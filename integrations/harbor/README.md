@@ -90,7 +90,9 @@ keep going for that grace, so a smaller room puts the caller's timeout in the
 middle of the last turn. At the defaults the budget stays 600 against the 1500 s
 timeout, since 600 is the smaller. A task timeout of 900 s therefore runs a 540 s
 budget, and `MICROAGENT_BUDGET_SECONDS=1200` under the default timeout is capped
-to 1140.
+to 1140. A timeout that leaves no room after the grace, so the budget cannot be
+shorter than it, is refused before the container starts rather than answered with
+a budget the caller's timeout expires inside.
 
 A run that still reaches the caller's timeout is scored on the tree it left
 rather than raised: the trial would otherwise be recorded as an exception and

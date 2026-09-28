@@ -474,6 +474,44 @@ test "the longest ruleset carries both blocks in full" {
     try std.testing.expectEqualStrings(want, block);
 }
 
+// `config.example.toml` is the only template the project ships, and a key
+// renamed or a level removed above leaves it naming something the reader does
+// not have: the file still copies cleanly, still sets two lines, and every run
+// a user makes from it prints a complaint about a key or level that was correct
+// when the template was written. Nothing else in the tree would notice, so the
+// template is read here and applied, and the levels it names are checked
+// against the enums.
+test "the shipped config template applies, and names levels the reader has" {
+    const gpa = std.testing.allocator;
+    // The test runs with the build root as its working directory, which is
+    // where the template is tracked.
+    const text = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "config.example.toml", gpa, .limited(max_template_bytes));
+    defer gpa.free(text);
+
+    var style: Style = .{};
+    // No unknown key and no bad value: every line the template ships is one
+    // this reader takes. A level added to an enum is not required to appear
+    // here, so this only refuses a template that has drifted from the reader.
+    const problem = style.applyToml(text);
+    if (problem) |p| {
+        std.debug.print("\nconfig.example.toml: '{s}' is {s}\n", .{
+            p.key,
+            if (p.bad_value) "not a level this build has" else "not a key this build uses",
+        });
+        return error.TestUnexpectedResult;
+    }
+
+    // The template ships both keys, so both are the level the file names, and
+    // each round-trips through the spelling the reader accepts.
+    try std.testing.expectEqualStrings("ultra", style.caveman.name());
+    try std.testing.expectEqualStrings("full", style.ponytail.name());
+    try std.testing.expectEqual(style.caveman, parseCaveman(style.caveman.name()).?);
+    try std.testing.expectEqual(style.ponytail, parsePonytail(style.ponytail.name()).?);
+}
+
+/// The template is a handful of commented lines; a bigger file is not one.
+const max_template_bytes: usize = 64 * 1024;
+
 // The config file is the one input the tree hands the binary that nobody in
 // the run wrote: a user edits it, a repository ships one, and it is read
 // before the first request. `std.testing.fuzz` runs this corpus through the

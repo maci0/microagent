@@ -1023,14 +1023,12 @@ fn configPathText(arena: std.mem.Allocator, source: StyleSource) []const u8 {
 /// printed, and a base url is the redacted spelling so credentials in one do
 /// not reach a log either.
 ///
-/// Every value on this line is one the operator or the environment supplied:
-/// the model id and the base url are flags, the ca bundle and the session
-/// directory are variables, the style config is a path and the key source is
-/// either a variable name or the file the key was read from. Each goes through
-/// `safeTextAll`, the escaping every other diagnostic quoting a value uses, so
-/// a `--model` carrying an escape sequence or a `MICROAGENT_SESSION_DIR`
-/// carrying a byte that is not text is written as the characters it is rather
-/// than acted on.
+/// Every value the environment supplied is escaped by `traceText`, the same
+/// reason the notes below it are: a model id, a bundle path, a session
+/// directory and the config path are all operator-supplied bytes, and a
+/// `MICROAGENT_SESSION_DIR` carrying a C0 byte wrote it to the terminal
+/// unsanitized on the one line whose whole job is telling an operator what the
+/// run resolved.
 fn traceConfig(io: Io, arena: std.mem.Allocator, opts: Options, style: LoadedStyle, key_source: []const u8) void {
     if (!debug_enabled) return;
     net.note(io, arena,
@@ -1042,19 +1040,27 @@ fn traceConfig(io: Io, arena: std.mem.Allocator, opts: Options, style: LoadedSty
         \\[mdebug] api key from {s}
         \\
     , .{
-        chat_mod.safeTextAll(arena, opts.model),
+        traceText(arena, opts.model),
         displayUrl(arena, opts.base_url),
         opts.max_turns,
         opts.max_tokens,
         if (opts.budget_s) |b| std.fmt.allocPrint(arena, "{d}", .{b}) catch "?" else "unset",
-        opts.reasoning_effort orelse "unset",
-        if (opts.ca_bundle.len == 0) "unset" else chat_mod.safeTextAll(arena, opts.ca_bundle),
-        if (opts.session_dir.len == 0) "off" else chat_mod.safeTextAll(arena, opts.session_dir),
-        if (style.source) |p| chat_mod.safeTextAll(arena, p) else "none",
+        traceText(arena, opts.reasoning_effort orelse "unset"),
+        traceText(arena, if (opts.ca_bundle.len == 0) "unset" else opts.ca_bundle),
+        traceText(arena, if (opts.session_dir.len == 0) "off" else opts.session_dir),
+        traceText(arena, style.source orelse "none"),
         style.style.caveman.name(),
         style.style.ponytail.name(),
         chat_mod.safeTextAll(arena, key_source),
     });
+}
+
+/// A configuration value the way the trace should spell it: escaped, and in
+/// full rather than cut to `quoted_value_bytes`, because the trace exists to
+/// let a reader recognize the value the run resolved, and a truncated path
+/// names no directory. Same escaping, same reasoning, as `displayUrl` above.
+fn traceText(arena: std.mem.Allocator, value: []const u8) []const u8 {
+    return chat_mod.safeText(arena, value, value.len *| chat_mod.safe_text_widening);
 }
 
 /// Whether a style config that could not be read is worth a line on stderr. A
@@ -2753,6 +2759,37 @@ test "a base url that carries credentials does not print them" {
         "https://openrouter.ai/\u{fffd}",
         displayUrl(arena, "https://openrouter.ai/\xff"),
     );
+}
+
+// The trace is a diagnostic like any other, and every value on it came from
+// the environment or the command line. One that carries a C0 byte used to be
+// written to the terminal as it stood, on the one line whose job is telling an
+// operator which value the run resolved. Escaped, and long enough to still name
+// the value: a path cut to the quote budget names no directory.
+test "every value on the config trace is escaped and left readable" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Nothing to escape comes back as it went in, which is the common case and
+    // the one a reader is scanning for.
+    try std.testing.expectEqualStrings("some/model", traceText(arena, "some/model"));
+    try std.testing.expectEqualStrings("unset", traceText(arena, "unset"));
+
+    // A C0 byte is spelled, so a session directory or a model id carrying one
+    // cannot move the cursor, clear the screen or rewrite the line under it.
+    try std.testing.expectEqualStrings("a\\x1bb", traceText(arena, "a\x1bb"));
+    try std.testing.expectEqualStrings("\\x00", traceText(arena, "\x00"));
+    // A byte that is not text is replaced rather than passed through as
+    // mojibake, the same way every other diagnostic quotes a value.
+    try std.testing.expectEqualStrings("\u{fffd}", traceText(arena, "\xff"));
+
+    // Long values are not cut to the quote budget: the trace exists to let a
+    // reader recognize the value, and a truncated path names no directory.
+    const long_path = "/home/" ++ "d" ** 400 ++ "/sessions";
+    const shown = traceText(arena, long_path);
+    try std.testing.expectEqualStrings(long_path, shown);
+    try std.testing.expect(shown.len >= long_path.len);
 }
 
 test "the command line parses in either flag form and in any order" {

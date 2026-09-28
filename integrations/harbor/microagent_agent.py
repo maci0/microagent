@@ -110,12 +110,18 @@ def trimmed_env(name: str) -> str | None:
 
 def host_ca_bundle() -> Path | None:
     # The binary's own order (net.caBundlePath): the project's variable first,
-    # then the one the system trust store tooling uses. An operator who set
-    # MICROAGENT_CA_BUNDLE for the run on this host means the same bundle for
-    # the run in the container, and reading only SSL_CERT_FILE would upload the
-    # system store instead and trust the wrong root for a benchmark.
+    # then the one the system trust store tooling uses, and only then the probed
+    # system store. An operator who set MICROAGENT_CA_BUNDLE for the run on this
+    # host means the same bundle for the run in the container, and reading only
+    # SSL_CERT_FILE would upload the system store instead and trust the wrong
+    # root for a benchmark. SSL_CERT_FILE comes before the probed paths for the
+    # same reason: it is a variable the operator set, and the probe is a
+    # fallback. It used to come last, so a host that set SSL_CERT_FILE (a CI
+    # runner with a private CA in it, which is the case the variable exists
+    # for) uploaded the system store instead and the container failed the first
+    # request against a root the host could reach.
     candidates = (
-        c for c in (trimmed_env("MICROAGENT_CA_BUNDLE"), *HOST_CA_CANDIDATES, trimmed_env("SSL_CERT_FILE")) if c
+        c for c in (trimmed_env("MICROAGENT_CA_BUNDLE"), trimmed_env("SSL_CERT_FILE"), *HOST_CA_CANDIDATES) if c
     )
     for candidate in candidates:
         path = Path(candidate)
@@ -201,6 +207,27 @@ def base_url() -> str:
     return value
 
 
+def working_budget(agent_timeout: int) -> int:
+    """The agent's working time for a given hard timeout: the operator's budget
+    if it fits, else the timeout less the room the last turn needs.
+
+    One derivation, read by `validate_env` and by `run`, so the budget a run is
+    checked for is the one it is given; the room itself is spelled once above.
+
+    The room is floored at one second rather than at the minute it used to be
+    floored at, because a floor that outgrew the timeout is a budget the
+    caller's timeout expires in the middle of, which is the fault the room
+    exists to prevent. On `MICROAGENT_AGENT_TIMEOUT_SEC=30` the old floor gave
+    a 60 s budget against a 30 s timeout: the container was killed 30 s in, and
+    the run was recorded as an exception rather than scored on the tree it had
+    left. A timeout that leaves no room at all is refused by `validate_env`
+    rather than answered with a budget of zero, so the two cannot disagree
+    about which timeouts are workable.
+    """
+    room = agent_timeout - FINAL_TURN_ROOM_S
+    return min(int_env("MICROAGENT_BUDGET_SECONDS", DEFAULT_BUDGET_SECONDS), max(1, room))
+
+
 def validate_env() -> None:
     """Every knob the binary is handed, read once so a bad one stops the run
     before anything is uploaded or started.
@@ -214,7 +241,18 @@ def validate_env() -> None:
     """
     int_env("MICROAGENT_MAX_TURNS", DEFAULT_MAX_TURNS)
     int_env("MICROAGENT_BUDGET_SECONDS", DEFAULT_BUDGET_SECONDS)
-    int_env("MICROAGENT_AGENT_TIMEOUT_SEC", DEFAULT_AGENT_TIMEOUT_SEC)
+    agent_timeout = int_env("MICROAGENT_AGENT_TIMEOUT_SEC", DEFAULT_AGENT_TIMEOUT_SEC)
+    # A timeout that does not exceed the room has no working time to give: the
+    # run would start, be killed inside its first turn, and be recorded as an
+    # exception rather than scored on the tree it left. Refused here, where the
+    # reason is printed at the command line rather than from a job log nobody is
+    # watching.
+    if agent_timeout <= FINAL_TURN_ROOM_S:
+        raise RuntimeError(
+            f"MICROAGENT_AGENT_TIMEOUT_SEC={agent_timeout} leaves no working time inside it: the "
+            f"last turn needs {FINAL_TURN_ROOM_S}s after the budget, so the timeout must be more "
+            f"than {FINAL_TURN_ROOM_S}, or the run is killed mid-turn and scored as an exception"
+        )
     reasoning_effort()
     base_url()
 
@@ -349,14 +387,11 @@ class Microagent(BaseAgent):
         # The budget is the agent's working time, so it is as large as the
         # caller's timeout allows, less room for the last turn to land. A
         # budget equal to the timeout is a run killed mid-turn; a budget far
-        # below it is working time thrown away.
+        # below it is working time thrown away. `working_budget` is the same
+        # derivation `validate_env` checked, so the budget refused at the
+        # command line is the budget this run would have been given.
         agent_timeout = int_env("MICROAGENT_AGENT_TIMEOUT_SEC", DEFAULT_AGENT_TIMEOUT_SEC)
-        budget = str(
-            min(
-                int_env("MICROAGENT_BUDGET_SECONDS", DEFAULT_BUDGET_SECONDS),
-                max(60, agent_timeout - FINAL_TURN_ROOM_S),
-            )
-        )
+        budget = str(working_budget(agent_timeout))
         reasoning = reasoning_effort()
         command = " ".join(
             shlex.quote(part)
