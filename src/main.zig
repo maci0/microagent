@@ -284,6 +284,16 @@ pub fn main(init: std.process.Init) !void {
 
 /// Injected when the wall-clock budget runs out: the model has done its
 /// reading, so it is asked for the edit rather than another investigation.
+/// Asked once when a run that already edited the tree stops without having run
+/// any test runner. The measured failure mode: a SWE-bench instance that ended
+/// after 20 turns and zero test commands, against 5-15 test commands in every
+/// instance that passed.
+const verify_push =
+    "Nothing in this session has run a test, so nothing verifies the change. Run the tests that " ++
+    "cover what you changed, using the project's own test command, and fix whatever they report. " ++
+    "If the project has no test for this code, run the closest thing that exercises the changed " ++
+    "line and say what it proved.";
+
 const final_push =
     "Your budget is exhausted. Apply the single most important fix now, using what you already " ++
     "know, with one edit or one write. Do not search again. Then stop.";
@@ -1043,6 +1053,7 @@ fn run(
     var turn: usize = 0;
     var usage: chat_mod.Usage = .{};
     var compaction_floor: usize = 0;
+    var verify_asked = false;
     while (turn < opts.max_turns) : (turn += 1) {
         _ = turn_state.reset(.{ .retain_with_limit = turn_arena_retain_bytes });
         if (budget.expired(io)) {
@@ -1061,10 +1072,50 @@ fn run(
         if (turn + 1 == opts.max_turns)
             net.note(io, arena, "microagent: last turn (--max-turns {d})\n", .{opts.max_turns});
         try compactMessages(io, gpa, msgs, turn_arena, &compaction_floor);
-        // The model stopped asking for tools, so the run is over.
-        if (!try runTurn(client, io, turn_arena, gpa, opts, msgs, &session, &usage, budget, tool_env)) return;
+        // The model stopped asking for tools. If it changed the tree without
+        // ever running a test, ask for that once rather than accepting the
+        // answer: a fix nobody ran is the failure mode this loop exists to
+        // catch, and one extra turn is a cheap way to catch it.
+        if (!try runTurn(client, io, turn_arena, gpa, opts, msgs, &session, &usage, budget, tool_env)) {
+            if (!verify_asked and madeEdit(msgs.items) and !ranTests(msgs.items)) {
+                verify_asked = true;
+                net.note(io, arena, "microagent: no test runner was used; asking for one verification turn\n", .{});
+                try appendMessage(gpa, msgs, "user", verify_push);
+                continue;
+            }
+            return;
+        }
     }
     net.note(io, arena, "microagent: stopped at the --max-turns ceiling ({d})\n", .{opts.max_turns});
+}
+
+/// Test runners worth recognising, so a run that never touched one can be
+/// asked to verify itself once before it is allowed to finish.
+const test_runners = [_][]const u8{
+    "pytest",      "unittest",       "runtests",   "manage.py test", "cargo test",
+    "go test",     "npm test",       "yarn test",  "pnpm test",      "make test",
+    "ctest",       "zig build test", "tox",        "nox",            "jest",
+    "vitest",      "mocha",          "rspec",      "phpunit",        "dotnet test",
+    "gradle test", "mvn test",       "bazel test", "swift test",     "mix test",
+};
+
+/// True when some tool call in this conversation ran a test runner. It reads
+/// the conversation rather than instrumenting each tool, so it counts a command
+/// from any earlier turn too.
+fn ranTests(msgs: []const u8) bool {
+    for (test_runners) |runner| {
+        if (std.mem.indexOf(u8, msgs, runner) != null) return true;
+    }
+    return false;
+}
+
+/// True when the conversation shows the agent changed something, so a missing
+/// test run is a gap rather than a run that had nothing to verify.
+fn madeEdit(msgs: []const u8) bool {
+    for ([_][]const u8{ "\"name\":\"edit\"", "\"name\":\"write\"", "\"name\":\"ast\"" }) |call| {
+        if (std.mem.indexOf(u8, msgs, call) != null) return true;
+    }
+    return false;
 }
 
 /// One request and everything its answer causes: the completion, the assistant
@@ -3324,6 +3375,17 @@ test "the api key is sent as the request's authorization header" {
         .override => |value| try std.testing.expectEqualStrings(auth, value),
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "a conversation without a test runner is recognised" {
+    const with_pytest = "[{\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\\\"python -m pytest tests/\\\"}\"}}]}]";
+    try std.testing.expect(ranTests(with_pytest));
+    try std.testing.expect(madeEdit("[{\"name\":\"edit\"}]"));
+    try std.testing.expect(!madeEdit("[{\"name\":\"search\"}]"));
+
+    const reading_only = "[{\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"a.py\\\"}\"}}]}]";
+    try std.testing.expect(!ranTests(reading_only));
+    try std.testing.expect(!ranTests(""));
 }
 
 test "a tool timeout is cut to what is left of the budget" {
