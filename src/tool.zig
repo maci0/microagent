@@ -30,11 +30,13 @@ const max_edit_bytes: usize = 8 * 1024 * 1024;
 /// A secret file is one key, not a document.
 const max_secret_bytes: usize = 4096;
 
-/// The two lines `bash` appends after the output it captured, kept as constants
-/// so the buffer it assembles is sized from the same text it writes. Each
-/// carries its own leading newline; the newline is emitted separately when
-/// there is output for it to separate.
-const bash_truncation_note = "\n[output truncated at the tool's cap]";
+/// The lines a tool appends after the output it captured, kept as constants so
+/// the buffer it assembles is sized from the same text it writes. Each carries
+/// its own leading newline; the newline is emitted separately when there is
+/// output for it to separate. The truncation note is shared by every tool that
+/// captures a subprocess, the exit note by `bash` alone, which is the only one
+/// that reports an exit status.
+const truncation_note = "\n[output truncated at the tool's cap]";
 const bash_exit_note = "\n(exit: )";
 /// An exit number is a wait status, so it is three digits at most. Sized here
 /// rather than guessed, because it is the one part of the exit line whose
@@ -193,23 +195,58 @@ fn runSearchTool(io: Io, arena: std.mem.Allocator, argv: []const []const u8, wha
     // broad ripgrep over a large tree passed the capture limit and came back
     // as `error: StreamTooLong` with no output at all, so the model was told
     // the search had failed rather than that it had found too much.
-    const res = runCapped(io, arena, argv, max_tool_output * 4, net.durationMs(boundedMs(tool_timeout_ms, ceiling_ms)), environ_map) catch |err|
-        return std.fmt.allocPrint(arena, "error: {s} failed: {s}", .{ what, @errorName(err) });
-    if (res.stdout.len > 0) return withCaptureNote(arena, res.stdout, res);
+    var got: Partial = undefined;
+    const res = runCapped(io, arena, argv, max_tool_output * 4, net.durationMs(boundedMs(tool_timeout_ms, ceiling_ms)), environ_map, &got) catch |err|
+        return failedOutput(arena, got, try std.fmt.allocPrint(arena, "error: {s} failed: {s}", .{ what, @errorName(err) }));
+    if (res.stdout.len > 0) return withCaptureNote(arena, res.stdout, res.partial());
     // The cap drains either stream, so a stderr cut short is as much a prefix
     // of the warning as a stdout one is of the matches, and the marker is what
     // says so. Marking only the stream that usually wins leaves a tool that
     // writes its findings nowhere and its warnings to stderr unmarked.
-    if (res.stderr.len > 0) return withCaptureNote(arena, res.stderr, res);
+    if (res.stderr.len > 0) return withCaptureNote(arena, res.stderr, res.partial());
     return std.fmt.allocPrint(arena, "(no matches)", .{});
 }
 
 /// The captured stream with a line saying that it is the beginning of a longer
 /// output. A half-read match list reads as the whole one otherwise, and the
 /// model narrows its next search against what it did not see.
-fn withCaptureNote(arena: std.mem.Allocator, text: []const u8, res: Captured) ![]const u8 {
-    if (!atCaptureLimit(res)) return text;
-    return std.fmt.allocPrint(arena, "{s}{s}", .{ text, bash_truncation_note });
+fn withCaptureNote(arena: std.mem.Allocator, text: []const u8, got: Partial) ![]const u8 {
+    if (!got.atCaptureLimit()) return text;
+    return std.fmt.allocPrint(arena, "{s}{s}", .{ text, truncation_note });
+}
+
+/// What a tool says when its subprocess failed: everything the child wrote
+/// before it did, then the failure under it.
+///
+/// The output is the point. A `git log` that timed out after printing the last
+/// hundred commits, or a `bash` build that printed every error it had found and
+/// then hung, reached the model as the error name alone, so the next turn read
+/// that the command had produced nothing and re-ran it from scratch. The same
+/// three tools, which disagree about this, all say it here now.
+///
+/// `reason` is already the whole line, so a caller that has a name and a number
+/// to put in it formats both before the call.
+fn failedOutput(
+    arena: std.mem.Allocator,
+    got: Partial,
+    reason: []const u8,
+) ![]const u8 {
+    if (got.stdout.len == 0 and got.stderr.len == 0) return reason;
+    var buf: std.ArrayList(u8) = .empty;
+    try buf.ensureTotalCapacity(arena, got.stdout.len + got.stderr.len +
+        truncation_note.len + reason.len + 2);
+    if (got.stdout.len > 0) try buf.appendSlice(arena, got.stdout);
+    if (got.stderr.len > 0) {
+        if (buf.items.len > 0) try buf.appendSlice(arena, "\n");
+        try buf.appendSlice(arena, got.stderr);
+    }
+    if (got.atCaptureLimit()) {
+        if (buf.items.len > 0) try buf.appendSlice(arena, "\n");
+        try buf.appendSlice(arena, truncation_note[1..]);
+    }
+    try buf.appendSlice(arena, "\n");
+    try buf.appendSlice(arena, reason);
+    return buf.items;
 }
 
 /// Lines of git output a call keeps when the model asks for no limit: a raw
@@ -293,8 +330,9 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
     // default here is 400 lines, and 400 long diff lines pass the capture cap,
     // so a call the model asked to be trimmed came back as
     // `error: git diff failed: StreamTooLong` with no lines at all.
-    const res = runCapped(io, arena, argv, max_tool_output * 4, net.durationMs(boundedMs(tool_timeout_ms, ceiling_ms)), environ_map) catch |err|
-        return std.fmt.allocPrint(arena, "error: git {s} failed: {s}", .{ cmd, @errorName(err) });
+    var got: Partial = undefined;
+    const res = runCapped(io, arena, argv, max_tool_output * 4, net.durationMs(boundedMs(tool_timeout_ms, ceiling_ms)), environ_map, &got) catch |err|
+        return failedOutput(arena, got, try std.fmt.allocPrint(arena, "error: git {s} failed: {s}", .{ cmd, @errorName(err) }));
     const text = if (res.stdout.len > 0) res.stdout else res.stderr;
     if (text.len == 0) return std.fmt.allocPrint(arena, "(git {s}: no output)", .{cmd});
     // The line cap below is the one git is cut by, and it only says so when it
@@ -302,7 +340,7 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
     // is marked here for the reason `runSearchTool` marks one: a half-read
     // commit reads as the whole one otherwise, and the model narrows its next
     // `git log` against a history it never saw.
-    return withCaptureNote(arena, try firstLines(arena, text, limit), res);
+    return withCaptureNote(arena, try firstLines(arena, text, limit), res.partial());
 }
 
 /// The command line one `git` call runs, with the subcommand and every flag
@@ -528,9 +566,14 @@ fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_
     if (credentialInCommand(command)) |path| return credentialRefusal(arena, "bash", path);
     const timeout_ms: u64 = bashTimeoutMs(requestedTimeoutMs(args.get("timeout_ms")), ceiling_ms);
     const capture_limit = max_tool_output * 4;
-    const res = runCapped(io, arena, &.{ "/bin/sh", "-c", command }, capture_limit, net.durationMs(timeout_ms), environ_map) catch |err| switch (err) {
-        error.Timeout => return std.fmt.allocPrint(arena, "error: command timed out after {d}ms", .{timeout_ms}),
-        else => return std.fmt.allocPrint(arena, "error: {s}", .{@errorName(err)}),
+    // A command that runs to its own timeout has usually already said what is
+    // wrong: a build that printed every error before it hung is the case this
+    // is for. Its output comes back with the reason, and a command that printed
+    // nothing is the bare reason it always was.
+    var got: Partial = undefined;
+    const res = runCapped(io, arena, &.{ "/bin/sh", "-c", command }, capture_limit, net.durationMs(timeout_ms), environ_map, &got) catch |err| switch (err) {
+        error.Timeout => return failedOutput(arena, got, try std.fmt.allocPrint(arena, "error: command timed out after {d}ms", .{timeout_ms})),
+        else => return failedOutput(arena, got, try std.fmt.allocPrint(arena, "error: {s}", .{@errorName(err)})),
     };
     // The captured size is known before the first append, so the buffer is
     // sized once rather than doubling its way up to `capture_limit` on each
@@ -539,7 +582,7 @@ fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_
     // as constants so the reservation and the writes cannot drift apart.
     var buf: std.ArrayList(u8) = .empty;
     try buf.ensureTotalCapacity(arena, res.stdout.len + res.stderr.len +
-        bash_truncation_note.len + bash_exit_note.len + exit_status_max_digits);
+        truncation_note.len + bash_exit_note.len + exit_status_max_digits);
     if (res.stdout.len > 0) try buf.appendSlice(arena, res.stdout);
     if (res.stderr.len > 0) {
         if (buf.items.len > 0) try buf.appendSlice(arena, "\n");
@@ -549,7 +592,7 @@ fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_
     // a half-read build log or diff read as the whole one.
     if (atCaptureLimit(res)) {
         if (buf.items.len > 0) try buf.appendSlice(arena, "\n");
-        try buf.appendSlice(arena, bash_truncation_note[1..]);
+        try buf.appendSlice(arena, truncation_note[1..]);
     }
     if (buf.items.len == 0) {
         var line: std.ArrayList(u8) = .empty;
@@ -1135,6 +1178,34 @@ const Captured = struct {
     /// exactly on the cap dropped nothing, and a reader told otherwise reads a
     /// complete log as a cut-off one.
     dropped: [2]bool,
+
+    fn partial(self: Captured) Partial {
+        return .{ .stdout = self.stdout, .stderr = self.stderr, .dropped = self.dropped };
+    }
+};
+
+/// What a child had written by the time `runCapped` failed, for a caller that
+/// reports the failure together with whatever the command managed to print.
+///
+/// It is the same bytes a finished call returns, and the same note about the cap
+/// having been reached, so a timeout does not cost the model the output that
+/// led to it: a build that ran for the whole timeout and printed every error it
+/// had found used to reach the model as a bare "command timed out", and the
+/// errors were the reason the next command was worth running.
+///
+/// The exit status is deliberately absent. A call that failed never learned one:
+/// a child killed on the deadline has a signal this program sent, and a child
+/// that closed its pipes and was still running has nothing at all, so a
+/// `.{ .exited = 0 }` standing in here would read as a command that succeeded.
+pub const Partial = struct {
+    stdout: []u8,
+    stderr: []u8,
+    dropped: [2]bool,
+
+    /// Whether either stream carries a byte the cap cut off.
+    pub fn atCaptureLimit(self: Partial) bool {
+        return self.dropped[0] or self.dropped[1];
+    }
 };
 
 /// Runs `argv` and keeps the first `limit` bytes of each stream.
@@ -1144,6 +1215,11 @@ const Captured = struct {
 /// big file reached the model as a bare error with no output at all. Here the
 /// bytes past the cap are drained and dropped instead: the child still runs to
 /// its own end, so the exit status and the timeout keep meaning what they did.
+///
+/// `partial` receives those same bytes when the call fails, which is the one
+/// case the drain above read them for: a timeout, a read that failed, a child
+/// that could not be waited for. It is written only on the error paths, and a
+/// caller that passes null loses nothing but the ability to show them.
 ///
 /// The child leads its own process group and the whole group is signalled on the
 /// way out: a model-supplied `bash`
@@ -1158,6 +1234,7 @@ fn runCapped(
     limit: usize,
     timeout: Io.Timeout,
     environ_map: ?*const std.process.Environ.Map,
+    partial: ?*Partial,
 ) !Captured {
     var spawned = try ToolChild.spawn(io, argv, environ_map);
     // The group is published while the call runs, so an interrupt reaches it,
@@ -1173,6 +1250,13 @@ fn runCapped(
     var chunks: [2][capture_chunk]u8 = undefined;
     var vecs: [2][1][]u8 = .{ .{&chunks[0]}, .{&chunks[1]} };
     var out: [2]std.ArrayList(u8) = .{ .empty, .empty };
+    var dropped: [2]bool = .{ false, false };
+    // The arena owns the bytes, so handing them to the caller on the way out of
+    // a failure is a copy of two slice headers rather than a move, and the
+    // caller's arena is the one that outlives this call either way.
+    errdefer if (partial) |p| {
+        p.* = .{ .stdout = out[0].items, .stderr = out[1].items, .dropped = dropped };
+    };
 
     var storage: [2]Io.Operation.Storage = undefined;
     var batch: Io.Batch = .init(&storage);
@@ -1189,7 +1273,6 @@ fn runCapped(
     const deadline = timeout.toDeadline(io);
     var draining: usize = files.len;
     var read_err: ?anyerror = null;
-    var dropped: [2]bool = .{ false, false };
     while (draining > 0) {
         try batch.awaitConcurrent(io, deadline);
         while (batch.next()) |completion| {
@@ -1328,18 +1411,32 @@ fn waitBounded(
         error.ConcurrencyUnavailable => return error.NoConcurrency,
         else => |e| return e,
     };
-    group.await(io) catch {};
+    // The join is allowed to be cancelled, and the two answers the tasks set
+    // are asked for first: a task that did run has something to say, and a
+    // cancelation delivered to this wait is also delivered to the drain above,
+    // which propagates it rather than swallowing it.
+    var join_err: ?anyerror = null;
+    group.await(io) catch |err| {
+        join_err = err;
+    };
     if (waiting.wait_err) |err| return err;
     // The kill is this program's own, so it is reported as the timeout it is
     // rather than as a signal the command did not choose for itself.
     if (waiting.timed_out.load(.acquire)) return error.Timeout;
+    // A join that failed leaves `term` at the `.{ .exited = 0 }` it was
+    // initialised to, which reads as a command that exited cleanly. Swallowing
+    // the error here reported a cancelled, killed or never-finished child as
+    // the success its zero status spells. The child is signalled and reaped by
+    // the caller on the way out of `runCapped` either way, so failing here costs
+    // the run nothing.
+    if (join_err) |err| return err;
     return waiting.term;
 }
 
 /// True when a stream filled the cap with bytes still arriving, so the captured
 /// bytes are the beginning of the output and not all of it.
-fn atCaptureLimit(captured: Captured) bool {
-    return captured.dropped[0] or captured.dropped[1];
+pub fn atCaptureLimit(captured: Captured) bool {
+    return captured.partial().atCaptureLimit();
 }
 
 /// One tool result as the model reads it: capped, cut on a code point
@@ -2500,15 +2597,15 @@ test "output cut by the capture cap is marked even when no line was dropped" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const whole: Captured = .{ .stdout = "", .stderr = "", .term = .{ .exited = 0 }, .dropped = .{ false, false } };
+    const whole: Partial = .{ .stdout = "", .stderr = "", .dropped = .{ false, false } };
     // Fewer lines than the limit, so the line count cut nothing, and nothing
     // was dropped, so the bytes are the whole output.
     try std.testing.expectEqualStrings("1\n2\n", try withCaptureNote(arena, try firstLines(arena, "1\n2\n", 400), whole));
 
-    const cut: Captured = .{ .stdout = "", .stderr = "", .term = .{ .exited = 0 }, .dropped = .{ true, false } };
+    const cut: Partial = .{ .stdout = "", .stderr = "", .dropped = .{ true, false } };
     try std.testing.expectEqualStrings("1\n2\n\n[output truncated at the tool's cap]", try withCaptureNote(arena, try firstLines(arena, "1\n2\n", 400), cut));
     // Both caps can land on one result, and each says which one it was.
-    const both: Captured = .{ .stdout = "", .stderr = "", .term = .{ .exited = 0 }, .dropped = .{ false, true } };
+    const both: Partial = .{ .stdout = "", .stderr = "", .dropped = .{ false, true } };
     try std.testing.expectEqualStrings("1\n... [output truncated at 1 lines]\n[output truncated at the tool's cap]", try withCaptureNote(arena, try firstLines(arena, "1\n2\n", 1), both));
 }
 
@@ -2589,7 +2686,7 @@ test "a scoped git call still leaves the committed credentials out" {
         &.{ "git", "-C", root, "add", "-A" },
         &.{ "git", "-C", root, "commit", "-qm", "x" },
     }) |argv| {
-        const res = try runCapped(io, arena, argv, 1 << 20, net.durationMs(30_000), null);
+        const res = try runCapped(io, arena, argv, 1 << 20, net.durationMs(30_000), null, null);
         if (res.term != .exited or res.term.exited != 0) {
             std.debug.print("git setup failed: {s}\n", .{res.stderr});
             return error.TestUnexpectedResult;
@@ -2608,7 +2705,7 @@ test "a scoped git call still leaves the committed credentials out" {
         try argv.appendSlice(arena, &.{ cmd, "--no-color" });
         try argv.append(arena, "HEAD");
         try gitPathspecs(arena, &argv, cmd, ".");
-        const res = try runCapped(io, arena, argv.items, 1 << 20, net.durationMs(30_000), null);
+        const res = try runCapped(io, arena, argv.items, 1 << 20, net.durationMs(30_000), null, null);
         if (std.mem.indexOf(u8, res.stdout, marker) != null) {
             std.debug.print("git {s} with a path leaked a committed credential\n", .{cmd});
             return error.TestUnexpectedResult;
@@ -2707,7 +2804,7 @@ test "a git path does not switch the credential exclusions off" {
         \\git -C '{s}' init -q && git -C '{s}' add -A && git -C '{s}' -c user.email=t@t -c user.name=t commit -qm base
     , .{ root, root, root });
     const setup = [_][]const u8{ "/bin/sh", "-c", script };
-    const made = try runCapped(io, arena, &setup, 1 << 20, net.durationMs(60_000), null);
+    const made = try runCapped(io, arena, &setup, 1 << 20, net.durationMs(60_000), null, null);
     if (made.term != .exited or made.term.exited != 0) {
         std.debug.print("could not build the fixture repository: {s}\n", .{made.stderr});
         return error.TestUnexpectedResult;
@@ -2720,7 +2817,7 @@ test "a git path does not switch the credential exclusions off" {
 
     for ([_][]const u8{ "show", "diff" }) |cmd| {
         for ([_]?[]const u8{ null, ".", root }) |path| {
-            const res = try runCapped(io, arena, try gitIn(arena, root, cmd, null, path), 1 << 20, net.durationMs(60_000), null);
+            const res = try runCapped(io, arena, try gitIn(arena, root, cmd, null, path), 1 << 20, net.durationMs(60_000), null, null);
             const text = try arena.dupe(u8, res.stdout);
             if (std.mem.indexOf(u8, text, needle) != null) {
                 std.debug.print("git {s} with path '{s}' leaked the committed key\n", .{ cmd, path orelse "<none>" });
@@ -2858,7 +2955,7 @@ test "a child that outruns the capture cap keeps its first bytes instead of fail
     // all, which is what a chatty build or a broad ripgrep used to hand back.
     const noisy = try runCapped(std.testing.io, arena, &.{
         "/bin/sh", "-c", "head -c 200000 /dev/zero | tr '\\0' 'a'",
-    }, cap, net.durationMs(30_000), null);
+    }, cap, net.durationMs(30_000), null, null);
     try std.testing.expectEqual(cap, noisy.stdout.len);
     try std.testing.expect(atCaptureLimit(noisy));
     try std.testing.expectEqualStrings("a" ** 8, noisy.stdout[0..8]);
@@ -2870,7 +2967,7 @@ test "a child that outruns the capture cap keeps its first bytes instead of fail
 
     const quiet = try runCapped(std.testing.io, arena, &.{
         "/bin/sh", "-c", "echo hi; echo bye >&2",
-    }, cap, net.durationMs(30_000), null);
+    }, cap, net.durationMs(30_000), null, null);
     try std.testing.expectEqualStrings("hi\n", quiet.stdout);
     try std.testing.expectEqualStrings("bye\n", quiet.stderr);
     try std.testing.expect(!atCaptureLimit(quiet));
@@ -2885,7 +2982,7 @@ test "output ending exactly on the cap is not reported as truncated" {
 
     const exact = try runCapped(std.testing.io, arena_state.allocator(), &.{
         "/bin/sh", "-c", "head -c 4096 /dev/zero | tr '\\0' 'a'",
-    }, cap, net.durationMs(30_000), null);
+    }, cap, net.durationMs(30_000), null, null);
     try std.testing.expectEqual(cap, exact.stdout.len);
     try std.testing.expect(!atCaptureLimit(exact));
 }
@@ -2899,7 +2996,7 @@ test "both pipes past the cap drain together, so the child never wedges" {
         "/bin/sh",
         "-c",
         "head -c 200000 /dev/zero | tr '\\0' 'a'; head -c 200000 /dev/zero | tr '\\0' 'b' >&2",
-    }, cap, net.durationMs(30_000), null);
+    }, cap, net.durationMs(30_000), null, null);
     try std.testing.expectEqual(cap, noisy.stdout.len);
     try std.testing.expectEqual(cap, noisy.stderr.len);
     try std.testing.expectEqualStrings("a" ** 8, noisy.stdout[0..8]);
@@ -3124,7 +3221,7 @@ fn expectNoProcessSurvived() !void {
     // which has already exited, so the check below would pass on a process
     // that was never running.
     const script = try std.fmt.allocPrint(arena, "sh -c 'sleep 30 & echo $! > {s}; wait' & exit 0", .{pid_path});
-    try std.testing.expectError(error.Timeout, runCapped(io, arena, &.{ "/bin/sh", "-c", script }, 4096, net.durationMs(300), null));
+    try std.testing.expectError(error.Timeout, runCapped(io, arena, &.{ "/bin/sh", "-c", script }, 4096, net.durationMs(300), null, null));
 
     const raw = tmp.dir.readFileAlloc(io, pid_name, arena, .limited(64)) catch return error.GrandchildNotReported;
     const pid = try std.fmt.parseInt(std.posix.pid_t, std.mem.trim(u8, raw, " \t\r\n"), 10);
@@ -3172,7 +3269,7 @@ test "an interrupt during a tool call is forwarded to that call's process group"
         pub fn go(a: std.mem.Allocator, t: Io) void {
             // The call outlives nothing here: the handler kills its group, so
             // a hung call would hang the suite rather than fail it.
-            _ = runCapped(t, a, &.{ "/bin/sh", "-c", "sleep 5" }, 4096, net.durationMs(3000), null) catch {};
+            _ = runCapped(t, a, &.{ "/bin/sh", "-c", "sleep 5" }, 4096, net.durationMs(3000), null, null) catch {};
         }
     };
     const thread = try Thread.spawn(.{}, Call.go, .{ arena, io });
@@ -3189,7 +3286,7 @@ test "a tool call reports the exit status of the command it ran" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const res = try runCapped(std.testing.io, arena, &.{ "/bin/sh", "-c", "printf out; printf err 1>&2; exit 3" }, 4096, net.durationMs(10_000), null);
+    const res = try runCapped(std.testing.io, arena, &.{ "/bin/sh", "-c", "printf out; printf err 1>&2; exit 3" }, 4096, net.durationMs(10_000), null, null);
     try std.testing.expectEqualStrings("out", res.stdout);
     try std.testing.expectEqualStrings("err", res.stderr);
     try std.testing.expectEqual(@as(u8, 3), res.term.exited);
@@ -3223,7 +3320,7 @@ test "a tool call is timed out by the clock, not by how long it stayed quiet" {
     const script = "while :; do printf x; sleep 0.1; done";
     const budget_ms: u64 = 400;
     const started = Io.Timestamp.now(io, .awake).nanoseconds;
-    try std.testing.expectError(error.Timeout, runCapped(io, arena, &.{ "/bin/sh", "-c", script }, 4096, net.durationMs(budget_ms), null));
+    try std.testing.expectError(error.Timeout, runCapped(io, arena, &.{ "/bin/sh", "-c", script }, 4096, net.durationMs(budget_ms), null, null));
     const spent = Io.Timestamp.now(io, .awake).nanoseconds - started;
     // The deadline is what ended the call, so it did not return before it: an
     // error raised on the way in is a different fault wearing this one's name,
@@ -3237,6 +3334,51 @@ test "a tool call is timed out by the clock, not by how long it stayed quiet" {
 
 test "a tool call that times out leaves no process of its own behind" {
     try expectNoProcessSurvived();
+}
+
+// The bytes a command printed before the deadline are the reason the next
+// command is worth running, and the error path used to drop them: a build that
+// printed every error and then hung reached the model as one line naming a
+// timeout, so the next turn read that it had produced nothing at all.
+test "a command that times out keeps what it printed before the deadline" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const script = "printf 'compiling a.c\\n'; printf 'a.c:1: error: nope\\n' 1>&2; sleep 30";
+    var got: Partial = undefined;
+    try std.testing.expectError(
+        error.Timeout,
+        runCapped(io, arena, &.{ "/bin/sh", "-c", script }, 4096, net.durationMs(300), null, &got),
+    );
+    try std.testing.expectEqualStrings("compiling a.c\n", got.stdout);
+    try std.testing.expectEqualStrings("a.c:1: error: nope\n", got.stderr);
+    try std.testing.expect(!got.atCaptureLimit());
+
+    // The tool result carries both streams and names the failure under them.
+    const out = try bashCall(arena, script, 300);
+    try std.testing.expect(std.mem.indexOf(u8, out, "compiling a.c") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "a.c:1: error: nope") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "command timed out after 300ms") != null);
+
+    // A command that printed nothing before the deadline is still the bare
+    // failure line, with no empty body in front of it.
+    try std.testing.expectEqualStrings(
+        "error: command timed out after 300ms",
+        try bashCall(arena, "sleep 30", 300),
+    );
+}
+
+/// The tool result for one `bash` call, through the argument object the model
+/// sends rather than through the struct the tool reads.
+fn bashCall(arena: std.mem.Allocator, command: []const u8, timeout_ms: i64) ![]const u8 {
+    const keys = [_][]const u8{ "command", "timeout_ms" };
+    const values = [_]std.json.Value{ .{ .string = command }, .{ .integer = timeout_ms } };
+    const args = std.json.ObjectMap.init(arena, &keys, &values) catch return error.TestUnexpectedResult;
+    return toolBash(std.testing.io, arena, args, null, null);
 }
 
 // `bash` is the tool with no path argument, so it is the one a model reaches a
@@ -3331,6 +3473,7 @@ test "a tool subprocess cannot see the provider key" {
         4096,
         net.durationMs(10_000),
         &clean,
+        null,
     );
     try std.testing.expect(std.mem.indexOf(u8, res.stdout, "sk-live") == null);
     try std.testing.expect(std.mem.indexOf(u8, res.stdout, "/usr/bin") != null);
@@ -3344,6 +3487,7 @@ test "a tool subprocess cannot see the provider key" {
         4096,
         net.durationMs(10_000),
         &env,
+        null,
     );
     try std.testing.expect(std.mem.indexOf(u8, inherited.stdout, "sk-live-not-a-real-key") != null);
 }
@@ -3370,6 +3514,7 @@ test "a command that closes its pipes and keeps running is bounded by the tool t
         &.{ "/bin/sh", "-c", "exec 1>&- 2>&-; sleep 600" },
         4096,
         net.durationMs(1000),
+        null,
         null,
     ));
     const elapsed_ms = @divTrunc(Io.Timestamp.now(io, .awake).nanoseconds - start, std.time.ns_per_ms);
