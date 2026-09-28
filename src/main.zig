@@ -161,6 +161,10 @@ const Options = struct {
     /// instead of being killed in the middle of one. A clock step inside the
     /// run does not consume budget.
     budget_s: ?u64 = null,
+    /// Stop starting turns once the run has billed this many tokens in total,
+    /// prompt and completion together, cached prompt tokens included. Null is
+    /// no ceiling, the way an unset `budget_s` is no deadline.
+    max_spend_tokens: ?u64 = null,
     /// PEM file to trust instead of scanning the system store. Set by
     /// --ca-bundle, MICROAGENT_CA_BUNDLE or SSL_CERT_FILE.
     ca_bundle: []const u8 = "",
@@ -229,7 +233,11 @@ pub fn main(init: std.process.Init) !void {
     opts.ca_bundle = net.caBundlePath(init.environ_map);
     if (envValue(init.environ_map, "MICROAGENT_BUDGET_SECONDS")) |v| {
         var env_buf: [256]u8 = undefined;
-        if (budgetSeconds(&env_buf, "MICROAGENT_BUDGET_SECONDS", v, &opts.budget_s)) |m| return configError(io, "{s}", .{m});
+        if (optionalCeiling(&env_buf, "MICROAGENT_BUDGET_SECONDS", v, &opts.budget_s)) |m| return configError(io, "{s}", .{m});
+    }
+    if (envValue(init.environ_map, "MICROAGENT_MAX_SPEND_TOKENS")) |v| {
+        var env_buf: [256]u8 = undefined;
+        if (optionalCeiling(&env_buf, "MICROAGENT_MAX_SPEND_TOKENS", v, &opts.max_spend_tokens)) |m| return configError(io, "{s}", .{m});
     }
     opts.session_dir = session_mod.sessionDir(init.environ_map, init.arena.allocator());
 
@@ -352,6 +360,14 @@ const help_text =
     \\                         past it; a turn cut off there is discarded, not
     \\                         half-applied
     \\                         (env MICROAGENT_BUDGET_SECONDS)
+    \\      --max-spend-tokens <n>
+    \\                         stop starting turns once the run has billed
+    \\                         this many tokens, prompt and completion
+    \\                         together. At least 1; leaving it out is what
+    \\                         says "no ceiling", the way an unset --budget
+    \\                         says "no deadline". The turn that reaches the
+    \\                         ceiling is the one that finishes
+    \\                         (env MICROAGENT_MAX_SPEND_TOKENS)
     \\      --reasoning-effort <level>
     \\                         reasoning.effort sent to the provider: minimal, low,
     \\                         medium, high, or none to disable (env MICROAGENT_REASONING_EFFORT)
@@ -390,10 +406,10 @@ const help_text =
     \\  microagent -- "explain why -Werror is failing in src/net.zig"
     \\
     \\exit status: 0 the run finished, 1 the run failed, 2 the command line was
-    \\wrong, 3 the run stopped at a ceiling (--max-turns, or a budget that ran
-    \\out) so the answer on stdout is a prefix of the work rather than an
-    \\answer, 130 interrupted (Ctrl+C or kill), which takes the tool subprocess
-    \\with it.
+    \\wrong, 3 the run stopped at a ceiling (--max-turns, --max-spend-tokens, or
+    \\a budget that ran out) so the answer on stdout is a prefix of the work
+    \\rather than an answer, 130 interrupted (Ctrl+C or kill), which takes the
+    \\tool subprocess with it.
     \\
     \\output: stdout carries the model's text and one JSON line per response,
     \\{"type":"usage","usage":{...}}, and nothing else. stderr carries the tool
@@ -410,7 +426,8 @@ const help_text =
     \\
     \\A variable set to an empty string is not a value: MICROAGENT_MODEL,
     \\MICROAGENT_BASE_URL, MICROAGENT_REASONING_EFFORT, MICROAGENT_BUDGET_SECONDS,
-    \\MICROAGENT_MAX_TURNS, MICROAGENT_MAX_TOKENS and MDEBUG keep their defaults,
+    \\MICROAGENT_MAX_SPEND_TOKENS, MICROAGENT_MAX_TURNS, MICROAGENT_MAX_TOKENS
+    \\and MDEBUG keep their defaults,
     \\and MICROAGENT_CA_BUNDLE and MICROAGENT_CAVEMAN/PONYTAIL fall through to
     \\whatever comes next. MICROAGENT_CONFIG and MICROAGENT_SESSION_DIR are the
     \\two where empty means off: no style file, no session log. HOME is trimmed
@@ -620,16 +637,16 @@ fn redactUserinfo(arena: std.mem.Allocator, url: []const u8) []const u8 {
     return std.fmt.allocPrint(arena, "{s}[redacted]@{s}", .{ url[0 .. scheme_end + "://".len], rest[at + 1 ..] }) catch url;
 }
 
-/// The wall-clock budget in seconds, from a flag or a variable, or the message
-/// saying it is not one. It goes through `ceiling` like the turn and token
-/// limits, so a zero budget is refused the same way: zero is not "no limit" to
-/// the loop, it is a deadline that has already passed, so the first turn the run
+/// An optional ceiling from a flag or a variable, or the message saying the
+/// value is not one. It goes through `ceiling` like the turn and token limits,
+/// so a zero budget is refused the same way: zero is not "no limit" to the
+/// loop, it is a deadline that has already passed, so the first turn the run
 /// would take is the forced final push and then it stops. A caller that meant
 /// no ceiling has to say so by leaving the option out.
-fn budgetSeconds(buf: []u8, from: []const u8, value: []const u8, out: *?u64) ?[]const u8 {
-    var seconds: u64 = undefined;
-    if (ceiling(u64, buf, from, value, &seconds)) |m| return m;
-    out.* = seconds;
+fn optionalCeiling(buf: []u8, from: []const u8, value: []const u8, out: *?u64) ?[]const u8 {
+    var ceiling_value: u64 = undefined;
+    if (ceiling(u64, buf, from, value, &ceiling_value)) |m| return m;
+    out.* = ceiling_value;
     return null;
 }
 
@@ -667,6 +684,7 @@ const ValuedOption = enum {
     config,
     reasoning_effort,
     budget,
+    max_spend_tokens,
     max_turns,
     max_tokens,
 };
@@ -695,6 +713,7 @@ const valued_flags = [_]ValuedFlag{
     .{ .short = null, .long = "--config", .noun = "a file", .option = .config },
     .{ .short = null, .long = "--reasoning-effort", .noun = "a level", .option = .reasoning_effort },
     .{ .short = null, .long = "--budget", .noun = "a number of seconds", .option = .budget },
+    .{ .short = null, .long = "--max-spend-tokens", .noun = "a number", .option = .max_spend_tokens },
     .{ .short = null, .long = "--max-turns", .noun = "a number", .option = .max_turns },
     .{ .short = null, .long = "--max-tokens", .noun = "a number", .option = .max_tokens },
 };
@@ -728,7 +747,8 @@ fn setValued(
         .ca_bundle => opts.ca_bundle = value,
         .config => opts.config = value,
         .reasoning_effort => return reasoningEffort(buf, value, &opts.reasoning_effort),
-        .budget => return budgetSeconds(buf, "--budget", value, &opts.budget_s),
+        .budget => return optionalCeiling(buf, "--budget", value, &opts.budget_s),
+        .max_spend_tokens => return optionalCeiling(buf, "--max-spend-tokens", value, &opts.max_spend_tokens),
         .max_turns => return ceiling(usize, buf, "--max-turns", value, &opts.max_turns),
         .max_tokens => return ceiling(u32, buf, "--max-tokens", value, &opts.max_tokens),
     }
@@ -1033,7 +1053,7 @@ fn traceConfig(io: Io, arena: std.mem.Allocator, opts: Options, style: LoadedSty
     if (!debug_enabled) return;
     net.note(io, arena,
         \\[mdebug] model={s} base_url={s}
-        \\[mdebug] max_turns={d} max_tokens={d} budget_s={s} reasoning_effort={s}
+        \\[mdebug] max_turns={d} max_tokens={d} budget_s={s} max_spend_tokens={s} reasoning_effort={s}
         \\[mdebug] ca_bundle={s} session_dir={s}
         \\[mdebug] style_config={s}
         \\[mdebug] caveman={s} ponytail={s}
@@ -1045,6 +1065,7 @@ fn traceConfig(io: Io, arena: std.mem.Allocator, opts: Options, style: LoadedSty
         opts.max_turns,
         opts.max_tokens,
         if (opts.budget_s) |b| std.fmt.allocPrint(arena, "{d}", .{b}) catch "?" else "unset",
+        if (opts.max_spend_tokens) |m| std.fmt.allocPrint(arena, "{d}", .{m}) catch "?" else "unset",
         traceText(arena, opts.reasoning_effort orelse "unset"),
         traceText(arena, if (opts.ca_bundle.len == 0) "unset" else opts.ca_bundle),
         traceText(arena, if (opts.session_dir.len == 0) "off" else opts.session_dir),
@@ -1226,6 +1247,54 @@ const final_push_grace_s: u64 = 300;
 /// zero timeout would fail before the tool could even start.
 const tool_timeout_floor_ms: u64 = 5_000;
 
+/// How close to the spend ceiling a run says so, as a percentage of the cap.
+/// Said once, on the turn that crosses it, so an operator watching a bill sees
+/// the run approaching its own limit rather than discovering afterwards that it
+/// stopped there. A cap small enough to be crossed by the first turn is never
+/// announced: the ceiling itself is the news, and a warning above it would be
+/// a warning about every run.
+const spend_alarm_percent: u64 = 80;
+
+/// Whether a run that has billed `spent` tokens may take another turn.
+///
+/// The count is the run's `total`, which is the whole conversation re-sent plus
+/// what came back, cached prompt tokens included. Counting the cached ones is
+/// the conservative reading: they are billed, at a lower rate, and a ceiling
+/// the run can pass while cheap is not the ceiling an operator set.
+///
+/// The turn that reaches the cap is the one that is allowed to finish. The
+/// check is made before a turn is started, not after one is billed, so the
+/// provider never sees a request this run has already priced itself out of.
+fn spendCeilingReached(spent: u64, cap: ?u64) bool {
+    const limit = cap orelse return false;
+    return spent >= limit;
+}
+
+/// Whether a run that has billed `spent` tokens is close enough to its ceiling
+/// to say so. The first turn at or past `spend_alarm_percent` of the cap.
+fn spendAlarmDue(spent: u64, cap: ?u64) bool {
+    const limit = cap orelse return false;
+    if (limit < 2) return false;
+    return spent >= limit *| spend_alarm_percent / 100;
+}
+
+/// Why a run stopped at its spend ceiling, in the words the operator reads, and
+/// the announcement that precedes the stop. Null for a run with no ceiling, and
+/// for a run that has not reached the announcement yet.
+fn spendNotice(arena: std.mem.Allocator, spent: u64, cap: ?u64, turn: usize) ?[]const u8 {
+    if (spendCeilingReached(spent, cap))
+        return std.fmt.allocPrint(arena, "microagent: stopped at the --max-spend-tokens ceiling ({d} tokens) after {d} turn(s) and {d} token(s); the answer is a prefix of the work\n", .{
+            cap.?, turn, spent,
+        }) catch
+            "microagent: stopped at the --max-spend-tokens ceiling; the answer is a prefix of the work\n";
+    if (spendAlarmDue(spent, cap))
+        return std.fmt.allocPrint(arena, "microagent: {d} of the {d} token ceiling spent after {d} turn(s)\n", .{
+            spent, cap.?, turn,
+        }) catch
+            "microagent: the run is close to its token ceiling\n";
+    return null;
+}
+
 /// How a turn ended, which is what tells a finished run from a stopped one.
 ///
 /// A turn is finished when the model stopped asking for tools on its own, and
@@ -1240,9 +1309,9 @@ const TurnEnd = enum { answered, wants_tools, cut_off };
 /// The agent loop: keep asking until the model stops calling tools.
 ///
 /// What it returns is the last turn's end, and only `.answered` is a run that
-/// reached an answer on its own. A loop that leaves through `--max-turns` is
-/// `.cut_off`: the model was still working when the ceiling took the turn away,
-/// so what is on stdout is a prefix.
+/// reached an answer on its own. A loop that leaves through `--max-turns` or
+/// through the spend ceiling is `.cut_off`: the model was still working when
+/// the ceiling took the turn away, so what is on stdout is a prefix.
 fn run(
     client: *std.http.Client,
     io: Io,
@@ -1269,9 +1338,25 @@ fn run(
     var usage: chat_mod.Usage = .{};
     var compaction_floor: usize = 0;
     var verify_asked = false;
+    var spend_alarmed = false;
     var progress: Progress = .{};
     while (turn < opts.max_turns) : (turn += 1) {
         _ = turn_state.reset(.{ .retain_with_limit = turn_arena_retain_bytes });
+        // Before the time budget, because the final push below is a turn like
+        // any other and would spend past a ceiling the operator set in money
+        // rather than in seconds. Announced once, on the turn that crosses the
+        // alarm, and spent for the rest of the run: a warning repeated on every
+        // turn after it is noise the first one has already made.
+        if (spendNotice(arena, usage.total, opts.max_spend_tokens, turn)) |notice| {
+            if (spendCeilingReached(usage.total, opts.max_spend_tokens)) {
+                net.writeErr(io, notice);
+                return .cut_off;
+            }
+            if (!spend_alarmed) {
+                spend_alarmed = true;
+                net.writeErr(io, notice);
+            }
+        }
         if (budget.expired(io)) {
             // Stop in the middle of the work, or stop after one last push
             // that is told to edit? A review that ran out of time with
@@ -1342,10 +1427,29 @@ fn isTestRun(call_name: []const u8, args: []const u8) bool {
     return false;
 }
 
-fn isEdit(call_name: []const u8) bool {
-    return std.mem.eql(u8, call_name, "edit") or
-        std.mem.eql(u8, call_name, "write") or
-        std.mem.eql(u8, call_name, "ast");
+/// Whether this call could have changed the tree, which is what the loop asks
+/// about when the model stops: an edit nobody tested is the failure mode one
+/// more turn is asked to catch, and a run that changed nothing has no edit to
+/// catch it on.
+///
+/// `ast` is here for `--rewrite`, not for the tool: a search prints its matches
+/// and leaves the tree exactly as it found it, so counting every structural
+/// search as an edit made a read-only investigation ask for a verification turn
+/// on changes that were never made. The key is read as a string, which is the
+/// only shape `runTool` dispatches a rewrite from.
+fn isEdit(call_name: []const u8, args: []const u8) bool {
+    if (std.mem.eql(u8, call_name, "edit") or std.mem.eql(u8, call_name, "write")) return true;
+    if (!std.mem.eql(u8, call_name, "ast")) return false;
+    // The page allocator, freed on the way out: this is a per-call parse of
+    // arguments a few hundred bytes long, once, and the tree it builds is
+    // released before the next one is read.
+    const parsed = std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, args, .{}) catch return false;
+    defer parsed.deinit();
+    const object = switch (parsed.value) {
+        .object => |o| o,
+        else => return false,
+    };
+    return chat_mod.str(object.get("rewrite")) != null;
 }
 
 /// What the run has done that the loop needs to know about afterwards.
@@ -2519,7 +2623,7 @@ fn finishTurn(
         // it scans the call's whole argument string once per test-runner name,
         // and a multi-kilobyte `bash` command pays that every time. The check
         // is what records the fact, so it is skipped rather than repeated.
-        if (!progress.edited and isEdit(call.name)) progress.edited = true;
+        if (!progress.edited and isEdit(call.name, call.args.items)) progress.edited = true;
         if (!progress.tested and isTestRun(call.name, call.args.items)) progress.tested = true;
         // A call the budget will not pay for still gets a tool message. An
         // assistant turn that names calls the conversation never answers is one
@@ -3028,12 +3132,22 @@ test "a budget of zero is refused like every other zero ceiling" {
     var env: std.process.Environ.Map = .init(std.testing.allocator);
     defer env.deinit();
     try env.put("MICROAGENT_BUDGET_SECONDS", "0");
-    try std.testing.expectEqualStrings("MICROAGENT_BUDGET_SECONDS must be at least 1", budgetSeconds(&buf, "MICROAGENT_BUDGET_SECONDS", env.get("MICROAGENT_BUDGET_SECONDS").?, &opts.budget_s).?);
+    try std.testing.expectEqualStrings("MICROAGENT_BUDGET_SECONDS must be at least 1", optionalCeiling(&buf, "MICROAGENT_BUDGET_SECONDS", env.get("MICROAGENT_BUDGET_SECONDS").?, &opts.budget_s).?);
     try std.testing.expectEqual(@as(?u64, null), opts.budget_s);
 
     // A real budget still takes, trimmed the way a shell leaves it.
-    try std.testing.expectEqual(@as(?[]const u8, null), budgetSeconds(&buf, "--budget", " 90 ", &opts.budget_s));
+    try std.testing.expectEqual(@as(?[]const u8, null), optionalCeiling(&buf, "--budget", " 90 ", &opts.budget_s));
     try std.testing.expectEqual(@as(?u64, 90), opts.budget_s);
+
+    // The spend ceiling refuses zero the same way: zero tokens is not "no
+    // ceiling", it is a run whose first turn is not affordable. Saying "no
+    // ceiling" is leaving the option out.
+    try std.testing.expectEqualStrings("--max-spend-tokens must be at least 1", parseArgs(&buf, &.{ "--max-spend-tokens", "0" }, &opts).?);
+    try std.testing.expectEqual(@as(?u64, null), opts.max_spend_tokens);
+    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &.{ "--max-spend-tokens", " 500000 " }, &opts));
+    try std.testing.expectEqual(@as(?u64, 500_000), opts.max_spend_tokens);
+    try std.testing.expectEqualStrings("--max-spend-tokens must be a number, got 'soon'", parseArgs(&buf, &.{ "--max-spend-tokens", "soon" }, &opts).?);
+    try std.testing.expectEqual(@as(?u64, 500_000), opts.max_spend_tokens);
 
     // The other two ceilings, which are typed rather than u64, so a value a
     // wider one accepts is refused here for being out of range rather than out
@@ -3051,6 +3165,88 @@ test "a budget of zero is refused like every other zero ceiling" {
     // that it was too small.
     try std.testing.expectEqualStrings("--max-tokens must be a number, got '1e30'", parseArgs(&buf, &.{ "--max-tokens", "1e30" }, &counted).?);
     try std.testing.expectEqual(default_max_tokens, counted.max_tokens);
+}
+
+// A run's spend is the one ceiling nothing else bounds. `--max-turns` counts
+// turns, so a run that reaches the ceiling in five turns and one that reaches
+// it in a hundred cost the same by its own count, and a turn's cost is a whole
+// conversation re-sent: the run that keeps appending tool results and never
+// compacts bills more with fewer turns than one that does. `--max-tokens` is
+// the same figure for every response, so neither of them is a bound on what a
+// run spends. This is.
+test "a run stops at the spend ceiling, and announces itself before it does" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // No ceiling is no ceiling: the loop is bounded by turns and by time, and
+    // neither of those is a number of tokens.
+    try std.testing.expect(!spendCeilingReached(1_000_000_000, null));
+    try std.testing.expect(!spendAlarmDue(1_000_000_000, null));
+    try std.testing.expect(spendNotice(arena, 1_000_000_000, null, 5) == null);
+
+    // Under the ceiling the run goes on, and quietly: the alarm is a fraction
+    // of the way there, not every turn below it.
+    try std.testing.expect(!spendCeilingReached(99, 100));
+    try std.testing.expect(!spendAlarmDue(79, 100));
+    try std.testing.expect(spendNotice(arena, 79, 100, 3) == null);
+
+    // The announcement is one line naming the numbers, so an operator watching
+    // a bill sees the run approaching the limit it set.
+    try std.testing.expectEqualStrings(
+        "microagent: 80 of the 100 token ceiling spent after 3 turn(s)\n",
+        spendNotice(arena, 80, 100, 3).?,
+    );
+
+    // The ceiling itself, reached on the turn that is already paid for: the
+    // check is made before a turn is started, so a run that lands exactly on
+    // the cap stops rather than taking one more.
+    try std.testing.expect(spendCeilingReached(100, 100));
+    try std.testing.expect(spendCeilingReached(101, 100));
+    try std.testing.expectEqualStrings(
+        "microagent: stopped at the --max-spend-tokens ceiling (100 tokens) after 4 turn(s) and 100 token(s); the answer is a prefix of the work\n",
+        spendNotice(arena, 100, 100, 4).?,
+    );
+
+    // A cap of one token is crossed by any turn at all, so the alarm would
+    // always be saying what the ceiling stop already says.
+    try std.testing.expect(spendCeilingReached(1, 1));
+    try std.testing.expect(!spendAlarmDue(0, 1));
+    try std.testing.expect(!spendAlarmDue(1, 1));
+
+    // A cap far past what any provider reports. The percentage multiplies
+    // first, so it saturates rather than wrapping, and a wrapped threshold
+    // would be a small number that alarms on the first turn. The saturation
+    // makes such a cap alarm early, which is the safe direction: it says so
+    // sooner rather than never.
+    const huge = std.math.maxInt(u64);
+    const threshold = huge *| spend_alarm_percent / 100;
+    try std.testing.expectEqual(huge, huge *| spend_alarm_percent);
+    try std.testing.expect(!spendAlarmDue(threshold - 1, huge));
+    try std.testing.expect(spendAlarmDue(threshold, huge));
+    try std.testing.expect(!spendCeilingReached(huge - 1, huge));
+    try std.testing.expect(spendCeilingReached(huge, huge));
+}
+
+test "the spend ceiling is set from a flag or its variable, and the run trace names it" {
+    var opts: Options = .{};
+    var buf: [512]u8 = undefined;
+    // Both spellings the other ceilings take, and the environment path a
+    // harness that prices a review sets it through.
+    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &.{ "--max-spend-tokens=250000", "fix it" }, &opts));
+    try std.testing.expectEqual(@as(?u64, 250_000), opts.max_spend_tokens);
+    try std.testing.expectEqualStrings("fix it", opts.prompt);
+
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("MICROAGENT_MAX_SPEND_TOKENS", " 250000 \n");
+    var env_buf: [256]u8 = undefined;
+    try std.testing.expectEqual(@as(?[]const u8, null), optionalCeiling(&env_buf, "MICROAGENT_MAX_SPEND_TOKENS", env.get("MICROAGENT_MAX_SPEND_TOKENS").?, &opts.max_spend_tokens));
+    try std.testing.expectEqual(@as(?u64, 250_000), opts.max_spend_tokens);
+
+    // Every flag the table lists is spelled the way the help text spells it, so
+    // a new ceiling cannot be parsed by a name its own help does not have.
+    try std.testing.expectEqual(@as(ValuedOption, .max_spend_tokens), valuedFlag("--max-spend-tokens").?.option);
 }
 
 test "help and version win wherever they appear" {
@@ -4323,11 +4519,28 @@ test "only a bash call that names a runner counts as verification" {
     try std.testing.expect(!isTestRun("read", "{\"path\":\"tests/test_thing.py\"}"));
     try std.testing.expect(!isTestRun("bash", "{\"command\":\"ls tests/\"}"));
     try std.testing.expect(!isTestRun("search", "{\"pattern\":\"pytest\"}"));
+}
 
-    try std.testing.expect(isEdit("edit"));
-    try std.testing.expect(isEdit("write"));
-    try std.testing.expect(isEdit("ast"));
-    try std.testing.expect(!isEdit("read"));
+test "only a call that changes the tree counts as an edit" {
+    // The two tools that write whatever they are handed, with or without
+    // arguments this has to read.
+    try std.testing.expect(isEdit("edit", "{\"path\":\"src/net.zig\",\"old_string\":\"a\",\"new_string\":\"b\"}"));
+    try std.testing.expect(isEdit("write", "{\"path\":\"src/net.zig\",\"content\":\"\"}"));
+    try std.testing.expect(!isEdit("read", "{\"path\":\"src/net.zig\"}"));
+    try std.testing.expect(!isEdit("bash", "{\"command\":\"sed -i s/a/b/ src/net.zig\"}"));
+
+    // A structural search prints its matches and changes nothing, so it is not
+    // an edit: a run that only looked was being asked to verify changes it
+    // never made.
+    try std.testing.expect(!isEdit("ast", "{\"pattern\":\"$A == $A\",\"lang\":\"zig\"}"));
+    // The one that does rewrite, every match of it.
+    try std.testing.expect(isEdit("ast", "{\"pattern\":\"$A == $A\",\"lang\":\"zig\",\"rewrite\":\"$A != $A\"}"));
+    // A rewrite key carrying something other than a string is not the shape
+    // `runTool` dispatches, and arguments a stream cut in half are not a call
+    // at all: neither is an edit, and neither has to parse to say so.
+    try std.testing.expect(!isEdit("ast", "{\"pattern\":\"$A\",\"rewrite\":true}"));
+    try std.testing.expect(!isEdit("ast", "{\"pattern\":\"$A\",\"rewri"));
+    try std.testing.expect(!isEdit("ast", ""));
 }
 
 test "a tool timeout is cut to what is left of the budget" {

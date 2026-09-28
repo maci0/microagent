@@ -14,6 +14,17 @@ release, and `microagent update` moves you to it.
 
 ### Added
 
+- `--max-spend-tokens <n>` (`MICROAGENT_MAX_SPEND_TOKENS`) stops a run once it has
+  billed that many tokens, prompt and completion together. Neither of the ceilings
+  already there bounds what a run spends: `--max-turns` counts turns, and a turn
+  re-sends the whole conversation, so a run that appends tool results and compacts
+  late bills more with fewer turns than one that does, while `--max-tokens` is the
+  same figure for every response. The check is made before a turn is started, so the
+  provider never sees a request the run has already priced itself out of, and the
+  turn that reaches the ceiling is the one that finishes. The run announces itself on
+  stderr at 80% of the ceiling, once, naming both numbers. Like `--budget`, leaving
+  the option out is what says "no ceiling", and a value of zero is refused.
+
 - A bare `help` is a request for the usage text, the way `microagent update help`
   already was. It used to be a coding run whose task was the word "help",
   billed to the caller, while the one subcommand that accepted the word printed
@@ -22,6 +33,13 @@ release, and `microagent update` moves you to it.
   already there, so `microagent -- "help"` and `microagent -p help` run.
 
 ### Changed
+
+- A structural search is no longer counted as an edit. The loop asks for one
+  verification turn when the model changed the tree without running a test, and
+  `ast` was in the set of tools that could have changed it whether or not the
+  call carried a `--rewrite`, so a run that only looked was asked to verify
+  changes it had never made. The key is read now, and a search that printed its
+  matches is a read.
 
 - The harbor adapter checks `MICROAGENT_BASE_URL` before the container starts, the way it
   already checks the ceilings and the reasoning level. A url with no scheme, or an http one

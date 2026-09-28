@@ -74,6 +74,14 @@ The flags, abridged; `microagent --help` is the full text.
                        turn cut off there is discarded, not half-applied. At
                        least 1, and leaving it out is what says "no budget"
                        (env MICROAGENT_BUDGET_SECONDS)
+    --max-spend-tokens <n>
+                       stop starting turns once the run has billed this many
+                       tokens, prompt and completion together. Neither turn
+                       count nor --max-tokens bounds what a run spends, since a
+                       turn re-sends the whole conversation. At least 1, and
+                       leaving it out is what says "no ceiling"; the run says
+                       on stderr when it passes 80% of it
+                       (env MICROAGENT_MAX_SPEND_TOKENS)
     --reasoning-effort <level>
                        reasoning.effort sent to the provider: minimal, low,
                        medium, high, or none to disable (env MICROAGENT_REASONING_EFFORT)
@@ -111,8 +119,9 @@ MDEBUG=1                trace a stuck stream on stderr, and print the
 Every long flag also takes `--flag=value`, a flag wins over the environment variable for the same
 option, and a bare `--` ends the flags, so a task that begins with a dash is passed after it
 (`microagent -- "explain why -Werror fails"`). The exit status is 0 for a finished run, 1 for a
-failed one, 2 for a wrong command line, 3 for a run that stopped at a ceiling (`--max-turns`, or a
-budget that ran out) so the text on stdout is a prefix of the work rather than an answer, and 130
+failed one, 2 for a wrong command line, 3 for a run that stopped at a ceiling (`--max-turns`,
+`--max-spend-tokens`, or a budget that ran out) so the text on stdout is a prefix of the work rather
+than an answer, and 130
 for an interrupt, which takes the tool subprocess with it. `microagent --help`, a bare
 `microagent help`, and `microagent update --help` are the full text; a wrong flag prints the reason
 and that help on stderr, so a script reading stdout gets nothing from a failed invocation.
@@ -121,8 +130,8 @@ Every value is checked where it is set, so a mistyped level, a ceiling of zero
 or a non-numeric budget is refused before the first request rather than becoming
 a 400 or an empty run. A variable set to an empty string is not a value:
 `MICROAGENT_MODEL`, `MICROAGENT_BASE_URL`, `MICROAGENT_REASONING_EFFORT`,
-`MICROAGENT_BUDGET_SECONDS`, `MICROAGENT_MAX_TURNS`, `MICROAGENT_MAX_TOKENS`
-and `MDEBUG` keep their defaults, `MICROAGENT_CA_BUNDLE` falls through to
+`MICROAGENT_BUDGET_SECONDS`, `MICROAGENT_MAX_SPEND_TOKENS`, `MICROAGENT_MAX_TURNS`,
+`MICROAGENT_MAX_TOKENS` and `MDEBUG` keep their defaults, `MICROAGENT_CA_BUNDLE` falls through to
 `SSL_CERT_FILE`, and
 `MICROAGENT_CAVEMAN`/`MICROAGENT_PONYTAIL` fall through to the config file.
 Two variables are the exception: `MICROAGENT_CONFIG` and `MICROAGENT_SESSION_DIR`
