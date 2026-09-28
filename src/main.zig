@@ -378,7 +378,8 @@ const help_text =
     \\                         together. At least 1; leaving it out is what
     \\                         says "no ceiling", the way an unset --budget
     \\                         says "no deadline". The turn that reaches the
-    \\                         ceiling is the one that finishes
+    \\                         ceiling is the one that finishes, and the run
+    \\                         says on stderr once 80% of it is spent
     \\                         (env MICROAGENT_MAX_SPEND_TOKENS)
     \\      --reasoning-effort <level>
     \\                         reasoning.effort sent to the provider: minimal, low,
@@ -400,6 +401,7 @@ const help_text =
     \\  MICROAGENT_PONYTAIL    how lazy the code is: off, lite, full, ultra
     \\                         (default full)
     \\
+    \\session log:
     \\  MICROAGENT_SESSION_DIR where the per-response JSONL session log goes
     \\                         (default ~/.microagent/sessions; empty writes none)
     \\
@@ -512,6 +514,27 @@ test "the help text names the default model and base url" {
     // the sentence with it.
     try std.testing.expect(std.mem.indexOf(u8, help_text, default_model) != null);
     try std.testing.expect(std.mem.indexOf(u8, help_text, default_base_url) != null);
+}
+
+test "the help text groups each variable under what it configures" {
+    // The reply-style heading names the two variables that choose a style, so
+    // a session directory listed under it reads as a third style level. Each
+    // block runs to the blank line that ends it, which is what a reader sees
+    // as the block.
+    const style_at = std.mem.indexOf(u8, help_text, "reply style (").?;
+    const style_end = std.mem.indexOf(u8, help_text[style_at..], "\n\n").? + style_at;
+    try std.testing.expect(std.mem.indexOf(u8, help_text[style_at..style_end], "MICROAGENT_SESSION_DIR") == null);
+    try std.testing.expect(std.mem.indexOf(u8, help_text, "session log:\n  MICROAGENT_SESSION_DIR") != null);
+}
+
+test "the help text names the spend alarm the run prints" {
+    // `--max-spend-tokens` warns on stderr once the share is spent, and the
+    // README says so. A flag documented without the warning is a flag whose
+    // one line of stderr looks like a fault rather than the ceiling working.
+    // Spelled from the constant, so a percent that moves takes the sentence
+    // with it.
+    const said = std.fmt.comptimePrint("once {d}% of it is spent", .{spend_alarm_percent});
+    try std.testing.expect(std.mem.indexOf(u8, help_text, said) != null);
 }
 
 /// The value of an environment variable, or null when it is not set or is set

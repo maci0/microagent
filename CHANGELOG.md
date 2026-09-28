@@ -51,6 +51,11 @@ release, and `microagent update` moves you to it.
 
 ### Changed
 
+- `microagent --help` lists `MICROAGENT_SESSION_DIR` under its own heading rather
+  than under "reply style", where a session directory read as a third style
+  level, and says that a `--max-spend-tokens` run warns on stderr once 80% of
+  the ceiling is spent, which the README already said and the flag did not.
+
 - `search`, `ast` and `git` name the program they delegate to when that program
   is not installed, and how to install it. `rg` and `ast-grep` are not part of a
   stock macOS, where this binary ships and runs, so `error: ripgrep failed:

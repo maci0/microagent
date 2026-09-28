@@ -102,6 +102,10 @@ reply style (env, or the TOML config at MICROAGENT_CONFIG, default
   MICROAGENT_PONYTAIL    how lazy the code is: off, lite, full, ultra
                          (default full)
 
+session log:
+  MICROAGENT_SESSION_DIR where the per-response JSONL session log goes
+                         (default ~/.microagent/sessions; empty writes none)
+
 subcommand:
   update [--check] [--repo owner/name]
                          replace this binary with the latest GitHub
