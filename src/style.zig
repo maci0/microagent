@@ -66,27 +66,55 @@ pub const Style = struct {
     caveman: CavemanLevel = .ultra,
     ponytail: PonytailLevel = .full,
 
+    /// The most fragments a pair of levels contributes: the three strings a
+    /// header is made of, a wenyan line, and one body and one shared block per
+    /// knob.
+    const ruleset_max_parts: usize = 12;
+
     /// The prompt fragment these levels add. Empty when both are off, so an
     /// `off`/`off` run sends exactly the system prompt it sent before styles
     /// existed.
-    pub fn ruleset(self: Style, allocator: std.mem.Allocator) ![]u8 {
-        var parts: std.ArrayList([]const u8) = .empty;
-        // The list borrows the compiled-in fragments, so only its own array is
-        // released; `concat` copies them into the returned slice.
-        defer parts.deinit(allocator);
+    ///
+    /// The fragments are a fixed handful of compiled-in strings, so the list of
+    /// them is a stack array of the exact size rather than a list that grows:
+    /// one allocation for the text, and none for the bookkeeping. The returned
+    /// text is const, because nothing writes to it after it is joined.
+    pub fn ruleset(self: Style, allocator: std.mem.Allocator) ![]const u8 {
+        var parts: [ruleset_max_parts][]const u8 = undefined;
+        var len: usize = 0;
         if (self.caveman != .off) {
-            try parts.appendSlice(allocator, &.{ "CAVEMAN MODE ACTIVE - level: ", self.caveman.name(), "\n" });
-            if (isWenyan(self.caveman)) try parts.append(allocator, wenyan_line);
-            try parts.appendSlice(allocator, &.{ cavemanBody(self.caveman), caveman_shared });
+            parts[len] = "CAVEMAN MODE ACTIVE - level: ";
+            len += 1;
+            parts[len] = self.caveman.name();
+            len += 1;
+            parts[len] = "\n";
+            len += 1;
+            if (isWenyan(self.caveman)) {
+                parts[len] = wenyan_line;
+                len += 1;
+            }
+            parts[len] = cavemanBody(self.caveman);
+            len += 1;
+            parts[len] = caveman_shared;
+            len += 1;
         }
         if (self.ponytail != .off) {
-            if (parts.items.len > 0) try parts.append(allocator, "\n");
-            try parts.appendSlice(allocator, &.{
-                "PONYTAIL MODE ACTIVE - level: ", self.ponytail.name(), "\n",
-                ponytailBody(self.ponytail),      ponytail_shared,
-            });
+            if (len > 0) {
+                parts[len] = "\n";
+                len += 1;
+            }
+            parts[len] = "PONYTAIL MODE ACTIVE - level: ";
+            len += 1;
+            parts[len] = self.ponytail.name();
+            len += 1;
+            parts[len] = "\n";
+            len += 1;
+            parts[len] = ponytailBody(self.ponytail);
+            len += 1;
+            parts[len] = ponytail_shared;
+            len += 1;
         }
-        return std.mem.concat(allocator, u8, parts.items);
+        return std.mem.concat(allocator, u8, parts[0..len]);
     }
 
     /// Read the levels out of a TOML document. A missing key keeps the

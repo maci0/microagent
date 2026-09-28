@@ -2329,7 +2329,10 @@ fn compactMessages(
     // and the run compacts on the schedule it did before.
     floor.* = conversation_soft_limit;
 
-    var jb = chat_mod.JsonBuf.init(gpa);
+    // The elided size is what the message list is about to be rewritten to, so
+    // the buffer is sized before the first byte rather than walking the doubling
+    // ladder to reach a size the pass above already computed.
+    var jb = chat_mod.JsonBuf.initCapacity(gpa, @max(size, 1));
     defer jb.list.deinit(gpa);
     try std.json.Stringify.value(parsed.value, .{}, jb.writer());
     msgs.clearRetainingCapacity();
@@ -2455,12 +2458,16 @@ fn finishTurn(
         // A tool result is capped at `max_tool_output`, so the message holding
         // it is bounded before the first byte is written. Reserving that now
         // keeps a full-size result from walking the doubling ladder, which on
-        // the turn arena leaves every intermediate block behind.
-        var tool_msg = chat_mod.JsonBuf.initCapacity(arena, tool_result_message_bytes);
+        // the turn arena leaves every intermediate block behind. A short result
+        // is the ordinary one, so the reservation is the result's own size
+        // under that ceiling: a turn of two dozen `git status` calls otherwise
+        // reserves the whole cap for each of them.
+        const result_bytes = try tool_mod.toolResult(arena, output);
+        var tool_msg = chat_mod.JsonBuf.initCapacity(arena, @min(tool_result_message_bytes, result_bytes.len + 512));
         try tool_msg.writer().writeAll(",{\"role\":\"tool\",\"tool_call_id\":");
         try chat_mod.writeJsonString(tool_msg.writer(), call.id);
         try tool_msg.writer().writeAll(",\"content\":");
-        try chat_mod.writeJsonString(tool_msg.writer(), try tool_mod.toolResult(arena, output));
+        try chat_mod.writeJsonString(tool_msg.writer(), result_bytes);
         try tool_msg.writer().writeAll("}");
         try msgs.appendSlice(gpa, tool_msg.items());
     }
@@ -2471,7 +2478,11 @@ fn finishTurn(
 /// response called no tool, else the call list: `arguments` is whatever the
 /// provider streamed, as a string, whether or not it is JSON yet.
 fn assistantMessage(arena: std.mem.Allocator, result: *const chat_mod.ChatResult) ![]u8 {
-    var msg = chat_mod.JsonBuf.init(arena);
+    // Every byte written below is a byte that arrived over the wire this turn,
+    // and the surrounding JSON adds a fixed amount per call, so the message is
+    // sized before the first write. On the request arena a buffer grown to that
+    // size leaves every intermediate block behind.
+    var msg = chat_mod.JsonBuf.initCapacity(arena, assistantMessageBytes(result));
     try msg.writer().writeAll("{\"role\":\"assistant\",\"content\":");
     if (result.content.items.len == 0 and result.calls.items.len > 0) {
         try msg.writer().writeAll("null");
@@ -2495,6 +2506,21 @@ fn assistantMessage(arena: std.mem.Allocator, result: *const chat_mod.ChatResult
     }
     try msg.writer().writeAll("]}");
     return msg.items();
+}
+
+/// The bytes one assistant message needs: the text and the arguments as they
+/// arrived, plus the JSON around them. The escapes can make a message longer
+/// than this, so it is a starting size rather than a bound, which is what
+/// `JsonBuf.initCapacity` is for.
+const assistant_call_json_bytes: usize = 64;
+const assistant_message_json_bytes: usize = 32;
+
+fn assistantMessageBytes(result: *const chat_mod.ChatResult) usize {
+    var bytes: usize = result.content.items.len + assistant_message_json_bytes;
+    for (result.calls.items) |call| {
+        bytes += call.id.len + call.name.len + call.args.items.len + assistant_call_json_bytes;
+    }
+    return bytes;
 }
 
 // One machine-readable line per response: gauntlet reads these for live

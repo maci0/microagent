@@ -403,17 +403,32 @@ pub fn stripBom(text: []const u8) []const u8 {
 /// of them.
 pub fn safeText(arena: std.mem.Allocator, s: []const u8, max: usize) []const u8 {
     var out: std.ArrayList(u8) = .empty;
+    // Every byte that reaches the output costs at least one, so the input
+    // length and the budget bound the result, and one reservation replaces the
+    // walk up the growth ladder a diagnostic's worth of bytes otherwise takes.
+    out.ensureTotalCapacityPrecise(arena, @min(s.len, max)) catch {};
     var i: usize = 0;
     while (i < s.len) {
         const c = s[i];
         // The printable ASCII a diagnostic is mostly made of, and the only
         // ASCII that reaches either branch below. One table rather than a C0
         // test, a DEL test and an ASCII test per byte, for the reason
-        // `json_literal_byte` gives.
+        // `json_literal_byte` gives. A run of them is copied whole, the way
+        // `writeJsonString` copies one, rather than byte by byte.
         if (c >= 0x20 and c < 0x7f) {
-            if (out.items.len + 1 > max) break;
-            out.append(arena, c) catch break;
-            i += 1;
+            const room = max -| out.items.len;
+            if (room == 0) break;
+            var end = i + 1;
+            while (end < s.len) : (end += 1) {
+                const d = s[end];
+                if (d < 0x20 or d >= 0x7f) break;
+            }
+            const run_end = @min(end, i + room);
+            out.appendSlice(arena, s[i..run_end]) catch break;
+            // A run the budget cut short ends the value, exactly as the
+            // byte-at-a-time budget test did.
+            if (run_end < end) break;
+            i = end;
             continue;
         }
         if (c < 0x20 or c == 0x7f) {
@@ -656,6 +671,13 @@ test "a quoted value never exceeds its budget" {
         try std.testing.expect(quoted.len <= max);
         try std.testing.expect(std.mem.startsWith(u8, wide, quoted));
     }
+    // A budget that lands inside a run of printable ASCII keeps the part of the
+    // run that fits and stops there, which is what copying the run whole has to
+    // preserve.
+    for (0.."plain".len + 1) |max| {
+        try std.testing.expectEqualStrings("plain"[0..max], safeText(arena, "plain", max));
+    }
+    try std.testing.expectEqualStrings("plain", safeText(arena, "plain", 5));
 }
 
 // Every value a diagnostic quotes back came from outside the process: an

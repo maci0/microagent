@@ -188,7 +188,7 @@ pub fn forwardInterruptsToToolGroup() void {
 /// A tool that delegates to a binary already on PATH: the caller builds the
 /// argv, and the failure text, the empty result and the two output streams are
 /// handled the same way for each of them.
-fn runSearchTool(io: Io, arena: std.mem.Allocator, argv: []const []const u8, what: []const u8, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map) ![]u8 {
+fn runSearchTool(io: Io, arena: std.mem.Allocator, argv: []const []const u8, what: []const u8, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map) ![]const u8 {
     // The cap drains rather than fails, for the reason `runCapped` gives: a
     // broad ripgrep over a large tree passed the capture limit and came back
     // as `error: StreamTooLong` with no output at all, so the model was told
@@ -207,7 +207,7 @@ fn runSearchTool(io: Io, arena: std.mem.Allocator, argv: []const []const u8, wha
 /// The captured stream with a line saying that it is the beginning of a longer
 /// output. A half-read match list reads as the whole one otherwise, and the
 /// model narrows its next search against what it did not see.
-fn withCaptureNote(arena: std.mem.Allocator, text: []u8, res: Captured) ![]u8 {
+fn withCaptureNote(arena: std.mem.Allocator, text: []const u8, res: Captured) ![]const u8 {
     if (!atCaptureLimit(res)) return text;
     return std.fmt.allocPrint(arena, "{s}\n[output truncated at the tool's cap]", .{text});
 }
@@ -258,7 +258,7 @@ fn gitLogLines(limit: usize) usize {
 
 /// Read-only git, with the subcommands fixed here rather than assembled by the
 /// model. Deterministic, no shell quoting, and the output is capped.
-fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map) ![]u8 {
+fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map) ![]const u8 {
     const cmd = chat.str(args.get("cmd")) orelse return std.fmt.allocPrint(arena, "error: missing cmd", .{});
     const path = chat.str(args.get("path"));
     const rev = chat.str(args.get("rev"));
@@ -367,8 +367,11 @@ fn gitPathspecs(arena: std.mem.Allocator, argv: *std.ArrayList([]const u8), cmd:
     if (path) |p| try argv.append(arena, p);
 }
 
-/// The first `limit` lines, with a note when lines were dropped.
-fn firstLines(arena: std.mem.Allocator, text: []const u8, limit: usize) ![]u8 {
+/// The first `limit` lines, with a note when lines were dropped. A call that
+/// kept every line hands back the capture itself: it is arena-owned, the caller
+/// only reads it, and copying a cap's worth of git output per call bought
+/// nothing.
+fn firstLines(arena: std.mem.Allocator, text: []const u8, limit: usize) ![]const u8 {
     var lines: usize = 0;
     var end: usize = text.len;
     var at: usize = 0;
@@ -380,11 +383,11 @@ fn firstLines(arena: std.mem.Allocator, text: []const u8, limit: usize) ![]u8 {
         }
         at = nl + 1;
     }
-    if (end == text.len) return arena.dupe(u8, text);
+    if (end == text.len) return text;
     return std.fmt.allocPrint(arena, "{s}... [output truncated at {d} lines]", .{ text[0..end], limit });
 }
 
-pub fn runTool(io: Io, arena: std.mem.Allocator, call: chat.ToolCall, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map) ![]u8 {
+pub fn runTool(io: Io, arena: std.mem.Allocator, call: chat.ToolCall, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map) ![]const u8 {
     const parsed = std.json.parseFromSlice(std.json.Value, arena, call.args.items, .{}) catch
         return std.fmt.allocPrint(arena, "error: tool arguments are not valid JSON", .{});
     const args = switch (parsed.value) {
@@ -508,7 +511,7 @@ fn credentialInCommand(command: []const u8) ?[]const u8 {
     return null;
 }
 
-fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map) ![]u8 {
+fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map) ![]const u8 {
     const command = chat.str(args.get("command")) orelse return std.fmt.allocPrint(arena, "error: missing command", .{});
     // `bash` is the one tool with no path argument to check, and it can read
     // every file the three guarded tools refuse: `cat .env` and
@@ -716,7 +719,7 @@ fn isWriting(tool: []const u8) bool {
 /// What a tool returns instead of a credential. It names the file, so a model
 /// that asked for it knows which one was refused, and it says what to do
 /// instead, because a bare error reads as a broken tool and gets retried.
-fn credentialRefusal(arena: std.mem.Allocator, tool: []const u8, path: []const u8) error{OutOfMemory}![]u8 {
+fn credentialRefusal(arena: std.mem.Allocator, tool: []const u8, path: []const u8) error{OutOfMemory}![]const u8 {
     // The advice has to be the one that is true for the tool that was refused.
     // The `bash` branch sends the model to the operator because `bash` runs
     // the same name check over its own words: telling a model that `read` just
@@ -737,7 +740,7 @@ fn credentialRefusal(arena: std.mem.Allocator, tool: []const u8, path: []const u
     );
 }
 
-fn toolRead(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
+fn toolRead(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]const u8 {
     const path = chat.str(args.get("path")) orelse return std.fmt.allocPrint(arena, "error: missing path", .{});
     if (isCredentialPath(path)) return try credentialRefusal(arena, "read", path);
     if (!args.contains("offset") and !args.contains("limit"))
@@ -751,9 +754,9 @@ fn toolRead(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
 
 /// What a `read` says when the file is not there, is a directory, or cannot be
 /// opened: the same words whichever way the bytes were going to be fetched.
-fn readFailed(arena: std.mem.Allocator, path: []const u8, err: anyerror) []u8 {
+fn readFailed(arena: std.mem.Allocator, path: []const u8, err: anyerror) []const u8 {
     return std.fmt.allocPrint(arena, "error: cannot read {s}: {s}", .{ path, @errorName(err) }) catch
-        @constCast("error: cannot read the file");
+        "error: cannot read the file";
 }
 
 /// Bytes one read of a streamed file brings in.
@@ -768,7 +771,7 @@ const read_chunk = 8 * 1024;
 /// file to find out there was nothing more; this reads up to the last line
 /// asked for and stops. A file whose last line has no newline is still a line,
 /// and gets the newline the split-based reader gave it.
-fn readLines(io: Io, arena: std.mem.Allocator, path: []const u8, offset: usize, limit: usize) ![]u8 {
+fn readLines(io: Io, arena: std.mem.Allocator, path: []const u8, offset: usize, limit: usize) ![]const u8 {
     var file = std.Io.Dir.cwd().openFile(io, path, .{ .allow_directory = true }) catch |err|
         return readFailed(arena, path, err);
     defer file.close(io);
@@ -851,7 +854,7 @@ fn readLines(io: Io, arena: std.mem.Allocator, path: []const u8, offset: usize, 
     return buf.items;
 }
 
-fn toolWrite(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
+fn toolWrite(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]const u8 {
     const path = chat.str(args.get("path")) orelse return std.fmt.allocPrint(arena, "error: missing path", .{});
     // The same refusal `read` makes. A run that cannot read a key file has no
     // business rewriting one either: `write` replaces the file whole, so a
@@ -916,7 +919,7 @@ pub fn writeFileAtomic(io: Io, dir: std.Io.Dir, path: []const u8, bytes: []const
     try af.replace(io);
 }
 
-fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
+fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]const u8 {
     const path = chat.str(args.get("path")) orelse return std.fmt.allocPrint(arena, "error: missing path", .{});
     // The same refusal `read` makes. An edit reads the whole file to find its
     // match, and the operator's key is the one file in a tree where a match the
@@ -980,7 +983,7 @@ fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     return std.fmt.allocPrint(arena, "replaced {d} occurrence(s) in {s}", .{ count, path });
 }
 
-fn toolSearch(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map) ![]u8 {
+fn toolSearch(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map) ![]const u8 {
     const pattern = chat.str(args.get("pattern")) orelse return std.fmt.allocPrint(arena, "error: missing pattern", .{});
     const path = chat.str(args.get("path")) orelse ".";
     // The globs below are traversal rules: ripgrep applies them while it walks,
@@ -1013,7 +1016,7 @@ fn toolSearch(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceilin
 /// Structural search/rewrite through ast-grep. `rewrite` set means the change
 /// is applied to every match (`--update-all`), so the next turn reads the
 /// result back rather than trusting the tool's summary.
-fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map) ![]u8 {
+fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map) ![]const u8 {
     const pattern = chat.str(args.get("pattern")) orelse return std.fmt.allocPrint(arena, "error: missing pattern", .{});
     const lang = chat.str(args.get("lang")) orelse return std.fmt.allocPrint(arena, "error: missing lang", .{});
     const path = chat.str(args.get("path")) orelse ".";
@@ -1269,7 +1272,7 @@ pub fn toolResult(arena: std.mem.Allocator, output: []const u8) ![]const u8 {
     });
 }
 
-pub fn dispatch(arena: std.mem.Allocator, name: []const u8, args: []const u8) ![]u8 {
+pub fn dispatch(arena: std.mem.Allocator, name: []const u8, args: []const u8) ![]const u8 {
     var call: chat.ToolCall = .{
         .id = try arena.dupe(u8, ""),
         .name = try arena.dupe(u8, name),
