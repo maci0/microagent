@@ -369,6 +369,11 @@ PYTHONPATH=$PWD/integrations/harbor ~/harbor-venv/bin/harbor run \
 See [integrations/harbor/README.md](integrations/harbor/README.md) and
 [BENCHMARK.md](BENCHMARK.md#swe-bench-verified).
 
+## License
+
+MIT, in [LICENSE](LICENSE). The file ships in the package `build.zig.zon`
+describes, so the grant travels with the source a consumer fetches.
+
 ## Benchmarks
 
 ```sh

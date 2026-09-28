@@ -14,12 +14,15 @@ release, and `microagent update` moves you to it.
 
 ### Added
 
+- An MIT `LICENSE`, listed in the README and in the package `build.zig.zon`
+  ships. A consumer reading the README or fetching the package had no file that
+  said what the grant was.
 - `make instructions`, wrapping `bench/instructions.sh`, so the retired-instructions
   gate CONTRIBUTING.md documents is a target rather than a line in the prose:
   `make instructions` prints the table and `make instructions CHECK=--check`
-  compares each row against `bench/instructions.baseline`. It builds first, since
-  the script reads the test build's `options.zig` and stops with a reminder when
-  there is none.
+  compares each row against `bench/instructions.baseline`. It runs the test suite
+  first, since the script reads that build's `options.zig` and stops with a
+  reminder when there is none.
 - The release workflow reads the published release back after publishing it and
   compares it with `dist/`: the release is no longer a draft, it carries exactly
   the assets this tag built and nothing else, each one byte-identical to the file
