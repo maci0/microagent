@@ -58,6 +58,11 @@ pub const ChatResult = struct {
     reasoning_tokens: u64 = 0,
     total_tokens: u64 = 0,
     cached_tokens: u64 = 0,
+    /// Whether the provider ever sent a `total_tokens` of its own. Until it
+    /// does, the total is the sum of the parts, and a stream that spreads its
+    /// usage over several frames re-sums it as each part lands rather than
+    /// keeping the first frame's partial sum.
+    total_from_provider: bool = false,
     /// Why the provider stopped generating, as the last frame spells it, or the
     /// empty slice when the stream carried none. `length` is the one that
     /// matters: it means the response was cut at `max_tokens`, so the turn is a

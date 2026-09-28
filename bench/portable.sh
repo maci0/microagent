@@ -25,6 +25,25 @@ elif command -v gtimeout >/dev/null 2>&1; then
 	limiter=gtimeout
 fi
 
+# A ceiling that is not a count of seconds is not a ceiling. GNU `timeout`
+# reads a zero as "no limit at all", and the watchdog below compares with
+# `test -ge`, which errors rather than compares on anything else and so never
+# fires: a typo in BENCH_TIMEOUT either runs a task for ever or runs it with
+# no ceiling. Both branches refuse it here instead, where the caller can see.
+check_secs() {
+	case "$1" in
+	'' | *[!0-9]*)
+		printf 'run_limited: %s is not a number of seconds\n' "$1" >&2
+		return 1
+		;;
+	esac
+	[ "$1" -ge 1 ] || {
+		printf 'run_limited: a zero-second ceiling is no ceiling\n' >&2
+		return 1
+	}
+	return 0
+}
+
 if [ -n "$limiter" ]; then
 	# `-k` is the escalation: without it GNU timeout TERMs and then waits for
 	# the child however long it takes, which is the same hang the watchdog
@@ -32,6 +51,7 @@ if [ -n "$limiter" ]; then
 	run_limited() {
 		secs=$1 dir=$2
 		shift 2
+		check_secs "$secs" || return 2
 		(cd "$dir" && exec "$limiter" -k "$run_limited_grace" "$secs" "$@")
 	}
 else
@@ -44,14 +64,19 @@ else
 	run_limited() {
 		secs=$1 dir=$2
 		shift 2
+		check_secs "$secs" || return 2
 		(cd "$dir" && exec "$@") &
 		pid=$!
 		(
+			# The tick is counted after the sleep, so `secs` sleeps have passed
+			# by the time the ceiling is read. Counting it first read the
+			# ceiling one second early, which cut a one-second budget to no
+			# budget at all.
 			ticks=0
 			while kill -0 "$pid" 2>/dev/null; do
+				sleep 1
 				ticks=$((ticks + 1))
 				[ "$ticks" -ge "$secs" ] && break
-				sleep 1
 			done
 			if kill -0 "$pid" 2>/dev/null; then
 				kill -TERM "$pid" 2>/dev/null

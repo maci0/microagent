@@ -1603,7 +1603,12 @@ const UsageFields = struct {
 fn applyUsage(result: *chat_mod.ChatResult, u: UsageFields) void {
     if (chat_mod.maybeNum(u.prompt)) |v| result.prompt_tokens = v;
     if (chat_mod.maybeNum(u.completion)) |v| result.completion_tokens = v;
-    if (chat_mod.maybeNum(u.total)) |v| result.total_tokens = v;
+    if (chat_mod.maybeNum(u.total)) |v| {
+        result.total_tokens = v;
+        // A zero is not a total the provider stands behind: it is the field
+        // left where it started, and the sum below is what stands in for it.
+        if (v != 0) result.total_from_provider = true;
+    }
     if (chat_mod.maybeNum(u.reasoning)) |v| result.reasoning_tokens = v;
     if (chat_mod.maybeNum(u.cached)) |v| result.cached_tokens = v;
     if (result.cached_tokens == 0) {
@@ -1612,7 +1617,11 @@ fn applyUsage(result: *chat_mod.ChatResult, u: UsageFields) void {
     if (result.cached_tokens == 0) {
         if (chat_mod.maybeNum(u.cache_read)) |v| result.cached_tokens = v;
     }
-    if (result.total_tokens == 0)
+    // A provider that has sent no total of its own gets the sum of the parts
+    // recomputed on every frame, so a stream that splits the parts across
+    // frames reports what all of them add up to rather than the first frame's
+    // half of it.
+    if (!result.total_from_provider)
         result.total_tokens = result.prompt_tokens +| result.completion_tokens;
 }
 
@@ -2810,6 +2819,26 @@ test "a later usage frame does not zero the counters an earlier one set" {
     try std.testing.expectEqual(@as(u64, 768), sink.result.cached_tokens);
     try std.testing.expectEqual(@as(u64, 918), sink.result.total_tokens);
 }
+
+// A stream that splits the parts across frames is the same stream: the total
+// is what all of them add up to. Summing once, on the frame that carried the
+// first part, reported that frame's half and left the rest of the response out
+// of the usage line a monitor reads tokens out of.
+test "a total summed from parts counts the parts a later frame brings" {
+    var sink = FrameSink.init(std.testing.allocator);
+    defer sink.deinit();
+
+    try sink.feed("{\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":900}}");
+    try std.testing.expectEqual(@as(u64, 900), sink.result.total_tokens);
+
+    try sink.feed("{\"choices\":[{\"delta\":{}}],\"usage\":{\"completion_tokens\":18}}");
+    try std.testing.expectEqual(@as(u64, 918), sink.result.total_tokens);
+
+    // A total the provider does send is its own number, and it still wins.
+    try sink.feed("{\"choices\":[{\"delta\":{}}],\"usage\":{\"total_tokens\":999}}");
+    try std.testing.expectEqual(@as(u64, 999), sink.result.total_tokens);
+}
+
 test "session record carries one response's counters, cwd and model time" {
     var state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer state.deinit();
