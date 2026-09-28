@@ -51,6 +51,16 @@ release, and `microagent update` moves you to it.
 
 ### Changed
 
+- `make lint-shell` runs shellcheck with four of its optional checks on, the
+  ones that report a masked `set -e` failure, an uppercase variable read on a
+  path that never assigned it, a `which` the shell may not carry, and a null
+  test against a literal the script just wrote. The tree passes all four.
+
+- The Harbor adapter keeps `BaseEnvironment` and `AgentContext` in a
+  type-checking block, so importing it does not import Harbor's environment and
+  context models, and `ruff.toml` selects `TC` so the next one lands the same
+  way.
+
 - `microagent --help` lists `MICROAGENT_SESSION_DIR` under its own heading rather
   than under "reply style", where a session directory read as a third style
   level, and says that a `--max-spend-tokens` run warns on stderr once 80% of

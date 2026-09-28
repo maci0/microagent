@@ -49,6 +49,8 @@ lint.select = [
     "SLF",  # private member access
     "SLOT", # __slots__ on subclasses
     "T10",  # leftover debugger calls
+    "TC",   # a third-party import used only in an annotation, which costs import time
+
     "TRY",  # tryceratops: a swallowed raise, a useless finally, a bare return in except
     "ASYNC", # async correctness: blocking a loop, a stray task group
     "ERA",   # commented-out code, which is never deleted and always misread

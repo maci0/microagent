@@ -28,11 +28,14 @@ import os
 import platform
 import shlex
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from harbor.agents.base import BaseAgent
-from harbor.environments.base import BaseEnvironment
-from harbor.models.agent.context import AgentContext
+
+if TYPE_CHECKING:
+    from harbor.environments.base import BaseEnvironment
+    from harbor.models.agent.context import AgentContext
 
 # The musl asset for the host's own architecture, under the name the release
 # publishes. Harbor runs the task container on the host's architecture, so the
