@@ -174,6 +174,14 @@ fn allDigits(text: []const u8) bool {
 const LogName = struct {
     stamp: u128,
     attempt: usize,
+
+    /// Whether `self` is the older of the two by the numbers a name carries.
+    /// The pruner breaks a tie on the path, which a name alone cannot say, so
+    /// a harness holding only names compares keys that may well be equal.
+    fn olderThan(self: LogName, other: LogName) bool {
+        if (self.stamp != other.stamp) return self.stamp < other.stamp;
+        return self.attempt < other.attempt;
+    }
 };
 
 /// The numbers behind a name `createSessionLog` could have written, or null
@@ -270,8 +278,8 @@ fn pruneSessionsTo(io: Io, arena: std.mem.Allocator, session_dir: []const u8, ke
 
     std.mem.sort(Found, found.items, {}, struct {
         fn lessThan(_: void, a: Found, b: Found) bool {
-            if (a.key.stamp != b.key.stamp) return a.key.stamp < b.key.stamp;
-            if (a.key.attempt != b.key.attempt) return a.key.attempt < b.key.attempt;
+            if (a.key.olderThan(b.key)) return true;
+            if (b.key.olderThan(a.key)) return false;
             return std.mem.order(u8, a.path, b.path) == .lt;
         }
     }.lessThan);
@@ -1021,8 +1029,7 @@ fn fuzzStoreNames(_: void, smith: *std.testing.Smith) !void {
 /// tie on the path, which a name alone cannot say, so a harness that only has
 /// names compares keys that may well be equal.
 fn keyOlder(a: LogName, b: LogName) bool {
-    if (a.stamp != b.stamp) return a.stamp < b.stamp;
-    return a.attempt < b.attempt;
+    return a.olderThan(b);
 }
 
 // A session record is the one thing this module writes for somebody else to

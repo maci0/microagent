@@ -15,7 +15,6 @@
 
 const std = @import("std");
 const Io = std.Io;
-const builtin = @import("builtin");
 
 const build_options = @import("build_options");
 const chat_mod = @import("chat.zig");
@@ -1893,6 +1892,17 @@ fn applyUsage(result: *chat_mod.ChatResult, u: UsageFields, unparsable: *usize) 
         result.total_tokens = result.prompt_tokens +| result.completion_tokens;
 }
 
+/// The one response cap, applied to whichever stream a fragment arrived on.
+/// `max_response_bytes` bounds a whole response rather than each stream in it,
+/// so the answer text and every call's arguments share one budget; two copies
+/// of this arithmetic is two places for the ceiling to be read at half of.
+fn clampToResponseCap(result: *chat_mod.ChatResult, text: []const u8) []const u8 {
+    const kept = chat_mod.clamp(text, max_response_bytes -| result.streamed);
+    if (kept.len != text.len) result.dropped = true;
+    result.streamed += kept.len;
+    return kept;
+}
+
 /// Appends streamed answer text to the result and to the buffer the caller
 /// prints, under the one response cap.
 fn appendStreamed(
@@ -1901,11 +1911,9 @@ fn appendStreamed(
     result: *chat_mod.ChatResult,
     out_buf: *std.ArrayList(u8),
 ) !void {
-    const kept = chat_mod.clamp(text, max_response_bytes -| result.streamed);
-    if (kept.len != text.len) result.dropped = true;
+    const kept = clampToResponseCap(result, text);
     try result.content.appendSlice(gpa, kept);
     try out_buf.appendSlice(gpa, kept);
-    result.streamed += kept.len;
 }
 
 /// Folds one streamed fragment of a tool call into `calls`, growing it to the
@@ -1946,10 +1954,7 @@ fn applyCallDelta(
         call.name = owned;
     }
     if (args) |v| {
-        const kept = chat_mod.clamp(v, max_response_bytes -| result.streamed);
-        if (kept.len != v.len) result.dropped = true;
-        try call.args.appendSlice(gpa, kept);
-        result.streamed += kept.len;
+        try call.args.appendSlice(gpa, clampToResponseCap(result, v));
     }
 }
 

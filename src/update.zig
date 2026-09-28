@@ -422,12 +422,14 @@ const Capped = struct {
             try self.body.writer.writeAll(part);
             total +|= part.len;
         }
-        if (data.len != 0) {
+        // `splat` is how many times the pattern is written and it may be zero,
+        // so a zero writes nothing at all rather than one copy of the pattern
+        // the caller asked for no copies of.
+        if (data.len != 0 and splat != 0) {
             const part = data[data.len - 1];
-            const reps = @max(splat, 1);
             var one = [_][]const u8{part};
-            try self.body.writer.writeSplatAll(&one, reps);
-            total +|= part.len *| reps;
+            try self.body.writer.writeSplatAll(&one, splat);
+            total +|= part.len *| splat;
         }
         if (self.body.written().len > self.limit) {
             self.over = true;
@@ -444,6 +446,27 @@ const Capped = struct {
         _ = capacity;
     }
 };
+
+// A drain is handed the pattern and the number of times to write it, and that
+// number may be zero. Writing one copy anyway puts a byte in a release body
+// that the caller never asked for, and the sidecar is a sha256 over exactly
+// the bytes that were downloaded, so a body the drain padded is one whose
+// checksum cannot match.
+test "a zero splat writes no copy of the pattern" {
+    const gpa = std.testing.allocator;
+    var c: Capped = undefined;
+    try c.start(gpa, 1024);
+    defer c.body.deinit();
+
+    try c.writer.splatBytesAll("xy", 0);
+    try c.writer.writeAll("done");
+    try std.testing.expectEqualStrings("done", c.body.written());
+
+    // One repetition is still one copy, so the zero is honoured rather than
+    // every splat being refused.
+    try c.writer.splatBytesAll("ab", 2);
+    try std.testing.expectEqualStrings("doneabab", c.body.written());
+}
 
 fn fail(io: std.Io, comptime fmt: []const u8, args: anytype) u8 {
     var buf: [512]u8 = undefined;

@@ -196,7 +196,11 @@ fn runSearchTool(io: Io, arena: std.mem.Allocator, argv: []const []const u8, wha
     const res = runCapped(io, arena, argv, max_tool_output * 4, net.durationMs(boundedMs(tool_timeout_ms, ceiling_ms)), environ_map) catch |err|
         return std.fmt.allocPrint(arena, "error: {s} failed: {s}", .{ what, @errorName(err) });
     if (res.stdout.len > 0) return withCaptureNote(arena, res.stdout, res);
-    if (res.stderr.len > 0) return res.stderr;
+    // The cap drains either stream, so a stderr cut short is as much a prefix
+    // of the warning as a stdout one is of the matches, and the marker is what
+    // says so. Marking only the stream that usually wins leaves a tool that
+    // writes its findings nowhere and its warnings to stderr unmarked.
+    if (res.stderr.len > 0) return withCaptureNote(arena, res.stderr, res);
     return std.fmt.allocPrint(arena, "(no matches)", .{});
 }
 
@@ -503,15 +507,28 @@ fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_
         if (buf.items.len > 0) try buf.appendSlice(arena, "\n");
         try buf.appendSlice(arena, bash_truncation_note[1..]);
     }
-    if (buf.items.len == 0) return std.fmt.allocPrint(arena, "(no output, exit {s})", .{@tagName(res.term)});
+    if (buf.items.len == 0) {
+        var line: std.ArrayList(u8) = .empty;
+        try line.appendSlice(arena, "(no output, exit ");
+        try appendExitStatus(arena, &line, res.term);
+        try line.appendSlice(arena, ")");
+        return line.items;
+    }
     if (res.term != .exited or res.term.exited != 0) {
         try buf.appendSlice(arena, bash_exit_note[0 .. bash_exit_note.len - 1]);
-        try buf.appendSlice(arena, @tagName(res.term));
-        if (res.term == .exited)
-            try buf.appendSlice(arena, try std.fmt.allocPrint(arena, " {d}", .{res.term.exited}));
+        try appendExitStatus(arena, &buf, res.term);
         try buf.appendSlice(arena, ")");
     }
     return buf.items;
+}
+
+/// The tag and, for a normal exit, the number: the tag alone says `exited`
+/// without saying which code, so a model reading it cannot tell a failure from
+/// a success. The no-output line and the trailing note are the same sentence,
+/// so both are spelled here rather than in one of them.
+fn appendExitStatus(arena: std.mem.Allocator, buf: *std.ArrayList(u8), term: std.process.Child.Term) !void {
+    try buf.appendSlice(arena, @tagName(term));
+    if (term == .exited) try buf.appendSlice(arena, try std.fmt.allocPrint(arena, " {d}", .{term.exited}));
 }
 
 /// Directories whose every file is a credential. Matched per path component,
@@ -2601,6 +2618,32 @@ test "a tool call that times out leaves no process of its own behind" {
 // what `cat` returns is a tool result the provider reads again on every later
 // turn. The check is over the command's words rather than a parsed AST, so it
 // is pinned on the words it does and does not claim.
+// The exit status is the only thing a silent command leaves behind, so the
+// no-output line has to carry the number the trailing note carries. Spelling it
+// from the tag alone reports `exited` for a command that failed and one that
+// succeeded alike, which is the one distinction the model cannot get anywhere
+// else.
+test "a bash command with no output still says which exit it was" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    try std.testing.expectEqualStrings(
+        "(no output, exit exited 3)",
+        try dispatch(arena, "bash", "{\"command\":\"exit 3\"}"),
+    );
+    try std.testing.expectEqualStrings(
+        "(no output, exit exited 0)",
+        try dispatch(arena, "bash", "{\"command\":\"exit 0\"}"),
+    );
+    // The same number reaches the line when there was output to append it to,
+    // so the two spellings cannot drift apart again.
+    try std.testing.expectEqualStrings(
+        "hi\n\n(exit: exited 3)",
+        try dispatch(arena, "bash", "{\"command\":\"echo hi; exit 3\"}"),
+    );
+}
+
 test "bash refuses a command naming a credentials file" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
