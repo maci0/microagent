@@ -2,7 +2,8 @@
 # Retired instructions per unit of work, for the paths a run actually walks.
 #
 #   sh bench/instructions.sh            print the table
-#   sh bench/instructions.sh --check    the same, and fail on a regression
+#   sh bench/instructions.sh --check    the same, and fail on a row that left
+#                                       the band in either direction
 #
 # Why instructions and not time. Wall clock moves with frequency scaling, the
 # CPU quota and whatever else the machine is doing, so a wall-clock gate fails
@@ -140,7 +141,8 @@ printf '%-32s %14s %14s\n' path instructions instr_per_unit
 printf '%s\n' "--------------------------------------------------------------------------"
 printf '%-32s %14s %14s\n' baseline "$baseline" -
 
-worst=0
+regressed=0
+improved=0
 while IFS='|' read -r name filter units; do
 	[ -n "$name" ] || continue
 	value=$(measure "$filter") || exit 2
@@ -151,19 +153,30 @@ while IFS='|' read -r name filter units; do
 		want=$(awk -F'\t' -v n="$name" '$1 == n { print $2 }' "$root/bench/instructions.baseline" 2>/dev/null)
 		if [ -n "$want" ] && [ "$want" -gt 0 ]; then
 			# Compare in tenths so the ratio is an integer and shell
-			# arithmetic does not have to do division on a float.
+			# arithmetic does not have to do division on a float. The two
+			# sides of the band are reported apart: above it a path retired
+			# more work than the baseline records, below it fewer, and the
+			# second is a stale baseline rather than a regression to fix.
 			now=$((per * 1000 / want))
-			if [ "$now" -gt "$((1000 + tolerance * 10))" ] || [ "$now" -lt "$((1000 - tolerance * 10))" ]; then
-				printf '  REGRESSION: %s is %s per unit, baseline %s (band +/-%s%%)\n' \
+			if [ "$now" -gt "$((1000 + tolerance * 10))" ]; then
+				printf '  REGRESSION: %s is %s per unit, baseline %s (band +/-%s%%): fix the code that retired more\n' \
 					"$name" "$per" "$want" "$tolerance"
-				worst=1
+				regressed=1
+			elif [ "$now" -lt "$((1000 - tolerance * 10))" ]; then
+				printf '  IMPROVED: %s is %s per unit, baseline %s (band +/-%s%%): re-record bench/instructions.baseline\n' \
+					"$name" "$per" "$want" "$tolerance"
+				improved=1
 			fi
 		fi
 	fi
 done <"$rows"
 
-if [ "$worst" -ne 0 ]; then
-	printf '%s\n' "bench/instructions.sh: a hot path moved outside the band; fix it or re-record bench/instructions.baseline"
+if [ "${regressed:-0}" -ne 0 ]; then
+	printf '%s\n' "bench/instructions.sh: a hot path retired more instructions than the baseline records: fix it, or re-record bench/instructions.baseline"
+	exit 1
+fi
+if [ "${improved:-0}" -ne 0 ]; then
+	printf '%s\n' "bench/instructions.sh: a hot path retired fewer instructions than the baseline records, so the baseline is stale: re-record it with 'sh bench/instructions.sh' and commit the result"
 	exit 1
 fi
 exit 0

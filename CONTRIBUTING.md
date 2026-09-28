@@ -87,7 +87,10 @@ may have performance counters switched off, so a gate that cannot measure is a
 gate that fails for the wrong reason on someone else's machine. It exits 1 when
 a row leaves its band and 2 when a row cannot be measured at all, so run it
 before a push that touches a hot path and re-record
-`bench/instructions.baseline` only when the change is meant to move it.
+`bench/instructions.baseline` only when the change is meant to move it. A row
+above its band is a regression to fix; a row below it retired less work than
+the baseline records, so the baseline is what is stale, and the run says which
+one it found rather than calling both a regression.
 
 `make check` is the whole gate: it is the same `make fmt-check`, the same
 `ruff check`, `ruff format --check` and `yamllint`, the same `zig build test`,
