@@ -586,7 +586,7 @@ fn baseUrlCarriesKey(base_url: []const u8) bool {
 
 fn isLoopbackHost(host: []const u8) bool {
     if (std.ascii.eqlIgnoreCase(host, "localhost")) return true;
-    if (std.mem.endsWith(u8, host, ".localhost")) return true;
+    if (std.ascii.endsWithIgnoreCase(host, ".localhost")) return true;
     if (isIpv4Loopback(host)) return true;
     return std.mem.eql(u8, std.mem.trim(u8, host, "[]"), "::1");
 }
@@ -2923,6 +2923,11 @@ test "the api key is only sent over https, or to a loopback gateway" {
     try std.testing.expect(baseUrlCarriesKey("http://127.0.0.1:1234/v1"));
     try std.testing.expect(baseUrlCarriesKey("http://127.1.2.3/v1"));
     try std.testing.expect(baseUrlCarriesKey("http://[::1]:1234/v1"));
+    // A name that ends in the loopback spelling is the same machine: a
+    // resolver sends `.localhost` nowhere, so the exemption has to read the
+    // suffix and not only the whole name.
+    try std.testing.expect(baseUrlCarriesKey("http://gateway.localhost:1234/v1"));
+    try std.testing.expect(baseUrlCarriesKey("http://Gateway.LocalHost/v1"));
 
     // Anywhere else, plaintext would put the key on the wire in the clear.
     try std.testing.expect(!baseUrlCarriesKey("http://openrouter.ai/api/v1"));
@@ -3025,6 +3030,31 @@ test "the command line parses in either flag form and in any order" {
     try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &padded_argv, &padded));
     try std.testing.expectEqual(@as(?u64, 90), padded.budget_s);
     try std.testing.expectEqual(@as(usize, 7), padded.max_turns);
+
+    // The task is taken where it stands, so a flag after it is still a flag.
+    // A parser that wanted its flags first would read "fix it" as the prompt
+    // and then stop, and every case above would still pass.
+    var after: Options = .{};
+    const after_argv = [_][]const u8{ "fix it", "--max-turns", "7", "--model", "some/model" };
+    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &after_argv, &after));
+    try std.testing.expectEqualStrings("fix it", after.prompt);
+    try std.testing.expectEqual(@as(usize, 7), after.max_turns);
+    try std.testing.expectEqualStrings("some/model", after.model);
+
+    // The two flags the help spells with their own names reach their own
+    // fields: both are one long word away from another option, so a table row
+    // that drifted would set the CA bundle path into the config path and leave
+    // every other case in the suite green.
+    var named: Options = .{};
+    const named_argv = [_][]const u8{ "--ca-bundle", "/etc/ca.pem", "--config", "/etc/agent.toml" };
+    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &named_argv, &named));
+    try std.testing.expectEqualStrings("/etc/ca.pem", named.ca_bundle);
+    try std.testing.expectEqualStrings("/etc/agent.toml", named.config);
+
+    // And the short form of a row in the same table.
+    var short_k: Options = .{};
+    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &.{ "-k", "sk-a-key" }, &short_k));
+    try std.testing.expectEqualStrings("sk-a-key", short_k.api_key);
 }
 
 // A task is model output, so a prompt that begins with a dash is ordinary, and

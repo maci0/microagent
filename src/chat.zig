@@ -1039,17 +1039,37 @@ test "the five usage counters are emitted in the order the wire names them" {
 // near the ceiling must saturate too: a plain `+` would wrap to a small number
 // and report a run that spent almost nothing.
 test "a run total saturates instead of wrapping" {
-    var usage: Usage = .{ .prompt = std.math.maxInt(u64) - 1, .cached = 1, .completion = 10, .reasoning = 20, .total = 30 };
-    usage.add(&.{
-        .prompt_tokens = 10,
-        .cached_tokens = 1,
-        .completion_tokens = 1,
-        .reasoning_tokens = 1,
-        .total_tokens = 2,
-    });
-    try std.testing.expectEqual(std.math.maxInt(u64), usage.prompt);
-    try std.testing.expectEqual(@as(u64, 2), usage.cached);
-    try std.testing.expectEqual(@as(u64, 11), usage.completion);
-    try std.testing.expectEqual(@as(u64, 21), usage.reasoning);
-    try std.testing.expectEqual(@as(u64, 32), usage.total);
+    // Each counter in turn is taken to the ceiling and added ten more, because
+    // a plain `+` on any one of them wraps to a small number and reports a run
+    // that spent almost nothing. The four left alone have to come out as an
+    // ordinary sum, so a saturating add that clamped every field fails here
+    // rather than passing.
+    const start = [5]u64{ 1, 10, 20, 30, 40 };
+    const near = std.math.maxInt(u64) - 1;
+    for (0..start.len) |over| {
+        var before = start;
+        before[over] = near;
+        var usage: Usage = .{
+            .prompt = before[0],
+            .cached = before[1],
+            .completion = before[2],
+            .reasoning = before[3],
+            .total = before[4],
+        };
+        var result: ChatResult = .{};
+        switch (over) {
+            0 => result.prompt_tokens = 10,
+            1 => result.cached_tokens = 10,
+            2 => result.completion_tokens = 10,
+            3 => result.reasoning_tokens = 10,
+            4 => result.total_tokens = 10,
+            else => unreachable,
+        }
+        usage.add(&result);
+        const got = [5]u64{ usage.prompt, usage.cached, usage.completion, usage.reasoning, usage.total };
+        for (got, before) |value, was| {
+            const expected: u64 = if (was == near) std.math.maxInt(u64) else was;
+            try std.testing.expectEqual(expected, value);
+        }
+    }
 }

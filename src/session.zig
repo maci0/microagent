@@ -188,18 +188,22 @@ pub fn open(io: Io, arena: std.mem.Allocator, session_dir: []const u8, model: []
         net.note(io, arena, "microagent: the session directory {s} could not be created ({s}); the rest of this run is not recorded\n", .{ shown, @errorName(err) });
         return null;
     };
-    const now_ns = Io.Clock.real.now(io).nanoseconds;
-    // A clock set before 1970 reads a negative stamp, and a name that begins
-    // with `-` is one `logName` refuses to parse, so the log would be written
-    // and never pruned. Zero sorts as the oldest name, which is the order a
-    // stamp saying nothing about the time should have.
-    const stamp: u128 = if (now_ns < 0) 0 else @intCast(now_ns);
+    const stamp = logStamp(Io.Clock.real.now(io).nanoseconds);
     const file = createSessionLog(io, arena, session_dir, stamp) orelse {
         net.note(io, arena, "microagent: no session log could be opened under {s}; the rest of this run is not recorded\n", .{shown});
         return null;
     };
     pruneSessions(io, arena, session_dir);
     return .{ .file = file, .cwd = cwd, .model = model, .dir = session_dir };
+}
+
+/// The stamp a run's log is named from, from a clock reading in nanoseconds. A
+/// clock set before 1970 reads negative, and a name that begins with `-` is one
+/// `logName` refuses to parse, so the log would be written and never pruned.
+/// Zero sorts as the oldest name, which is the order a stamp saying nothing
+/// about the time should have.
+fn logStamp(now_ns: i128) u128 {
+    return if (now_ns < 0) 0 else @intCast(now_ns);
 }
 
 /// Session logs kept on disk. The store is a per-run directory that nothing
@@ -922,7 +926,11 @@ test "a log named from a clock before 1970 is still one the pruner counts" {
 
     // The stamp `open` computes for a clock reading before the epoch.
     const before_epoch_ns: i128 = -1_000_000_000;
-    const stamp: u128 = if (before_epoch_ns < 0) 0 else @intCast(before_epoch_ns);
+    const stamp = logStamp(before_epoch_ns);
+    try std.testing.expectEqual(@as(u128, 0), stamp);
+    // The same reading on the far side of the epoch is the stamp itself, so the
+    // clamp is not quietly taking every time before some other line.
+    try std.testing.expectEqual(@as(u128, 1_000_000_000), logStamp(1_000_000_000));
     const log = createSessionLog(io, arena, dir_path, stamp) orelse return error.TestUnexpectedResult;
     log.close(io);
     try store.tmp.dir.access(io, "0.jsonl", .{});

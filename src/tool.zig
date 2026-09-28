@@ -3298,6 +3298,11 @@ test "a tool call reports the exit status of the command it ran" {
 /// three orders of magnitude above the skew it covers.
 const deadline_slack_ms: u64 = 10;
 
+/// How far past its budget a timed-out call may still be running. Several
+/// budgets wide, so a loaded host passes, and far below the seconds a wait that
+/// answers on something other than the clock would take.
+const deadline_overshoot_ms: u64 = 5_000;
+
 // A timeout that is re-armed by every read is not a timeout. Both runners
 // wait on the child's pipes in a loop, and a command that keeps writing never
 // lets one of those waits reach the end of the duration, so the call runs for
@@ -3330,6 +3335,12 @@ test "a tool call is timed out by the clock, not by how long it stayed quiet" {
     // machine that has been suspended, or one whose timer fires on the first
     // tick of a coarser one, hands back a deadline a hair before it is due.
     try std.testing.expect(spent + deadline_slack_ms * std.time.ns_per_ms >= budget_ms * std.time.ns_per_ms);
+    // And the other side of the same claim: the wait is bounded by the clock,
+    // so a signalling task that fires long past the deadline spends the run's
+    // budget on a call the budget had already given up on. The margin is
+    // several budgets wide because a loaded host is slow rather than wrong,
+    // but a task that comes back seconds late is not a host being loaded.
+    try std.testing.expect(spent < deadline_overshoot_ms * std.time.ns_per_ms);
 }
 
 test "a tool call that times out leaves no process of its own behind" {

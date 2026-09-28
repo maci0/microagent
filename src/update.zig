@@ -1774,6 +1774,12 @@ test "update: checksum match replaces a copy; mismatch, missing sidecar, and a b
     const got = try copyOf(io, tmp.dir);
     defer alloc.free(got);
     try std.testing.expectEqualStrings("abc", got);
+    // The replacement is a program the next run execs, so the mode is part of
+    // what was installed: a copy of the right bytes no shell can run is not an
+    // update, and a test that reads only the contents would pass on it.
+    const mode = (try tmp.dir.statFile(io, "microagent", .{})).permissions.toMode();
+    try std.testing.expectEqual(exec_mode.toMode(), mode & 0o7777);
+    try std.testing.expect(mode & 0o111 != 0);
 }
 
 test "update: a body over the cap is refused while it arrives" {

@@ -217,6 +217,65 @@ pub fn nextLineEnd(pending: []const u8, scanned: *usize) ?usize {
     return at;
 }
 
+// The splitter three call sites share, so the `scanned` bookkeeping is pinned
+// here rather than only through them. An off-by-one either leaves a caller's
+// `pending` growing without bound (a `scanned` that is not lowered past the
+// bytes already consumed) or drops a line that has already arrived (a `scanned`
+// that runs past it).
+test "the line splitter resumes where the last call stopped, and does not skip a line" {
+    var scanned: usize = 0;
+    // Nothing to return: the whole buffer has been searched, which is the
+    // reading a caller appends to without rescanning.
+    try std.testing.expectEqual(@as(?usize, null), nextLineEnd("", &scanned));
+    try std.testing.expectEqual(@as(usize, 0), scanned);
+    try std.testing.expectEqual(@as(?usize, null), nextLineEnd("abc", &scanned));
+    try std.testing.expectEqual(@as(usize, 3), scanned);
+
+    // A line ending in the first byte, and one ending in the last, so neither
+    // end of the buffer is assumed.
+    scanned = 0;
+    try std.testing.expectEqual(@as(?usize, 0), nextLineEnd("\nrest", &scanned));
+    try std.testing.expectEqual(@as(usize, 1), scanned);
+    scanned = 0;
+    try std.testing.expectEqual(@as(?usize, 3), nextLineEnd("abc\n", &scanned));
+    try std.testing.expectEqual(@as(usize, 4), scanned);
+
+    // Every line of a three-line buffer, in order, with no line skipped and
+    // none handed back twice.
+    const text = "one\ntwo\nthree\n";
+    scanned = 0;
+    var lines: [4]usize = undefined;
+    var n: usize = 0;
+    while (nextLineEnd(text, &scanned)) |at| {
+        try std.testing.expect(n < lines.len);
+        lines[n] = at;
+        n += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), n);
+    try std.testing.expectEqualSlices(usize, &.{ 3, 7, 13 }, lines[0..3]);
+    try std.testing.expectEqual(text.len, scanned);
+
+    // The caller's half of the contract: a line consumed and its bytes dropped
+    // resumes at the same character of the record, so a line split across two
+    // reads is found once it is whole and not before.
+    var pending: std.ArrayList(u8) = .empty;
+    defer pending.deinit(std.testing.allocator);
+    try pending.appendSlice(std.testing.allocator, "data: fir");
+    scanned = 0;
+    try std.testing.expectEqual(@as(?usize, null), nextLineEnd(pending.items, &scanned));
+    try pending.appendSlice(std.testing.allocator, "st\ndata: second\n");
+    const at = nextLineEnd(pending.items, &scanned).?;
+    try std.testing.expectEqualStrings("data: first", pending.items[0..at]);
+    const consumed = at + 1;
+    std.mem.copyForwards(u8, pending.items, pending.items[consumed..]);
+    pending.items.len -= consumed;
+    scanned -= consumed;
+    try std.testing.expectEqualStrings("data: second\n", pending.items);
+    try std.testing.expectEqual(@as(usize, 0), scanned);
+    try std.testing.expectEqual(@as(?usize, 12), nextLineEnd(pending.items, &scanned));
+    try std.testing.expectEqual(@as(?usize, null), nextLineEnd(pending.items, &scanned));
+}
+
 /// A monotonic duration for `Io.Timeout`, from milliseconds. A tool deadline
 /// is named in milliseconds in every tool, so the conversion is spelled once
 /// here rather than at each call site.
