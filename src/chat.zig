@@ -131,9 +131,14 @@ test "a tool's wire name and its variant are the same name both ways" {
 
 test "only the tools that change a file say they write" {
     // The loop and the credential refusal both ask this of the same enum, so a
-    // new variant is classified here once rather than in each of them.
-    for (tools()) |tool| {
-        try std.testing.expectEqual(tool == .write or tool == .edit, tool.writes());
+    // new variant is classified here once rather than in each of them. The
+    // expected answers are spelled out in the order `tools()` advertises them
+    // rather than recomputed from the rule under test, so a variant added to
+    // the enum and to the schema but left out of `writes` fails here.
+    const by_schema_order = [_]bool{ false, false, true, true, false, false, false };
+    try std.testing.expectEqual(by_schema_order.len, tools().len);
+    for (tools(), by_schema_order) |tool, writes| {
+        try std.testing.expectEqual(writes, tool.writes());
     }
 }
 
@@ -1124,9 +1129,10 @@ test "a cut never leaves half a code point in the request body" {
 
 // A transport splits a body wherever it likes, so the split lands inside a
 // character as often as not: a run that writes each chunk as it arrives must be
-// able to tell how much of the chunk it cannot write yet. The property is that
-// the two halves still join up, which is what makes holding the tail back
-// lossless rather than a truncation.
+// able to tell how much of the chunk it cannot write yet. What a writer must
+// not do is lose bytes or cut a glyph in half, so the loop asks for the two
+// properties that catch a wrong count at every one of the split points; the
+// exact count for each is pinned by the test that follows.
 test "a body split at any byte still joins into the text it was" {
     const text = "a\u{00e9}\u{65e5}\u{1f600}z";
     for (0..text.len + 1) |at| {
@@ -1137,19 +1143,13 @@ test "a body split at any byte still joins into the text it was" {
         try std.testing.expect(held <= utf8_max_sequence_bytes);
         try std.testing.expect(held <= head.len);
         try std.testing.expect(std.unicode.utf8ValidateSlice(head[0 .. head.len - held]));
-        // The kept bytes go in front of the next chunk, so the two halves the
-        // writer saw are one string again. The character the split fell in can
-        // have its lead byte here and its last bytes there, which is the case
-        // this is here for: a three-byte head and a one-byte tail of a
-        // four-byte character.
-        const joined = try std.mem.concat(std.testing.allocator, u8, &.{ head[head.len - held ..], text[at..] });
-        defer std.testing.allocator.free(joined);
-        // What the writer put on the wire before it held the tail back, plus
-        // the tail and the next chunk, is the text it was: holding bytes back
-        // costs no output.
-        const whole = try std.mem.concat(std.testing.allocator, u8, &.{ head[0 .. head.len - held], joined });
-        defer std.testing.allocator.free(whole);
-        try std.testing.expectEqualStrings(text, whole);
+        // The character the split fell in can have its lead byte in this chunk
+        // and its last bytes in the next, which is the case this is here for: a
+        // three-byte head and a one-byte tail of a four-byte character. A count
+        // that over-held would swallow whole characters, so what goes on the
+        // wire before the tail is put back has to be the text's own prefix and
+        // nothing longer.
+        try std.testing.expect(std.mem.startsWith(u8, text, head[0 .. head.len - held]));
     }
 }
 

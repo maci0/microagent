@@ -1824,6 +1824,14 @@ test "update: comparison and install lines use the release wording" {
         "Installed v0.2.0 to /usr/local/bin/microagent",
         try formatInstalled(&buf, "v0.2.0", "/usr/local/bin/microagent"),
     );
+    // A tag that is not a triple still installs, and says the comparison was
+    // not made rather than calling the build current. Its arguments are the
+    // tool, the running version and the tag in that order, the same order
+    // `formatCurrent` takes them.
+    try std.testing.expectEqualStrings(
+        "microagent 0.1.0 is not the latest release (nightly), which is not a version triple to compare against",
+        try formatUncompared(&buf, "microagent", "0.1.0", "nightly"),
+    );
 }
 
 test "update: checksum match replaces a copy; mismatch, missing sidecar, and a bad url do not" {
@@ -1844,9 +1852,14 @@ test "update: checksum match replaces a copy; mismatch, missing sidecar, and a b
     // Every verdict but `replaced` refuses the write, so each case also checks
     // that the binary on disk is untouched.
     const refusals = [_]struct { want: Verdict, in: Inputs }{
+        // An up-to-date build is `current` on the two versions alone: the asset
+        // and the sidecar are never fetched, so a release that published
+        // neither is not a reason to fail an update. Filling the row in would
+        // let the same-release check move to the end of the function and leave
+        // every case below answering the same.
         .{
             .want = .current,
-            .in = .{ .running = "0.1.0", .tag = "v0.1.0", .asset_url = good_url, .asset = "abc", .sidecar_url = good_side_url, .sidecar = good_side, .basename = asset_base },
+            .in = .{ .running = "0.1.0", .tag = "v0.1.0" },
         },
         .{
             .want = .checksum_mismatch,
@@ -1856,9 +1869,23 @@ test "update: checksum match replaces a copy; mismatch, missing sidecar, and a b
             .want = .missing_sidecar,
             .in = .{ .running = "0.1.0", .tag = "v0.2.0", .asset_url = good_url, .asset = "abc", .sidecar_url = null, .basename = asset_base },
         },
+        // A sidecar the body carried with nothing in it: the URL was there and
+        // the body was empty, which is a 200 with a zero-length reply and not
+        // a digest that failed to match.
+        .{
+            .want = .missing_sidecar,
+            .in = .{ .running = "0.1.0", .tag = "v0.2.0", .asset_url = good_url, .asset = "abc", .sidecar_url = good_side_url, .sidecar = "", .basename = asset_base },
+        },
         .{
             .want = .missing_asset,
             .in = .{ .running = "0.1.0", .tag = "v0.2.0", .asset_url = null, .asset = "abc", .sidecar_url = good_side_url, .sidecar = good_side, .basename = asset_base },
+        },
+        // A release with neither is reported as the asset it is missing first,
+        // so the message names the asset rather than a sidecar of a download
+        // that never happened.
+        .{
+            .want = .missing_asset,
+            .in = .{ .running = "0.1.0", .tag = "v0.2.0" },
         },
         .{
             .want = .missing_asset,
@@ -1871,6 +1898,14 @@ test "update: checksum match replaces a copy; mismatch, missing sidecar, and a b
         .{
             .want = .untrusted_url,
             .in = .{ .running = "0.1.0", .tag = "v0.2.0", .asset_url = "https://example.com/microagent", .asset = "abc", .sidecar_url = good_side_url, .sidecar = good_side, .basename = asset_base },
+        },
+        // The digest has to come from the same host as the bytes it is checked
+        // against: a release that points the binary at github.com and the
+        // sidecar at a lookalike would otherwise install unverified bytes
+        // through a check the two hosts never shared.
+        .{
+            .want = .untrusted_url,
+            .in = .{ .running = "0.1.0", .tag = "v0.2.0", .asset_url = good_url, .asset = "abc", .sidecar_url = "https://example.com/microagent.sha256", .sidecar = good_side, .basename = asset_base },
         },
     };
     for (refusals) |c| {

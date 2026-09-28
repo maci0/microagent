@@ -403,6 +403,22 @@ test "the config sets levels and leaves absent or bad keys alone" {
     try std.testing.expectEqualStrings("cavmen", typo.key);
     try std.testing.expect(!typo.bad_value);
     try std.testing.expectEqual(CavemanLevel.lite, style.caveman);
+
+    // A bad key or a bad value does not stop the scan: the document is read to
+    // the end and every key after the problem still applies, so one typo above
+    // a real setting does not leave the whole file inert. The first problem is
+    // the one named, whichever it came first.
+    var after: Style = .{};
+    const first = after.applyToml("cavmen = \"off\"\nponytail = 'lazy'\ncaveman = \"ultra\"\n").?;
+    try std.testing.expectEqualStrings("cavmen", first.key);
+    try std.testing.expect(!first.bad_value);
+    try std.testing.expectEqual(CavemanLevel.ultra, after.caveman);
+    try std.testing.expectEqual(PonytailLevel.full, after.ponytail);
+
+    // A line with nothing before the `=` names no key, so it is not a problem
+    // to report, and the key after it still applies.
+    try std.testing.expect(after.applyToml("= \"lite\"\ncaveman = \"off\"\n") == null);
+    try std.testing.expectEqual(CavemanLevel.off, after.caveman);
 }
 
 test "the config reads either root or [style] keys, and nothing else" {
@@ -432,10 +448,12 @@ test "a comment trails a key, a value and a table header" {
         "# the reply style.\n" ++
             "[style] # how terse the agent writes\n" ++
             "caveman = \"lite\" # not as terse as ultra\n" ++
-            "ponytail = full # not valid TOML, and read anyway\n",
+            "ponytail = ultra # not valid TOML, and read anyway\n",
     ) == null);
     try std.testing.expectEqual(CavemanLevel.lite, style.caveman);
-    try std.testing.expectEqual(PonytailLevel.full, style.ponytail);
+    // A level the default does not already carry, so a line dropped instead of
+    // read leaves this different rather than the same.
+    try std.testing.expectEqual(PonytailLevel.ultra, style.ponytail);
 
     // A `#` is cut before the quote is looked for, so one after the closing
     // quote is a comment and one the quoted value itself carries leaves the
@@ -503,10 +521,14 @@ test "a config an editor saved with a byte order mark reads the same" {
 
 test "the wenyan levels ask for classical Chinese" {
     const gpa = std.testing.allocator;
-    const block = try (Style{ .caveman = .wenyan_full, .ponytail = .off }).ruleset(gpa);
-    defer gpa.free(block);
-    try std.testing.expect(std.mem.indexOf(u8, block, "level: wenyan-full") != null);
-    try std.testing.expect(std.mem.indexOf(u8, block, "classical Chinese") != null);
+    // All three, not one: a level left out of the switch that names them reads
+    // the block without the one line the model writes its replies from.
+    for ([_]CavemanLevel{ .wenyan_lite, .wenyan_full, .wenyan_ultra }) |level| {
+        const block = try (Style{ .caveman = level, .ponytail = .off }).ruleset(gpa);
+        defer gpa.free(block);
+        try std.testing.expect(std.mem.indexOf(u8, block, level.name()) != null);
+        try std.testing.expect(std.mem.indexOf(u8, block, wenyan_line) != null);
+    }
 }
 
 // The longest ruleset is wenyan caveman with ponytail both on: the wenyan line

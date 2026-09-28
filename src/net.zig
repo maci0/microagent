@@ -807,8 +807,27 @@ test "a Retry-After date is read as the instant it names" {
 // the number of days from the epoch to it, so an off-by-one in either the table
 // or the arithmetic moves the answer rather than being asserted twice.
 test "every month name reads as the month the epoch counts" {
-    for (calendar_months, 1..) |name, number| {
-        const month: u32 = @intCast(number);
+    // Spelled out here rather than walked out of `calendar_months`, because
+    // the point is that the two agree: reading the name back out of the table
+    // the name came from cannot fail when the table is reordered.
+    const months = [_]struct { name: []const u8, number: u32 }{
+        .{ .name = "Jan", .number = 1 },
+        .{ .name = "Feb", .number = 2 },
+        .{ .name = "Mar", .number = 3 },
+        .{ .name = "Apr", .number = 4 },
+        .{ .name = "May", .number = 5 },
+        .{ .name = "Jun", .number = 6 },
+        .{ .name = "Jul", .number = 7 },
+        .{ .name = "Aug", .number = 8 },
+        .{ .name = "Sep", .number = 9 },
+        .{ .name = "Oct", .number = 10 },
+        .{ .name = "Nov", .number = 11 },
+        .{ .name = "Dec", .number = 12 },
+    };
+    try std.testing.expectEqual(calendar_months.len, months.len);
+    for (months) |entry| {
+        const name = entry.name;
+        const month = entry.number;
         // A year with no 29 February, so February's own length does not enter.
         const header = try std.fmt.allocPrint(
             std.testing.allocator,
@@ -818,6 +837,7 @@ test "every month name reads as the month the epoch counts" {
         defer std.testing.allocator.free(header);
         const want = daysFromCivil(2021, month, 12) * @as(i64, std.time.s_per_day);
         try std.testing.expectEqual(@as(?i64, want), httpDateEpochSeconds(header));
+        try std.testing.expectEqual(@as(?u32, month), monthFromName(name));
         // The name a sender is allowed to spell any other way is still this
         // month, which a byte comparison against the table would refuse.
         for ([_]*const fn (u8) u8{ std.ascii.toLower, std.ascii.toUpper }) |casing| {

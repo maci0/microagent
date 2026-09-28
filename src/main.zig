@@ -280,7 +280,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (opts.prompt.len == 0) return usageError(io, "no prompt: pass it as an argument or with --print", .{});
     tool_mod.forwardInterruptsToToolGroup();
-    const key = resolveKey(io, init, opts.api_key);
+    const key = resolveKey(io, init.environ_map, init.arena, opts.api_key);
     opts.api_key = key.value;
     // The message names every source, including the file, because a user who
     // wrote a key there is not looking for the four variables.
@@ -1025,14 +1025,14 @@ fn setPrompt(buf: []u8, opts: *Options, value: []const u8) ?[]const u8 {
 /// the file being present is exactly why a reader believes a key is set.
 const Key = struct { value: []const u8, source: []const u8 };
 
-fn resolveKey(io: Io, init: std.process.Init, given: []const u8) Key {
+fn resolveKey(io: Io, environ: *std.process.Environ.Map, arena_state: *std.heap.ArenaAllocator, given: []const u8) Key {
     if (given.len > 0) return .{ .value = given, .source = "--api-key" };
     for (key_vars) |n| {
-        if (envValue(init.environ_map, n)) |v| return .{ .value = v, .source = n };
+        if (envValue(environ, n)) |v| return .{ .value = v, .source = n };
     }
-    const arena = init.arena.allocator();
+    const arena = arena_state.allocator();
     const fallback = std.fs.path.join(arena, &.{
-        net.homeDir(init.environ_map) orelse return .{ .value = "", .source = "none" },
+        net.homeDir(environ) orelse return .{ .value = "", .source = "none" },
         ".secrets",
         "openrouter",
     }) catch |err| {
@@ -1041,7 +1041,7 @@ fn resolveKey(io: Io, init: std.process.Init, given: []const u8) Key {
         // the run has no API key, when the key is in a file whose path this
         // could not build.
         net.note(io, arena, "microagent: the path to {s}/.secrets/openrouter could not be built ({s}); no key was taken from a file there\n", .{
-            chat_mod.safeTextAll(arena, net.homeDir(init.environ_map) orelse "$HOME"), @errorName(err),
+            chat_mod.safeTextAll(arena, net.homeDir(environ) orelse "$HOME"), @errorName(err),
         });
         return .{ .value = "", .source = "none" };
     };
@@ -6399,6 +6399,86 @@ test "an atomic write follows a symlink to the file it names" {
     var link_buf: [std.fs.max_path_bytes]u8 = undefined;
     const n = try tmp.dir.readLink(io, "link", &link_buf);
     try std.testing.expectEqualStrings("real", link_buf[0..n]);
+}
+
+// Where the key comes from is decided before the first turn, and the order
+// decides it: a `--api-key` beats every variable, the variables are tried in
+// the order the help text names them, and only when none of them carries one
+// is the file under `$HOME` read. The file is a fallback rather than the
+// first choice, and a variable that is set to nothing is not a key at all.
+test "the key is the flag, then the first variable, then the file" {
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const io = std.testing.io;
+
+    // A flag is a key and is not looked past, whatever the environment says.
+    try env.put(key_vars[0], "from-var");
+    {
+        const k = resolveKey(io, &env, &arena_state, "from-flag");
+        try std.testing.expectEqualStrings("from-flag", k.value);
+        try std.testing.expectEqualStrings("--api-key", k.source);
+    }
+
+    // Every variable set, the one the help text names first is the one used.
+    for (key_vars, 0..) |name, i| {
+        try env.put(name, try std.fmt.allocPrint(arena_state.allocator(), "from-{d}", .{i}));
+    }
+    {
+        const k = resolveKey(io, &env, &arena_state, "");
+        try std.testing.expectEqualStrings("from-0", k.value);
+        try std.testing.expectEqualStrings(key_vars[0], k.source);
+    }
+
+    // Each variable in turn, so the order the help text and README name is the
+    // order a key is looked for in, and not merely the order the array spells.
+    for (key_vars) |name| {
+        for (key_vars) |other| _ = env.swapRemove(other);
+        try env.put(name, "only-this-one");
+        const k = resolveKey(io, &env, &arena_state, "");
+        try std.testing.expectEqualStrings("only-this-one", k.value);
+        try std.testing.expectEqualStrings(name, k.source);
+    }
+
+    // A variable set to nothing is not a key, and the ones after it are still
+    // read rather than stopping at the empty one.
+    for (key_vars) |other| _ = env.swapRemove(other);
+    try env.put(key_vars[0], "");
+    try env.put(key_vars[1], "not-the-empty-one");
+    {
+        const k = resolveKey(io, &env, &arena_state, "");
+        try std.testing.expectEqualStrings("not-the-empty-one", k.value);
+        try std.testing.expectEqualStrings(key_vars[1], k.source);
+    }
+
+    // With no variable carrying one the file is read, and a key in it is named
+    // by the path it came from rather than by a variable nobody set.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, ".secrets");
+    try tmp.dir.writeFile(io, .{ .sub_path = ".secrets/openrouter", .data = "sk-from-the-file\n" });
+    for (key_vars) |name| _ = env.swapRemove(name);
+    const home = try tmp.dir.realPathFileAlloc(io, ".", arena_state.allocator());
+    try env.put("HOME", home);
+    {
+        const k = resolveKey(io, &env, &arena_state, "");
+        try std.testing.expectEqualStrings("sk-from-the-file", k.value);
+        try std.testing.expectEqualStrings(
+            try std.fs.path.join(arena_state.allocator(), &.{ home, ".secrets", "openrouter" }),
+            k.source,
+        );
+    }
+
+    // No variable, no file, and no `$HOME` to build a path from: no key, said
+    // so by the source rather than by a path that was never tried.
+    try tmp.dir.deleteFile(io, ".secrets/openrouter");
+    _ = env.swapRemove("HOME");
+    {
+        const k = resolveKey(io, &env, &arena_state, "");
+        try std.testing.expectEqualStrings("", k.value);
+        try std.testing.expectEqualStrings("none", k.source);
+    }
 }
 
 // The credentials are in this process's environment, and a tool result is

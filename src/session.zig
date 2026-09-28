@@ -573,7 +573,12 @@ test "model time is the gap on the clock it was stamped from, and never negative
     // caller that stamped a different one. The record says the run took no
     // time rather than a length no reader can divide by.
     try std.testing.expectEqual(@as(u64, 0), elapsedMs(io, .real, now + 3600 * std.time.ns_per_s));
-    try std.testing.expectEqual(@as(u64, 0), elapsedMs(io, .real, now));
+
+    // A stamp read a few statements above is not pinned to a zero gap: whether
+    // the wall clock moved under the test in that time is a property of the
+    // machine, not of the code, and a loaded runner would fail a suite whose
+    // behavior is right. The clamp above carries the "never negative" half; the
+    // band below carries the rest.
 
     // A stamp from the past is the ordinary case. The band is wide on purpose:
     // the lower bound is what proves the difference was taken, and an upper
@@ -694,7 +699,10 @@ test "a session directory that cannot be used is named, and keeps no log" {
     try std.testing.expectEqual(@as(i64, 12), record.get("elapsed_ms").?.integer);
     try std.testing.expectEqual(@as(i64, 3), record.get("usage").?.object.get("completion_tokens").?.integer);
     try std.testing.expect(record.get("ts").?.integer >= 0);
-    try std.testing.expect(record.get("cwd") != null);
+    // The directory the run was in, resolved, which is what a monitor reading
+    // the store needs; the session directory the log sits in is not it.
+    const cwd = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", arena);
+    try std.testing.expectEqualStrings(cwd, record.get("cwd").?.string);
 }
 
 // A log that cannot be written to has stopped recording the run. Kept, it is

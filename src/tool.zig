@@ -2327,8 +2327,23 @@ test "a cut inside a character still names the cap it was cut at" {
 
     const cut = try toolResult(arena, &raw);
     try std.testing.expectEqual(max_tool_output - 1, chat.clamp(&raw, max_tool_output).len);
-    const want = try std.fmt.allocPrint(arena, "truncated at {d} of {d} bytes]", .{ max_tool_output, raw.len });
-    try std.testing.expect(std.mem.endsWith(u8, cut, want));
+    const marker = try std.fmt.allocPrint(
+        arena,
+        "\n... [tool output truncated at {d} of {d} bytes]",
+        .{ max_tool_output, raw.len },
+    );
+    try std.testing.expect(std.mem.endsWith(u8, cut, marker));
+    // What the result itself kept, read off the result rather than off a
+    // second call to `clamp`: the marker is formatted from the cap and the
+    // input length, never from the slice, so a cut that kept too much or too
+    // little leaves both assertions above saying the same thing.
+    const kept = cut[0 .. cut.len - marker.len];
+    try std.testing.expectEqual(max_tool_output - 1, kept.len);
+    try std.testing.expect(std.mem.startsWith(u8, kept, "x" ** (max_tool_output - 1)));
+    // The euro sign straddles the cap, so the kept bytes stop before its lead
+    // byte and the `z` behind it is dropped with the rest.
+    try std.testing.expect(std.unicode.utf8ValidateSlice(kept));
+    try std.testing.expect(std.mem.indexOfScalar(u8, cut, 'z') == null);
 }
 
 test "a real tool result over the cap stays a string the body can carry" {
@@ -3528,12 +3543,35 @@ test "each tool refuses a missing required argument" {
 // the model gets no log at all. What reaches git is a count it accepts, and
 // what reaches the model is still every line the capture cap let through.
 test "a git line limit past what git parses is cut, not handed over" {
-    try std.testing.expectEqual(@as(usize, 1), @min(1, git_log_line_ceiling));
-    try std.testing.expectEqual(git_default_limit, @min(git_default_limit, git_log_line_ceiling));
-    try std.testing.expectEqual(git_log_line_ceiling, @min(std.math.maxInt(usize), git_log_line_ceiling));
-    // Nothing past the ceiling is ever spelled for git, on a 32-bit build or
-    // a 64-bit one.
-    try std.testing.expect(@min(std.math.maxInt(u32), git_log_line_ceiling) <= git_log_line_ceiling);
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // The count git is actually handed, read back out of the argv rather than
+    // recomputed with the same `@min`, so cutting it in the tool fails here.
+    const cases = [_]struct { limit: usize, want: []const u8 }{
+        .{ .limit = 1, .want = "1" },
+        .{ .limit = git_default_limit, .want = "400" },
+        .{ .limit = git_log_line_ceiling, .want = "1048576" },
+        // One past the ceiling, a 32-bit count, and one nothing can hold all
+        // spell the same number: nothing past it ever reaches git.
+        .{ .limit = git_log_line_ceiling + 1, .want = "1048576" },
+        .{ .limit = std.math.maxInt(u32), .want = "1048576" },
+        .{ .limit = std.math.maxInt(usize), .want = "1048576" },
+    };
+    for (cases) |c| {
+        const argv = try gitArgv(arena, "log", null, null, c.limit);
+        var count: []const u8 = "";
+        for (argv, 0..) |arg, i| {
+            if (std.mem.eql(u8, arg, "-n")) {
+                count = argv[i + 1];
+                break;
+            }
+        }
+        std.testing.expectEqualStrings(c.want, count) catch |err| {
+            std.debug.print("a limit of {d} spelled {s} for git\n", .{ c.limit, count });
+            return err;
+        };
+    }
 }
 
 // A missing argument that the model filled with a number is still missing: the
