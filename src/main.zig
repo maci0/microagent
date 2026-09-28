@@ -410,7 +410,9 @@ fn tokenCeiling(io: Io, from: []const u8, value: []const u8) u32 {
     return n;
 }
 
-const key_var_names = "MICROAGENT_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY or DEEPSEEK_API_KEY";
+/// The same list spelled as the sentence an error needs, so adding a provider
+/// touches one place.
+const key_var_names = std.fmt.comptimePrint("{s}, {s}, {s} or {s}", .{ key_vars[0], key_vars[1], key_vars[2], key_vars[3] });
 
 /// Whether the API key may be sent to this base url. The key rides in an
 /// Authorization header on every request, so a plaintext url hands it to

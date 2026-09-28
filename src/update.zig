@@ -494,6 +494,42 @@ fn statusHint(status: std.http.Status) []const u8 {
     };
 }
 
+/// The first listed asset, paired with a sidecar that matches the bytes, so the
+/// verdict turns on the tag and URL checks rather than stopping at the
+/// checksum. A body that does not parse still has to produce an input, since
+/// what the updater does with a malformed body is part of the same surface.
+const Decision = struct {
+    rel: ?Release,
+    in: Inputs,
+    verdict: Verdict,
+};
+
+fn decideFromBody(arena: std.mem.Allocator, body: []const u8) !Decision {
+    const rel = parseRelease(arena, body) catch null;
+    const first: ?ListedAsset = if (rel) |r| (if (r.assets.len > 0) r.assets[0] else null) else null;
+    const tag = if (rel) |r| r.tag else body;
+    const name = if (first) |a| a.name else body;
+    const url = if (first) |a| a.url else body;
+    // The sidecar sits beside the asset in the same release, so its URL is the
+    // asset's with the checksum suffix the updater already looks for.
+    const sidecar_url = if (first != null) try std.fmt.allocPrint(arena, "{s}.sha256", .{url}) else null;
+
+    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(body, &digest, .{});
+    const sidecar = try std.fmt.allocPrint(arena, "{s}  {s}\n", .{ std.fmt.bytesToHex(digest, .lower), name });
+
+    const in: Inputs = .{
+        .running = "0.0.1",
+        .tag = tag,
+        .asset_url = url,
+        .asset = body,
+        .sidecar_url = sidecar_url,
+        .sidecar = sidecar,
+        .basename = name,
+    };
+    return .{ .rel = rel, .in = in, .verdict = decide(in) };
+}
+
 /// Subcommand entry, called by main with the arguments after `update`.
 /// Returns the process exit code.
 pub fn run(
@@ -966,42 +1002,6 @@ const release_corpus = [_][]const u8{
     lookalike_release,
     "{\"tag_name\":\"\\u0000\\ud83d\\ude80\",\"html_url\":\"https://github.com/o/r\",\"assets\":[{\"name\":\"\\u0000\",\"browser_download_url\":\"https://github.com/o/r/\\u0000\"}]}",
 };
-
-/// The first listed asset, paired with a sidecar that matches the bytes, so the
-/// verdict turns on the tag and URL checks rather than stopping at the
-/// checksum. A body that does not parse still has to produce an input, since
-/// what the updater does with a malformed body is part of the same surface.
-const Decision = struct {
-    rel: ?Release,
-    in: Inputs,
-    verdict: Verdict,
-};
-
-fn decideFromBody(arena: std.mem.Allocator, body: []const u8) !Decision {
-    const rel = parseRelease(arena, body) catch null;
-    const first: ?ListedAsset = if (rel) |r| (if (r.assets.len > 0) r.assets[0] else null) else null;
-    const tag = if (rel) |r| r.tag else body;
-    const name = if (first) |a| a.name else body;
-    const url = if (first) |a| a.url else body;
-    // The sidecar sits beside the asset in the same release, so its URL is the
-    // asset's with the checksum suffix the updater already looks for.
-    const sidecar_url = if (first != null) try std.fmt.allocPrint(arena, "{s}.sha256", .{url}) else null;
-
-    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(body, &digest, .{});
-    const sidecar = try std.fmt.allocPrint(arena, "{s}  {s}\n", .{ std.fmt.bytesToHex(digest, .lower), name });
-
-    const in: Inputs = .{
-        .running = "0.0.1",
-        .tag = tag,
-        .asset_url = url,
-        .asset = body,
-        .sidecar_url = sidecar_url,
-        .sidecar = sidecar,
-        .basename = name,
-    };
-    return .{ .rel = rel, .in = in, .verdict = decide(in) };
-}
 
 test "update: fuzz: a release body only reaches a replacement it earns" {
     const gpa = std.testing.allocator;
