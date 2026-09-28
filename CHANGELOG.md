@@ -155,6 +155,26 @@ release, and `microagent update` moves you to it.
   either moved the operator's cursor and a byte that is not text reached the screen as
   mojibake, while a key could be the whole 64 KB config cap on one line. The tool gutter keeps
   the `\xNN` and U+FFFD spelling it had, through the shared helper.
+- `search` and `ast` refuse a credentials file named as their `path`. The exclusion globs are
+  traversal rules, and both backends read a file passed as the path whatever the globs say, so
+  `{"pattern": "...", "path": ".env"}` returned the line with the key in it, and a tool result is
+  re-sent to the provider on every later turn. The name is refused the way `read` and `git`
+  refuse one, and the refusal names the tool that turned it down.
+- A number the model wrote as something else is read as the number rather than as zero. `read`
+  answered a `limit` of `"3"` with an empty result and an `offset` of `"5"` with the file from the
+  top, `git log` a `limit` of `"12"` with one line, and `bash` a `timeout_ms` of `0`, a negative
+  one or a `"60000"` with `command timed out after 0ms` without the command ever starting. A value
+  that is no number at all falls back to the documented default.
+- A session log in a subdirectory of the store is pruned where it is. The walker entered every
+  subdirectory and reported a basename, which was then deleted through the store's root: a log
+  under `archive/` left a newer root log deleted in its place while the run still writing to that
+  name carried on into an unlinked file.
+- A session directory that cannot be created is reported on stderr instead of silently leaving the
+  run unrecorded, and a relative `MICROAGENT_SESSION_DIR` is opened the way the log file in it is
+  rather than through an API that asserts the path is absolute and tripped that assert in a debug
+  build.
+- `microagent update --repo` accepts the longest `owner/name` its own validator allows. The URL
+  buffer was six bytes short of it, so a legal repo was refused with the message a typo gets.
 - `make preflight` names every tool the gate needs that a clean clone does not carry, with the
   command that installs it, and `make check` runs it before the format check and the suite. A
   clone without `shellcheck`, `ruff` or `yamllint` otherwise stopped at `make: ruff: No such

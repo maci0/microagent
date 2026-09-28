@@ -211,7 +211,27 @@ const git_default_limit: usize = 400;
 /// `usize` cannot hold is every line rather than a trap.
 fn gitLineLimit(args: std.json.ObjectMap) usize {
     const v = args.get("limit") orelse return git_default_limit;
-    return @max(1, chat.numCount(v));
+    const n = countArg(v) orelse return git_default_limit;
+    return @max(1, std.math.cast(usize, n) orelse std.math.maxInt(usize));
+}
+
+/// A count the model sent, or null when it sent something that is not one.
+///
+/// `chat.num` answers 0 for every value it cannot read as a number, which is
+/// the right answer for a token counter that starts at zero and the wrong one
+/// for a line count: a `limit` of `"3"` became a limit of zero, so the call
+/// returned an empty result and the model read it as a file with nothing in
+/// it. A number spelled as a string is a number a model meant, so it is read
+/// as one; a value that is neither is the model's mistake to be told about by
+/// the default rather than answered with the wrong lines.
+fn countArg(v: ?std.json.Value) ?u64 {
+    const value = v orelse return null;
+    return switch (value) {
+        .integer => |n| if (n > 0) @intCast(n) else 0,
+        .float => |f| std.math.lossyCast(u64, f),
+        .number_string, .string => |s| std.fmt.parseInt(u64, s, 10) catch null,
+        else => null,
+    };
 }
 
 /// The largest count handed to `git log -n`. Its own argument parser refuses a
@@ -238,7 +258,7 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
         return std.fmt.allocPrint(arena, "error: rev must not start with '-'", .{});
     // `git show <rev> -- .env` prints a committed credentials file as a patch,
     // so the path gets the refusal `read` gives it rather than a git one.
-    if (path) |p| if (isCredentialPath(p)) return credentialRefusal(arena, p);
+    if (path) |p| if (isCredentialPath(p)) return credentialRefusal(arena, "git", p);
 
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(arena, &.{ "git", "--no-pager" });
@@ -375,9 +395,22 @@ fn bashTimeoutMs(requested: ?u64, ceiling_ms: ?u64) u64 {
     return boundedMs(@min(requested orelse default_bash_timeout_ms, max_bash_timeout_ms), ceiling_ms);
 }
 
+/// The timeout the model asked for, or null when it asked for none.
+///
+/// `countArg` reads a number the model wrote, and null for one it did not, but
+/// a timeout it did write can still be a value no command can run under: a
+/// zero or a negative one is not "no time", it is a deadline already spent, and
+/// the call came back `command timed out after 0ms` without the command ever
+/// starting. The documented default is what a request that names no usable
+/// timeout gets.
+fn requestedTimeoutMs(v: ?std.json.Value) ?u64 {
+    const n = countArg(v) orelse return null;
+    return if (n > 0) n else null;
+}
+
 fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64) ![]u8 {
     const command = chat.str(args.get("command")) orelse return std.fmt.allocPrint(arena, "error: missing command", .{});
-    const timeout_ms: u64 = bashTimeoutMs(if (args.get("timeout_ms")) |v| chat.num(v) else null, ceiling_ms);
+    const timeout_ms: u64 = bashTimeoutMs(requestedTimeoutMs(args.get("timeout_ms")), ceiling_ms);
     const capture_limit = max_tool_output * 4;
     const res = runCapped(io, arena, &.{ "/bin/sh", "-c", command }, capture_limit, net.durationMs(timeout_ms)) catch |err| switch (err) {
         error.Timeout => return std.fmt.allocPrint(arena, "error: command timed out after {d}ms", .{timeout_ms}),
@@ -506,55 +539,28 @@ fn isCredentialPath(path: []const u8) bool {
     return isCredentialName(std.fs.path.basename(std.mem.trimEnd(u8, path, "/")));
 }
 
-/// Appends the exclusion globs that keep a search off a credentials file.
-///
-/// `read` refuses one because what it returns is re-sent to the provider on
-/// every later turn, and that reasoning holds for a search: a `search` for
-/// `SECRET=` over a tree with a `.env` in it hands the provider the value
-/// through the tool the system prompt tells the model to prefer. The rule is
-/// the one `isCredentialName` and `credential_dirs` already spell, restated as
-/// globs, because there is no way to hand a predicate to a subprocess.
-///
-/// The globs are `-i` and cover every component, so `.secrets/key` and
-/// `.SSH/id_rsa` are excluded the way `isCredentialPath` refuses them: the
-/// names are matched case-insensitively there, and a filesystem that resolves
-/// `.ENV` to `.env` resolves it for ripgrep too. `.env*` and `*.env` are the
-/// two spellings `isCredentialName` matches on, which no other table holds.
-fn appendCredentialGlobs(arena: std.mem.Allocator, argv: *std.ArrayList([]const u8)) !void {
-    for (credential_dirs) |dir| {
-        try argv.appendSlice(arena, &.{ "--iglob", try std.fmt.allocPrint(arena, "!**/{s}/**", .{dir}) });
-    }
-    for (credential_names) |name| {
-        try argv.appendSlice(arena, &.{ "--iglob", try std.fmt.allocPrint(arena, "!{s}", .{name}) });
-    }
-    for (credential_extensions) |ext| {
-        try argv.appendSlice(arena, &.{ "--iglob", try std.fmt.allocPrint(arena, "!*{s}", .{ext}) });
-    }
-    try argv.appendSlice(arena, &.{ "--iglob", "!.env*", "--iglob", "!*.env" });
-}
-
-/// What `read` returns instead of a credential. It names the file, so a model
+/// What a tool returns instead of a credential. It names the file, so a model
 /// that asked for it knows which one was refused, and it says what to do
 /// instead, because a bare error reads as a broken tool and gets retried.
-fn credentialRefusal(arena: std.mem.Allocator, path: []const u8) error{OutOfMemory}![]u8 {
+fn credentialRefusal(arena: std.mem.Allocator, tool: []const u8, path: []const u8) error{OutOfMemory}![]u8 {
     return std.fmt.allocPrint(
         arena,
-        "refused: {s} is a credentials file. `read` does not return one, because the result " ++
+        "refused: {s} is a credentials file. `{s}` does not return one, because the result " ++
             "is re-sent to the provider on every later turn. Run the command that needs the key " ++
             "through `bash`, and do not print it.",
-        .{path},
+        .{ path, tool },
     );
 }
 
 fn toolRead(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     const path = chat.str(args.get("path")) orelse return std.fmt.allocPrint(arena, "error: missing path", .{});
-    if (isCredentialPath(path)) return try credentialRefusal(arena, path);
+    if (isCredentialPath(path)) return try credentialRefusal(arena, "read", path);
     if (!args.contains("offset") and !args.contains("limit"))
         return std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_read_bytes)) catch |err|
             return readFailed(arena, path, err);
 
-    const offset: usize = @max(1, chat.numCount(args.get("offset")));
-    const limit: usize = if (args.get("limit")) |v| chat.numCount(v) else std.math.maxInt(usize);
+    const offset: usize = @max(1, std.math.cast(usize, countArg(args.get("offset")) orelse 1) orelse std.math.maxInt(usize));
+    const limit: usize = std.math.cast(usize, countArg(args.get("limit")) orelse std.math.maxInt(u64)) orelse std.math.maxInt(usize);
     return readLines(io, arena, path, offset, limit);
 }
 
@@ -744,10 +750,12 @@ fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
 fn toolSearch(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64) ![]u8 {
     const pattern = chat.str(args.get("pattern")) orelse return std.fmt.allocPrint(arena, "error: missing pattern", .{});
     const path = chat.str(args.get("path")) orelse ".";
-    // A glob narrows what a search walks; naming a credentials file as the
-    // root is a search that walks one, so it takes the same refusal `read`
-    // gives it. A recursive search is covered by the globs below instead.
-    if (isCredentialPath(path)) return try credentialRefusal(arena, path);
+    // The globs below are traversal rules: ripgrep applies them while it walks,
+    // and a file named as the search path is read whatever they say, so
+    // `{"path": ".env"}` came back with the key's line in it. The name is
+    // checked here instead, which is what the globs and this test between them
+    // make true.
+    if (isCredentialPath(path)) return try credentialRefusal(arena, "search", path);
     const glob = chat.str(args.get("glob"));
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(arena, &.{ "rg", "--line-number", "--no-heading", "--color", "never", "--max-count", "200", "--glob-case-insensitive" });
@@ -769,7 +777,10 @@ fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
     const pattern = chat.str(args.get("pattern")) orelse return std.fmt.allocPrint(arena, "error: missing pattern", .{});
     const lang = chat.str(args.get("lang")) orelse return std.fmt.allocPrint(arena, "error: missing lang", .{});
     const path = chat.str(args.get("path")) orelse ".";
-    if (isCredentialPath(path)) return try credentialRefusal(arena, path);
+    // The same hole `search` has: `--globs` filters the walk, and a file named
+    // as the path is rewritten whatever they say, which is a key's line in a
+    // match and a keystore in the diff of the turn after.
+    if (isCredentialPath(path)) return try credentialRefusal(arena, "ast", path);
     const rewrite = chat.str(args.get("rewrite"));
 
     var argv: std.ArrayList([]const u8) = .empty;
@@ -1235,6 +1246,58 @@ test "a model cannot ask bash for a timeout past the ceiling" {
     try std.testing.expectEqual(tool_timeout_ms, boundedMs(tool_timeout_ms, null));
 }
 
+test "a bash timeout that is no number is the default, not no time at all" {
+    // `timeout_ms` is model output and models write numbers as strings, send
+    // a zero for "unlimited", and sign one by accident. Every value that is not
+    // a usable count read as 0 ms, and a command under a deadline already spent
+    // came back `command timed out after 0ms` without ever starting.
+    try std.testing.expectEqual(default_bash_timeout_ms, bashTimeoutMs(requestedTimeoutMs(.{ .integer = 0 }), null));
+    try std.testing.expectEqual(default_bash_timeout_ms, bashTimeoutMs(requestedTimeoutMs(.{ .integer = -1 }), null));
+    try std.testing.expectEqual(default_bash_timeout_ms, bashTimeoutMs(requestedTimeoutMs(.{ .float = -1.0 }), null));
+    try std.testing.expectEqual(default_bash_timeout_ms, bashTimeoutMs(requestedTimeoutMs(.{ .string = "soon" }), null));
+    try std.testing.expectEqual(default_bash_timeout_ms, bashTimeoutMs(requestedTimeoutMs(.{ .null = {} }), null));
+    try std.testing.expectEqual(default_bash_timeout_ms, bashTimeoutMs(requestedTimeoutMs(null), null));
+    // A number is what was asked for, whichever way the model spelled it.
+    try std.testing.expectEqual(@as(u64, 60_000), bashTimeoutMs(requestedTimeoutMs(.{ .integer = 60_000 }), null));
+    try std.testing.expectEqual(@as(u64, 60_000), bashTimeoutMs(requestedTimeoutMs(.{ .float = 60_000.5 }), null));
+    try std.testing.expectEqual(@as(u64, 60_000), bashTimeoutMs(requestedTimeoutMs(.{ .number_string = "60000" }), null));
+    try std.testing.expectEqual(@as(u64, 60_000), bashTimeoutMs(requestedTimeoutMs(.{ .string = "60000" }), null));
+}
+
+test "a read count that is no number reads the file rather than nothing" {
+    // `limit` and `offset` are integers in the schema, and a model that wrote
+    // one as a string got zero: a limit of zero returned an empty result, and
+    // an offset of zero clamped to the first line, so the model read a file it
+    // had asked for a window of, or read nothing at all.
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "lines.txt", .data = "one\ntwo\nthree\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+
+    const all = try dispatch(arena, "read", try std.fmt.allocPrint(arena, "{{\"path\":\"{s}/lines.txt\",\"limit\":\"2\"}}", .{root}));
+    try std.testing.expectEqualStrings("one\ntwo\n", all);
+
+    const from = try dispatch(arena, "read", try std.fmt.allocPrint(arena, "{{\"path\":\"{s}/lines.txt\",\"offset\":\"2\",\"limit\":1}}", .{root}));
+    try std.testing.expectEqualStrings("two\n", from);
+
+    // A number is still a number: the window asked for is the window read.
+    const windowed = try dispatch(arena, "read", try std.fmt.allocPrint(arena, "{{\"path\":\"{s}/lines.txt\",\"offset\":2,\"limit\":1}}", .{root}));
+    try std.testing.expectEqualStrings("two\n", windowed);
+
+    // A value that is no number at all is the model's mistake, and the default
+    // is the whole file rather than an empty one the model reads as no content.
+    const malformed = try dispatch(arena, "read", try std.fmt.allocPrint(arena, "{{\"path\":\"{s}/lines.txt\",\"limit\":\"all\"}}", .{root}));
+    try std.testing.expectEqualStrings("one\ntwo\nthree\n", malformed);
+}
+
 test "read refuses a secret file and says so, and reads the rest" {
     for ([_][]const u8{
         ".env",
@@ -1386,7 +1449,7 @@ test "the credentials refusal names the file and the way out" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const refused = try credentialRefusal(arena, "/home/someone/.secrets/openrouter");
+    const refused = try credentialRefusal(arena, "read", "/home/someone/.secrets/openrouter");
     try std.testing.expect(std.mem.indexOf(u8, refused, "/home/someone/.secrets/openrouter") != null);
     try std.testing.expect(std.mem.indexOf(u8, refused, "bash") != null);
     // Not a single byte of a key is in the message, only the path that names it.
@@ -1450,6 +1513,19 @@ test "search and ast skip the files read refuses, and git refuses one by name" {
     ));
     try std.testing.expect(std.mem.startsWith(u8, refused, "refused: "));
     try std.testing.expect(std.mem.indexOf(u8, refused, needle) == null);
+
+    // A file named as the path is the case the globs cannot cover: both
+    // backends read an explicit path whatever their filters say, so the
+    // needle came back the moment the model asked for that one file.
+    for ([_][]const u8{ "search", "ast" }) |tool| {
+        const named = try std.fmt.allocPrint(arena, "{{\"path\":\"{s}/deploy/server.pem\"{s}", .{
+            root,
+            if (std.mem.eql(u8, tool, "ast")) ",\"pattern\":\"$A\",\"lang\":\"python\"}" else ",\"pattern\":\"sk-do-not-search\"}",
+        });
+        const result = try dispatch(arena, tool, named);
+        try std.testing.expect(std.mem.startsWith(u8, result, "refused: "));
+        try std.testing.expect(std.mem.indexOf(u8, result, needle) == null);
+    }
 }
 
 // A search returns the same bytes a `read` refuses, and the system prompt
@@ -1892,6 +1968,12 @@ test "a tool call reports the exit status of the command it ran" {
     try std.testing.expectEqual(@as(u8, 3), res.term.exited);
 }
 
+/// How far short of its deadline a timeout is allowed to come back, measured
+/// between the timer the wait is armed on and the clock the elapsed time is
+/// read off. Well under the smallest budget the assertion below is about, and
+/// three orders of magnitude above the skew it covers.
+const deadline_slack_ms: u64 = 10;
+
 // A timeout that is re-armed by every read is not a timeout. Both runners
 // wait on the child's pipes in a loop, and a command that keeps writing never
 // lets one of those waits reach the end of the duration, so the call runs for
@@ -1920,13 +2002,13 @@ test "a tool call is timed out by the clock, not by how long it stayed quiet" {
     const spent = Io.Timestamp.now(io, .awake).nanoseconds - started;
     // The deadline is what ended both calls, so neither returned before it:
     // an error raised on the way in is a different fault wearing this one's
-    // name, and a lower bound is what tells the two apart. The bound is half
-    // the budget, not all of it, because the deadline is a timer rather than
-    // the clock: a loaded host fires it a tick early, and a test that demanded
-    // the full budget failed on that alone. Half still leaves two orders of
-    // magnitude between a deadline and an error returned on the way in.
-    try std.testing.expect(after_capped >= budget_ms * std.time.ns_per_ms / 2);
-    try std.testing.expect(spent >= budget_ms * std.time.ns_per_ms);
+    // name, and a lower bound is what tells the two apart. The bound carries
+    // `deadline_slack_ms` because the wait is armed on a timer and the elapsed
+    // time is read off a clock, and the two are not the same reading: a
+    // machine that has been suspended, or one whose timer fires on the first
+    // tick of a coarser one, hands back a deadline a hair before it is due.
+    try std.testing.expect(after_capped + deadline_slack_ms * std.time.ns_per_ms >= budget_ms * std.time.ns_per_ms);
+    try std.testing.expect(spent + deadline_slack_ms * std.time.ns_per_ms >= 2 * budget_ms * std.time.ns_per_ms);
 }
 
 // `bash` goes through the capped runner, not the search runner, and it is the

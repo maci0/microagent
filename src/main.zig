@@ -1035,7 +1035,10 @@ fn openSession(io: Io, arena: std.mem.Allocator, opts: Options) ?Session {
     // directory that is resolved and then not used, by a log that could not be
     // opened, has no owner to free it.
     const cwd = std.Io.Dir.cwd().realPathFileAlloc(io, ".", arena) catch return null;
-    std.Io.Dir.cwd().createDirPath(io, opts.session_dir) catch return null;
+    std.Io.Dir.cwd().createDirPath(io, opts.session_dir) catch |err| {
+        net.note(io, arena, "microagent: the session log under {s} could not be created ({s}); the rest of this run is not recorded\n", .{ opts.session_dir, @errorName(err) });
+        return null;
+    };
     const stamp = Io.Clock.real.now(io).nanoseconds;
     const file = createSessionLog(io, arena, opts.session_dir, stamp) orelse return null;
     pruneSessions(io, arena, opts.session_dir);
@@ -1071,7 +1074,10 @@ fn isSessionLogName(name: []const u8) bool {
 /// program's own `<digits>[-<digits>].jsonl` files are touched. Every failure
 /// is ignored: a store that cannot be pruned costs a run nothing.
 fn pruneSessions(io: Io, arena: std.mem.Allocator, session_dir: []const u8) void {
-    var dir = std.Io.Dir.openDirAbsolute(io, session_dir, .{ .iterate = true }) catch return;
+    // Not the absolute spelling: `MICROAGENT_SESSION_DIR=logs/x` is a legal
+    // path, and the create and the log file are opened through the cwd, so the
+    // directory they name is read the same way.
+    var dir = std.Io.Dir.openDir(std.Io.Dir.cwd(), io, session_dir, .{ .iterate = true }) catch return;
     defer dir.close(io);
 
     var names: std.ArrayList([]u8) = .empty;
@@ -1081,14 +1087,19 @@ fn pruneSessions(io: Io, arena: std.mem.Allocator, session_dir: []const u8) void
     }
     // The walk is scoped: the walker holds the directory handle, and deleting
     // through `dir` while it is still open closes that handle under it.
+    //
+    // What is kept is the path from the store's root, not the basename. The
+    // walker enters every subdirectory it meets, and a basename deleted through
+    // the root is a different file from the one that was counted: a log under
+    // `archive/` left a newer root log deleted in its place, and the run still
+    // writing to that name carried on into an unlinked file.
     {
         var walker = dir.walk(arena) catch return;
         defer walker.deinit();
         while (walker.next(io) catch return) |entry| {
             if (entry.kind != .file) continue;
-            const name = entry.basename;
-            if (!isSessionLogName(name)) continue;
-            names.append(arena, arena.dupe(u8, name) catch return) catch return;
+            if (!isSessionLogName(entry.basename)) continue;
+            names.append(arena, arena.dupe(u8, entry.path) catch return) catch return;
         }
     }
     if (names.items.len <= max_session_logs) return;
@@ -3987,6 +3998,159 @@ test "the style config path follows flag, then variable, then home" {
     var bare: std.process.Environ.Map = .init(std.testing.allocator);
     defer bare.deinit();
     try std.testing.expect(styleConfigPath(&bare, arena, "").path == null);
+}
+
+// The session store is a per-run directory nothing used to delete from, so a
+// long-lived machine accumulated one log per review forever. The bound is the
+// behavior: oldest first, only this program's own files, recent runs kept.
+test "the session store keeps the most recent logs and drops the rest" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_path = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+
+    const total = max_session_logs + 25;
+    var i: usize = 0;
+    while (i < total) : (i += 1) {
+        const name = try std.fmt.allocPrint(arena, "{d}.jsonl", .{i + 1});
+        try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "{}" });
+    }
+    // A file this program did not write is not ours to delete.
+    try tmp.dir.writeFile(io, .{ .sub_path = "notes.jsonl", .data = "keep me" });
+
+    pruneSessions(io, arena, dir_path);
+
+    var dir = try std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true });
+    defer dir.close(io);
+    var walker = try dir.walk(arena);
+    defer walker.deinit();
+    var left: usize = 0;
+    var notes_present = false;
+    while (try walker.next(io)) |entry| {
+        if (!std.mem.endsWith(u8, entry.basename, ".jsonl")) continue;
+        if (std.mem.eql(u8, entry.basename, "notes.jsonl")) {
+            notes_present = true;
+            continue;
+        }
+        left += 1;
+    }
+    try std.testing.expectEqual(max_session_logs, left);
+    try std.testing.expect(notes_present);
+    // The survivors are the newest, so a monitor still sees the current run.
+    const newest = try std.fmt.allocPrint(arena, "{d}.jsonl", .{total});
+    try tmp.dir.access(io, newest, .{});
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "1.jsonl", .{}));
+}
+
+test "a log in a subdirectory is pruned where it is, not by its bare name" {
+    // The walker enters every subdirectory, and the name it reported was the
+    // leaf: deleting that through the store's root removed a newer root log and
+    // left the nested one, which is the opposite of what was asked for.
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_path = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+
+    try std.Io.Dir.cwd().createDirPath(io, try std.fs.path.join(arena, &.{ dir_path, "0archive" }));
+    try tmp.dir.writeFile(io, .{ .sub_path = "0archive/1.jsonl", .data = "{}" });
+    const total = max_session_logs + 25;
+    var i: usize = 0;
+    while (i < total) : (i += 1) {
+        try tmp.dir.writeFile(io, .{ .sub_path = try std.fmt.allocPrint(arena, "{d}.jsonl", .{i + 1}), .data = "{}" });
+    }
+
+    pruneSessions(io, arena, dir_path);
+
+    // The oldest is the nested one, and it goes where it is: counted, deleted,
+    // and the root's own `1.jsonl` is still a name the store holds.
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "0archive/1.jsonl", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "1.jsonl", .{}));
+    try tmp.dir.access(io, try std.fmt.allocPrint(arena, "{d}.jsonl", .{total}), .{});
+    var left: usize = 0;
+    {
+        var dir = try std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true });
+        defer dir.close(io);
+        var walker = try dir.walk(arena);
+        defer walker.deinit();
+        while (try walker.next(io)) |entry| {
+            if (entry.kind == .file and isSessionLogName(entry.basename)) left += 1;
+        }
+    }
+    try std.testing.expectEqual(max_session_logs, left);
+}
+
+// A re-run that reads the same clock stamp writes its log beside the first
+// one under a `-N` name, and a store that only recognised `<digits>.jsonl`
+// would keep every one of those forever while still reporting itself pruned.
+// The names are created the way a run creates them, exclusive and in order, so
+// the test exercises the real collision path rather than the pattern.
+test "the session store prunes the logs a re-run wrote beside the first" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_path = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+
+    var i: usize = 0;
+    while (i < max_session_logs) : (i += 1) {
+        const log = createSessionLog(io, arena, dir_path, @intCast(i + 1)) orelse return error.TestUnexpectedResult;
+        log.close(io);
+        // Every run here is a re-run of the one before it: the same stamp, so
+        // the log goes beside the first rather than over it.
+        const beside = createSessionLog(io, arena, dir_path, @intCast(i + 1)) orelse return error.TestUnexpectedResult;
+        beside.close(io);
+    }
+    try std.testing.expectEqual(max_session_logs * 2, countSessionLogs(io, arena, dir_path));
+
+    pruneSessions(io, arena, dir_path);
+
+    try std.testing.expectEqual(max_session_logs, countSessionLogs(io, arena, dir_path));
+    // The oldest stamp is gone entirely, the newest is still there in both of
+    // its names, so the monitor reading the store still sees this run.
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "1.jsonl", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "1-1.jsonl", .{}));
+    const newest = try std.fmt.allocPrint(arena, "{d}.jsonl", .{max_session_logs});
+    try tmp.dir.access(io, newest, .{});
+    const newest_beside = try std.fmt.allocPrint(arena, "{d}-1.jsonl", .{max_session_logs});
+    try tmp.dir.access(io, newest_beside, .{});
+}
+
+/// How many of the store's own logs are there, by the same rule `pruneSessions`
+/// prunes by, so the count a test asserts is the count the pruner sees.
+fn countSessionLogs(io: Io, arena: std.mem.Allocator, session_dir: []const u8) !usize {
+    var dir = try std.Io.Dir.openDirAbsolute(io, session_dir, .{ .iterate = true });
+    defer dir.close(io);
+    var walker = try dir.walk(arena);
+    defer walker.deinit();
+    var n: usize = 0;
+    while (try walker.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        if (isSessionLogName(entry.basename)) n += 1;
+    }
+    return n;
 }
 
 // The name and the id of a streamed tool call are copies the run allocator

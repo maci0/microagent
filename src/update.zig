@@ -653,7 +653,10 @@ fn runChecked(
     check_only: bool,
     repo: []const u8,
 ) u8 {
-    var api_buf: [240]u8 = undefined;
+    // The longest `owner/name` `validRepo` accepts is 201 bytes, and the URL
+    // around it is 46 more, so a buffer under that reported a legal repo as a
+    // malformed one before a single byte was requested.
+    var api_buf: [256]u8 = undefined;
     // A value the flag cannot carry is a usage error, so it prints the reason
     // and the usage text together like every other one. The message names the
     // flag and the rule rather than guessing at the mistake: a URL, a second
@@ -841,6 +844,22 @@ test "update: a repo that is not owner/name is refused before a release url exis
     try std.testing.expect(!validRepo("maci0/microagent/"));
     const url = try releaseApiUrl(&buf, default_repo);
     try std.testing.expectEqualStrings("https://api.github.com/repos/maci0/microagent/releases/latest", url);
+}
+
+test "update: the longest repo validRepo accepts still has a url" {
+    // The buffer `runChecked` hands the builder has to hold the url around the
+    // longest repo the validator lets through, or a legal one is refused with
+    // the message that a typo gets.
+    var long: [201]u8 = undefined;
+    @memset(long[0..100], 'a');
+    @memset(long[100..201], 'b');
+    long[100] = '/';
+    const repo = long[0..];
+    try std.testing.expect(validRepo(repo));
+    var buf: [256]u8 = undefined;
+    const url = try releaseApiUrl(&buf, repo);
+    try std.testing.expect(std.mem.startsWith(u8, url, "https://api.github.com/repos/"));
+    try std.testing.expect(std.mem.endsWith(u8, url, "/releases/latest"));
 }
 
 test "update: a release page that is not https on a GitHub host is not printed" {
