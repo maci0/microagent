@@ -1459,6 +1459,97 @@ test "a ranged read of a file over the cap is refused like a whole-file read" {
     );
 }
 
+// A ranged read frames arbitrary file bytes into lines, and the file is
+// whatever the model reached for: a minified bundle with no newline in four
+// megabytes, a lockfile, a binary blob with NULs, a file whose last line has
+// no newline. The framing is a cursor moved by hand across 8 KB reads, so the
+// properties a fuzzer can see are that a range comes back as the same bytes the
+// whole-file split gives, and that every line it hands back ends in a newline
+// whatever the file held. `expectedLines` is the oracle: it is the split-based
+// reader this replaced, written out in full above, and the two disagreeing is
+// the bug the fuzzer is here to find.
+//
+// `std.testing.fuzz` runs this corpus on every `zig build test`, and through
+// the fuzzer's mutations when the test binary is built in fuzz mode.
+const read_lines_corpus = [_][]const u8{
+    "",
+    "\n",
+    "\n\n\n",
+    "a",
+    "one\ntwo\nthree\n",
+    "one\ntwo\nthree",
+    "one\r\ntwo\r\n",
+    "\r\n",
+    "a\n\nb\n",
+    "no newline anywhere",
+    "\x00\n\x00\x00",
+    "head\n" ++ "z" ** (read_chunk - 5) ++ "\ntail",
+    "head\n" ++ "z" ** (read_chunk - 4) ++ "\ntail",
+    "head\n" ++ "z" ** (read_chunk - 3) ++ "\ntail",
+    "head\n" ++ "z" ** (read_chunk * 2 + 1) ++ "\ntail\n",
+    "head\n" ++ "z" ** (read_chunk - 1) ++ "\n" ++ "y" ** (read_chunk - 1) ++ "\n",
+    ("line\n" ** 2000),
+    "caf\u{00e9}\n\u{65e5}\u{672c}\u{8a9e}\n\u{1f680}\n",
+    "\xff\xfe\n\xc3\n",
+    " {\"a\":1}\n {\"b\":2}\n",
+    "\n\n\n\n\n\n\n\n\n\nleading blanks",
+    "trailing\n\n\n\n\n\n\n",
+};
+
+test "a fuzzed ranged read frames the file the same way the split-based reader did" {
+    try std.testing.fuzz({}, fuzzReadLines, .{ .corpus = &read_lines_corpus });
+}
+
+/// The ranges one fuzzed file is read over. The cursor arithmetic goes wrong at
+/// the edges of a range rather than in the middle of one, so every read covers
+/// the first line, a limit that stops inside the file, a limit of zero, a range
+/// that starts past the last line, and one that reaches for everything left.
+const read_lines_ranges = [_][2]usize{
+    .{ 1, 1 },
+    .{ 1, 3 },
+    .{ 2, 2 },
+    .{ 3, 1 },
+    .{ 1, 0 },
+    .{ 0, 5 },
+    .{ 9, 4 },
+    .{ 1, 1_000 },
+};
+
+fn fuzzReadLines(_: void, smith: *std.testing.Smith) !void {
+    const gpa = std.testing.allocator;
+    // Wide enough that a line can straddle the read boundary in both
+    // directions, and well under `max_read_bytes`, so the cap the loop checks
+    // is never the reason a range comes back short.
+    var scratch: [16 * 1024]u8 = undefined;
+    const text: []const u8 = if (smith.in) |seed| seed else scratch[0..smith.slice(&scratch)];
+
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_path = dir_buf[0..try tmp.dir.realPath(std.testing.io, &dir_buf)];
+    const path = try std.fs.path.join(arena, &.{ dir_path, "fuzz.txt" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "fuzz.txt", .data = text });
+
+    for (read_lines_ranges) |range| {
+        const offset = range[0];
+        const limit = range[1];
+        var range_arena = std.heap.ArenaAllocator.init(arena);
+        defer range_arena.deinit();
+        const got = try readLines(std.testing.io, range_arena.allocator(), path, offset, limit);
+        const want = try expectedLines(arena, text, offset, limit);
+        try std.testing.expectEqualStrings(want, got);
+
+        // Whatever the file held, the range is whole lines: a last line with
+        // no newline of its own comes back with one, because that newline is
+        // what ends it for the model.
+        if (got.len > 0) try std.testing.expect(std.mem.endsWith(u8, got, "\n"));
+    }
+}
+
 // The scan cursor is what keeps a ranged read of a minified bundle or a base64
 // blob from re-searching the whole pending line on every read, but a cursor
 // that is lowered wrongly drops or repeats a line. The bytes are the property
