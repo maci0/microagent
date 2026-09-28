@@ -229,7 +229,7 @@ pub fn main(init: std.process.Init) !void {
     opts.api_key = resolveKey(init, opts.api_key);
     if (opts.api_key.len == 0) return configError(io, "no API key: pass --api-key or set {s}", .{key_var_names});
     if (!baseUrlCarriesKey(opts.base_url))
-        return configError(io, "the API key would go to {s} in the clear; use an https base url, or http on loopback", .{clip(opts.base_url)});
+        return configError(io, "the API key would go to {s} in the clear; use an https base url, or http on loopback", .{net.clamp(opts.base_url, 80)});
 
     var client: std.http.Client = .{ .allocator = gpa, .io = io };
     defer client.deinit();
@@ -459,10 +459,6 @@ fn displayUrl(arena: std.mem.Allocator, url: []const u8) []const u8 {
     return std.fmt.allocPrint(arena, "{s}[redacted]@{s}", .{ url[0 .. scheme_end + "://".len], rest[at + 1 ..] }) catch url;
 }
 
-fn clip(s: []const u8) []const u8 {
-    return s[0..@min(s.len, 80)];
-}
-
 /// Reads the arguments after the program name into `opts`, formatting any
 /// message that names a bad argument into `buf`. Returns null when
 /// they parse, or a message naming what was wrong, which `usageError` prints
@@ -569,7 +565,7 @@ fn isFlag(name: []const u8, short: []const u8, long: []const u8) bool {
 /// silently running whichever came last.
 fn setPrompt(buf: []u8, opts: *Options, value: []const u8) ?[]const u8 {
     if (opts.prompt.len != 0)
-        return std.fmt.bufPrint(buf, "prompt given twice: '{s}' and '{s}'", .{ clip(opts.prompt), clip(value) }) catch
+        return std.fmt.bufPrint(buf, "prompt given twice: '{s}' and '{s}'", .{ net.clamp(opts.prompt, 80), net.clamp(value, 80) }) catch
             "prompt given twice";
     opts.prompt = value;
     return null;
@@ -1541,9 +1537,9 @@ fn noteToolCall(io: Io, arena: std.mem.Allocator, name: []const u8, args: std.js
         (str(args.get("command")) orelse str(args.get("pattern")) orelse str(args.get("path")) orelse "");
     var buf: std.ArrayList(u8) = .empty;
     buf.appendSlice(arena, "\u{23fa} ") catch return;
-    writeGutterText(arena, &buf, clamp(name, 40)) catch return;
+    writeGutterText(arena, &buf, net.clamp(name, 40)) catch return;
     buf.append(arena, ' ') catch return;
-    writeGutterText(arena, &buf, clamp(detail, 120)) catch return;
+    writeGutterText(arena, &buf, net.clamp(detail, 120)) catch return;
     buf.append(arena, '\n') catch return;
     net.writeErr(io, buf.items);
 }
@@ -1583,6 +1579,9 @@ fn writeGutterText(gpa: std.mem.Allocator, buf: *std.ArrayList(u8), s: []const u
 /// a repository can put an escape sequence on the operator's screen through
 /// the gutter line. A diagnostic note shows them as `.`; the model's own output
 /// on stdout is left alone, because that is the answer the run was asked for.
+/// Bytes that are not a UTF-8 sequence become `.` too: the body is whatever a
+/// gateway answered with, and a latin-1 error page copied onto the log is not
+/// a character, only something a reader has to decode twice.
 fn terminalSafe(arena: std.mem.Allocator, s: []const u8) []const u8 {
     const out = arena.alloc(u8, s.len) catch return s;
     var i: usize = 0;
@@ -1594,8 +1593,28 @@ fn terminalSafe(arena: std.mem.Allocator, s: []const u8) []const u8 {
             i += 2;
             continue;
         }
-        out[i] = if (c < 0x20 or c == 0x7f) '.' else c;
-        i += 1;
+        if (c < 0x20 or c == 0x7f) {
+            out[i] = '.';
+            i += 1;
+            continue;
+        }
+        if (c < 0x80) {
+            out[i] = c;
+            i += 1;
+            continue;
+        }
+        // A lead byte that does not begin a valid sequence, a truncated tail,
+        // an overlong encoding and a surrogate half all read as one byte of
+        // nothing. Skipping the whole sequence would copy a partial character
+        // into the line, so the bad byte goes alone.
+        const len = utf8SequenceLen(s, i);
+        if (len == 0) {
+            out[i] = '.';
+            i += 1;
+            continue;
+        }
+        @memcpy(out[i .. i + len], s[i .. i + len]);
+        i += len;
     }
     return out;
 }
@@ -1977,22 +1996,12 @@ fn atCaptureLimit(captured: Captured) bool {
     return captured.dropped[0] or captured.dropped[1];
 }
 
-/// The first `max` bytes, cut on a UTF-8 codepoint boundary. Both callers feed
-/// text a model will read back, one of them inside a JSON request body, so a
-/// cut in the middle of a codepoint would put invalid UTF-8 on the wire.
-fn clamp(s: []const u8, max: usize) []const u8 {
-    if (s.len <= max) return s;
-    var end = max;
-    while (end > 0 and s[end] & 0xc0 == 0x80) end -= 1;
-    return s[0..end];
-}
-
 /// One tool result as the model reads it: capped, cut on a code point
 /// boundary, and marked when bytes were dropped. Without the marker a
 /// truncated file or a truncated test log is indistinguishable from a complete
 /// one, and the agent reasons about output it never saw.
 fn toolResult(arena: std.mem.Allocator, output: []const u8) ![]const u8 {
-    const kept = clamp(output, max_tool_output);
+    const kept = net.clamp(output, max_tool_output);
     if (kept.len == output.len) return kept;
     return std.fmt.allocPrint(arena, "{s}\n... [tool output truncated at {d} of {d} bytes]", .{
         kept, kept.len, output.len,
@@ -2165,32 +2174,6 @@ test "the tool gutter stays one line whatever the model sent" {
     try std.testing.expect(std.mem.indexOfScalar(u8, buf.items, '\n') == null);
 }
 
-test "clamp keeps short strings intact" {
-    try std.testing.expectEqualStrings("abc", clamp("abc", 8));
-    // A string exactly at the limit is kept whole, not cut to one byte short.
-    try std.testing.expectEqualStrings("abc", clamp("abc", 3));
-    try std.testing.expectEqualStrings("ab", clamp("abcd", 2));
-    try std.testing.expectEqualStrings("", clamp("abc", 0));
-}
-
-test "a cut never leaves half a code point in the request body" {
-    // The bytes go into the JSON body verbatim, so anything clamp keeps has to
-    // be a whole character: source files are full of multi-byte text and a
-    // cut lands in one often enough to matter.
-    const text = "caf\u{00e9} \u{1f600} fin";
-    var n: usize = 0;
-    while (n <= text.len) : (n += 1) {
-        const kept = clamp(text, n);
-        try std.testing.expect(kept.len <= n);
-        try std.testing.expect(std.unicode.utf8ValidateSlice(kept));
-        try std.testing.expect(std.mem.startsWith(u8, text, kept));
-    }
-    // The cut is at the boundary, not somewhere short of it.
-    try std.testing.expectEqualStrings("caf\u{00e9} ", clamp(text, 7));
-    try std.testing.expectEqualStrings("caf\u{00e9} \u{1f600}", clamp(text, 10));
-    try std.testing.expectEqualStrings("", clamp("\u{1f600}", 2));
-}
-
 test "a capped tool result says how much was dropped" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -2251,6 +2234,25 @@ test "a tool argument cannot repaint the operator's terminal" {
     const got = terminalSafe(arena, "ls\x1b[2Jrm -rf /\u{009b}31m\x07 caf\u{00e9}");
     try std.testing.expectEqualStrings("ls.[2Jrm -rf /..31m. caf\u{00e9}", got);
     try std.testing.expectEqualStrings("plain text", terminalSafe(arena, "plain text"));
+}
+
+test "an error body that is not UTF-8 reaches the log as text" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    // The four ways a body can stop being text, each losing only the bytes
+    // that are not part of a character.
+    try std.testing.expectEqualStrings("caf.", terminalSafe(arena, "caf\xe9")); // latin-1 e-acute
+    try std.testing.expectEqualStrings("..", terminalSafe(arena, "\xc0\xaf")); // overlong "/"
+    try std.testing.expectEqualStrings("...", terminalSafe(arena, "\xed\xa0\x80")); // lone surrogate
+    try std.testing.expectEqualStrings("..", terminalSafe(arena, "\xe6\x97")); // truncated tail
+    // A bad byte does not swallow the character after it.
+    try std.testing.expectEqualStrings(".\u{00e9}", terminalSafe(arena, "\xe9\u{00e9}"));
+    try std.testing.expect(std.unicode.utf8ValidateSlice(terminalSafe(arena, "caf\xe9 \xc0\xaf \xed\xa0\x80 \xe6\x97")));
+    // A valid multibyte character still survives, including one that is not
+    // BMP: four bytes copied whole, not four dots.
+    try std.testing.expectEqualStrings("\u{1f600}\u{00e9}", terminalSafe(arena, "\u{1f600}\u{00e9}"));
 }
 
 test "conversation and tool schema serialize as one valid request body" {
@@ -3031,14 +3033,6 @@ test "a saturated token count does not overflow the run total" {
     usage.add(&ordinary);
     try std.testing.expectEqual(std.math.maxInt(u64), usage.prompt);
     try std.testing.expectEqual(std.math.maxInt(u64), usage.total);
-}
-
-test "a truncated tool result keeps whole codepoints" {
-    // "日" is 3 bytes, so a 4- or 5-byte cut lands inside it.
-    try std.testing.expectEqualStrings("abc", clamp("abc日本", 4));
-    try std.testing.expectEqualStrings("ab", clamp("ab日", 4));
-    try std.testing.expectEqualStrings("abc", clamp("abc", 4));
-    try std.testing.expect(std.unicode.utf8ValidateSlice(clamp("abc日本語のテキスト", 8)));
 }
 
 test "backoff doubles, caps, and never overflows an attempt counter" {

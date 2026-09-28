@@ -532,7 +532,7 @@ pub fn run(
     const api = releaseApiUrl(&api_buf, repo) catch {
         var msg: [192]u8 = undefined;
         const line = std.fmt.bufPrint(&msg, "microagent update: want owner/repo, not a URL (got '{s}')\n", .{
-            repo[0..@min(repo.len, 80)],
+            net.clamp(repo, 80),
         }) catch "microagent update: want owner/repo, not a URL\n";
         net.writeErr(io, line);
         return 2;
