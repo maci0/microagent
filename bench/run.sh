@@ -84,7 +84,17 @@ for agent in $agents; do
 		fi
 		run_limited "$timeout_s" "$work" sh -c "$(argv_for "$agent")" >"$work/.out" 2>"$work/.err"
 		rc=$?
-		end=$(monotonic_ns)
+		# The clock is read at both ends and both readings have to answer. A
+		# source that reads for the first one can still fail for the second, and
+		# an empty `end` is not an error awk reports: it reads as a missing field
+		# worth 0, so the subtraction below divided one raw nanosecond count by a
+		# billion and appended a wall_s nobody measured.
+		if ! end=$(monotonic_ns); then
+			printf '%-10s %-14s %8s %10s %8s  %s\n' "$agent" "$task" - - - no-clock
+			printf '{"agent":"%s","task":"%s","wall_s":null,"tokens":null,"lines":"n/a","result":"no-clock"}\n' \
+				"$agent" "$task" >>"$results"
+			continue
+		fi
 		wall=$(echo "$end $start" | awk '{printf "%.1f", ($1-$2)/1000000000}')
 
 		lines=$(cd "$work" && git diff --numstat | awk '{a+=$1; d+=$2} END {printf "+%d/-%d", a, d}')

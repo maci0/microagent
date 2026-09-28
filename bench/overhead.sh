@@ -55,7 +55,15 @@ for agent in $agents; do
 	# one command line and the prompt is the last of them.
 	# shellcheck disable=SC2046
 	run_limited 180 "$work" $(harness_argv "$agent") "$prompt" >"$work/out" 2>&1
-	end=$(monotonic_ns)
+	# Both ends of the clock are checked, not just the first. An empty reading
+	# is not an error awk reports, it reads as a field worth 0, so a second
+	# reading that failed divided one raw nanosecond count by a billion and
+	# printed that as the run's wall time.
+	if ! end=$(monotonic_ns); then
+		printf '%-14s %10s %10s %10s\n' "$agent" "$startup" no-clock -
+		rm -rf "$work"
+		continue
+	fi
 	wall=$(echo "$end $start" | awk '{printf "%.1f", ($1-$2)/1000000000}')
 	# Only microagent prints a machine-readable cumulative total.
 	tokens=$(grep -o '"total_tokens":[0-9]*' "$work/out" 2>/dev/null | tail -1 | cut -d: -f2)

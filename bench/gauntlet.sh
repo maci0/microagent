@@ -63,7 +63,16 @@ for agent in $agents; do
 	( cd "$dir" && gauntlet -a "$agent" -r "$reviews" --max-reviews "$max_reviews" --once \
 		-C "$dir" -t "$timeout_per_review" -y --no-color ) >"$dir/.gauntlet.log" 2>&1
 	rc=$?
-	end=$(monotonic_ns)
+	# Both ends of the clock are checked, not just the first. A second reading
+	# that fails leaves `end` empty, and the shell arithmetic below reads an
+	# empty variable as 0, so the row was written with a wall time derived from
+	# the start reading alone rather than one that was refused.
+	if ! end=$(monotonic_ns); then
+		printf '%-40s %6s %6s %7s %8s %8s %8s  %s\n' "$agent" - - - no-clock - - -
+		printf '{"agent":"%s","passed":null,"failed":null,"changed_files":null,"wall_s":null,"tokens":null,"verify":null,"rc":null}\n' \
+			"$agent" >>"$root/bench/gauntlet-results.jsonl"
+		continue
+	fi
 	elapsed=$(( (end - start + 500000000) / 1000000000 ))
 
 	passed=$(awk '/^  Passed:/{print $2}' "$dir/.gauntlet.log" | tail -1)
