@@ -222,6 +222,13 @@ fn logName(name: []const u8) ?LogName {
 /// reader that insists the path is absolute turns it into a panic in a checked
 /// build.
 fn pruneSessions(io: Io, arena: std.mem.Allocator, session_dir: []const u8) void {
+    pruneSessionsTo(io, arena, session_dir, max_session_logs);
+}
+
+/// The pruner, with the window it keeps as an argument rather than a constant,
+/// so the fuzz harness can put a handful of names over a window of two and
+/// check what the delete loop does with them.
+fn pruneSessionsTo(io: Io, arena: std.mem.Allocator, session_dir: []const u8, keep: usize) void {
     var dir = std.Io.Dir.openDir(std.Io.Dir.cwd(), io, session_dir, .{ .iterate = true }) catch |err| {
         net.note(io, arena, "microagent: the session store under {s} could not be read for pruning ({s}); it is not pruned and is left as it stands\n", .{ session_dir, @errorName(err) });
         return;
@@ -259,7 +266,7 @@ fn pruneSessions(io: Io, arena: std.mem.Allocator, session_dir: []const u8) void
             found.append(arena, .{ .path = arena.dupe(u8, entry.path) catch return, .key = key }) catch return;
         }
     }
-    if (found.items.len <= max_session_logs) return;
+    if (found.items.len <= keep) return;
 
     std.mem.sort(Found, found.items, {}, struct {
         fn lessThan(_: void, a: Found, b: Found) bool {
@@ -272,14 +279,14 @@ fn pruneSessions(io: Io, arena: std.mem.Allocator, session_dir: []const u8) void
     var i: usize = 0;
     var failed: usize = 0;
     var first_err: ?anyerror = null;
-    while (i < found.items.len - max_session_logs) : (i += 1) {
+    while (i < found.items.len - keep) : (i += 1) {
         dir.deleteFile(io, found.items[i].path) catch |err| {
             failed += 1;
             if (first_err == null) first_err = err;
         };
     }
     if (failed != 0) net.note(io, arena, "microagent: {d} of {d} session logs under {s} could not be deleted ({s}); the store is over its {d}-log limit and stays that way until they can be\n", .{
-        failed, found.items.len - max_session_logs, session_dir, @errorName(first_err.?), max_session_logs,
+        failed, found.items.len - keep, session_dir, @errorName(first_err.?), keep,
     });
 }
 
@@ -888,4 +895,256 @@ test "a store that cannot be created gives the run no log rather than a silent o
     // to walk into.
     const still_a_file = try tmp.dir.readFileAlloc(io, "blocked", arena, .limited(64));
     try std.testing.expectEqualStrings("not a directory", still_a_file);
+}
+
+// The names in a session store arrive on a directory walk rather than out of
+// this program: `MICROAGENT_SESSION_DIR` can point the store anywhere, the walk
+// enters every subdirectory it meets, and a tool call that ran with the store
+// inside its reach leaves a name in it that no run wrote. `pruneSessions`
+// deletes files, so the two properties a fuzzer can see are that a name this
+// program would never have written is never deleted, and that what is left is
+// the newest of the names it did write. Both numbers in a name are read with
+// `parseInt`, and which of two names is older is a three-key comparison over
+// them, so a seed that carries both spellings of a stamp and both sides of the
+// `-N` pair is the shape that decides it.
+//
+// `std.testing.fuzz` runs this corpus on every `zig build test`, and through
+// the fuzzer's mutations when the test binary is built in fuzz mode. One name
+// per line, and a space is part of a name rather than a separator: a name with
+// a space in it is a file a filesystem holds and a walk reports.
+const store_name_corpus = [_][]const u8{
+    "",
+    "\n",
+    "1.jsonl\n2.jsonl\n3.jsonl\n4.jsonl",
+    "1.jsonl\n1-1.jsonl\n2.jsonl\n2-1.jsonl",
+    "00012.jsonl\n12.jsonl\n12-0.jsonl\n12-1.jsonl\n13.jsonl",
+    "1.jsonl\n10.jsonl\n2.jsonl\n9.jsonl",
+    "1.jsonl\n1-9.jsonl\n1-10.jsonl\n1-11.jsonl",
+    "0.jsonl\n00.jsonl\n0-0.jsonl\n0-1.jsonl",
+    "notes.jsonl\n1.jsonl\n2.jsonl\nkeep.jsonl",
+    "README\n1.jsonl\n2.jsonl\n3.jsonl",
+    ".jsonl\n1.jsonl\n2.jsonl",
+    "1.JSONL\n1.jsonl\n2.jsonl",
+    "1.jsonl.bak\n1.jsonl\n2.jsonl",
+    "1.jsonl\n-1.jsonl\n1-.jsonl\n1-1-.jsonl\n2.jsonl",
+    "18446744073709551616.jsonl\n340282366920938463463374607431768211456.jsonl\n1.jsonl\n2.jsonl",
+    "99999999999999999999999999999999999999.jsonl\n1.jsonl\n2.jsonl",
+    "-1.jsonl\n+1.jsonl\n1 .jsonl\n 1.jsonl\n2.jsonl",
+    "1.jsonl\n1.jsonl\n1.jsonl\n1.jsonl",
+    "1.jsonl\n../../etc/passwd\n2.jsonl\n3.jsonl",
+    "1.jsonl\n\u{65e5}\u{8a00}.jsonl\n2.jsonl\n3.jsonl",
+    "1.jsonl\n2.jsonl\n3.jsonl\n4.jsonl\n5.jsonl\n6.jsonl\n7.jsonl\n8.jsonl",
+};
+
+test "a fuzzed store name is deleted only when the pruner wrote it" {
+    try std.testing.fuzz({}, fuzzStoreNames, .{ .corpus = &store_name_corpus });
+}
+
+fn fuzzStoreNames(_: void, smith: *std.testing.Smith) !void {
+    const gpa = std.testing.allocator;
+    var scratch: [4 * 1024]u8 = undefined;
+    const text: []const u8 = if (smith.in) |seed| seed else scratch[0..smith.slice(&scratch)];
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_path = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+
+    // A window small enough that a handful of names reaches past it, so the
+    // delete loop runs on every iteration rather than on a rare one.
+    const keep: usize = 3;
+
+    const Written = struct { name: []const u8, key: ?LogName };
+    var written: std.ArrayList(Written) = .empty;
+    defer written.deinit(gpa);
+
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (written.items.len >= 16) break;
+        // A name no filesystem holds never reaches the walk, so seeding one
+        // says nothing about what the pruner does with what does.
+        if (line.len == 0 or line.len > 255) continue;
+        if (std.mem.indexOfAny(u8, line, "/\x00") != null) continue;
+        if (std.mem.eql(u8, line, ".") or std.mem.eql(u8, line, "..")) continue;
+        // A name written twice is one file, and counting it twice would make
+        // the store look larger than it is.
+        var seen = false;
+        for (written.items) |w| {
+            if (std.mem.eql(u8, w.name, line)) seen = true;
+        }
+        if (seen) continue;
+        try tmp.dir.writeFile(io, .{ .sub_path = line, .data = "log" });
+        try written.append(gpa, .{ .name = line, .key = logName(line) });
+    }
+
+    pruneSessionsTo(io, arena, dir_path, keep);
+
+    // A name no run of this program wrote is not its to delete, whatever the
+    // walk found beside it and wherever in the window it would have sorted.
+    var survivors: std.ArrayList(Written) = .empty;
+    defer survivors.deinit(gpa);
+    var deleted: std.ArrayList(Written) = .empty;
+    defer deleted.deinit(gpa);
+    for (written.items) |w| {
+        if (w.key == null) {
+            try tmp.dir.access(io, w.name, .{});
+            continue;
+        }
+        if (tmp.dir.access(io, w.name, .{})) |_| {
+            try survivors.append(gpa, w);
+        } else |_| {
+            try deleted.append(gpa, w);
+        }
+    }
+
+    // The window is on the store's own logs only: what is left is the window,
+    // or the whole store when it never reached it.
+    try std.testing.expectEqual(@min(keep, survivors.items.len + deleted.items.len), survivors.items.len);
+    // And what is left is the newest of them, so no log that survived is older
+    // than one that was deleted.
+    for (deleted.items) |gone| {
+        for (survivors.items) |kept| {
+            try std.testing.expect(!keyOlder(kept.key.?, gone.key.?));
+        }
+    }
+}
+
+/// The order `pruneSessions` reads a name's two numbers in: the clock stamp
+/// first, and the `-N` a re-run was given as the second. The pruner breaks a
+/// tie on the path, which a name alone cannot say, so a harness that only has
+/// names compares keys that may well be equal.
+fn keyOlder(a: LogName, b: LogName) bool {
+    if (a.stamp != b.stamp) return a.stamp < b.stamp;
+    return a.attempt < b.attempt;
+}
+
+// A session record is the one thing this module writes for somebody else to
+// read: a monitor opens the file mid-run and takes each line as a response. The
+// strings in it came from outside the process (the model name off a request the
+// program built, the finish reason out of the provider's stream), and the store
+// is JSONL, so the property worth asserting is that whatever those strings are
+// the record is still exactly one line and that line still reads back as the
+// strings that went into it. A record that carried a newline would split into
+// two lines the monitor reads as two responses, and a record that lost a
+// character would bill a run for tokens it never spent.
+//
+// `std.testing.fuzz` runs this corpus on every `zig build test`, and through the
+// fuzzer's mutations when the test binary is built in fuzz mode. The corpus
+// carries the escapes, the controls and the malformed sequences a cut code
+// point or a latin-1 file leaves behind, in the three fields together and in
+// each on its own.
+const session_record_corpus = [_][]const u8{
+    "",
+    "a",
+    "\n",
+    "\r\n\r\n",
+    "\t\x00",
+    "\x1b[2J\x1b[31m\x07",
+    "quote\" backslash\\ newline\n tab\t",
+    "{\"content\":\"already a record\"}",
+    "caf\u{00e9}",
+    "\u{65e5}\u{8a00}\u{1f600}",
+    "\u{2028}\u{2029}",
+    "/home/me/projects/\u{1f600}",
+    "openai/gpt-4o\nstop",
+    "openrouter/auto\nlength",
+    "vendor/model\r\ntool_calls",
+    "\xc3\n\xe6\x97\n\xf0\x9f",
+    "\xed\xa0\x80\n\xf8\x88\x80\x80\x80",
+    "\xff\xfe\n\xc2\n\xc3\x28",
+    "ok\xff\ntool\xfe",
+    "a\nb\nc\nd",
+    "vendor/model-with-a-name-long-enough-to-push-the-record\nstop",
+    "\x00" ** 32 ++ "\n" ++ "m" ** 32,
+};
+
+test "a fuzzed session record is one line that reads back as itself" {
+    try std.testing.fuzz({}, fuzzSessionRecord, .{ .corpus = &session_record_corpus });
+}
+
+fn fuzzSessionRecord(_: void, smith: *std.testing.Smith) !void {
+    const gpa = std.testing.allocator;
+    var scratch: [8 * 1024]u8 = undefined;
+    const text: []const u8 = if (smith.in) |seed| seed else scratch[0..smith.slice(&scratch)];
+
+    // The arena is the caller's, the way `writeRecord` builds a record: the
+    // line it hands back is the buffer's whole capacity and not a length a
+    // caller can free by, so it is owned by the run rather than by the test.
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The three strings, split out of the same bytes so one seed reaches all
+    // three at once and a cut one of them.
+    const third = text.len / 3;
+    const cwd = text[0..third];
+    const model = text[third .. 2 * third];
+    const finish_reason = try arena.dupe(u8, text[2 * third ..]);
+
+    // The numbers the provider chose, at the ends a count reaches: a stamp and
+    // a duration are both read back by a monitor and summed, so a counter that
+    // arrives as something other than what was spent is a wrong bill. JSON has
+    // no integer wider than i64, and a counter a monitor reads is parsed as
+    // one, so the values here stay in the range it can read back.
+    var nums: [24]u8 = undefined;
+    const got_nums = smith.slice(&nums);
+    const ts_ms: i64 = if (got_nums >= 8) std.mem.readInt(i64, nums[0..8], .little) else 0;
+    const elapsed_ms: u64 = if (got_nums >= 16) std.math.cast(u64, @as(i64, @bitCast(std.mem.readInt(u64, nums[8..16], .little)))) orelse 0 else 0;
+    const total: u64 = if (got_nums >= 24) std.math.cast(u64, @as(i64, @bitCast(std.mem.readInt(u64, nums[16..24], .little)))) orelse 0 else 0;
+
+    const result: chat.ChatResult = .{
+        .prompt_tokens = 1,
+        .cached_tokens = 2,
+        .completion_tokens = 3,
+        .reasoning_tokens = 4,
+        .total_tokens = total,
+        .finish_reason = finish_reason,
+    };
+
+    const line = try sessionRecord(arena, ts_ms, cwd, model, elapsed_ms, &result);
+
+    // One record, one line. The store is JSONL and a monitor reads it while the
+    // run is still going, so a newline inside any of the three strings splits
+    // the record into two responses the monitor will not join back together.
+    try std.testing.expect(std.mem.endsWith(u8, line, "\n"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, line, "\n"));
+
+    try std.testing.expect(try std.json.validate(gpa, line[0 .. line.len - 1]));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena, line[0 .. line.len - 1], .{});
+    const obj = parsed.value.object;
+
+    // The strings that went in are the strings a monitor reads, and the
+    // numbers are the numbers the record was built from.
+    try expectSameString(obj, "cwd", cwd);
+    try expectSameString(obj, "model", model);
+    try expectSameString(obj, "finish_reason", finish_reason);
+    const usage = obj.get("usage").?.object;
+    try std.testing.expectEqual(@as(i64, 1), usage.get("prompt_tokens").?.integer);
+    try std.testing.expectEqual(@as(i64, 2), usage.get("cached_tokens").?.integer);
+    try std.testing.expectEqual(@as(i64, 3), usage.get("completion_tokens").?.integer);
+    try std.testing.expectEqual(@as(i64, 4), usage.get("reasoning_tokens").?.integer);
+    try std.testing.expectEqual(total, @as(u64, @intCast(usage.get("total_tokens").?.integer)));
+    try std.testing.expectEqual(elapsed_ms, @as(u64, @intCast(obj.get("elapsed_ms").?.integer)));
+    try std.testing.expectEqual(ts_ms, obj.get("ts").?.integer);
+}
+
+/// The field reads back as the bytes that went in, for text. A byte that is not
+/// part of a valid sequence is written as U+FFFD, so what comes back is still
+/// text and never longer than the three bytes each replacement takes.
+fn expectSameString(obj: std.json.ObjectMap, key: []const u8, text: []const u8) !void {
+    const got = chat.str(obj.get(key)) orelse return error.TestUnexpectedResult;
+    if (std.unicode.utf8ValidateSlice(text)) {
+        try std.testing.expectEqualStrings(text, got);
+    } else {
+        try std.testing.expect(std.unicode.utf8ValidateSlice(got));
+        try std.testing.expect(got.len <= text.len * 3);
+    }
 }
