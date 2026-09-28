@@ -9,6 +9,14 @@ tests. `make check` wants exactly 0.16.0, because that is the version CI install
 and the one the release assets are built with; `make zig-version` is the check on
 its own, and a newer Zig still builds the project.
 
+0.16.0 is also the newest stable: [the download index](https://ziglang.org/download/index.json)
+lists no 0.16.1, and `master` is 0.17.0-dev, which is not a release to pin a
+release asset to. So the version is not a constraint on anything, and there is
+no upgrade to take for performance until 0.17 ships. Worth knowing before a
+review goes looking for one: measured here, `-mcpu=native` moves the hot paths
+by less than the run-to-run noise, so there is no build flag to reach for
+either.
+
 ```sh
 make            # zig-out/bin/microagent
 make small      # the ReleaseSmall binary
