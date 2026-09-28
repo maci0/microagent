@@ -1022,11 +1022,18 @@ const Budget = struct {
 
     /// Milliseconds left on the budget, or null when there is no budget. Zero
     /// means expired; callers that only care about that use `expired`.
+    ///
+    /// A budget is seconds the caller typed, and a cast is where that stops
+    /// being trustworthy: the deadline is held at nanosecond resolution, so a
+    /// budget past `u64` milliseconds (about 5.8e8 years, which
+    /// `--budget-seconds 20000000000000000` is) needs more milliseconds than
+    /// the answer has bits for. `cast` saturates instead, and a ceiling no
+    /// caller can wait out is as good an answer as the exact figure.
     fn remainingMs(self: Budget, io: Io) ?u64 {
         const d = self.deadline_ns orelse return null;
         const now = Io.Timestamp.now(io, .awake).nanoseconds;
         if (now >= d) return 0;
-        return @intCast(@divTrunc(d - now, std.time.ns_per_ms));
+        return std.math.cast(u64, @divTrunc(d - now, std.time.ns_per_ms)) orelse std.math.maxInt(u64);
     }
 
     /// The ceiling a tool's own deadline may not pass, or null when the run
@@ -3865,6 +3872,27 @@ test "a wait the budget cannot cover is not taken" {
     try std.testing.expectEqual(@as(?u64, null), spent.affordableWaitMs(std.testing.io, 1));
     try std.testing.expectEqual(@as(?u64, null), spent.affordableWaitMs(std.testing.io, backoffMs(0)));
     try std.testing.expectEqual(@as(?u64, null), spent.affordableWaitMs(std.testing.io, max_retry_after_ms));
+}
+
+test "a budget too large to count in milliseconds is a ceiling, not a trap" {
+    // `--budget-seconds 20000000000000000` is a number `ceiling` accepts: it
+    // is a u64 and it is not zero. In milliseconds it needs more bits than a
+    // u64 has, and the deadline is nanoseconds, so the millisecond answer is
+    // the one that runs out of room. It saturates: a run set up that way keeps
+    // its own ceiling for anything that reads a duration, rather than panicking
+    // on the cast in a checked build and wrapping in a release one.
+    const huge: Budget = .{ .deadline_ns = @as(i96, std.math.maxInt(u64)) * std.time.ns_per_s };
+    try std.testing.expectEqual(@as(?u64, std.math.maxInt(u64)), huge.remainingMs(std.testing.io));
+    // The same ceiling reaches a tool rather than a number it cannot hold.
+    try std.testing.expectEqual(@as(?u64, std.math.maxInt(u64)), huge.toolCeilingMs(std.testing.io));
+
+    // An ordinary budget is still counted exactly rather than saturated: a
+    // minute taken at the clock this test reads has its 60,000 milliseconds
+    // left, less whatever the run between the two readings spent on the
+    // assertion itself.
+    const now = Io.Timestamp.now(std.testing.io, .awake).nanoseconds;
+    const left = Budget.of(now, 60).remainingMs(std.testing.io).?;
+    try std.testing.expect(left > 59_000 and left <= 60_000);
 }
 
 test "a Retry-After header sets the wait, and only a wait worth taking" {

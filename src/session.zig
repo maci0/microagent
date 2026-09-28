@@ -130,23 +130,47 @@ fn allDigits(text: []const u8) bool {
     return true;
 }
 
-/// True for a name `createSessionLog` could have written: the unix nanoseconds
-/// of a run, and the `-N` a second run with the same stamp was given rather
-/// than the first run's log. The suffixed names matter as much as the plain
-/// ones here: a machine whose clock repeats a stamp is exactly the machine
-/// whose store fills with the logs a re-run wrote beside the first, and a
-/// retention window that skipped them would bound nothing on it.
-fn isSessionLogName(name: []const u8) bool {
-    if (!std.mem.endsWith(u8, name, ".jsonl")) return false;
+/// The two numbers a log's name is made of: the clock stamp of the run, and
+/// the `-N` a run that read the same stamp was given rather than the first
+/// one's log.
+const LogName = struct {
+    stamp: u128,
+    attempt: usize,
+};
+
+/// The numbers behind a name `createSessionLog` could have written, or null
+/// for anything else. The suffixed names matter as much as the plain ones here:
+/// a machine whose clock repeats a stamp is exactly the machine whose store
+/// fills with the logs a re-run wrote beside the first, and a retention window
+/// that skipped them would bound nothing on it.
+///
+/// A stamp too wide for the parse is not a name this program wrote, so it is
+/// left alone rather than deleted as though it were ours.
+fn logName(name: []const u8) ?LogName {
+    if (!std.mem.endsWith(u8, name, ".jsonl")) return null;
     const stem = name[0 .. name.len - ".jsonl".len];
-    const dash = std.mem.indexOfScalar(u8, stem, '-') orelse return allDigits(stem);
-    return allDigits(stem[0..dash]) and allDigits(stem[dash + 1 ..]);
+    const dash = std.mem.indexOfScalar(u8, stem, '-');
+    const stamp_text = if (dash) |at| stem[0..at] else stem;
+    const attempt_text = if (dash) |at| stem[at + 1 ..] else "";
+    if (!allDigits(stamp_text)) return null;
+    if (attempt_text.len != 0 and !allDigits(attempt_text)) return null;
+    return .{
+        .stamp = std.fmt.parseInt(u128, stamp_text, 10) catch return null,
+        .attempt = if (attempt_text.len == 0) 0 else std.fmt.parseInt(usize, attempt_text, 10) catch return null,
+    };
 }
 
-/// Deletes the oldest logs past `max_session_logs`. The names are unix
-/// nanoseconds, so a plain lexicographic sort is oldest first, and only this
-/// program's own `<digits>[-<digits>].jsonl` files are touched. Every failure
-/// is ignored: a store that cannot be pruned costs a run nothing.
+fn isSessionLogName(name: []const u8) bool {
+    return logName(name) != null;
+}
+
+/// Deletes the oldest logs past `max_session_logs`. The oldest is read off the
+/// numbers the name carries rather than off its bytes: `-` sorts below every
+/// digit and a short stamp sorts below a long one, so a lexicographic sort puts
+/// a re-run's `<stamp>-1.jsonl` ahead of the `<stamp>.jsonl` that was written
+/// before it, and hands the retention window the wrong file of the pair. Only
+/// this program's own `<digits>[-<digits>].jsonl` files are touched. Every
+/// failure is ignored: a store that cannot be pruned costs a run nothing.
 ///
 /// Through the cwd, the way `open` creates the directory and `createSessionLog`
 /// creates the log: `MICROAGENT_SESSION_DIR=logs/x` is a legal value, and a
@@ -156,10 +180,11 @@ fn pruneSessions(io: Io, arena: std.mem.Allocator, session_dir: []const u8) void
     var dir = std.Io.Dir.openDir(std.Io.Dir.cwd(), io, session_dir, .{ .iterate = true }) catch return;
     defer dir.close(io);
 
-    var names: std.ArrayList([]u8) = .empty;
+    const Found = struct { path: []u8, key: LogName };
+    var found: std.ArrayList(Found) = .empty;
     defer {
-        for (names.items) |name| arena.free(name);
-        names.deinit(arena);
+        for (found.items) |f| arena.free(f.path);
+        found.deinit(arena);
     }
     // The walk is scoped: the walker holds the directory handle, and deleting
     // through `dir` while it is still open closes that handle under it.
@@ -168,26 +193,28 @@ fn pruneSessions(io: Io, arena: std.mem.Allocator, session_dir: []const u8) void
         defer walker.deinit();
         while (walker.next(io) catch return) |entry| {
             if (entry.kind != .file) continue;
-            if (!isSessionLogName(entry.basename)) continue;
+            const key = logName(entry.basename) orelse continue;
             // What is kept is the path from the store's root, not the basename.
             // The walker enters every subdirectory it meets, and a basename
             // deleted through the root either removes nothing or removes a
             // different file with the same name, while still counting toward
             // the limit: the store then looks pruned and is not.
-            names.append(arena, arena.dupe(u8, entry.path) catch return) catch return;
+            found.append(arena, .{ .path = arena.dupe(u8, entry.path) catch return, .key = key }) catch return;
         }
     }
-    if (names.items.len <= max_session_logs) return;
+    if (found.items.len <= max_session_logs) return;
 
-    std.mem.sort([]u8, names.items, {}, struct {
-        fn lessThan(_: void, a: []u8, b: []u8) bool {
-            return std.mem.order(u8, a, b) == .lt;
+    std.mem.sort(Found, found.items, {}, struct {
+        fn lessThan(_: void, a: Found, b: Found) bool {
+            if (a.key.stamp != b.key.stamp) return a.key.stamp < b.key.stamp;
+            if (a.key.attempt != b.key.attempt) return a.key.attempt < b.key.attempt;
+            return std.mem.order(u8, a.path, b.path) == .lt;
         }
     }.lessThan);
 
     var i: usize = 0;
-    while (i < names.items.len - max_session_logs) : (i += 1) {
-        dir.deleteFile(io, names.items[i]) catch {};
+    while (i < found.items.len - max_session_logs) : (i += 1) {
+        dir.deleteFile(io, found.items[i].path) catch {};
     }
 }
 
@@ -546,6 +573,48 @@ test "a store named relative to the working directory is pruned where it is" {
 // would keep every one of those forever while still reporting itself pruned.
 // The names are created the way a run creates them, exclusive and in order, so
 // the test exercises the real collision path rather than the pattern.
+// A stamp is a number, so the window that keeps the newest `max_session_logs`
+// reads it as one, and reads the `-N` beside it as the second number it is.
+// Sorted as bytes instead, `-` (0x2d) sorts below `.` (0x2e), so the re-run's
+// `<stamp>-1.jsonl` looks older than the `<stamp>.jsonl` written before it: the
+// window cuts between the pair and deletes the log of the run that happened
+// second, keeping the older of the two as the newest.
+test "the session store prunes by stamp, not by the bytes of the name" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_path = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+
+    // Stamps 3 through 202, then a re-run that read the oldest of them again,
+    // so the one file over the limit is the second half of that oldest pair.
+    var i: usize = 0;
+    while (i < max_session_logs) : (i += 1) {
+        const log = createSessionLog(io, arena, dir_path, @intCast(i + 3)) orelse return error.TestUnexpectedResult;
+        log.close(io);
+    }
+    const rerun = createSessionLog(io, arena, dir_path, 3) orelse return error.TestUnexpectedResult;
+    rerun.close(io);
+    try std.testing.expectEqual(max_session_logs + 1, countSessionLogs(io, arena, dir_path));
+
+    pruneSessions(io, arena, dir_path);
+
+    try std.testing.expectEqual(max_session_logs, countSessionLogs(io, arena, dir_path));
+    // The first of the pair is what goes; the run behind it is still the one a
+    // monitor would read if it were the pair's last run.
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "3.jsonl", .{}));
+    try tmp.dir.access(io, "3-1.jsonl", .{});
+    // And the newest stamp is untouched.
+    try tmp.dir.access(io, "202.jsonl", .{});
+}
+
 test "the session store prunes the logs a re-run wrote beside the first" {
     const gpa = std.testing.allocator;
     var arena_state = std.heap.ArenaAllocator.init(gpa);
