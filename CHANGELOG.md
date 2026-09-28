@@ -14,6 +14,21 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- A character the transport split across two reads is no longer written to
+  stdout in halves. The stream loop flushed each chunk as it arrived, and a
+  chunk boundary is a byte boundary rather than a character one: a `日` split
+  as `\xe6\x97` and `\xa5` reached the terminal as a replacement glyph followed
+  by a broken byte, and a reader validating each write as text saw two
+  fragments where there is one character. The loop now holds back the trailing
+  bytes of an unfinished character, at most three of them, and writes them with
+  the next chunk.
+- The base url is escaped on its way to a stderr note. `--base-url` and
+  `MICROAGENT_BASE_URL` are the operator's own bytes and every failure message
+  names the url, so `MICROAGENT_BASE_URL=$'\e[2J...'` cleared the screen on the
+  way to an error, and a base url that is not UTF-8 reached it as mojibake. The
+  escaping is the one every other diagnostic quoting a value already uses, and
+  the budget is wide enough that a url is never cut short of its endpoint.
+
 - The `git` tool keeps its credential exclusions when the call names a path. It
   appended them only to a pathless `git show` or `git diff`, so `{"cmd":"show",
   "path":"."}` printed a committed `.env`, `.pem` or `.secrets/` file as a patch

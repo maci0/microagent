@@ -229,6 +229,10 @@ fn jsonNeedsEscape(c: u8) bool {
     return c < 0x20 or c == '"' or c == '\\';
 }
 
+/// The most bytes one UTF-8 character is made of, which bounds how far back
+/// from the end of a string the search for an unfinished character looks.
+pub const utf8_max_sequence_bytes = 4;
+
 /// The length of the UTF-8 sequence starting at `i`, or 0 where the bytes are
 /// not one: a bad lead byte, a truncated tail, or an overlong or surrogate
 /// encoding all read as a replacement rather than being copied through.
@@ -238,6 +242,33 @@ pub fn utf8SequenceLen(s: []const u8, i: usize) usize {
     if (end > s.len) return 0;
     if (!std.unicode.utf8ValidateSlice(s[i..end])) return 0;
     return want;
+}
+
+/// How many bytes at the end of `s` are the start of a sequence `s` cuts in
+/// half, and 0 when it ends on a character boundary.
+///
+/// The transport chunks a completion body wherever it likes, which is a byte
+/// boundary rather than a character one: `\xe6\x97\xa5` arriving as `\xe6\x97`
+/// then `\xa5` is a legal chunking of a legal answer. Writing the first half
+/// out as it arrives puts a replacement glyph and then a broken byte on the
+/// operator's screen, and a reader validating each write as text sees two
+/// fragments where there is one character. A caller that writes `s` as it grows
+/// holds this many bytes back until the next chunk completes them.
+///
+/// Bytes that are not a sequence at all are not half of one: a lead byte
+/// nothing follows, and a run of continuation bytes with no lead, are what
+/// they are on their own, and holding them back would stall the output behind
+/// text that will never be completed.
+pub fn partialTailLen(s: []const u8) usize {
+    var n: usize = 1;
+    while (n <= utf8_max_sequence_bytes and n <= s.len) : (n += 1) {
+        const c = s[s.len - n];
+        if (c & 0xc0 != 0x80) {
+            const want = std.unicode.utf8ByteSequenceLength(c) catch return 0;
+            return if (want > n) n else 0;
+        }
+    }
+    return 0;
 }
 
 pub fn str(v: ?std.json.Value) ?[]const u8 {
@@ -670,6 +701,50 @@ test "a cut never leaves half a code point in the request body" {
     try std.testing.expectEqualStrings("caf\u{00e9} ", clamp(text, 7));
     try std.testing.expectEqualStrings("caf\u{00e9} \u{1f600}", clamp(text, 10));
     try std.testing.expectEqualStrings("", clamp("\u{1f600}", 2));
+}
+
+// A transport splits a body wherever it likes, so the split lands inside a
+// character as often as not: a run that writes each chunk as it arrives must be
+// able to tell how much of the chunk it cannot write yet. The property is that
+// the two halves still join up, which is what makes holding the tail back
+// lossless rather than a truncation.
+test "a body split at any byte still joins into the text it was" {
+    const text = "a\u{00e9}\u{65e5}\u{1f600}z";
+    for (0..text.len + 1) |at| {
+        const head = text[0..at];
+        const held = partialTailLen(head);
+        // What a writer keeps back is the half of one character and nothing
+        // more, and everything it does write is whole text.
+        try std.testing.expect(held <= utf8_max_sequence_bytes);
+        try std.testing.expect(held <= head.len);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(head[0 .. head.len - held]));
+        // The kept bytes go in front of the next chunk, so the two halves the
+        // writer saw are one string again. The character the split fell in can
+        // have its lead byte here and its last bytes there, which is the case
+        // this is here for: a three-byte head and a one-byte tail of a
+        // four-byte character.
+        const joined = try std.mem.concat(std.testing.allocator, u8, &.{ head[head.len - held ..], text[at..] });
+        defer std.testing.allocator.free(joined);
+        try std.testing.expectEqualStrings(text[head.len - held ..], joined);
+    }
+}
+
+test "only half a character is held back" {
+    // Whole characters and ASCII are written as they arrive.
+    try std.testing.expectEqual(@as(usize, 0), partialTailLen(""));
+    try std.testing.expectEqual(@as(usize, 0), partialTailLen("abc"));
+    try std.testing.expectEqual(@as(usize, 0), partialTailLen("caf\u{00e9}"));
+    try std.testing.expectEqual(@as(usize, 0), partialTailLen("\u{65e5}\u{1f600}"));
+    // And the half that is a lead byte waiting for its tail is not.
+    try std.testing.expectEqual(@as(usize, 1), partialTailLen("\u{65e5}"[0..1]));
+    try std.testing.expectEqual(@as(usize, 2), partialTailLen("\u{65e5}"[0..2]));
+    try std.testing.expectEqual(@as(usize, 1), partialTailLen("\u{1f600}"[0..1]));
+    try std.testing.expectEqual(@as(usize, 2), partialTailLen("\u{1f600}"[0..2]));
+    try std.testing.expectEqual(@as(usize, 3), partialTailLen("\u{1f600}"[0..3]));
+    // Bytes no character is made of are not half of one, and holding them back
+    // would stall the output behind text that is never coming.
+    try std.testing.expectEqual(@as(usize, 0), partialTailLen("\xff"));
+    try std.testing.expectEqual(@as(usize, 0), partialTailLen("\x80\x80\x80\x80"));
 }
 
 // Every byte the process holds that came from outside it goes out again

@@ -593,7 +593,26 @@ fn isIpv4Loopback(host: []const u8) bool {
 /// the host replaced. Credentials belong in the environment, but an operator
 /// who put them in the base url should not find them copied into every line
 /// the run writes when the stream fails.
+///
+/// Redaction is not the only thing a url needs before it is printed. The value
+/// is the operator's own `--base-url`, and the notes below name it on every
+/// failure, so it is the one place this program hands back bytes the shell
+/// passed: `MICROAGENT_BASE_URL=$'\e[2J...'` cleared the screen on the way to
+/// an error message, and one that is not UTF-8 reached it as mojibake. The
+/// escaping is `chat.safeText`, the one every other diagnostic quoting a value
+/// already uses. It is given a budget that no escaping can overrun rather than
+/// the quote budget `clip` applies, because a url is the one value a reader
+/// needs in full to recognize the endpoint a run was talking to.
 fn displayUrl(arena: std.mem.Allocator, url: []const u8) []const u8 {
+    const shown = redactUserinfo(arena, url);
+    return chat_mod.safeText(arena, shown, shown.len *| safe_text_widening);
+}
+
+/// The longest `safeText` can be for a byte of input: a C0 control becomes four
+/// bytes, which is more than any other escape it writes.
+const safe_text_widening: usize = 4;
+
+fn redactUserinfo(arena: std.mem.Allocator, url: []const u8) []const u8 {
     const scheme_end = std.mem.indexOf(u8, url, "://") orelse return url;
     const rest = url[scheme_end + "://".len ..];
     const authority_end = std.mem.indexOfAny(u8, rest, "/?#") orelse rest.len;
@@ -1636,7 +1655,7 @@ fn streamChat(
             pending.shrinkRetainingCapacity(rest);
             scanned -|= start;
         }
-        try flushOut(io, arena, &out_buf, shown_url);
+        try flushCompleteOut(io, arena, &out_buf, shown_url);
     }
 
     if (unparsable > 0)
@@ -2187,12 +2206,77 @@ fn compactMessages(
 /// exit status that says the run finished. The reason is on stderr before the
 /// run ends, and the error is re-raised so the caller fails the run.
 fn flushOut(io: Io, arena: std.mem.Allocator, out_buf: *std.ArrayList(u8), shown_url: []const u8) !void {
-    if (out_buf.items.len == 0) return;
-    net.writeOut(io, out_buf.items) catch |err| {
+    try writeOutPrefix(io, arena, out_buf, out_buf.items.len, shown_url);
+}
+
+/// The flush the stream loop uses. It writes every whole character in the
+/// buffer and keeps a trailing partial one for the next chunk.
+///
+/// The chunk boundary is the transport's, not the text's: a `\xe6\x97\xa5` split
+/// as `\xe6\x97` and `\xa5` across two reads is a legal chunking of a legal
+/// answer, and writing each half as it arrives puts a replacement glyph and
+/// then a broken byte on the operator's screen. What is held back is at most
+/// three bytes, so nothing waits on it that would not have waited on the next
+/// read anyway, and the run's last flush writes the tail with the rest.
+fn flushCompleteOut(io: Io, arena: std.mem.Allocator, out_buf: *std.ArrayList(u8), shown_url: []const u8) !void {
+    const held = chat_mod.partialTailLen(out_buf.items);
+    try writeOutPrefix(io, arena, out_buf, out_buf.items.len - held, shown_url);
+}
+
+// The other half of `flushCompleteOut`: what the writer writes, and what the
+// next chunk starts from. A run whose answer carries a character the transport
+// split across two reads writes it as one character rather than as a
+// replacement glyph and a broken byte.
+test "a character split across two reads is written once it is whole" {
+    const answer = "a\u{65e5}\u{1f600}z";
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    var written: std.ArrayList(u8) = .empty;
+    defer written.deinit(std.testing.allocator);
+    var taken: usize = 0;
+
+    // The transport's chunking, not the text's: the reads below cut the answer
+    // in the middle of a three-byte character and of a four-byte one.
+    for ([_]usize{ 1, 3, 2, 1, 4, 1 }) |chunk| {
+        const take = @min(chunk, answer.len - taken);
+        try buf.appendSlice(std.testing.allocator, answer[taken..][0..take]);
+        taken += take;
+        // What the flush writes, and what it holds for the next read.
+        const held = chat_mod.partialTailLen(buf.items);
+        try written.appendSlice(std.testing.allocator, buf.items[0 .. buf.items.len - held]);
+        dropWritten(&buf, buf.items.len - held);
+    }
+    try written.appendSlice(std.testing.allocator, buf.items);
+
+    try std.testing.expectEqualStrings(answer, written.items);
+    try std.testing.expectEqual(@as(usize, 0), buf.items.len);
+}
+
+/// Writes the first `len` bytes of the buffer and keeps the rest at its front,
+/// so the bytes that were not written are the ones the next call starts from.
+fn writeOutPrefix(
+    io: Io,
+    arena: std.mem.Allocator,
+    out_buf: *std.ArrayList(u8),
+    len: usize,
+    shown_url: []const u8,
+) !void {
+    if (len == 0) return;
+    net.writeOut(io, out_buf.items[0..len]) catch |err| {
         net.note(io, arena, "microagent: the text streamed from {s} could not be written to stdout ({s}); the rest of this run's output is not on it either, and the run fails rather than finishing with a partial answer\n", .{ shown_url, @errorName(err) });
         return err;
     };
-    out_buf.clearRetainingCapacity();
+    dropWritten(out_buf, len);
+}
+
+/// Drops the `len` bytes just written and moves what is left to the front, so
+/// the bytes the next chunk has to complete are the ones the next call starts
+/// from. The buffer only ever holds one flush's worth, so the move is over a
+/// few bytes.
+fn dropWritten(out_buf: *std.ArrayList(u8), len: usize) void {
+    const kept = out_buf.items.len - len;
+    std.mem.copyForwards(u8, out_buf.items[0..kept], out_buf.items[len..]);
+    out_buf.shrinkRetainingCapacity(kept);
 }
 
 /// Appends the assistant message and, for every tool call it requested, runs
@@ -2646,6 +2730,17 @@ test "a base url that carries credentials does not print them" {
     );
     // Not a url at all, so there is no authority to look in.
     try std.testing.expectEqualStrings("openrouter.ai", displayUrl(arena, "openrouter.ai"));
+    // The base url is whatever the operator's shell passed, and the notes name
+    // it on every failure, so it reaches the terminal the way every other value
+    // a diagnostic quotes does: no control byte, and no byte that is not text.
+    try std.testing.expectEqualStrings(
+        "https://[redacted]@openrouter.ai/caf\u{fffd}\\x1b",
+        displayUrl(arena, "https://u:p@openrouter.ai/caf\xe9\x1b"),
+    );
+    try std.testing.expectEqualStrings(
+        "https://openrouter.ai/\u{fffd}",
+        displayUrl(arena, "https://openrouter.ai/\xff"),
+    );
 }
 
 test "the command line parses in either flag form and in any order" {
