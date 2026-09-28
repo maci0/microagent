@@ -62,7 +62,7 @@ help:
 build:
 	$(ZIG) build -Doptimize=$(OPT)
 
-# Smallest binary that still runs the same code (~600 KB).
+# Smallest binary that still runs the same code (~720 KB).
 small:
 	$(ZIG) build -Doptimize=ReleaseSmall
 

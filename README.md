@@ -80,7 +80,7 @@ reply style (env, or the TOML config at MICROAGENT_CONFIG, default
                          (default full)
 
 subcommand:
-  update [--check] [--repo owner/name]
+  update [-c|--check] [--repo owner/name]
                          replace this binary with the latest GitHub
                          release after verifying its .sha256 sidecar
                          (--check only reports; GITHUB_TOKEN lifts the

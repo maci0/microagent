@@ -36,8 +36,10 @@ make lint                   # shellcheck, ruff and yamllint on their own
 `ruff check`, `ruff format --check` and `yamllint`, the same `zig build test`,
 and the same `ReleaseSmall` build whose binary it then runs, that
 [.github/workflows/ci.yml](.github/workflows/ci.yml) runs, on the same Zig
-version. The one CI job it does not stand in for is the release-assets
-cross-build; `make release-assets` runs that. `make help` lists every target.
+version. Two things it does not stand in for: the release-assets
+cross-build (`make release-assets` runs that, and CI adds a byte-identical
+rebuild check on top of it) and the second runner, where the same gate also
+runs on macOS. `make help` lists every target.
 Source is formatted with `zig fmt`; `make fmt` applies it, and `ruff format`
 does the same for the Harbor adapter. The three linters cover what `zig fmt`
 cannot: the bench

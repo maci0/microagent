@@ -518,16 +518,18 @@ fn statusHint(status: std.http.Status) []const u8 {
     };
 }
 
-/// The first listed asset, paired with a sidecar that matches the bytes, so the
-/// verdict turns on the tag and URL checks rather than stopping at the
-/// checksum. A body that does not parse still has to produce an input, since
-/// what the updater does with a malformed body is part of the same surface.
+/// What one release body decided: the parsed release when it had one, the
+/// inputs `decide` was given, and the verdict those inputs produced.
 const Decision = struct {
     rel: ?Release,
     in: Inputs,
     verdict: Verdict,
 };
 
+/// The first listed asset, paired with a sidecar that matches the bytes, so the
+/// verdict turns on the tag and URL checks rather than stopping at the
+/// checksum. A body that does not parse still has to produce an input, since
+/// what the updater does with a malformed body is part of the same surface.
 fn decideFromBody(arena: std.mem.Allocator, body: []const u8) !Decision {
     const rel = parseRelease(arena, body) catch null;
     const first: ?ListedAsset = if (rel) |r| (if (r.assets.len > 0) r.assets[0] else null) else null;

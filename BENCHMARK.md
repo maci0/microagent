@@ -14,13 +14,14 @@ where `timeout` is not installed.
 
 | build | binary |
 | --- | --- |
-| `-Doptimize=ReleaseSmall` (stripped) | 692 KB |
-| `-Doptimize=ReleaseFast` (stripped) | 1.24 MB |
-| `-Doptimize=ReleaseSafe` (stripped) | 1.26 MB |
-| `Debug` (unstripped) | 31 MB |
+| `-Doptimize=ReleaseSmall` (stripped) | 721 KB |
+| `-Doptimize=ReleaseFast` (stripped) | 1.31 MB |
+| `-Doptimize=ReleaseSafe` (stripped) | 1.31 MB |
+| `Debug` (unstripped) | 31.2 MB |
 
-No runtime, no package manager, no node_modules, no python. Three files under `src/`
-(`main.zig` the agent loop, `style.zig` the reply styles, `update.zig` the self-update), 2 670 lines.
+No runtime, no package manager, no node_modules, no python. Four files under `src/`
+(`main.zig` the agent loop, `style.zig` the reply styles, `update.zig` the self-update, `net.zig` the
+HTTP and stderr helpers the other three share), 5 033 lines.
 The sizes in this table are `ls -l` on a fresh build of this tree; every other number below comes
 from the two bench scripts.
 
@@ -51,7 +52,7 @@ First request of a run, from the usage line microagent prints:
 
 | | tokens |
 | --- | --- |
-| system prompt + 6 tool schemas + one-line user prompt | **933** |
+| system prompt + tool schemas + one-line user prompt (six of the seven tools) | **933** |
 
 That is the entire fixed cost of the harness, measured rather than estimated. It was measured before
 the `git` tool existed, so today's prompt is slightly larger; the point is the order of magnitude,
