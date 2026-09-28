@@ -15,7 +15,7 @@ BIN := zig-out/bin/microagent
 export LC_ALL := C
 export TZ := UTC
 
-.PHONY: default help preflight version build small musl test test-one fmt fmt-python lint lint-versions lint-lock zig-version required-zig-version release-targets check-targets lint-shell lint-python lint-yaml check bench overhead install release-assets checksums clean
+.PHONY: default help preflight version build small musl test test-one fmt fmt-python lint lint-versions lint-lock zig-version required-zig-version release-targets check-targets check-reproducible lint-shell lint-python lint-yaml check bench overhead install release-assets checksums clean
 
 # The targets `microagent update` asks for, in the names release.yml publishes.
 # ci.yml rehearses the same list on every push and release.yml publishes it, so
@@ -23,6 +23,18 @@ export TZ := UTC
 RELEASE_TARGETS := x86_64-linux-musl aarch64-linux-musl x86_64-macos aarch64-macos
 # A rehearsal leaves TAG empty; a release passes TAG=v0.2.0.
 ASSET_PREFIX = microagent-$(if $(TAG),$(TAG)-)
+
+# GNU coreutils has sha256sum and macOS ships shasum under another name; both
+# print the `<hex>  <name>` line src/update.zig reads. Which host has which is
+# decided once, here, so `checksums` and `check-reproducible` cannot disagree.
+# The result is used unquoted on purpose: `shasum -a 256` has to arrive as two
+# words, and it is empty on a host with neither.
+SHA256_CMD = if command -v sha256sum >/dev/null 2>&1; then echo sha256sum; \
+	elif command -v shasum >/dev/null 2>&1; then echo "shasum -a 256"; fi
+
+# The scratch root `check-reproducible` builds into. CI passes the runner's temp
+# directory; a local run gets the caller's TMPDIR.
+REPRO_DIR ?= $${TMPDIR:-/tmp}/microagent-repro
 
 # The linter versions the gate runs. `ruff format` rewrites files and
 # `yamllint` changes rules between releases, so a local run on a different
@@ -91,6 +103,7 @@ help:
 	  'release-assets TAG=vX.Y.Z  the same, named as release.yml publishes them' \
 	  'release-targets       the published target triples, one per line' \
 	  'check-targets         every published target is one `update` asks for' \
+	  'check-reproducible    every published target rebuilds byte-identical' \
 	  'checksums             sha256 sidecars for dist/ (after a tagged build)' \
 	  'required-zig-version  the zig version build.zig.zon declares' \
 	  'clean                 remove zig-out and .zig-cache'
@@ -327,20 +340,16 @@ release-assets:
 
 # The sha256 sidecar `microagent update` verifies before it replaces anything.
 # Only a tagged build names its assets after a version, so a rehearsal in dist/
-# has nothing to checksum and says so. GNU coreutils has sha256sum and macOS
-# ships shasum under another name; both print the `<hex>  <name>` line
-# src/update.zig reads, and a host with neither is told so rather than left
-# without the sidecars an update cannot verify. The chosen spelling is unquoted
-# so `shasum -a 256` arrives as two words.
+# has nothing to checksum and says so. A host with neither hashing command is
+# told so rather than left without the sidecars an update cannot verify.
 checksums:
 	@test -d dist || { echo "no dist/, run 'make release-assets TAG=v0.2.0' first" >&2; exit 2; }
 	cd dist && set -eu && \
-	if command -v sha256sum >/dev/null 2>&1; then sum=sha256sum; \
-	elif command -v shasum >/dev/null 2>&1; then sum="shasum -a 256"; \
-	else \
+	sum=$$($(SHA256_CMD)); \
+	test -n "$$sum" || { \
 		echo "neither sha256sum nor shasum is on PATH, so the sidecars update verifies cannot be written" >&2; \
 		exit 2; \
-	fi; \
+	}; \
 	for asset in microagent-v*; do \
 		case "$$asset" in *.sha256) continue;; esac; \
 		test -e "$$asset" || { \
@@ -349,6 +358,46 @@ checksums:
 		}; \
 		$$sum "$$asset" > "$$asset.sha256"; \
 	done
+
+# Two independent builds of the same source must be byte-identical, or a
+# released checksum describes one binary and a rebuild produces another. Every
+# published target is checked, not one: two of the four assets are macOS
+# binaries, and a host-specific timestamp or path leaking into a cross build
+# would pass a check that only built the Linux one. The target list is the one
+# `release-assets` builds, so a new target cannot ship without a reproducibility
+# check of its own.
+#
+# Each build gets a cache and a prefix of its own, and the previous pair is
+# removed first, so the second is a real build rather than a cache hit. The
+# clock, timezone and locale are varied between the two, so a timestamp or a
+# locale-dependent ordering leaking into the binary fails here rather than on a
+# consumer's machine. ci.yml runs it on every push and release.yml runs it on
+# the tag, so a release is never published from a commit that has not passed it.
+check-reproducible:
+	@set -eu; \
+	test -n "$(RELEASE_TARGETS)" || { echo "no RELEASE_TARGETS to check" >&2; exit 1; }; \
+	sum=$$($(SHA256_CMD)); \
+	test -n "$$sum" || { \
+	  echo "neither sha256sum nor shasum is on PATH, so a rebuild cannot be compared" >&2; \
+	  exit 2; \
+	}; \
+	build_once() { \
+	  rm -rf "$(REPRO_DIR)"; \
+	  SOURCE_DATE_EPOCH="$$1" LC_ALL="$$2" TZ="$$3" $(ZIG) build \
+	    -Dtarget="$$4" -Doptimize=ReleaseSmall \
+	    --cache-dir "$(REPRO_DIR)/cache" -p "$(REPRO_DIR)/out"; \
+	  $$sum "$(REPRO_DIR)/out/bin/microagent" | cut -d' ' -f1; \
+	}; \
+	for target in $(RELEASE_TARGETS); do \
+	  first=$$(build_once 1700000000 C UTC "$$target"); \
+	  second=$$(build_once 1800000000 C.UTF-8 Asia/Tokyo "$$target"); \
+	  if [ "$$first" != "$$second" ]; then \
+	    echo "rebuild of $$target differs: $$first != $$second" >&2; \
+	    exit 1; \
+	  fi; \
+	  echo "$$target rebuilds to $$first"; \
+	done; \
+	rm -rf "$(REPRO_DIR)"
 
 clean:
 	rm -rf zig-out .zig-cache

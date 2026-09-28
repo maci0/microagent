@@ -182,6 +182,14 @@ release, and `microagent update` moves you to it.
   partway, left one `mktemp -d` directory per agent in the system temp directory and the next
   run started with the pile still there. A trap covers the ways out the last line does not
   reach, the way `bench/instructions.sh` already does.
+- A release can no longer be published from a commit whose assets a rebuild would not reproduce.
+  The byte-identical rebuild of every published target ran only in the push workflow, and a tag
+  push matches no branch filter, so a tag cut on a commit no push had covered published binaries
+  nothing had checked for reproducibility. The rebuild is a Makefile target
+  (`make check-reproducible`) that the push workflow and the release workflow both run, and the
+  release workflow's object-format check now reads the published target list from the Makefile
+  instead of naming the four triples a second time, so a target added to the release is checked
+  without a second edit to the workflow.
 - `integrations/harbor/microagent_agent.py` is formatted the way `ruff format` writes it, so the
   `ruff format --check` step that `make lint-python` and CI both run passes. The file had drifted
   from the formatter after the log-formatting change above it, which left `make check` red on a

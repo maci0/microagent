@@ -60,9 +60,9 @@ it then runs, that
 [.github/workflows/ci.yml](.github/workflows/ci.yml) runs, on the same Zig
 version (`make zig-version` is that first step, so a laptop on a different
 compiler is told rather than assumed). Two things it does not stand in for: the
-release-assets cross-build (`make release-assets` runs that, and CI adds a
-byte-identical rebuild of every published target on top of it) and the second
-runner, where the same gate also
+release-assets cross-build (`make release-assets` runs that, and
+`make check-reproducible` adds a byte-identical rebuild of every published
+target on top of it) and the second runner, where the same gate also
 runs on macOS. `make help` lists every target.
 Source is formatted with `zig fmt`; `make fmt` applies it, and `ruff format`
 does the same for the Harbor adapter. The three linters cover what `zig fmt`
@@ -135,6 +135,13 @@ before the tag exists:
 make release-assets TAG=v0.2.0   # the four cross-built assets, in dist/
 make checksums                   # the sha256 sidecars `update` verifies
 ```
+
+`make check-reproducible` rebuilds every published target twice, from a cold
+cache and with a different clock, timezone and locale each time, and refuses a
+target whose two builds differ: a released checksum has to describe a binary a
+rebuild reproduces. The push workflow runs it on every push and the release
+workflow runs it on the tag, so a release is never published from a commit that
+has not passed it.
 
 `make release-assets` empties `dist/` first, so what is there afterwards is the
 one run's assets: the release workflow publishes the glob `dist/microagent-*`,

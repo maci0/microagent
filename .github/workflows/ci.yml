@@ -146,33 +146,9 @@ jobs:
 
       # Two independent builds of the same source must be byte-identical, or a
       # released checksum describes one binary and a rebuild produces another.
-      # Every published target is checked, not one: two of the four assets are
-      # macOS binaries, and a host-specific timestamp or path leaking into a
-      # cross build would pass a gate that only built the Linux asset. The
-      # target list comes from the Makefile, the same one release.yml builds, so
-      # a new target cannot ship without a reproducibility check of its own.
-      # Separate cache and output directories force a real second build rather
-      # than a cache hit, and the clock, timezone and locale are varied so a
-      # timestamp or locale ordering leaking into the binary fails here.
+      # The recipe lives in the Makefile, which owns the published target list,
+      # so this job and release.yml run the same check over the same targets.
       - name: the release build is reproducible
-        run: |
-          set -euo pipefail
-          targets="$(make --no-print-directory release-targets)"
-          test -n "$targets" || { echo "Makefile names no RELEASE_TARGETS to check" >&2; exit 1; }
-          build_once() {
-            SOURCE_DATE_EPOCH="$1" LC_ALL="$2" TZ="$3" zig build \
-              -Dtarget="$4" -Doptimize=ReleaseSmall \
-              --cache-dir "$5" -p "$6"
-            sha256sum "$6/bin/microagent" | cut -d' ' -f1
-          }
-          for target in $targets; do
-            first=$(build_once 1700000000 C UTC "$target" \
-              "$RUNNER_TEMP/cache-a-$target" "$RUNNER_TEMP/out-a-$target")
-            second=$(build_once 1800000000 C.UTF-8 Asia/Tokyo "$target" \
-              "$RUNNER_TEMP/cache-b-$target" "$RUNNER_TEMP/out-b-$target")
-            if [ "$first" != "$second" ]; then
-              echo "rebuild of $target differs: $first != $second" >&2
-              exit 1
-            fi
-            echo "$target rebuilds to $first"
-          done
+        env:
+          REPRO_DIR: ${{ runner.temp }}/microagent-repro
+        run: make check-reproducible

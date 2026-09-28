@@ -25,7 +25,10 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # The cross build of every published target, the two independent builds of
+    # each that the reproducibility check makes, and the gate itself, so the
+    # ceiling has to cover more than the compile work it used to do.
+    timeout-minutes: 45
     permissions:
       contents: write
     steps:
@@ -83,7 +86,9 @@ jobs:
           # the host one can be run here, so the other three are checked by the
           # format their target names. A cross build that produced the wrong
           # object, or an empty one, used to publish and fail on a user's
-          # machine instead of here.
+          # machine instead of here. The list is the Makefile's, the same one
+          # `make release-assets` built above, so a target added to the release
+          # is checked here without a second edit to this workflow.
           check_format() {
             local asset="$1" want="$2" got
             got="$(od -An -tx1 -N4 "$asset" | tr -d ' \n')"
@@ -92,14 +97,30 @@ jobs:
               exit 1
             fi
           }
-          for target in x86_64-linux-musl aarch64-linux-musl x86_64-macos aarch64-macos; do
+          # Read into a variable and refused when empty: an empty list would
+          # leave the loop below unrun and this step green, which is the one
+          # outcome it exists to prevent.
+          targets="$(make --no-print-directory release-targets)"
+          test -n "$targets" || { echo "the Makefile names no published targets to check" >&2; exit 1; }
+          for target in $targets; do
             case "$target" in
               *-linux-musl) magic=7f454c46 ;;
-              *) magic=cffaedfe ;;
+              *-macos) magic=cffaedfe ;;
+              *) echo "no expected object format known for ${target}" >&2; exit 1 ;;
             esac
             check_format "dist/microagent-${GITHUB_REF_NAME}-${target}" "$magic"
           done
           ls -l dist
+
+      # A tag push matches no branch filter in ci.yml, so the release-assets
+      # job's byte-identical rebuild has not run on this commit unless a push
+      # happened to cover it. It is the same Makefile target that job runs, so
+      # a release is never published from a commit whose assets a rebuild would
+      # not reproduce.
+      - name: the release build is reproducible
+        env:
+          REPRO_DIR: ${{ runner.temp }}/microagent-repro
+        run: make check-reproducible
 
       - name: the changelog has an entry for this tag
         run: |
