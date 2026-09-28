@@ -1485,13 +1485,17 @@ fn applyDeclared(
     const delta = choice.delta orelse return true;
 
     if (delta.content) |text| {
-        const kept = chat_mod.clamp(text, max_response_bytes -| result.content.items.len);
+        const kept = chat_mod.clamp(text, max_response_bytes -| result.streamed);
         try result.content.appendSlice(gpa, kept);
         try out_buf.appendSlice(gpa, kept);
+        result.streamed += kept.len;
     }
     if (delta.tool_calls) |tcs| {
         for (tcs) |tc| {
-            const idx: usize = @intCast(chat_mod.num(tc.index));
+            // `numCount` clamps rather than casting: a provider index beyond
+            // what a `usize` holds saturates, so the cap below sees it and
+            // drops the call instead of the cast trapping or wrapping.
+            const idx = chat_mod.numCount(tc.index);
             // The index sizes `calls`, so a provider-sent index is capped
             // before it can ask for billions of empty slots.
             if (idx >= max_tool_calls) continue;
@@ -1514,7 +1518,9 @@ fn applyDeclared(
                     call.name = owned;
                 }
                 if (f.arguments) |v| {
-                    try call.args.appendSlice(gpa, chat_mod.clamp(v, max_response_bytes -| call.args.items.len));
+                    const kept = chat_mod.clamp(v, max_response_bytes -| result.streamed);
+                    try call.args.appendSlice(gpa, kept);
+                    result.streamed += kept.len;
                 }
             }
         }
@@ -1581,15 +1587,18 @@ fn applyFrame(
     if (delta != .object) return;
 
     if (chat_mod.str(delta.object.get("content"))) |text| {
-        if (result.content.items.len < max_response_bytes) {
-            try result.content.appendSlice(gpa, text);
-            try out_buf.appendSlice(gpa, text);
-        }
+        const kept = chat_mod.clamp(text, max_response_bytes -| result.streamed);
+        try result.content.appendSlice(gpa, kept);
+        try out_buf.appendSlice(gpa, kept);
+        result.streamed += kept.len;
     }
     if (delta.object.get("tool_calls")) |tcs| if (tcs == .array) {
         for (tcs.array.items) |tc| {
             if (tc != .object) continue;
-            const idx: usize = @intCast(chat_mod.num(tc.object.get("index")));
+            // `numCount` clamps rather than casting: a provider index beyond
+            // what a `usize` holds saturates, so the cap below sees it and
+            // drops the call instead of the cast trapping or wrapping.
+            const idx = chat_mod.numCount(tc.object.get("index"));
             // The index sizes `calls`, so a provider-sent index is capped
             // before it can ask for billions of empty slots.
             if (idx >= max_tool_calls) continue;
@@ -1612,7 +1621,9 @@ fn applyFrame(
                     call.name = owned;
                 }
                 if (chat_mod.str(f.object.get("arguments"))) |v| {
-                    if (call.args.items.len < max_response_bytes) try call.args.appendSlice(gpa, v);
+                    const kept = chat_mod.clamp(v, max_response_bytes -| result.streamed);
+                    try call.args.appendSlice(gpa, kept);
+                    result.streamed += kept.len;
                 }
             };
         }
@@ -2363,6 +2374,9 @@ test "a response that never stops sending cannot grow the run without bound" {
     var full: std.ArrayList(u8) = .empty;
     try full.appendNTimes(gpa, 'x', max_response_bytes);
     result.content = full;
+    // The response has already spent its allowance, which is what a full
+    // content buffer means: the counter and the bytes are one state, not two.
+    result.streamed = max_response_bytes;
     var calls: std.ArrayList(chat_mod.ToolCall) = .empty;
     var out_buf: std.ArrayList(u8) = .empty;
     var unparsable: usize = 0;
@@ -2372,7 +2386,38 @@ test "a response that never stops sending cannot grow the run without bound" {
     try std.testing.expectEqual(max_response_bytes, result.content.items.len);
     try std.testing.expectEqual(@as(usize, 0), out_buf.items.len);
     try std.testing.expectEqualStrings("bash", calls.items[0].name);
-    try std.testing.expectEqualStrings("{}", calls.items[0].args.items);
+    // The response has nothing left for arguments, so the call the provider
+    // named arrives without them rather than on top of a full allowance.
+    try std.testing.expectEqual(@as(usize, 0), calls.items[0].args.items.len);
+    try std.testing.expectEqual(max_response_bytes, result.streamed);
+}
+
+// The ceiling is on the response, not on each of the streams in it. A provider
+// that spends the whole allowance on one call's arguments must not be able to
+// spend it again on the next of the `max_tool_calls` calls, which is a gigabyte
+// held for a single turn.
+test "the response ceiling covers the calls as well as the text" {
+    var sink = FrameSink.init(std.testing.allocator);
+    defer sink.deinit();
+
+    // Text that takes the response to the ceiling, then a tool call whose
+    // arguments arrive after it.
+    sink.result.streamed = max_response_bytes - "kept".len;
+    try sink.feed("{\"choices\":[{\"delta\":{\"content\":\"kept\"}}]}");
+    try std.testing.expectEqualStrings("kept", sink.result.content.items);
+    try std.testing.expectEqual(max_response_bytes, sink.result.streamed);
+
+    // What arrived after the ceiling is dropped, and the frame's other fields
+    // still land: the model is told the call was made, not that it was not.
+    try sink.feed("{\"choices\":[{\"delta\":{\"content\":\"dropped\"}}]}");
+    try std.testing.expectEqualStrings("kept", sink.result.content.items);
+    try std.testing.expectEqual(max_response_bytes, sink.result.streamed);
+
+    try sink.feed("{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"bash\",\"arguments\":\"xxxxxxxx\"}}]}}]}");
+    try std.testing.expectEqual(@as(usize, 1), sink.calls.items.len);
+    try std.testing.expectEqualStrings("bash", sink.calls.items[0].name);
+    try std.testing.expectEqual(@as(usize, 0), sink.calls.items[0].args.items.len);
+    try std.testing.expectEqual(max_response_bytes, sink.result.streamed);
 }
 
 // The ceiling is a limit on what a turn holds, so the last delta that crosses
@@ -3465,4 +3510,59 @@ test "a response releases the copies it made of a tool call" {
 
     // The testing allocator reports the copies the response kept past deinit.
     result.deinit(gpa);
+}
+
+// The rename that puts a rewritten file in place brings the temporary file's
+// mode with it, so a 0o600 file the run never asked to change comes back 0o644
+// and a secret the repository kept private becomes readable by everyone on the
+// machine.
+test "an atomic write keeps the mode the destination already had" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "secret", .data = "old" });
+    try tmp.dir.setFilePermissions(io, "secret", Io.File.Permissions.fromMode(0o600), .{});
+    try tool_mod.writeFileAtomic(io, tmp.dir, arena, "secret", "new");
+
+    try std.testing.expectEqualStrings("new", try tmp.dir.readFileAlloc(io, "secret", arena, .limited(64)));
+    const stat = try tmp.dir.statFile(io, "secret", .{});
+    try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), stat.permissions.toMode() & tool_mod.permission_bits);
+
+    // A file that is not there yet is created with the default mode, so the
+    // helper does not need a caller to say what a new file should be.
+    try tool_mod.writeFileAtomic(io, tmp.dir, arena, "fresh", "content");
+    try std.testing.expectEqualStrings("content", try tmp.dir.readFileAlloc(io, "fresh", arena, .limited(64)));
+}
+
+// A rename replaces the name it is given, so writing over a symlink without
+// following it leaves a regular file where the link was and the file the link
+// named exactly as it was.
+test "an atomic write follows a symlink to the file it names" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "real", .data = "old" });
+    try tmp.dir.symLink(io, "real", "link", .{});
+    try tool_mod.writeFileAtomic(io, tmp.dir, arena, "link", "new");
+
+    try std.testing.expectEqualStrings("new", try tmp.dir.readFileAlloc(io, "real", arena, .limited(64)));
+    // The link is still a link: a run that resolves paths from the repository
+    // has not gained a second copy of every file it wrote through one.
+    var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.readLink(io, "link", &link_buf);
+    try std.testing.expectEqualStrings("real", link_buf[0..n]);
 }

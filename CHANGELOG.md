@@ -126,6 +126,17 @@ release, and `microagent update` moves you to it.
   or `$HOME/.secrets/openrouter` shipped a live key to a third party and kept shipping it for the
   rest of the run. The refusal names the file and says what to do instead; the system prompt tells
   the model not to ask for one. `bash` still reaches any file.
+- `write` and `edit` replace the file they change instead of truncating it. `Dir.writeFile`
+  opens the destination with `O_TRUNC` and writes into it, so a full disk, a signal or a limit
+  part way through left the model reading a source file shorter than it was, with the bytes
+  that were there gone. The bytes now go to a temporary file beside the destination and a
+  rename puts them in place, the way `update` already replaced the binary. A symlink is
+  followed to the file it names, so writing through one does not turn the link into a regular
+  file, and the destination's own mode is carried over rather than reset by the rename.
+- The `max_response_bytes` ceiling is per response rather than per stream. It was applied to
+  the visible text and to each call's arguments separately, so a provider that streamed the
+  full allowance for each of `max_tool_calls` calls could hold a gigabyte in one turn. One
+  counter now covers the whole response.
 - The session store prunes the logs a re-run wrote beside the first. A run that read the same
   clock stamp opened its log under a `<unix-ns>-N.jsonl` name rather than truncating the one
   already there, and the pruner only recognised `<unix-ns>.jsonl`, so on a machine whose clock

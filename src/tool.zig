@@ -398,10 +398,73 @@ fn toolRead(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
 fn toolWrite(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     const path = chat.str(args.get("path")) orelse return std.fmt.allocPrint(arena, "error: missing path", .{});
     const content = chat.str(args.get("content")) orelse "";
-    if (std.fs.path.dirname(path)) |dir| std.Io.Dir.cwd().createDirPath(io, dir) catch {};
-    std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = content }) catch |err|
+    writeFileAtomic(io, std.Io.Dir.cwd(), arena, path, content) catch |err|
         return std.fmt.allocPrint(arena, "error: cannot write {s}: {s}", .{ path, @errorName(err) });
     return std.fmt.allocPrint(arena, "wrote {d} bytes to {s}", .{ content.len, path });
+}
+
+/// The permission bits of a mode: the setuid, setgid and sticky bits with the
+/// nine `rwx` ones. A rename carries the temporary file's mode to the
+/// destination, so this is what decides what a rewritten file comes back as.
+pub const permission_bits: std.posix.mode_t = 0o7777;
+
+/// The file `path` names once a symlink is followed, which is the file opening
+/// `path` would have written to and the only one a rename may replace. The
+/// link's own bytes land in `buf`, which belongs to the caller because the
+/// answer is a slice of it.
+fn resolveWriteTarget(
+    io: Io,
+    dir: std.Io.Dir,
+    arena: std.mem.Allocator,
+    path: []const u8,
+    buf: []u8,
+) ![]const u8 {
+    const n = dir.readLink(io, path, buf) catch |err| switch (err) {
+        error.NotLink, error.FileNotFound => return path,
+        else => |e| return e,
+    };
+    const link = buf[0..n];
+    if (link.len == 0 or link[0] == '/') return link;
+    const dir_end = std.mem.findScalarLast(u8, path, '/') orelse return link;
+    return std.fmt.allocPrint(arena, "{s}/{s}", .{ path[0..dir_end], link });
+}
+
+/// Writes `bytes` over `path` so a write that does not finish cannot leave half
+/// a file where a whole one was.
+///
+/// `Dir.writeFile` opens the destination truncating and then writes into it, so
+/// a full disk, a signal or a limit part way through leaves the model reading
+/// a source file that is now shorter than it was, with the bytes that were
+/// there gone and no copy of them anywhere. The bytes go to a temporary file
+/// beside the destination and a rename puts them in place, so a reader sees
+/// either the old file whole or the new one whole. `microagent update` already
+/// replaces the binary this way; the two tools that edit a user's files were
+/// the one place that did not.
+///
+/// A rename replaces the name it is given, so a symlink would become a regular
+/// file and the tree would gain one, so the link is followed first. The mode
+/// the destination already has is carried over, because the rename brings the
+/// temporary file's mode with it and a 0o600 file that comes back 0o644 is a
+/// change the run was never asked to make.
+pub fn writeFileAtomic(io: Io, dir: std.Io.Dir, arena: std.mem.Allocator, path: []const u8, bytes: []const u8) !void {
+    var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const target = try resolveWriteTarget(io, dir, arena, path, &link_buf);
+    // Only the permission bits: the stat also carries the file type, and a
+    // create mode is a permission set.
+    const permissions: Io.File.Permissions = if (dir.statFile(io, target, .{})) |stat|
+        .fromMode(stat.permissions.toMode() & permission_bits)
+    else |err| switch (err) {
+        error.FileNotFound => .default_file,
+        else => |e| return e,
+    };
+    var af = try dir.createFileAtomic(io, target, .{
+        .replace = true,
+        .make_path = true,
+        .permissions = permissions,
+    });
+    defer af.deinit(io);
+    try af.file.writeStreamingAll(io, bytes);
+    try af.replace(io);
 }
 
 fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
@@ -428,7 +491,7 @@ fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
         rest = rest[at + old.len ..];
     }
     try buf.appendSlice(arena, rest);
-    std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = buf.items }) catch |err|
+    writeFileAtomic(io, std.Io.Dir.cwd(), arena, path, buf.items) catch |err|
         return std.fmt.allocPrint(arena, "error: cannot write {s}: {s}", .{ path, @errorName(err) });
     return std.fmt.allocPrint(arena, "replaced {d} occurrence(s) in {s}", .{ count, path });
 }

@@ -63,6 +63,13 @@ pub const ChatResult = struct {
     /// matters: it means the response was cut at `max_tokens`, so the turn is a
     /// prefix of what the model meant to say.
     finish_reason: []u8 = &.{},
+    /// Bytes this one response has added to the run: the visible text and every
+    /// call's arguments together. `max_response_bytes` bounds a response, not
+    /// each stream in it, and the streams are not one: a provider that streams
+    /// the full allowance of arguments for each of `max_tool_calls` calls holds
+    /// a gigabyte of a single turn in memory, which is a ceiling the run
+    /// documented and did not have.
+    streamed: usize = 0,
 
     pub fn deinitFinish(self: *ChatResult, gpa: std.mem.Allocator) void {
         if (!std.mem.eql(u8, self.finish_reason, &.{})) gpa.free(self.finish_reason);
