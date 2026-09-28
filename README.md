@@ -269,7 +269,7 @@ Seven tools, all of them thin wrappers over tools you already have:
 
 | tool | what it does |
 | --- | --- |
-| `bash` | `/bin/sh -c`, 120 s default timeout (600 s ceiling on what the model may ask for), output capped at 24 KB |
+| `bash` | `/bin/sh -c`, 120 s default timeout (600 s ceiling on what the model may ask for), output capped at 24 KB; a command naming a credentials file is refused, and the child does not inherit the provider key |
 | `read` | read a file, optional line offset/limit; refuses credentials (`.env`, key and keystore files, anything under `.secrets` or `.ssh`) |
 | `write` | create or overwrite a file, parents created; refuses a call with no `content` |
 | `edit` | exact string replacement, refuses an ambiguous match unless `replace_all` |
@@ -291,10 +291,13 @@ request: without it a model that fails to stop is billed until something else st
 A credential is the one thing a `read` refuses. Its result goes into the conversation, and the
 conversation is re-sent to the provider on every turn after it, so a `read` of `.env`, a `.pem`,
 an `id_ed25519` or `$HOME/.secrets/openrouter` would ship a key to a third party and keep
-shipping it. `search` and `ast` leave the same files out of their results and `git` refuses one
-named as a path, because a match or a patch is a tool result too. The model is told not to ask
-for one and told what to do instead; `bash` still reaches any file, which is where a human at the
-keyboard would go.
+shipping it. `search` and `ast` leave the same files out of their results, `git` refuses one
+named as a path, and `bash` refuses a command whose words name one, because a match, a patch
+and a `cat` are all tool results. The run's own API key is the other half, and it is closed
+structurally: every tool subprocess gets the environment minus the four variables the key is
+read from, so `bash: env` and `bash: printenv` have nothing to print. What is left is the name
+rule itself: a credential the tables do not recognize, and a path a command assembles at run
+time, are still read.
 
 A transient failure — 429, any 5xx, a connection that dies before the request reached the provider —
 is retried twice with 1 s and 2 s of backoff before the run exits non-zero, so a provider's bad

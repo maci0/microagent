@@ -230,7 +230,12 @@ pub fn main(init: std.process.Init) !void {
         try std.fmt.allocPrint(init.arena.allocator(), "{s}\n\n{s}", .{ system_prompt, reply_style });
     try openConversation(gpa, &msgs, prompt, opts.prompt);
 
-    run(&client, io, gpa, init.arena.allocator(), opts, &msgs) catch |err| {
+    // Built once for the run: a tool subprocess is spawned once per call, and
+    // each one would otherwise inherit the provider key.
+    var tool_env = try childEnviron(gpa, init.environ_map);
+    defer tool_env.deinit();
+
+    run(&client, io, gpa, init.arena.allocator(), opts, &msgs, &tool_env) catch |err| {
         // The endpoint is the one thing every failure below shares, and it is
         // not in the error: a DNS failure, a refused connection and a truncated
         // stream all arrive here as a bare name.
@@ -696,6 +701,34 @@ fn resolveKey(io: Io, init: std.process.Init, given: []const u8) Key {
 /// them: the project's own variable first, then the provider's.
 const key_vars = [_][]const u8{ "MICROAGENT_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY" };
 
+/// The environment every tool subprocess runs under: this process's, less the
+/// provider credential.
+///
+/// A tool's output is a tool message, and a tool message is re-sent to the
+/// provider on every later turn of the run. So `bash: env` or `bash:
+/// printenv` under an inherited environment did not print a variable, it put
+/// the run's API key in the transcript, on the wire, for the rest of the run.
+/// Removing the key from what the child can see closes that without trying to
+/// parse a shell to work out which of its commands print an environment, which
+/// no name check can do reliably.
+///
+/// Everything else is inherited. A build tool that needs `PATH`, `HOME` or a
+/// CI variable set in the caller's shell has to keep working, so the copy is
+/// the whole map minus the four names `resolveKey` reads.
+fn childEnviron(gpa: std.mem.Allocator, env: *const std.process.Environ.Map) !std.process.Environ.Map {
+    var copy: std.process.Environ.Map = .init(gpa);
+    errdefer copy.deinit();
+    var it = env.iterator();
+    while (it.next()) |entry| {
+        var skip = false;
+        for (key_vars) |name| {
+            if (std.mem.eql(u8, entry.key_ptr.*, name)) skip = true;
+        }
+        if (!skip) try copy.put(entry.key_ptr.*, entry.value_ptr.*);
+    }
+    return copy;
+}
+
 /// The reply-style levels for this run and the file they were read from, the
 /// latter for the trace: precedence here spans three sources, so a level on its
 /// own cannot say whether a file, a variable or a built-in default set it.
@@ -904,6 +937,7 @@ fn run(
     arena: std.mem.Allocator,
     opts: Options,
     msgs: *std.ArrayList(u8),
+    tool_env: *const std.process.Environ.Map,
 ) !void {
     const started = Io.Timestamp.now(io, .awake).nanoseconds;
     const budget = Budget.of(started, opts.budget_s);
@@ -930,7 +964,7 @@ fn run(
             // with a small diff, and the model has already done the reading.
             net.note(io, arena, "microagent: budget of {d}s reached after {d} turn(s); one final turn\n", .{ opts.budget_s.?, turn });
             try appendMessage(gpa, msgs, "user", final_push);
-            _ = try runTurn(client, io, turn_arena, gpa, opts, msgs, &session, &usage, budget.withGraceNs(final_push_grace_s));
+            _ = try runTurn(client, io, turn_arena, gpa, opts, msgs, &session, &usage, budget.withGraceNs(final_push_grace_s), tool_env);
             return;
         }
         // The ceiling is announced on the turn it applies to, before it is
@@ -940,7 +974,7 @@ fn run(
             net.note(io, arena, "microagent: last turn (--max-turns {d})\n", .{opts.max_turns});
         try compactMessages(io, gpa, msgs, turn_arena, &compaction_floor);
         // The model stopped asking for tools, so the run is over.
-        if (!try runTurn(client, io, turn_arena, gpa, opts, msgs, &session, &usage, budget)) return;
+        if (!try runTurn(client, io, turn_arena, gpa, opts, msgs, &session, &usage, budget, tool_env)) return;
     }
     net.note(io, arena, "microagent: stopped at the --max-turns ceiling ({d})\n", .{opts.max_turns});
 }
@@ -959,6 +993,7 @@ fn runTurn(
     session: *?session_mod.Session,
     usage: *chat_mod.Usage,
     budget: Budget,
+    tool_env: *const std.process.Environ.Map,
 ) !bool {
     const body = try buildBody(arena, opts, msgs.items);
     const asked = Io.Timestamp.now(io, .awake).nanoseconds;
@@ -974,7 +1009,7 @@ fn runTurn(
     // the record says how long the model generated, and a gap that spans the
     // tools would report a rate for a generation that was never continuous.
     const model_ms = session_mod.elapsedMs(io, asked);
-    try finishTurn(io, arena, gpa, msgs, &result, usage, budget);
+    try finishTurn(io, arena, gpa, msgs, &result, usage, budget, tool_env);
     session_mod.writeRecord(io, arena, session, model_ms, &result);
     return result.calls.items.len != 0;
 }
@@ -1684,6 +1719,7 @@ fn finishTurn(
     result: *chat_mod.ChatResult,
     usage: *chat_mod.Usage,
     budget: Budget,
+    tool_env: *const std.process.Environ.Map,
 ) !void {
     try msgs.appendSlice(gpa, ",");
     try msgs.appendSlice(gpa, try assistantMessage(arena, result));
@@ -1700,7 +1736,7 @@ fn finishTurn(
         const output = if (budget.expired(io))
             try std.fmt.allocPrint(arena, "error: not run, the run's time budget is exhausted", .{})
         else
-            tool_mod.runTool(io, arena, call, ceiling_ms) catch |err|
+            tool_mod.runTool(io, arena, call, ceiling_ms, tool_env) catch |err|
                 // A tool that fails outright (rather than reporting its own
                 // failure as text) is named here, so a result reading
                 // `error: OutOfMemory` says which of the calls ran out.
@@ -3792,4 +3828,38 @@ test "an atomic write follows a symlink to the file it names" {
     var link_buf: [std.fs.max_path_bytes]u8 = undefined;
     const n = try tmp.dir.readLink(io, "link", &link_buf);
     try std.testing.expectEqualStrings("real", link_buf[0..n]);
+}
+
+// The provider key is in this process's environment, and a tool result is
+// re-sent to the provider on every later turn of a run. So a subprocess that
+// inherited it turned `bash: printenv` into the key, on the wire, for the rest
+// of the run. The scrub happens once, before the first turn, and everything
+// else the caller's shell exported still reaches the tools.
+test "the tool environment is this one less the provider key" {
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("PATH", "/usr/bin");
+    try env.put("HOME", "/home/agent");
+    try env.put("CI", "1");
+    for (key_vars) |name| try env.put(name, "sk-live-not-a-real-key");
+
+    var scrubbed = try childEnviron(std.testing.allocator, &env);
+    defer scrubbed.deinit();
+
+    for (key_vars) |name| {
+        try std.testing.expectEqual(@as(?[]const u8, null), scrubbed.get(name));
+    }
+    // The rest is inherited, because a build that needs PATH or a CI variable
+    // set in the caller's shell has to keep working.
+    try std.testing.expectEqualStrings("/usr/bin", scrubbed.get("PATH").?);
+    try std.testing.expectEqualStrings("/home/agent", scrubbed.get("HOME").?);
+    try std.testing.expectEqualStrings("1", scrubbed.get("CI").?);
+
+    // A name that only reads like a key is not a key variable and stays.
+    var with_lookalike: std.process.Environ.Map = .init(std.testing.allocator);
+    defer with_lookalike.deinit();
+    try with_lookalike.put("MY_API_KEY", "not-a-provider-key");
+    var kept = try childEnviron(std.testing.allocator, &with_lookalike);
+    defer kept.deinit();
+    try std.testing.expectEqualStrings("not-a-provider-key", kept.get("MY_API_KEY").?);
 }

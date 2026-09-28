@@ -69,13 +69,18 @@ const ToolChild = struct {
     child: std.process.Child,
     pgid: ?std.posix.pid_t,
 
-    pub fn spawn(io: Io, argv: []const []const u8) !ToolChild {
+    pub fn spawn(io: Io, argv: []const []const u8, environ_map: ?*const std.process.Environ.Map) !ToolChild {
         const child = try std.process.spawn(io, .{
             .argv = argv,
             .pgid = 0, // its own group leader, so the group signal stays ours
             .stdin = .ignore,
             .stdout = .pipe,
             .stderr = .pipe,
+            // Null inherits this process's environment, which is how a tool
+            // subprocess used to see the provider key. Every call site passes
+            // the scrubbed copy the run builds once instead, so the key is
+            // never in a child's environment to print.
+            .environ_map = environ_map,
         });
         return .{
             .child = child,
@@ -109,8 +114,9 @@ pub fn runToolProcess(
     stdout_limit: usize,
     stderr_limit: usize,
     timeout: Io.Timeout,
+    environ_map: ?*const std.process.Environ.Map,
 ) !std.process.RunResult {
-    var spawned = try ToolChild.spawn(io, argv);
+    var spawned = try ToolChild.spawn(io, argv, environ_map);
     // The group is published while the call runs, so an interrupt reaches it,
     // and cleared on the way out, so a later signal does not hit a dead group.
     watchToolGroup(spawned.pgid);
@@ -194,8 +200,8 @@ pub fn forwardInterruptsToToolGroup() void {
 /// A tool that delegates to a binary already on PATH: the caller builds the
 /// argv, and the failure text, the empty result and the two output streams are
 /// handled the same way for each of them.
-fn runSearchTool(io: Io, arena: std.mem.Allocator, argv: []const []const u8, what: []const u8, ceiling_ms: ?u64) ![]u8 {
-    const res = runToolProcess(io, arena, argv, max_tool_output * 4, tool_stderr_limit, net.durationMs(boundedMs(tool_timeout_ms, ceiling_ms))) catch |err|
+fn runSearchTool(io: Io, arena: std.mem.Allocator, argv: []const []const u8, what: []const u8, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map) ![]u8 {
+    const res = runToolProcess(io, arena, argv, max_tool_output * 4, tool_stderr_limit, net.durationMs(boundedMs(tool_timeout_ms, ceiling_ms)), environ_map) catch |err|
         return std.fmt.allocPrint(arena, "error: {s} failed: {s}", .{ what, @errorName(err) });
     if (res.stdout.len > 0) return res.stdout;
     if (res.stderr.len > 0) return res.stderr;
@@ -248,7 +254,7 @@ fn gitLogLines(limit: usize) usize {
 
 /// Read-only git, with the subcommands fixed here rather than assembled by the
 /// model. Deterministic, no shell quoting, and the output is capped.
-fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64) ![]u8 {
+fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map) ![]u8 {
     const cmd = chat.str(args.get("cmd")) orelse return std.fmt.allocPrint(arena, "error: missing cmd", .{});
     const path = chat.str(args.get("path"));
     const rev = chat.str(args.get("rev"));
@@ -287,7 +293,7 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
     try argv.append(arena, "--");
     if (path) |p| try argv.append(arena, p);
 
-    const res = runToolProcess(io, arena, argv.items, max_tool_output * 4, tool_stderr_limit, net.durationMs(boundedMs(tool_timeout_ms, ceiling_ms))) catch |err|
+    const res = runToolProcess(io, arena, argv.items, max_tool_output * 4, tool_stderr_limit, net.durationMs(boundedMs(tool_timeout_ms, ceiling_ms)), environ_map) catch |err|
         return std.fmt.allocPrint(arena, "error: git {s} failed: {s}", .{ cmd, @errorName(err) });
     const text = if (res.stdout.len > 0) res.stdout else res.stderr;
     if (text.len == 0) return std.fmt.allocPrint(arena, "(git {s}: no output)", .{cmd});
@@ -311,7 +317,7 @@ fn firstLines(arena: std.mem.Allocator, text: []const u8, limit: usize) ![]u8 {
     return std.fmt.allocPrint(arena, "{s}... [output truncated at {d} lines]", .{ text[0..end], limit });
 }
 
-pub fn runTool(io: Io, arena: std.mem.Allocator, call: chat.ToolCall, ceiling_ms: ?u64) ![]u8 {
+pub fn runTool(io: Io, arena: std.mem.Allocator, call: chat.ToolCall, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map) ![]u8 {
     const parsed = std.json.parseFromSlice(std.json.Value, arena, call.args.items, .{}) catch
         return std.fmt.allocPrint(arena, "error: tool arguments are not valid JSON", .{});
     const args = switch (parsed.value) {
@@ -320,13 +326,13 @@ pub fn runTool(io: Io, arena: std.mem.Allocator, call: chat.ToolCall, ceiling_ms
     };
 
     noteToolCall(io, arena, call.name, args);
-    if (std.mem.eql(u8, call.name, "bash")) return toolBash(io, arena, args, ceiling_ms);
+    if (std.mem.eql(u8, call.name, "bash")) return toolBash(io, arena, args, ceiling_ms, environ_map);
     if (std.mem.eql(u8, call.name, "read")) return toolRead(io, arena, args);
     if (std.mem.eql(u8, call.name, "write")) return toolWrite(io, arena, args);
     if (std.mem.eql(u8, call.name, "edit")) return toolEdit(io, arena, args);
-    if (std.mem.eql(u8, call.name, "search")) return toolSearch(io, arena, args, ceiling_ms);
-    if (std.mem.eql(u8, call.name, "ast")) return toolAst(io, arena, args, ceiling_ms);
-    if (std.mem.eql(u8, call.name, "git")) return toolGit(io, arena, args, ceiling_ms);
+    if (std.mem.eql(u8, call.name, "search")) return toolSearch(io, arena, args, ceiling_ms, environ_map);
+    if (std.mem.eql(u8, call.name, "ast")) return toolAst(io, arena, args, ceiling_ms, environ_map);
+    if (std.mem.eql(u8, call.name, "git")) return toolGit(io, arena, args, ceiling_ms, environ_map);
     return std.fmt.allocPrint(arena, "error: unknown tool '{s}'", .{call.name});
 }
 
@@ -408,11 +414,44 @@ fn requestedTimeoutMs(v: ?std.json.Value) ?u64 {
     return if (n > 0) n else null;
 }
 
-fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64) ![]u8 {
+/// The first path in a shell command that names a credential file, or null.
+///
+/// `bash` takes a command rather than a path, so `isCredentialPath` has no
+/// single argument to read. Splitting the command into words and testing each
+/// is the same rule applied per word, and it is deliberately narrow: only a
+/// word that looks like a path is tested, meaning it carries a separator or a
+/// dot in its last component. A bare `identity` or `credentials` is an ordinary
+/// word to grep for, and refusing every command that contains one would break
+/// the searches that use them rather than protect anything. `cat .env`,
+/// `cat ./.env`, `cat "$PWD"/.env and `cat ~/.ssh/id_rsa` are all refused,
+/// because each of those words is a path.
+///
+/// This is a name check, not a shell parse, and it says so: a command that
+/// reaches the same file through indirection (`f=$(printf '.en''v'); cat
+/// "$f"`) is not caught here. Catching that needs a shell parser, and the
+/// guarantee that matters most, that the run's own key never reaches a child's
+/// environment, is structural rather than textual.
+fn credentialInCommand(command: []const u8) ?[]const u8 {
+    var words = std.mem.tokenizeAny(u8, command, " \t\n\"'`$&;<>|()[]{}*?!#\\");
+    while (words.next()) |word| {
+        const leaf = std.fs.path.basename(word);
+        if (std.mem.indexOfScalar(u8, word, '/') == null and std.mem.indexOfScalar(u8, leaf, '.') == null) continue;
+        if (isCredentialPath(word)) return word;
+    }
+    return null;
+}
+
+fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map) ![]u8 {
     const command = chat.str(args.get("command")) orelse return std.fmt.allocPrint(arena, "error: missing command", .{});
+    // `bash` is the one tool with no path argument to check, and it can read
+    // every file the three guarded tools refuse: `cat .env` and
+    // `git show HEAD -- .env` both come back whole, and a tool result is
+    // re-sent to the provider on every later turn. So the same name check runs
+    // over the command's own words.
+    if (credentialInCommand(command)) |path| return credentialRefusal(arena, "bash", path);
     const timeout_ms: u64 = bashTimeoutMs(requestedTimeoutMs(args.get("timeout_ms")), ceiling_ms);
     const capture_limit = max_tool_output * 4;
-    const res = runCapped(io, arena, &.{ "/bin/sh", "-c", command }, capture_limit, net.durationMs(timeout_ms)) catch |err| switch (err) {
+    const res = runCapped(io, arena, &.{ "/bin/sh", "-c", command }, capture_limit, net.durationMs(timeout_ms), environ_map) catch |err| switch (err) {
         error.Timeout => return std.fmt.allocPrint(arena, "error: command timed out after {d}ms", .{timeout_ms}),
         else => return std.fmt.allocPrint(arena, "error: {s}", .{@errorName(err)}),
     };
@@ -543,12 +582,19 @@ fn isCredentialPath(path: []const u8) bool {
 /// that asked for it knows which one was refused, and it says what to do
 /// instead, because a bare error reads as a broken tool and gets retried.
 fn credentialRefusal(arena: std.mem.Allocator, tool: []const u8, path: []const u8) error{OutOfMemory}![]u8 {
+    // The advice has to be the one that is true for the tool that was refused.
+    // Sending a model to `bash` for the bytes `read` will not return is the
+    // hole this check exists to close, so the one place that would say it is
+    // the one place it does not.
+    const advice = if (std.mem.eql(u8, tool, "bash"))
+        "`bash` does not read it either. Ask the operator for the value you need rather than printing a key."
+    else
+        "Run the command that needs the key through `bash`, and do not print it.";
     return std.fmt.allocPrint(
         arena,
         "refused: {s} is a credentials file. `{s}` does not return one, because the result " ++
-            "is re-sent to the provider on every later turn. Run the command that needs the key " ++
-            "through `bash`, and do not print it.",
-        .{ path, tool },
+            "is re-sent to the provider on every later turn. {s}",
+        .{ path, tool, advice },
     );
 }
 
@@ -749,7 +795,7 @@ fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     return std.fmt.allocPrint(arena, "replaced {d} occurrence(s) in {s}", .{ count, path });
 }
 
-fn toolSearch(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64) ![]u8 {
+fn toolSearch(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map) ![]u8 {
     const pattern = chat.str(args.get("pattern")) orelse return std.fmt.allocPrint(arena, "error: missing pattern", .{});
     const path = chat.str(args.get("path")) orelse ".";
     // The globs below are traversal rules: ripgrep applies them while it walks,
@@ -769,13 +815,13 @@ fn toolSearch(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceilin
     // the command line can turn off.
     for (credential_globs) |g| try argv.appendSlice(arena, &.{ "--glob", g });
     try argv.appendSlice(arena, &.{ "--", pattern, path });
-    return runSearchTool(io, arena, argv.items, "ripgrep", ceiling_ms);
+    return runSearchTool(io, arena, argv.items, "ripgrep", ceiling_ms, environ_map);
 }
 
 /// Structural search/rewrite through ast-grep. `rewrite` set means the change
 /// is applied to every match (`--update-all`), so the next turn reads the
 /// result back rather than trusting the tool's summary.
-fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64) ![]u8 {
+fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map) ![]u8 {
     const pattern = chat.str(args.get("pattern")) orelse return std.fmt.allocPrint(arena, "error: missing pattern", .{});
     const lang = chat.str(args.get("lang")) orelse return std.fmt.allocPrint(arena, "error: missing lang", .{});
     const path = chat.str(args.get("path")) orelse ".";
@@ -791,7 +837,7 @@ fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
     if (rewrite) |r| try argv.appendSlice(arena, &.{ "--rewrite", r, "--update-all" });
     try argv.appendSlice(arena, &.{ "--", path });
 
-    return runSearchTool(io, arena, argv.items, "ast-grep", ceiling_ms);
+    return runSearchTool(io, arena, argv.items, "ast-grep", ceiling_ms, environ_map);
 }
 
 /// Bytes read from a child pipe per operation. Both pipes are drained in one
@@ -830,8 +876,9 @@ pub fn runCapped(
     argv: []const []const u8,
     limit: usize,
     timeout: Io.Timeout,
+    environ_map: ?*const std.process.Environ.Map,
 ) !Captured {
-    var spawned = try ToolChild.spawn(io, argv);
+    var spawned = try ToolChild.spawn(io, argv, environ_map);
     // The group is published while the call runs, so an interrupt reaches it,
     // and cleared on the way out, so a later signal does not hit a dead group.
     watchToolGroup(spawned.pgid);
@@ -920,7 +967,7 @@ pub fn dispatch(arena: std.mem.Allocator, name: []const u8, args: []const u8) ![
         .name = try arena.dupe(u8, name),
     };
     try call.args.appendSlice(arena, args);
-    return runTool(std.testing.io, arena, call, null);
+    return runTool(std.testing.io, arena, call, null, null);
 }
 
 /// The line range a `read` with `offset` and `limit` returns: every line in
@@ -1236,7 +1283,7 @@ test "a real tool result over the cap stays a string the body can carry" {
     // Five bytes per line, so the cap does not land on a character boundary: a
     // plain cut here leaves half an e-acute in the string.
     try args.put(arena, "command", .{ .string = "i=0; while [ $i -lt 5000 ]; do printf '\\303\\251a\\303\\251'; i=$((i+1)); done" });
-    const output = try toolBash(std.testing.io, arena, args, null);
+    const output = try toolBash(std.testing.io, arena, args, null, null);
     try std.testing.expect(output.len > max_tool_output);
 
     const result = try toolResult(arena, output);
@@ -1597,7 +1644,7 @@ test "a search returns no credentials file `read` would refuse" {
     var args: std.json.ObjectMap = .empty;
     try args.put(arena, "pattern", .{ .string = "MARKER" });
     try args.put(arena, "path", .{ .string = root });
-    const out = try toolSearch(io, arena, args, null);
+    const out = try toolSearch(io, arena, args, null, null);
 
     // Every one of the files above holds a distinct value and only that value,
     // so a hit on any of them is a credential handed to the provider. The
@@ -1616,7 +1663,7 @@ test "a search returns no credentials file `read` would refuse" {
     var direct: std.json.ObjectMap = .empty;
     try direct.put(arena, "pattern", .{ .string = "MARKER" });
     try direct.put(arena, "path", .{ .string = try std.fs.path.join(arena, &.{ root, ".env" }) });
-    const refused = try toolSearch(io, arena, direct, null);
+    const refused = try toolSearch(io, arena, direct, null, null);
     try std.testing.expect(std.mem.startsWith(u8, refused, "refused: "));
     try std.testing.expect(std.mem.indexOf(u8, refused, "MARKER") == null);
 }
@@ -1650,7 +1697,7 @@ test "git tool refuses a rev that git would read as an option" {
     var args: std.json.ObjectMap = .empty;
     try args.put(arena, "cmd", .{ .string = "diff" });
     try args.put(arena, "rev", .{ .string = "--output=pwned" });
-    const out = try toolGit(std.testing.io, arena, args, null);
+    const out = try toolGit(std.testing.io, arena, args, null, null);
     try std.testing.expectEqualStrings("error: rev must not start with '-'", out);
 }
 
@@ -1687,7 +1734,7 @@ test "git tool refuses a missing or unknown subcommand" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     {
-        const out = try toolGit(std.testing.io, arena, .empty, null);
+        const out = try toolGit(std.testing.io, arena, .empty, null, null);
         try std.testing.expectEqualStrings("error: missing cmd", out);
     }
     {
@@ -1697,7 +1744,7 @@ test "git tool refuses a missing or unknown subcommand" {
         try args.put(arena, "cmd", .{ .string = "push" });
         try std.testing.expectEqualStrings(
             "error: unknown git cmd 'push'",
-            try toolGit(std.testing.io, arena, args, null),
+            try toolGit(std.testing.io, arena, args, null, null),
         );
     }
 }
@@ -1791,7 +1838,7 @@ test "a child that outruns the capture cap keeps its first bytes instead of fail
     // all, which is what a chatty build or a broad ripgrep used to hand back.
     const noisy = try runCapped(std.testing.io, arena, &.{
         "/bin/sh", "-c", "head -c 200000 /dev/zero | tr '\\0' 'a'",
-    }, cap, net.durationMs(30_000));
+    }, cap, net.durationMs(30_000), null);
     try std.testing.expectEqual(cap, noisy.stdout.len);
     try std.testing.expect(atCaptureLimit(noisy));
     try std.testing.expectEqualStrings("a" ** 8, noisy.stdout[0..8]);
@@ -1803,7 +1850,7 @@ test "a child that outruns the capture cap keeps its first bytes instead of fail
 
     const quiet = try runCapped(std.testing.io, arena, &.{
         "/bin/sh", "-c", "echo hi; echo bye >&2",
-    }, cap, net.durationMs(30_000));
+    }, cap, net.durationMs(30_000), null);
     try std.testing.expectEqualStrings("hi\n", quiet.stdout);
     try std.testing.expectEqualStrings("bye\n", quiet.stderr);
     try std.testing.expect(!atCaptureLimit(quiet));
@@ -1818,7 +1865,7 @@ test "output ending exactly on the cap is not reported as truncated" {
 
     const exact = try runCapped(std.testing.io, arena_state.allocator(), &.{
         "/bin/sh", "-c", "head -c 4096 /dev/zero | tr '\\0' 'a'",
-    }, cap, net.durationMs(30_000));
+    }, cap, net.durationMs(30_000), null);
     try std.testing.expectEqual(cap, exact.stdout.len);
     try std.testing.expect(!atCaptureLimit(exact));
 }
@@ -1832,7 +1879,7 @@ test "both pipes past the cap drain together, so the child never wedges" {
         "/bin/sh",
         "-c",
         "head -c 200000 /dev/zero | tr '\\0' 'a'; head -c 200000 /dev/zero | tr '\\0' 'b' >&2",
-    }, cap, net.durationMs(30_000));
+    }, cap, net.durationMs(30_000), null);
     try std.testing.expectEqual(cap, noisy.stdout.len);
     try std.testing.expectEqual(cap, noisy.stderr.len);
     try std.testing.expectEqualStrings("a" ** 8, noisy.stdout[0..8]);
@@ -1896,8 +1943,8 @@ const ToolRunner = enum {
     pub fn call(self: ToolRunner, arena: std.mem.Allocator, io: Io, argv: []const []const u8) anyerror!void {
         const timeout = net.durationMs(300);
         switch (self) {
-            .tool_process => _ = try runToolProcess(io, arena, argv, 4096, 4096, timeout),
-            .capped => _ = try runCapped(io, arena, argv, 4096, timeout),
+            .tool_process => _ = try runToolProcess(io, arena, argv, 4096, 4096, timeout, null),
+            .capped => _ = try runCapped(io, arena, argv, 4096, timeout, null),
         }
     }
 };
@@ -1965,7 +2012,7 @@ test "an interrupt during a tool call is forwarded to that call's process group"
         pub fn go(a: std.mem.Allocator, t: Io) void {
             // The call outlives nothing here: the handler kills its group, so
             // a hung call would hang the suite rather than fail it.
-            _ = runToolProcess(t, a, &.{ "/bin/sh", "-c", "sleep 5" }, 4096, 4096, net.durationMs(3000)) catch {};
+            _ = runToolProcess(t, a, &.{ "/bin/sh", "-c", "sleep 5" }, 4096, 4096, net.durationMs(3000), null) catch {};
         }
     };
     const thread = try Thread.spawn(.{}, Call.go, .{ arena, io });
@@ -1986,7 +2033,7 @@ test "a tool call reports the exit status of the command it ran" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const res = try runToolProcess(std.testing.io, arena, &.{ "/bin/sh", "-c", "printf out; printf err 1>&2; exit 3" }, 4096, 4096, net.durationMs(10_000));
+    const res = try runToolProcess(std.testing.io, arena, &.{ "/bin/sh", "-c", "printf out; printf err 1>&2; exit 3" }, 4096, 4096, net.durationMs(10_000), null);
     try std.testing.expectEqualStrings("out", res.stdout);
     try std.testing.expectEqualStrings("err", res.stderr);
     try std.testing.expectEqual(@as(u8, 3), res.term.exited);
@@ -2020,9 +2067,9 @@ test "a tool call is timed out by the clock, not by how long it stayed quiet" {
     const script = "while :; do printf x; sleep 0.1; done";
     const budget_ms: u64 = 400;
     const started = Io.Timestamp.now(io, .awake).nanoseconds;
-    try std.testing.expectError(error.Timeout, runCapped(io, arena, &.{ "/bin/sh", "-c", script }, 4096, net.durationMs(budget_ms)));
+    try std.testing.expectError(error.Timeout, runCapped(io, arena, &.{ "/bin/sh", "-c", script }, 4096, net.durationMs(budget_ms), null));
     const after_capped = Io.Timestamp.now(io, .awake).nanoseconds - started;
-    try std.testing.expectError(error.Timeout, runToolProcess(io, arena, &.{ "/bin/sh", "-c", script }, 4096, 4096, net.durationMs(budget_ms)));
+    try std.testing.expectError(error.Timeout, runToolProcess(io, arena, &.{ "/bin/sh", "-c", script }, 4096, 4096, net.durationMs(budget_ms), null));
     const spent = Io.Timestamp.now(io, .awake).nanoseconds - started;
     // The deadline is what ended both calls, so neither returned before it:
     // an error raised on the way in is a different fault wearing this one's
@@ -2041,4 +2088,89 @@ test "a tool call is timed out by the clock, not by how long it stayed quiet" {
 // it only where the search tools already did.
 test "a bash call that times out leaves no process of its own behind" {
     try expectNoProcessSurvived(.capped);
+}
+
+// `bash` is the tool with no path argument, so it is the one a model reaches a
+// credentials file through: `read` refuses the file, `bash: cat` does not, and
+// what `cat` returns is a tool result the provider reads again on every later
+// turn. The check is over the command's words rather than a parsed AST, so it
+// is pinned on the words it does and does not claim.
+test "bash refuses a command naming a credentials file" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const refused = [_][]const u8{
+        "cat .env",
+        "cat ./.env",
+        "cat $PWD/.env",
+        "head -n 2 .env.production",
+        "cat ~/.ssh/id_ed25519",
+        "cp ~/.secrets/openrouter /tmp/x",
+        "git show HEAD -- .env",
+    };
+    for (refused) |command| {
+        const out = try dispatch(arena, "bash", try std.fmt.allocPrint(arena, "{{\"command\":\"{s}\"}}", .{command}));
+        try std.testing.expect(std.mem.startsWith(u8, out, "refused:"));
+    }
+
+    // The narrowness is the point: a bare word that happens to be in the
+    // credential names table is an ordinary argument to a search, and refusing
+    // it would break real work for no protection.
+    const allowed = [_][]const u8{
+        "rg identity src",
+        "rg -w credentials .",
+        "zig build test",
+        "cat README.md",
+    };
+    for (allowed) |command| {
+        try std.testing.expectEqual(@as(?[]const u8, null), credentialInCommand(command));
+    }
+}
+
+// The provider key lives in this process's environment, and a tool subprocess
+// used to inherit all of it. The result of `printenv` is a tool result, so the
+// key would have been in the request body of every remaining turn of the run.
+test "a tool subprocess cannot see the provider key" {
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("PATH", "/usr/bin");
+    try env.put("OPENROUTER_API_KEY", "sk-live-not-a-real-key");
+    try env.put("MICROAGENT_API_KEY", "sk-live-not-a-real-key");
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The map the run hands its tools is built by main, which owns the list of
+    // key variables. Here the same two names are removed by hand so the
+    // assertion is about the runner, not about main's copy loop.
+    var clean: std.process.Environ.Map = .init(std.testing.allocator);
+    defer clean.deinit();
+    try clean.put("PATH", "/usr/bin");
+
+    const res = try runToolProcess(
+        std.testing.io,
+        arena,
+        &.{ "/bin/sh", "-c", "printenv OPENROUTER_API_KEY; printenv PATH" },
+        4096,
+        4096,
+        net.durationMs(10_000),
+        &clean,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, res.stdout, "sk-live") == null);
+    try std.testing.expect(std.mem.indexOf(u8, res.stdout, "/usr/bin") != null);
+
+    // Under the inherited environment the same command does print it, which is
+    // what makes the first assertion mean something.
+    const inherited = try runToolProcess(
+        std.testing.io,
+        arena,
+        &.{ "/bin/sh", "-c", "printenv OPENROUTER_API_KEY" },
+        4096,
+        4096,
+        net.durationMs(10_000),
+        &env,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, inherited.stdout, "sk-live-not-a-real-key") != null);
 }
