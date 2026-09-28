@@ -16,18 +16,22 @@ attacker would try.
 ## First decide if this review applies
 
 Apply it when the tree still carries a `THREAT_MODEL.md` with a reference column and the
-sources it names exist: an argument parser, the tool implementations in `src/main.zig`,
-and an update path in `src/update.zig`. Skip the whole review and print the skip result
-if there is no threat model, if the document has no code references to check, or if the
-tree has been reduced to a fragment with no execution surface to model.
+sources it names exist: an argument parser and run loop in `src/main.zig`, the tool
+implementations in `src/tool.zig`, and an update path in `src/update.zig`. Skip the whole
+review and print the skip result if there is no threat model, if the document has no code
+references to check, or if the tree has been reduced to a fragment with no execution
+surface to model.
 
 ## Review the following:
 
 1. **References that no longer resolve.** Every `` `src/file.zig:NNN` `` in the document
-   must name a line that still exists and still holds the thing the row claims. Search for
-   the named function (`parseArgs`, `replaceVerified`, `caBundlePath`, `resolveKey`,
-   `writeGutterText`) and correct the line, because a line number moves on every edit and
-   a function name does not.
+   must name a line that still exists and still holds the thing the row claims. The
+   function named in parentheses after the line is the anchor: search for that name
+   (`parseArgs`, `caBundlePath`, `envValue`, `runTool`, `parseRelease`) and correct the
+   line, because a line number moves on every edit and a function name does not. A few
+   rows name only a line, and a row that does so is repaired the same way: find the
+   enclosing `fn` at that line and give the reference that name, so the next pass has an
+   anchor that a line move cannot invalidate.
 
 2. **Controls claimed where the code has none.** The "Mitigations in the code" table is
    the load-bearing part of the document. For each row, read the named function and

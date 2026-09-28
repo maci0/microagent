@@ -29,9 +29,11 @@ a fragment with no invocation surface to hold a contract.
 1. **Options the parser takes but nothing documents.** Every branch in `parseArgs` in
    `src/main.zig` and in the update argument loop at `src/update.zig` names a flag. Find
    the branches that no line of `help_text` or of the update help text mentions, and the
-   help lines with no branch. Parse branches are written two ways (`isFlag(short, long)`
-   and a direct `std.mem.eql` on the name), so search `isFlag(`, `std.mem.eql(u8, name, "`,
-   and `"--`, and compare the list of names with the help text.
+   help lines with no branch. A branch reaches a flag by one of two routes: the
+   `valued_flags` table, whose `long` and `short` fields are every valued flag, and the
+   `isFlag(name, short, long)` calls for the two switches (`--version`, `--help`). Read
+   the table itself rather than the branch that indexes it, so search `valued_flags`,
+   `valuedFlag(`, `isFlag(`, and `"--`, and compare that list with the help text.
 
 2. **README options that the binary does not take.** The `README.md` "Use" block
    reproduces the flag list. Any flag or env var named there that `parseArgs` and the
@@ -40,11 +42,13 @@ a fragment with no invocation surface to hold a contract.
 
 3. **Precedence that the code and the docs disagree about.** The help states that a flag
    wins over the environment variable for the same option. Trace one option end to end
-   (for example `--max-turns` with `MICROAGENT_MAX_TURNS`, `--ca-bundle` with
-   `MICROAGENT_CA_BUNDLE`) from the parse loop through the run of `envValue` overrides in
-   `main` and the config resolution, and confirm the order in the code is the order the
-   docs promise. Find those overrides by searching `envValue(`, not by line number: they
-   move whenever a variable is added.
+   (for example `--max-turns` with `MICROAGENT_MAX_TURNS`, `--reasoning-effort` with
+   `MICROAGENT_REASONING_EFFORT`) from the parse loop through the run of `envValue`
+   overrides in `main` and the config resolution, and confirm the order in the code is the
+   order the docs promise. Find those overrides by searching `envValue(`, not by line
+   number: they move whenever a variable is added. One option does not come from that
+   run: `--ca-bundle` is filled by `net.caBundlePath`, so a trace that reads only
+   `envValue(` skips the variable the help names beside it.
 
 4. **Empty-string semantics drift.** `help_text` names a specific set of variables that
    keep their default when set to the empty string, and a second set that falls through to
@@ -71,7 +75,7 @@ a fragment with no invocation surface to hold a contract.
    mention of the subcommand for agreement on the flag spellings, including the
    `--repo=OWNER/NAME` form, and on which paths fetch an asset.
 
-8. **Emitted JSON that no document matches.** `usage_fields` in `src/main.zig` fixes
+8. **Emitted JSON that no document matches.** `usage_fields` in `src/chat.zig` fixes
    the order of the five token counters in both the usage line and the per-response usage
    object, and the session log has its own key set. Compare those writers against the
    README and CHANGELOG claims about the log, and against `src/style.zig` for the fields
@@ -79,8 +83,11 @@ a fragment with no invocation surface to hold a contract.
    emitted in a different order than promised, is a defect: a consumer parses this.
 
 9. **Tools the model is offered.** The help and the README call the tool set seven tools.
-   Count the tool schemas actually sent in the request body in `src/main.zig` and flag any
-   count that disagrees with the prose.
+   Read the schemas in the `tools` array the request body is built from in
+   `src/main.zig` and name them one by one; a repo-wide count of the `"type":"function"`
+   literal also matches a test fixture elsewhere in the file, and a count taken that way
+   reports a tool that is not offered. Flag any name the prose does not carry, and any
+   tool the prose carries that the array does not.
 
 10. **Version declared in more than one place.** The CHANGELOG states the version lives in
     `build.zig.zon` and nowhere else. Find every other place a version literal or a
@@ -136,9 +143,10 @@ count of fixes applied and the gate result.
 
 ## Important:
 
-- This review owns the invocation and output contract. Prompt files, skills, agent rule
-  files, PRDs, ADRs, and general prose review belong to their own reviews, and code
-  quality belongs to the standard gate; none of them are in scope here.
+- This review owns the invocation and output contract. The threat model's accuracy
+  belongs to `threat-model-review.md`, prompt files, skills, agent rule files, PRDs, ADRs,
+  and general prose review belong to their own reviews, and code quality belongs to the
+  standard gate; none of them are in scope here.
 - Judge the contract as a caller meets it: what a script, a CI job, or the model harness
   parsing this output will see. Where you are unsure how a caller would read a line, that
   ambiguity is itself the finding.
