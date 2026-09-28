@@ -16,7 +16,7 @@ container on the host's architecture: an arm64 host needs the aarch64 binary,
 and the x86_64 one does not execute there.
 
 The model provider key comes from the host environment ($MICROAGENT_API_KEY,
-else $OPENROUTER_API_KEY, $OPENAI_API_KEY or $DEEPSEEK_API_KEY) and is passed to
+else $OPENAI_API_KEY, $OPENROUTER_API_KEY or $DEEPSEEK_API_KEY) and is passed to
 the container process only, never baked into the image.
 """
 
@@ -134,13 +134,18 @@ def host_ca_bundle() -> Path | None:
 
 
 def api_key() -> str:
-    for name in ("MICROAGENT_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY"):
+    # The binary's own order (`key_vars` in src/main.zig): a host exporting both
+    # OPENAI_API_KEY and OPENROUTER_API_KEY was an OpenRouter key through this
+    # adapter and an OpenAI key on a direct run, so one environment billed two
+    # providers depending on whether the run went into a container. Pinned
+    # against that constant by a test in src/main.zig.
+    for name in ("MICROAGENT_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY"):
         value = trimmed_env(name)
         if value:
             return value
     raise RuntimeError(
         "no model provider key in the host environment: set MICROAGENT_API_KEY, "
-        "OPENROUTER_API_KEY, OPENAI_API_KEY or DEEPSEEK_API_KEY before running harbor"
+        "OPENAI_API_KEY, OPENROUTER_API_KEY or DEEPSEEK_API_KEY before running harbor"
     )
 
 

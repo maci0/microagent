@@ -61,7 +61,7 @@ installs. The command that regenerates it is in the comment at the top of
 
 | variable | effect |
 | --- | --- |
-| `MICROAGENT_API_KEY` / `OPENROUTER_API_KEY` / `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` | provider key, passed to the container process only |
+| `MICROAGENT_API_KEY` / `OPENAI_API_KEY` / `OPENROUTER_API_KEY` / `DEEPSEEK_API_KEY` | provider key, passed to the container process only, read in the order the binary reads it |
 | `MICROAGENT_BASE_URL` | OpenAI-compatible endpoint (default OpenRouter); https, or http on loopback, because the key goes to it in the clear, and a url the binary refuses stops the run here |
 | `MICROAGENT_BUDGET_SECONDS` | elapsed-time budget inside the container, read from the monotonic clock (default 600), capped at `MICROAGENT_AGENT_TIMEOUT_SEC` less 360 s |
 | `MICROAGENT_MAX_TURNS` | `--max-turns` passed to the binary (default 150, above the binary's own 100) |
@@ -83,16 +83,19 @@ naming the variable.
 name itself, so either route ends at the same ceiling.
 
 The budget is the agent's working time, so the adapter takes the smaller of
-`MICROAGENT_BUDGET_SECONDS` and `MICROAGENT_AGENT_TIMEOUT_SEC` less 360 s, with
-a floor of 60 s. The 360 s is the binary's own 300 s grace on the forced final
-push plus a minute for teardown: a run that reaches its budget is allowed to
-keep going for that grace, so a smaller room puts the caller's timeout in the
+`MICROAGENT_BUDGET_SECONDS` and `MICROAGENT_AGENT_TIMEOUT_SEC` less 360 s,
+floored at one second. The 360 s is the binary's own 300 s grace on the forced
+final push plus a minute for teardown: a run that reaches its budget is allowed
+to keep going for that grace, so a smaller room puts the caller's timeout in the
 middle of the last turn. At the defaults the budget stays 600 against the 1500 s
 timeout, since 600 is the smaller. A task timeout of 900 s therefore runs a 540 s
 budget, and `MICROAGENT_BUDGET_SECONDS=1200` under the default timeout is capped
-to 1140. A timeout that leaves no room after the grace, so the budget cannot be
-shorter than it, is refused before the container starts rather than answered with
-a budget the caller's timeout expires inside.
+to 1140. The floor is one second rather than the minute it used to be, because a
+floor that outgrew the timeout handed a 60 s budget to a 30 s timeout: the
+container was killed 30 s in and the run was recorded as an exception rather
+than scored on the tree it had left. A timeout that leaves no room after the
+grace, so the budget cannot be shorter than it, is refused before the container
+starts rather than answered with a budget the caller's timeout expires inside.
 
 A run that still reaches the caller's timeout is scored on the tree it left
 rather than raised: the trial would otherwise be recorded as an exception and

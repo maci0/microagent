@@ -5757,3 +5757,123 @@ test "the tool environment is this one less the credentials" {
     defer kept.deinit();
     try std.testing.expectEqualStrings("not-a-provider-key", kept.get("MY_API_KEY").?);
 }
+
+// The Harbor adapter (`integrations/harbor/microagent_agent.py`) reads the
+// host's environment and hands this binary a subset of it, so it duplicates
+// the configuration this file owns: the order the provider key is read in, the
+// reasoning levels, the default endpoint, the grace the budget is derived
+// against, and the exit code a stopped run leaves. A duplicate is fine; a
+// silent divergence is not, and nothing else in the tree would notice one: the
+// adapter is Python, it never imports this file, and the values it disagrees
+// about are the ones a run is scored on. The key order already drifted once, so
+// a host exporting OPENAI_API_KEY and OPENROUTER_API_KEY together was an
+// OpenAI key on a direct run and an OpenRouter key in the container. The
+// adapter's values are read from its source here, against the constants
+// themselves rather than against a second copy of them.
+test "the harbor adapter mirrors this binary's configuration schema" {
+    const gpa = std.testing.allocator;
+    // The test runs with the build root as its working directory, which is
+    // where the adapter is tracked.
+    const adapter = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, harbor_adapter_path, gpa, .limited(max_harbor_adapter_bytes));
+    defer gpa.free(adapter);
+
+    // The key variables, in the order the loop reads them, and the reasoning
+    // levels in the order they are named. Each name has to appear after the
+    // last one before it, so a reordering is caught and not just a rename.
+    try expectNamesInOrder(adapter, "for name in (", &key_vars);
+    try expectNamesInOrder(adapter, "REASONING_EFFORTS = (", &reasoning_efforts);
+
+    // The scalars the adapter spells as its own constant. Each is a value this
+    // file owns, and a change to one is a change the adapter has to make.
+    try expectSpelled(adapter, "DEFAULT_BASE_URL = " ++ std.fmt.comptimePrint("\"{s}\"", .{default_base_url}));
+    try expectSpelled(adapter, std.fmt.comptimePrint("FINAL_PUSH_GRACE_S = {d}", .{final_push_grace_s}));
+    try expectSpelled(adapter, std.fmt.comptimePrint("INCOMPLETE_EXIT_CODE = {d}", .{exit_incomplete}));
+
+    // The turn ceiling the adapter passes is its own, and deliberately above
+    // the binary's default: a run that asked for more than the binary would
+    // give it is capped there, and the cap the operator chose is the one that
+    // counts. A default that dropped to the binary's own would silently make
+    // the adapter's knob a no-op.
+    const turns = harborNumberAfter(adapter, "DEFAULT_MAX_TURNS = \"") orelse {
+        std.debug.print("\n" ++ harbor_adapter_path ++ ": DEFAULT_MAX_TURNS is not a quoted number\n", .{});
+        return error.TestUnexpectedResult;
+    };
+    if (turns <= max_turns_default) {
+        std.debug.print("\n" ++ harbor_adapter_path ++ ": DEFAULT_MAX_TURNS is {d}, not above the binary's own {d}\n", .{ turns, max_turns_default });
+        return error.TestUnexpectedResult;
+    }
+}
+
+const harbor_adapter_path = "integrations/harbor/microagent_agent.py";
+/// The adapter is a few hundred lines; a bigger file is not the one tracked.
+const max_harbor_adapter_bytes: usize = 128 * 1024;
+
+/// Every one of `names` in the tuple that starts at `anchor`, each after the one
+/// before it, and nowhere outside it. The anchor is the assignment or the loop
+/// header, and the closing parenthesis is the other end, so a name that is only
+/// spelled somewhere else in the file does not satisfy this: the search bounded
+/// to the opening bracket alone ran past a reordered tuple and found the names
+/// in order in the error message below it, which is the one place the file
+/// spells them in the binary's order.
+fn expectNamesInOrder(text: []const u8, anchor: []const u8, names: []const []const u8) !void {
+    const at = std.mem.indexOf(u8, text, anchor) orelse {
+        std.debug.print("\n" ++ harbor_adapter_path ++ ": no '{s}'\n", .{anchor});
+        return error.TestUnexpectedResult;
+    };
+    const after = at + anchor.len;
+    const close = std.mem.indexOfScalarPos(u8, text, after, ')') orelse {
+        std.debug.print("\n" ++ harbor_adapter_path ++ ": '{s}' opens no tuple\n", .{anchor});
+        return error.TestUnexpectedResult;
+    };
+    const tuple = text[after..close];
+    var rest = tuple;
+    for (names) |name| {
+        const found = std.mem.indexOf(u8, rest, name) orelse {
+            std.debug.print("\n" ++ harbor_adapter_path ++ ": '{s}' does not name '{s}' in order\n", .{ anchor, name });
+            return error.TestUnexpectedResult;
+        };
+        rest = rest[found + name.len ..];
+    }
+    // The other direction, which order alone does not catch: a name in the
+    // tuple this build does not have. The adapter promises to refuse a level
+    // the binary would refuse, before a container starts, and a level it lists
+    // and the binary does not have is a value it passes on and the run rejects
+    // there instead. Every quoted word in the tuple has to be one of `names`,
+    // and there have to be no more of them than there are names.
+    var seen: usize = 0;
+    var scan: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, tuple, scan, '"')) |open| {
+        const word_start = open + 1;
+        const word_end = std.mem.indexOfScalarPos(u8, tuple, word_start, '"') orelse break;
+        seen += 1;
+        if (seen > names.len or !hasName(names, tuple[word_start..word_end])) {
+            std.debug.print("\n" ++ harbor_adapter_path ++ ": '{s}' names a value this build does not have\n", .{anchor});
+            return error.TestUnexpectedResult;
+        }
+        scan = word_end + 1;
+    }
+    if (seen != names.len) {
+        std.debug.print("\n" ++ harbor_adapter_path ++ ": '{s}' names {d} values, this build has {d}\n", .{ anchor, seen, names.len });
+        return error.TestUnexpectedResult;
+    }
+}
+
+fn hasName(names: []const []const u8, candidate: []const u8) bool {
+    for (names) |name| if (std.mem.eql(u8, name, candidate)) return true;
+    return false;
+}
+
+/// The whole of `line` present in `text`, spelled exactly.
+fn expectSpelled(text: []const u8, line: []const u8) !void {
+    if (std.mem.indexOf(u8, text, line) != null) return;
+    std.debug.print("\n" ++ harbor_adapter_path ++ ": does not spell '{s}'\n", .{line});
+    return error.TestUnexpectedResult;
+}
+
+/// The number a quoted constant after `anchor` holds.
+fn harborNumberAfter(text: []const u8, anchor: []const u8) ?u64 {
+    const at = std.mem.indexOf(u8, text, anchor) orelse return null;
+    const rest = text[at + anchor.len ..];
+    const end = std.mem.indexOfScalar(u8, rest, '"') orelse return null;
+    return std.fmt.parseInt(u64, rest[0..end], 10) catch null;
+}
