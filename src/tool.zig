@@ -536,27 +536,51 @@ fn toolCallLine(arena: std.mem.Allocator, buf: []u8, name: []const u8, args: std
     );
 }
 
-/// Bytes a terminal acts on rather than prints: the C0 controls, DEL, and the
-/// C1 range, which UTF-8 spells as C2 80..9F. A tool argument is whatever the
-/// model decided to send, and the model decides that from files in the tree, so
-/// a repository can put an escape sequence on the operator's screen through
-/// the gutter line. A diagnostic note shows them as `.`; the model's own output
-/// on stdout is left alone, because that is the answer the run was asked for.
-/// An allocation that fails yields no text rather than the text unescaped,
-/// which is the input this exists to remove.
+/// Bytes a terminal acts on rather than prints: the C0 controls, DEL, the C1
+/// range, which UTF-8 spells as C2 80..9F, and every byte that is not part of a
+/// valid UTF-8 sequence. A tool argument is whatever the model decided to send,
+/// and the model decides that from files in the tree, so a repository can put
+/// an escape sequence on the operator's screen through the gutter line, and a
+/// provider can put a broken byte in an error body. A diagnostic note shows
+/// both as `.`; the model's own output on stdout is left alone, because that is
+/// the answer the run was asked for. An allocation that fails yields no text
+/// rather than the text unescaped, which is the input this exists to remove.
+///
+/// A byte that is not text is shown as a dot rather than written through. The
+/// body is the provider's own bytes, so a lone `0xff`, a continuation byte with
+/// no lead, or the `\xe6\x97` half of a character the cap cut in two reach this
+/// verbatim under a byte-at-a-time pass, and the terminal shows the run's
+/// diagnostic as mojibake. `chat.safeText` writes U+FFFD for the same bytes and
+/// `chat.writeJsonString` does the same in a request body; this keeps the
+/// length the rest of the caller's assertions are written against, and a dot
+/// is what this function already shows for a byte it cannot render. A whole
+/// sequence is copied byte for byte, so the pass is a fixed point: what comes
+/// out has no control and no invalid byte left in it for a second pass to find.
 pub fn terminalSafe(arena: std.mem.Allocator, s: []const u8) []const u8 {
     const out = arena.alloc(u8, s.len) catch return s[0..0];
     var i: usize = 0;
     while (i < s.len) {
         const c = s[i];
-        if (c == 0xc2 and i + 1 < s.len and s[i + 1] >= 0x80 and s[i + 1] <= 0x9f) {
-            out[i] = '.';
-            out[i + 1] = '.';
-            i += 2;
+        if (c < 0x80) {
+            out[i] = if (c < 0x20 or c == 0x7f) '.' else c;
+            i += 1;
             continue;
         }
-        out[i] = if (c < 0x20 or c == 0x7f) '.' else c;
-        i += 1;
+        const len = chat.utf8SequenceLen(s, i);
+        if (len == 0) {
+            out[i] = '.';
+            i += 1;
+            continue;
+        }
+        @memcpy(out[i .. i + len], s[i .. i + len]);
+        // A C1 control is a valid two-byte sequence, so the test above cannot
+        // see it, and the lead byte alone does not say C1: C2 80..9F is the
+        // range, and C2 A0..BF is U+00A0..U+00BF, which is text.
+        if (len == 2 and c == 0xc2 and s[i + 1] <= 0x9f) {
+            out[i] = '.';
+            out[i + 1] = '.';
+        }
+        i += len;
     }
     return out;
 }
@@ -2285,6 +2309,26 @@ test "a tool argument cannot repaint the operator's terminal" {
     const got = terminalSafe(arena, "ls\x1b[2Jrm -rf /\u{009b}31m\x07 caf\u{00e9}");
     try std.testing.expectEqualStrings("ls.[2Jrm -rf /..31m. caf\u{00e9}", got);
     try std.testing.expectEqualStrings("plain text", terminalSafe(arena, "plain text"));
+
+    // Bytes that are not text are dots rather than written through, so an
+    // error body the provider spelled with a broken sequence reaches the
+    // screen as a mark and not as mojibake. Every one of these is a byte a
+    // provider or a cap can really produce: a body that is not UTF-8 at all,
+    // a continuation byte with no lead, the two-byte half of a character the
+    // response cap cut, and the lone lead byte a body ends on.
+    const cases = [_]struct { raw: []const u8, want: []const u8 }{
+        .{ .raw = "\xff\xfe", .want = ".." },
+        .{ .raw = "a\x80b", .want = "a.b" },
+        .{ .raw = "\xe6\x97", .want = ".." },
+        .{ .raw = "\xf0\x9f", .want = ".." },
+        .{ .raw = "rate \xff limit", .want = "rate . limit" },
+        // A whole character is copied, however wide, and the text around an
+        // invalid byte is not moved: the pass is byte for byte.
+        .{ .raw = "caf\u{00e9} \u{65e5}\u{8a00} \u{1f600}", .want = "caf\u{00e9} \u{65e5}\u{8a00} \u{1f600}" },
+        // C2 A0 is U+00A0, which is text, where C2 9B is a control.
+        .{ .raw = "\u{00a0}\u{009b}", .want = "\u{00a0}.." },
+    };
+    inline for (cases) |c| try std.testing.expectEqualStrings(c.want, terminalSafe(arena, c.raw));
 }
 
 // An error body the provider sent is quoted onto the operator's screen, and it
@@ -2339,26 +2383,47 @@ fn fuzzTerminalSafe(_: void, smith: *std.testing.Smith) !void {
     try std.testing.expectEqual(text.len, safe.len);
 
     var i: usize = 0;
-    while (i < safe.len) : (i += 1) {
+    while (i < safe.len) {
         const c = safe[i];
         try std.testing.expect(c >= 0x20 and c != 0x7f);
-        if (c == 0xc2) {
-            try std.testing.expect(i + 1 >= safe.len or safe[i + 1] > 0x9f);
-            i += 1;
-        }
-    }
-
-    // A byte that was already printable is left exactly as it was, so the
-    // provider cannot have text rewritten around a sequence it wanted hidden.
-    i = 0;
-    while (i < text.len) : (i += 1) {
-        const c = text[i];
-        if (c == 0xc2 and i + 1 < text.len and text[i + 1] >= 0x80 and text[i + 1] <= 0x9f) {
+        if (c < 0x80) {
             i += 1;
             continue;
         }
-        if (c < 0x20 or c == 0x7f) continue;
-        try std.testing.expectEqual(c, safe[i]);
+        // Every byte above ASCII left in the result is the whole of a valid
+        // sequence, and none of it is a C1 control, so a body the provider
+        // spelled with a broken sequence has no mojibake on the screen.
+        const len = chat.utf8SequenceLen(safe, i);
+        try std.testing.expect(len > 0);
+        try std.testing.expect(!(len == 2 and c == 0xc2 and safe[i + 1] <= 0x9f));
+        i += len;
+    }
+
+    // A byte that was already text is left exactly as it was, so the provider
+    // cannot have text rewritten around a sequence it wanted hidden. A byte
+    // that was not text is the one thing this pass does replace, and it is
+    // replaced by a dot rather than dropped, so the fields still line up.
+    i = 0;
+    while (i < text.len) {
+        const c = text[i];
+        if (c < 0x80) {
+            if (c >= 0x20 and c != 0x7f) try std.testing.expectEqual(c, safe[i]);
+            i += 1;
+            continue;
+        }
+        const len = chat.utf8SequenceLen(text, i);
+        if (len == 0) {
+            try std.testing.expectEqual('.', safe[i]);
+            i += 1;
+            continue;
+        }
+        if (len == 2 and c == 0xc2 and text[i + 1] <= 0x9f) {
+            try std.testing.expectEqualStrings("..", safe[i..][0..2]);
+            i += len;
+            continue;
+        }
+        try std.testing.expectEqualStrings(text[i..][0..len], safe[i..][0..len]);
+        i += len;
     }
 
     // The result is its own fixed point: a second pass has nothing left to

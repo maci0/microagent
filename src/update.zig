@@ -26,16 +26,20 @@ const max_asset_bytes: usize = 256 * 1024 * 1024;
 /// A value this program does not spell, as the operator can be shown it: cut on
 /// a codepoint boundary (a partial codepoint in a diagnostic reads as a
 /// replacement character in the middle of the name), with every control
-/// character, DEL and C1 control written as its two-character escape.
+/// character, DEL and C1 control written as its two-character escape, and every
+/// byte that is not part of a valid UTF-8 sequence written as U+FFFD.
 ///
-/// Two kinds of value reach it. A `--repo` is whatever the user typed. A tag,
+/// Three kinds of value reach it. A `--repo` is whatever the user typed. A tag,
 /// an asset name and a release page are the release body's own bytes: GitHub
 /// publishes them, but this program treats that body as untrusted everywhere
 /// else (the release and sidecar harnesses read it as exactly that), and a tag
 /// carrying ESC, BEL or a C1 control puts an escape sequence on the operator's
 /// terminal through every line that prints it as written. The tag decides
 /// which version line is printed, and the asset name reaches three messages
-/// about a download that failed.
+/// about a download that failed. An asset url is the same: `trustedGithubUrl`
+/// reads the host and refuses a userinfo and a separator, but everything after
+/// the host is the release body's own bytes, and a path carrying an escape
+/// sequence reached the retry notes as written before it was quoted here.
 fn quoteUntrusted(arena: std.mem.Allocator, text: []const u8) []const u8 {
     return chat.safeText(arena, text, net.quoted_value_bytes);
 }
@@ -543,16 +547,37 @@ const fetch_retry_max_ms: u64 = 30_000;
 /// request at once: a wait that did not happen is not a backoff.
 fn waitBeforeFetchRetry(io: std.Io, arena: std.mem.Allocator, url: []const u8, attempt: u32, err: anyerror) bool {
     const wait = net.retryBackoffMs(attempt, fetch_retry_max_ms);
-    net.note(io, arena, "microagent update: {s} failed ({s}), retrying in {d}ms (attempt {d}/{d})\n", .{
-        url, @errorName(err), wait, attempt + 1, max_fetch_attempts,
-    });
+    net.writeErr(io, retryLine(arena, url, err, wait, attempt));
     io.sleep(.{ .nanoseconds = wait *| std.time.ns_per_ms }, .awake) catch |sleep_err| {
-        net.note(io, arena, "microagent update: the {d}ms wait before that attempt to {s} could not be taken ({s}); the update is abandoned rather than retried at once\n", .{
-            wait, url, @errorName(sleep_err),
-        });
+        net.writeErr(io, waitLine(arena, url, wait, sleep_err));
         return false;
     };
     return true;
+}
+
+/// The line a fetch that is about to be tried again prints, as the bytes
+/// themselves rather than through `net.note`, so the escaping is something a
+/// test can read rather than something only a terminal can see.
+///
+/// The url is quoted because every url but the API one is a field of the
+/// release body: `trustedGithubUrl` has read the scheme and the host by the time
+/// a fetch retries, and everything after the host is bytes this program has not
+/// looked at. A path carrying ESC or a byte that is not text puts an escape
+/// sequence or a replacement glyph on the operator's screen otherwise. The
+/// fetch itself wants the url as written, so the line quotes rather than the
+/// request changing.
+fn retryLine(arena: std.mem.Allocator, url: []const u8, err: anyerror, wait: u64, attempt: u32) []const u8 {
+    return std.fmt.allocPrint(arena, "microagent update: {s} failed ({s}), retrying in {d}ms (attempt {d}/{d})\n", .{
+        quoteUntrusted(arena, url), @errorName(err), wait, attempt + 1, max_fetch_attempts,
+    }) catch "microagent update: a fetch failed and is being retried\n";
+}
+
+/// The same line for a wait that could not be taken, which is the half of the
+/// retry that has to be said when the retry itself does not happen.
+fn waitLine(arena: std.mem.Allocator, url: []const u8, wait: u64, err: anyerror) []const u8 {
+    return std.fmt.allocPrint(arena, "microagent update: the {d}ms wait before that attempt to {s} could not be taken ({s}); the update is abandoned rather than retried at once\n", .{
+        wait, quoteUntrusted(arena, url), @errorName(err),
+    }) catch "microagent update: the wait before the next attempt could not be taken; the update is abandoned\n";
 }
 
 /// One GET, body capped at `max_size` while it streams, copied into `arena`.
@@ -974,14 +999,20 @@ fn runChecked(
 
     const exe = std.process.executablePathAlloc(io, arena) catch |err|
         return fail(io, "could not locate the running binary ({s})", .{@errorName(err)});
+    // The two notes below name the path, and a path is whatever the machine's
+    // own bytes spell: an install directory a shell set with a non-ASCII name
+    // reaches stderr as mojibake, and one carrying a control byte acts on the
+    // terminal. The install line on stdout keeps the path as written, because
+    // that is the line a script reads the path out of.
+    const shown_exe = chat.safeTextAll(arena, exe);
     replaceExecutable(io, exe, asset.bytes) catch |err|
-        return fail(io, "could not replace {s} ({s}); the binary was not replaced", .{ exe, @errorName(err) });
+        return fail(io, "could not replace {s} ({s}); the binary was not replaced", .{ shown_exe, @errorName(err) });
     const installed = formatInstalled(&line_buf, tag, exe) catch
         return fail(io, "could not format the install line", .{});
     net.writeOut(io, installed) catch |err|
-        return fail(io, "{s} was installed, but the install line could not be written to stdout ({s})", .{ exe, @errorName(err) });
+        return fail(io, "{s} was installed, but the install line could not be written to stdout ({s})", .{ shown_exe, @errorName(err) });
     net.writeOut(io, "\n") catch |err|
-        return fail(io, "{s} was installed, but the install line could not be written to stdout ({s})", .{ exe, @errorName(err) });
+        return fail(io, "{s} was installed, but the install line could not be written to stdout ({s})", .{ shown_exe, @errorName(err) });
     return 0;
 }
 
@@ -1645,6 +1676,39 @@ test "update: a tag and an asset name from the release body are quoted before a 
         line,
     );
     for (line) |c| try std.testing.expect(c >= 0x20 and c != 0x7f);
+}
+
+// Every url this program fetches except the API one is a field of the release
+// body, and `trustedGithubUrl` reads only the scheme, the host and the port: a
+// path carrying an escape sequence or a byte that is not text passes it. The
+// request needs the url as written, so the line that names it is the one that
+// has to quote, and these are the two lines a retry prints.
+test "update: a retry line quotes the url off the wire" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const url = "https://github.com/o/r/download/\x1b[2J\xff";
+    const retry = retryLine(arena, url, error.ConnectionRefused, 1000, 1);
+    try std.testing.expect(std.mem.indexOf(u8, retry, "https://github.com/o/r/download/\\x1b[2J") != null);
+    try expectNoControl(retry);
+
+    const waited = waitLine(arena, url, 1000, error.ClockRemoved);
+    try std.testing.expect(std.mem.indexOf(u8, waited, "https://github.com/o/r/download/\\x1b[2J") != null);
+    try expectNoControl(waited);
+
+    // A url of plain ASCII is unchanged, so an operator reading a normal retry
+    // sees the endpoint rather than a spelling of it.
+    try std.testing.expect(std.mem.indexOf(u8, retryLine(arena, "https://api.github.com/repos/o/r/releases/latest", error.Timeout, 1000, 1), "https://api.github.com/repos/o/r/releases/latest") != null);
+}
+
+/// Nothing on the line acts on a terminal, and the line is text, which is what
+/// the quoting exists to guarantee. The terminating newline is the line's own
+/// and is the one control it is allowed.
+fn expectNoControl(line: []const u8) !void {
+    try std.testing.expect(std.mem.endsWith(u8, line, "\n"));
+    for (line[0 .. line.len - 1]) |c| try std.testing.expect(c >= 0x20 and c != 0x7f);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(line));
 }
 
 test "update: comparison and install lines use the release wording" {
