@@ -500,10 +500,12 @@ pub fn maybeNum(v: ?std.json.Value, unparsable: ?*usize) ?u64 {
         // `spendCeilingReached` reads, so a run that had already spent its
         // budget read zero and never stopped.
         .integer => |n| return if (n >= 0) @intCast(n) else null,
-        // A float is the same signed count spelled the other way: `{"prompt_tokens":
-        // -1.0}` parses as a float, and `countArg` clamps it to zero, which is
-        // the value the arm above exists to refuse. The two spellings of a
-        // number have to agree or the guard is a guard on half the input.
+        // A count spelled as a float is truncated, the way `countArg` reads
+        // one, and a negative one is the case the integer arm above names: it
+        // clamps to zero, and folding that zero into a total erases what an
+        // earlier frame billed. The two spellings of a number have to agree or
+        // the guard is a guard on half the input: `{"prompt_tokens": -1.0}`
+        // parses as a float and reaches this arm rather than the one above.
         .float => |f| return if (f >= 0) std.math.lossyCast(u64, f) else null,
         // A declared field the provider omitted parses as JSON `null` rather
         // than as an absent optional, so both are null here. So is a boolean,

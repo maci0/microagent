@@ -158,6 +158,23 @@ release, and `microagent update` moves you to it.
   turn's tokens by it reported a model generating four tokens an hour. The
   budget keeps that clock, because it is a ceiling on wall time; the record does
   not, because a machine that was asleep was not generating.
+- Compaction runs again. The conversation a turn builds is the open JSON array
+  `buildBody` closes into a request, and the read-back parsed the buffer as a
+  closed one, so every pass failed with a syntax error, said so on stderr, and
+  elided nothing: a run past 400 KB re-sent the whole pile on every turn until
+  the provider refused it. The `]` the run never writes is added for the parse
+  and dropped from the rewrite, so the buffer is left the shape the request
+  builder expects.
+- A usage count spelled as a negative JSON float is absent rather than zero. The
+  integer spelling was read that way and the float fell through to the clamping
+  reader, so `-1.0` folded a zero over what an earlier frame had billed and a
+  run that had already spent its `--max-spend-tokens` ceiling never stopped.
+- The 80% spend alarm is exact. The percentage was applied to the two halves of
+  the cap separately, which floored the remainder after the multiply and put
+  the threshold of a cap of three at one token instead of two, so the alarm
+  could not fire before the ceiling it precedes. The product is taken widened.
+- The session store keeps 200 logs rather than 201. The prune ran before this
+  run's own log was opened, so every run left the store one over the window.
 - `bench/run.sh` counts a binary file a run added as a file rather than as zero
   lines. `git diff --numstat` spells a binary file's two columns as `-`, and the
   sum read each as a number worth zero, so a task whose answer is a new image or

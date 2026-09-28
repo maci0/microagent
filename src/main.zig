@@ -1477,15 +1477,16 @@ fn spendAlarmDue(spent: u64, cap: ?u64) bool {
 
 /// The token count the alarm is due at: `spend_alarm_percent` of the cap.
 ///
-/// The percentage is applied in two parts, `limit / 100` times the percent plus
-/// what the remainder carries, rather than as `limit * percent / 100`. That
-/// spelling drops the percent off every cap below a hundred of them: a cap of
-/// ten gave a threshold of zero, so the alarm fired on the first turn of a run
-/// that had spent nothing. The two parts keep the answer within one token of
-/// the exact value, and the multiply cannot wrap because its left operand is
-/// already scaled down.
+/// The percentage is taken on a widened product rather than on `u64`, because
+/// `limit * percent` overflows a cap near the `u64` ceiling and the cap is
+/// checked, not assumed. Dividing each part before summing instead lost the
+/// remainder's fraction: a cap of three asked for 80% of it and answered one,
+/// so the alarm could not fire before the ceiling it precedes. The widen is
+/// exact for every `u64` and the result is the floor the alarm compares
+/// against, so a run that has spent 80% of its cap and not a token more is
+/// announced.
 fn spendAlarmThreshold(limit: u64) u64 {
-    return (limit / 100) *| spend_alarm_percent + (limit % 100) *| spend_alarm_percent / 100;
+    return @intCast((@as(u128, limit) * spend_alarm_percent) / 100);
 }
 
 /// Why a run stopped at its spend ceiling, in the words the operator reads, and
@@ -2852,12 +2853,13 @@ fn compactMessages(
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    // The buffer is an array with no closing bracket, because `buildBody` is
-    // what closes it, and every request is built from it that way. `std.json`
-    // reads a complete document, and an array that stops at the end of its
-    // input sends its parser to a token type it has no case for, so the bracket
-    // is added here and taken off again by the rewrite below. Every test that
-    // drove this closed the buffer itself and so never reached that.
+    // The buffer is the array `buildBody` closes when it writes the request, so
+    // the `]` the run never appends is added here to read the whole thing back,
+    // and taken off the rewrite below to leave the buffer the shape the request
+    // builder expects. `std.json` reads a complete document, and an array that
+    // stops at the end of its input sends its parser to a token type it has no
+    // case for. Every test that drove this closed the buffer itself and so never
+    // reached that.
     const closed = try std.mem.concat(arena, u8, &.{ msgs.items, "]" });
     const parsed = std.json.parseFromSlice(std.json.Value, arena, closed, .{}) catch |err| {
         net.note(io, arena, "microagent: the {d} byte conversation could not be read back for compaction ({s}); it is sent as it stands\n", .{
@@ -2913,11 +2915,12 @@ fn compactMessages(
     // `items()` hands the written bytes out of the writer, so it is asked once:
     // a second call reads the writer after it has given them up.
     const written = jb.items();
-    // The rewrite is a whole array, and what goes back in the buffer is the open
-    // one `buildBody` closes. Leaving the bracket would close the array twice,
-    // and every request after a compaction would be a syntax error at the
-    // provider. A rewrite that is not an array cannot be opened, so it is not
-    // written at all rather than corrupting the buffer for the rest of the run.
+    // The rewrite is a closed array and what goes back in the buffer is the open
+    // one `buildBody` closes, so the `]` just written is dropped rather than
+    // left to close the array twice and make every request after a compaction a
+    // syntax error at the provider. A rewrite that is not an array cannot be
+    // opened, so it is not written at all rather than corrupting the buffer for
+    // the rest of the run.
     if (!std.mem.endsWith(u8, written, "]")) {
         net.note(io, arena, "microagent: the compacted conversation is not a message array; it is sent as it stands\n", .{});
         return;
@@ -4027,7 +4030,7 @@ test "a long run keeps the conversation bounded and the cache alive between comp
         // message and two tool results of the size a `read` of source returns.
         // The array stays open, as a run's buffer is, because `buildBody` is
         // what closes it.
-        try msgs.appendSlice(arena, ",{\"role\":\"assistant\",\"content\":\"looking at the parser\"}");
+        try appendMessage(arena, &msgs, "assistant", "looking at the parser");
         var t: usize = 0;
         while (t < 2) : (t += 1) {
             try msgs.appendSlice(arena, ",{\"role\":\"tool\",\"tool_call_id\":\"c\",\"content\":\"");
@@ -4075,6 +4078,10 @@ test "a long run keeps the conversation bounded and the cache alive between comp
     // And between them the prefix the provider can reuse is most of the prompt,
     // which is the whole reason the conversation is kept in wire form.
     try std.testing.expect(sum_cacheable * 100 / sum_sent > 50);
+    // The buffer a turn leaves behind is the open array the request builder
+    // closes, so a rewrite that closed it would end the next turn's first
+    // message after a `]` and the provider would reject the request.
+    try std.testing.expect(msgs.items[msgs.items.len - 1] != ']');
 }
 
 // The cacheable part of a request is its leading bytes, so the only thing a
@@ -4659,8 +4666,9 @@ test "a token count that is not a number is counted, not folded in as zero" {
 }
 
 /// The `[` and the first two messages a run starts from, in the bytes the
-/// agent appends. `appendToolResults` follows it with the tool results that
-/// push a conversation past the compaction limit.
+/// agent appends. The buffer stays an open array, the shape `buildBody` closes
+/// into a request, and `appendToolResults` follows it with the tool results
+/// that push a conversation past the compaction limit.
 ///
 /// Neither this nor `appendToolResults` closes the array. A run's buffer is
 /// open, because `buildBody` is what writes the closing bracket into the
@@ -4760,6 +4768,8 @@ test "compaction elides old tool output and keeps the recent turns" {
     const gpa = std.testing.allocator;
     var scratch_state = std.heap.ArenaAllocator.init(gpa);
     defer scratch_state.deinit();
+    var read_state = std.heap.ArenaAllocator.init(gpa);
+    defer read_state.deinit();
 
     var msgs: std.ArrayList(u8) = .empty;
     defer msgs.deinit(gpa);
@@ -4777,9 +4787,7 @@ test "compaction elides old tool output and keeps the recent turns" {
     try std.testing.expectEqual(conversation_soft_limit, floor);
 
     try std.testing.expect(msgs.items.len < before / 2);
-    const closed = try std.mem.concat(gpa, u8, &.{ msgs.items, "]" });
-    defer gpa.free(closed);
-    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, closed, .{});
+    const parsed = try parseConversation(read_state.allocator(), &msgs);
     defer parsed.deinit();
     const array = parsed.value.array;
     try std.testing.expectEqual(@as(usize, 122), array.items.len);
@@ -4867,6 +4875,8 @@ test "a conversation of small tool results is still bounded" {
     const gpa = std.testing.allocator;
     var scratch_state = std.heap.ArenaAllocator.init(gpa);
     defer scratch_state.deinit();
+    var read_state = std.heap.ArenaAllocator.init(gpa);
+    defer read_state.deinit();
 
     var msgs: std.ArrayList(u8) = .empty;
     defer msgs.deinit(gpa);
@@ -4884,9 +4894,7 @@ test "a conversation of small tool results is still bounded" {
     // The bound is the point: a run that cannot elide a large result is still
     // brought under the limit rather than left growing.
     try std.testing.expect(msgs.items.len <= conversation_soft_limit);
-    const closed = try std.mem.concat(gpa, u8, &.{ msgs.items, "]" });
-    defer gpa.free(closed);
-    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, closed, .{});
+    const parsed = try parseConversation(read_state.allocator(), &msgs);
     defer parsed.deinit();
     const array = parsed.value.array;
     // Nothing is dropped, so every tool_call_id still has its message, and the
@@ -4999,9 +5007,20 @@ test "a conversation with nothing to elide is not re-parsed every turn" {
 
 // Appends a message to a conversation, the way a turn does: the message goes
 // on in `appendMessage`'s own spelling, separator included, and the array stays
-// open because the run's buffer is open.
+// open because the run's buffer is open, which is the shape `compactMessages`
+// reads back.
 fn growConversation(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), role: []const u8, blob: []const u8) !void {
     try appendMessage(gpa, msgs, role, blob);
+}
+
+// Reads a conversation back the way compaction does: the buffer is the open
+// array a request is built from, so the `]` the run never writes is added
+// here. `arena` has to outlive the returned value.
+fn parseConversation(arena: std.mem.Allocator, msgs: *const std.ArrayList(u8)) !std.json.Parsed(std.json.Value) {
+    var closed: std.ArrayList(u8) = .empty;
+    try closed.appendSlice(arena, msgs.items);
+    try closed.append(arena, ']');
+    return std.json.parseFromSlice(std.json.Value, arena, closed.items, .{});
 }
 
 // Prompt caching keys on the exact bytes of the request prefix. Compaction is

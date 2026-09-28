@@ -200,6 +200,11 @@ pub fn open(io: Io, arena: std.mem.Allocator, session_dir: []const u8, model: []
         net.note(io, arena, "microagent: no session log could be opened under {s}; the rest of this run is not recorded\n", .{shown});
         return null;
     };
+    // The prune above counts the store before this run's own log joins it, so
+    // a machine that keeps ending its turn here settles on one more than the
+    // window the store is kept at. Pruning again with the log in place ends it
+    // on the number rather than one past it.
+    pruneSessions(io, arena, session_dir);
     return .{ .file = file, .cwd = cwd, .model = model, .dir = session_dir };
 }
 
