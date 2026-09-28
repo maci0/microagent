@@ -809,6 +809,13 @@ fn parseArgs(args: []const []const u8) Parsed {
             const v = arg["--repo=".len..];
             if (v.len == 0) return .{ .bad_flag = repo_needs_value };
             parsed.run.repo = v;
+        } else if (std.mem.eql(u8, arg, "--")) {
+            // A bare `--` ends the flags, the way the agent's own command line
+            // reads it. This subcommand takes no positional, so a trailing one
+            // is nothing to say, and a word after it is the argument it does
+            // not have, which is the answer it already gives to any other word.
+            if (i + 1 >= args.len) break;
+            return .{ .unknown = args[i + 1] };
         } else {
             return .{ .unknown = arg };
         }
@@ -1208,6 +1215,16 @@ test "update: the command line reads in either flag form, and help and version w
     }
     switch (parseArgs(&.{"--nope"})) {
         .unknown => |arg| try std.testing.expectEqualStrings("--nope", arg),
+        else => return error.TestUnexpectedResult,
+    }
+    // A bare `--` is read the way the agent's own command line reads it. This
+    // subcommand takes no positional, so a trailing one is nothing to say, and
+    // a word after it is the argument that does not exist here.
+    const ended = parseArgs(&.{ "--check", "--" }).run;
+    try std.testing.expect(ended.check_only);
+    try std.testing.expect(ended.repo == null);
+    switch (parseArgs(&.{ "--", "extra" })) {
+        .unknown => |arg| try std.testing.expectEqualStrings("extra", arg),
         else => return error.TestUnexpectedResult,
     }
 }

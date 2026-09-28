@@ -80,6 +80,9 @@ The flags, abridged; `microagent --help` is the full text.
 -h, --help             the full usage text
 -V, --version          version
 
+A bare -- ends the flags, so a task that begins with a dash goes after it:
+microagent -- "explain why -Werror fails in src/net.zig"
+
 reply style (env, or the TOML config at MICROAGENT_CONFIG, default
 ~/.microagent/config.toml with the keys "caveman" and "ponytail"):
   MICROAGENT_CAVEMAN     how terse the reply is: off, lite, full, ultra,
@@ -106,11 +109,13 @@ MDEBUG=1                trace a stuck stream on stderr, and print the
 ```
 
 Every long flag also takes `--flag=value`, a flag wins over the environment variable for the same
-option, and the exit status is 0 for a finished run, 1 for a failed one, 2 for a wrong command
-line, 3 for a run that stopped at a ceiling (`--max-turns`, or a budget that ran out) so the text on
-stdout is a prefix of the work rather than an answer, and 130 for an interrupt, which takes the tool
-subprocess with it. `microagent --help` and `microagent update --help` are the full text; a wrong flag prints the
-reason and that help on stderr, so a script reading stdout gets nothing from a failed invocation.
+option, and a bare `--` ends the flags, so a task that begins with a dash is passed after it
+(`microagent -- "explain why -Werror fails"`). The exit status is 0 for a finished run, 1 for a
+failed one, 2 for a wrong command line, 3 for a run that stopped at a ceiling (`--max-turns`, or a
+budget that ran out) so the text on stdout is a prefix of the work rather than an answer, and 130
+for an interrupt, which takes the tool subprocess with it. `microagent --help` and
+`microagent update --help` are the full text; a wrong flag prints the reason and that help on
+stderr, so a script reading stdout gets nothing from a failed invocation.
 
 Every value is checked where it is set, so a mistyped level, a ceiling of zero
 or a non-numeric budget is refused before the first request rather than becoming

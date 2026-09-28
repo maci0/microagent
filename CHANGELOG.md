@@ -149,6 +149,12 @@ release, and `microagent update` moves you to it.
 
 ### Changed
 
+- A bare `--` ends the flags. A task is model output and starts with a dash as
+  often as not ("-Werror", "--fix"), and `microagent -- "..."` was an unknown
+  argument and exit 2 before a request was sent; the only spelling that took
+  one was `--print`. `microagent -- --help` is a run whose task is the words
+  `--help`, which is what `-p --help` already was, and `microagent update`
+  reads the same marker.
 - The reproducibility gate isolates the compiler's global cache as well as the project one.
   `--cache-dir` moves the project's artifacts, but the compiled toolchain stayed in the
   runner's `$HOME/.cache/zig`, so a warm cache left by a previous build on the same machine

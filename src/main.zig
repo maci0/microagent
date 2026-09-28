@@ -359,7 +359,8 @@ const help_text =
     \\  -V, --version          version
     \\
     \\every long flag also takes --flag=value. A flag wins over the environment
-    \\variable for the same option.
+    \\variable for the same option. A bare -- ends the flags, so a task that
+    \\begins with a dash is passed after it.
     \\
     \\reply style (MICROAGENT_CAVEMAN / MICROAGENT_PONYTAIL, or the same two keys
     \\in the config named above):
@@ -384,6 +385,7 @@ const help_text =
     \\  microagent "fix the failing test in src/net.zig and run it"
     \\  microagent --max-turns 20 "review the diff and stop"
     \\  microagent --print "$(cat task.txt)"
+    \\  microagent -- "explain why -Werror is failing in src/net.zig"
     \\
     \\exit status: 0 the run finished, 1 the run failed, 2 the command line was
     \\wrong, 3 the run stopped at a ceiling (--max-turns, or a budget that ran
@@ -743,12 +745,24 @@ fn splitArg(arg: []const u8) SplitArg {
 /// appear, and stop the parse there.
 fn parseArgs(buf: []u8, argv: []const []const u8, opts: *Options) ?[]const u8 {
     var i: usize = 0;
+    var flags_ended = false;
     while (i < argv.len) : (i += 1) {
         const arg = argv[i];
         const split = splitArg(arg);
         const name = split.name;
         const joined = split.joined;
-        if (isFlag(name, "-V", "--version")) {
+        // A bare `--` ends the flags, the way every other command line reads
+        // it. A task is model output and starts with a dash as often as not
+        // ("-Werror", "--fix"), and there was no spelling for one that did
+        // before this: it was an unknown argument, exit 2, before a request.
+        if (!flags_ended and std.mem.eql(u8, name, "--")) {
+            flags_ended = true;
+            continue;
+        }
+        if (flags_ended) {
+            if (arg.len == 0) return empty_prompt_message;
+            if (setPrompt(buf, opts, arg)) |m| return m;
+        } else if (isFlag(name, "-V", "--version")) {
             opts.action = .version;
             return null;
         } else if (isFlag(name, "-h", "--help")) {
@@ -768,10 +782,7 @@ fn parseArgs(buf: []u8, argv: []const []const u8, opts: *Options) ?[]const u8 {
             // taking the prompt positionally makes the order irrelevant.
             if (setPrompt(buf, opts, arg)) |m| return m;
         } else if (arg.len == 0) {
-            // An empty word is a prompt with nothing in it, which is the same
-            // mistake as `--print=`, and saying it is an unknown argument
-            // describes a flag nobody wrote.
-            return "the prompt is empty: pass the task as an argument or with --print";
+            return empty_prompt_message;
         } else {
             return std.fmt.bufPrint(buf, "unknown or incomplete argument '{s}'", .{clip(arg)}) catch "bad arguments";
         }
@@ -779,16 +790,23 @@ fn parseArgs(buf: []u8, argv: []const []const u8, opts: *Options) ?[]const u8 {
     return null;
 }
 
+/// An empty word is a prompt with nothing in it, which is the same mistake as
+/// `--print=`. Saying it is an unknown argument would describe a flag nobody
+/// wrote, so both spellings of the mistake get this one sentence.
+const empty_prompt_message = "the prompt is empty: pass the task as an argument or with --print";
+
 /// The action `--help` or `--version` asks for, or null when the command line
 /// asks for neither. Read over the same arguments, and with the same rules,
 /// as `parseArgs` above: a value a flag takes is stepped over, so
 /// `microagent -p --help` is a run whose prompt is the words `--help` and not
-/// a request for help, in both places. A change to how one walks the command
-/// line is a change to both.
+/// a request for help, in both places, and a bare `--` ends the flags in both
+/// too, so `microagent -- --help` is a run rather than a request for help. A
+/// change to how one walks the command line is a change to both.
 fn earlyAction(argv: []const []const u8) ?Action {
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
         const split = splitArg(argv[i]);
+        if (std.mem.eql(u8, split.name, "--")) return null;
         if (isFlag(split.name, "-V", "--version")) return .version;
         if (isFlag(split.name, "-h", "--help")) return .help;
         if (valuedFlag(split.name) != null and split.joined == null) i += 1;
@@ -2621,6 +2639,44 @@ test "the command line parses in either flag form and in any order" {
     try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &padded_argv, &padded));
     try std.testing.expectEqual(@as(?u64, 90), padded.budget_s);
     try std.testing.expectEqual(@as(usize, 7), padded.max_turns);
+}
+
+// A task is model output, so a prompt that begins with a dash is ordinary, and
+// `--` is the spelling every other command line gives it. Before this, the only
+// way to pass one was `--print`, and a bare `microagent -- "-Werror"` was an
+// unknown argument and exit 2.
+test "a bare -- ends the flags, so a task that starts with a dash is a task" {
+    var opts: Options = .{};
+    var buf: [512]u8 = undefined;
+    const argv = [_][]const u8{ "--max-turns", "5", "--", "--version is not a flag here" };
+    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &argv, &opts));
+    try std.testing.expectEqual(@as(usize, 5), opts.max_turns);
+    try std.testing.expectEqualStrings("--version is not a flag here", opts.prompt);
+    // The action stays a run, so `--` also protects a prompt that is a word
+    // this parser would otherwise answer to.
+    try std.testing.expectEqual(Action.run, opts.action);
+
+    // A flag after `--` is the task, not a request for help: the early pass
+    // reads the same line and has to agree, or `microagent -- --help` prints
+    // the help and then runs a task nobody asked to read.
+    try std.testing.expectEqual(@as(?Action, null), earlyAction(&.{ "--", "--help" }));
+    try std.testing.expectEqual(@as(?Action, null), earlyAction(&.{ "--", "-V" }));
+    // Before the `--`, a flag is still a flag.
+    try std.testing.expectEqual(@as(?Action, .help), earlyAction(&.{ "--model", "some/model", "--help" }));
+
+    // The prompt is still taken once, and still says so when it is taken twice.
+    var twice: Options = .{};
+    try std.testing.expectEqualStrings("prompt given twice: 'one' and 'two'", parseArgs(&buf, &.{ "--", "one", "two" }, &twice).?);
+    var with_flag: Options = .{};
+    try std.testing.expectEqualStrings("prompt given twice: 'flag' and 'task'", parseArgs(&buf, &.{ "--print", "flag", "--", "task" }, &with_flag).?);
+    // An empty word after `--` is the empty prompt, not an unknown argument.
+    var empty: Options = .{};
+    try std.testing.expectEqualStrings("the prompt is empty: pass the task as an argument or with --print", parseArgs(&buf, &.{ "--", "" }, &empty).?);
+    // A `--` on its own names no prompt, so the run says so rather than
+    // sending the flag to the provider as the task.
+    var bare: Options = .{};
+    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &.{"--"}, &bare));
+    try std.testing.expectEqualStrings("", bare.prompt);
 }
 
 test "a wrong command line names the flag and the value it was given" {
