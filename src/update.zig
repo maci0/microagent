@@ -151,11 +151,17 @@ pub fn validRepo(text: []const u8) bool {
     return repoPartOk(owner) and repoPartOk(name);
 }
 
+/// The release API URL's format: everything but the repo. Spelled once so the
+/// fuzz harness below can tell a repo too long for its buffer from one that
+/// fits, without repeating the prefix and suffix.
+const release_api_url_fmt = "https://api.github.com/repos/{s}/releases/latest";
+const release_api_url_fixed = "https://api.github.com/repos//releases/latest";
+
 /// The release API URL. A repo that is not `owner/name` fails here, before
 /// any bytes are requested.
 pub fn releaseApiUrl(buf: []u8, repo: []const u8) error{ BadRepo, NameTooLong }![]const u8 {
     if (!validRepo(repo)) return error.BadRepo;
-    return std.fmt.bufPrint(buf, "https://api.github.com/repos/{s}/releases/latest", .{repo}) catch
+    return std.fmt.bufPrint(buf, release_api_url_fmt, .{repo}) catch
         return error.NameTooLong;
 }
 
@@ -1001,6 +1007,159 @@ test "update: the command line reads in either flag form, and help and version w
         .unknown => |arg| try std.testing.expectEqualStrings("--nope", arg),
         else => return error.TestUnexpectedResult,
     }
+}
+
+// The `update` command line is untrusted in the same way the agent's own is: a
+// wrapper script, a CI job and a human all spell it, and every one of them can
+// put a value where a flag belongs. What makes it worth a harness of its own
+// is the sink: whatever `--repo` ends up holding is formatted into the URL the
+// updater requests, so a parser that composes a repo out of arguments, or that
+// keeps one after refusing it, aims a request at a host nobody named.
+// `std.testing.fuzz` runs this corpus on every `zig build test`, and through
+// the fuzzer's mutations when the test binary is built in fuzz mode. The corpus
+// is the shapes a caller reaches for: both spellings of a valued flag, a value
+// joined with `=`, an empty value, a flag that ends the line, a value that
+// looks like a flag, a second `--repo`, the words that stop the parse, and the
+// repo shapes `validRepo` accepts and refuses.
+const update_args_corpus = [_][]const u8{
+    "",
+    " ",
+    "-",
+    "--",
+    "-h",
+    "--help",
+    "help",
+    "-V",
+    "--version",
+    "-c",
+    "--check",
+    "--check --help",
+    "-c -V",
+    "--check --check",
+    "--repo",
+    "--repo=",
+    "--repo you/microagent",
+    "--repo=you/microagent",
+    "-c --repo you/microagent",
+    "--repo --check",
+    "--repo -c",
+    "--repo --help",
+    "--repo https://evil.example/x",
+    "--repo /etc/passwd",
+    "--repo a/b/c",
+    "--repo owner/",
+    "--repo /name",
+    "--repo ..",
+    "--repo ../..",
+    "--repo %2e%2e%2f",
+    "--repo owner/na me",
+    "--repo ow ner/name",
+    "--repo owner/name?x=1",
+    "--repo owner/name#frag",
+    "--repo owner/name/../../etc",
+    "--repo you/microagent --repo evil/repo",
+    "--repo you/microagent extra",
+    "extra --repo you/microagent",
+    "--nope",
+    "-x",
+    "--repo=--check",
+    "--repo=-h",
+    "\u{0}\u{1}\u{7f}",
+    "--repo \u{65e5}\u{8a00}/\u{65e5}\u{8a00}",
+    "--repo \u{fffd}/x",
+    "--repo \xff\xfe/x",
+    "--repo a\u{0}b/c",
+    "microagent-" ** 40 ++ "/x",
+    "a" ** 200 ++ "/b",
+    "owner/" ++ "n" ** 200,
+};
+
+test "update: fuzz: a fuzzed update command line aims at the repo it was given" {
+    try std.testing.fuzz({}, fuzzUpdateArgs, .{ .corpus = &update_args_corpus });
+}
+
+fn fuzzUpdateArgs(_: void, smith: *std.testing.Smith) !void {
+    var raw: [8 * 1024]u8 = undefined;
+    const text = if (smith.in) |seed| seed else raw[0..smith.slice(&raw)];
+
+    // One word per space-separated run, so the fuzzer's bytes reach the parser
+    // as arguments rather than as a single opaque one.
+    var argv: [64][]const u8 = undefined;
+    var n: usize = 0;
+    var words = std.mem.tokenizeAny(u8, text, " \t\n");
+    while (words.next()) |word| {
+        if (n == argv.len) break;
+        argv[n] = word;
+        n += 1;
+    }
+
+    const parsed = parseArgs(argv[0..n]);
+    const repo = switch (parsed) {
+        .run => |r| r.repo orelse return,
+        // Every other outcome refuses the line, so no repo is set. A parser
+        // that set one anyway would send it on to a URL nobody named.
+        else => {
+            for (argv[0..n]) |arg| try std.testing.expect(!std.mem.eql(u8, arg, default_repo));
+            return;
+        },
+    };
+
+    // The repo is bytes the caller typed, never ones the parser composed: a
+    // value out of no word is a value nobody named. The joined `--repo=value`
+    // is the one spelling where the repo is a slice of a word rather than a
+    // word of its own, which is why the test is containment.
+    var named = false;
+    for (argv[0..n]) |arg| {
+        if (std.mem.indexOf(u8, arg, repo) != null) named = true;
+    }
+    if (!named) {
+        std.debug.print("a repo no argument carried: {s}\n", .{repo});
+        return error.TestUnexpectedResult;
+    }
+
+    // And the URL it reaches is the one that repo earns, or none at all. A
+    // repo shape `validRepo` refuses must not become a request to a host the
+    // caller did not name.
+    var buf: [1024]u8 = undefined;
+    if (!validRepo(repo)) {
+        try std.testing.expectError(error.BadRepo, releaseApiUrl(&buf, repo));
+    } else {
+        const url = releaseApiUrl(&buf, repo) catch |err| switch (err) {
+            // A repo too long for the buffer is refused rather than truncated
+            // into a URL naming a different repository.
+            error.NameTooLong => {
+                try std.testing.expect(repo.len + release_api_url_fixed.len > buf.len);
+                return;
+            },
+            error.BadRepo => return error.TestUnexpectedResult,
+        };
+        try std.testing.expect(std.mem.startsWith(u8, url, "https://api.github.com/repos/"));
+        try std.testing.expect(std.mem.endsWith(u8, url, "/releases/latest"));
+        // Whatever the caller typed is inside the URL verbatim, so a repo with
+        // a query, a fragment or an escape in it is still the one host, and
+        // never one the value could redirect the request to.
+        try std.testing.expect(std.mem.indexOf(u8, url, repo) != null);
+        try std.testing.expect(trustedGithubUrl(url));
+    }
+
+    // A repo is quoted into an error message with a terminal-safe escaper, so
+    // the quoted form is a prefix of what the whole repo escapes to, cut on a
+    // codepoint boundary, and it is itself a string a reader can be shown: one
+    // line, valid UTF-8, and never a byte a terminal acts on.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const quoted = quoteRepo(arena, repo);
+    try std.testing.expect(quoted.len <= repo_in_error_bytes);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(quoted));
+    for (quoted) |c| try std.testing.expect(c >= 0x20 and c != 0x7f);
+    // The budget cuts the escaped text, never the repo, so what is quoted is
+    // the start of the whole thing: a cut that dropped or reordered a byte
+    // would name a repository the caller never typed.
+    const whole = chat.safeText(arena, repo, std.math.maxInt(usize));
+    try std.testing.expect(std.mem.startsWith(u8, whole, quoted));
+    // And a short repo is quoted whole, escapes and all.
+    if (repo.len <= repo_in_error_bytes) try std.testing.expectEqualStrings(whole, quoted);
 }
 
 test "update: --check and an equal version do not fetch an asset" {

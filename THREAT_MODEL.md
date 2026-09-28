@@ -140,6 +140,11 @@ is no user confirmation between a model decision and a command.
 - A hostile or coerced endpoint chooses every tool call. A single response can carry up to
   64 calls (`src/main.zig:50`, enforced by the index check at `src/main.zig:1695` and
   the index clamp in `applyCallDelta`) and they run as the operator.
+- A tool call's name and argument object are the provider's own text and are parsed
+  from bytes the model read out of the tree. They are fuzzed from the argument JSON
+  to the gutter line and the limits it produces: the line stays one line inside its
+  buffer with no byte a terminal acts on, and every count the model wrote is inside
+  its ceiling before a subprocess starts (`src/tool.zig:1282`).
 - A stream that never sends `[DONE]` grows the turn until the caps at
   `src/main.zig:58` stop it, and the run ends as truncated (`src/main.zig:1452`).
 - An error body from the provider is printed on stderr through `terminalSafe`
@@ -196,6 +201,10 @@ is no user confirmation between a model decision and a command.
 - The release JSON is attacker-shaped: every field in it becomes a tag, an asset name or a
   URL the updater acts on (`src/update.zig:278`). It is fuzzed against exactly that
   (`src/update.zig:1214`, `src/update.zig:1301`).
+- The `--repo` the updater requests from is the caller's own text, and it is
+  fuzzed from the command line to the URL it becomes: a repo no argument carried
+  fails, a repo `validRepo` refuses never reaches a request, and one it accepts
+  only ever names `api.github.com` (`src/update.zig:997`).
 - A body over the cap is refused while it streams, not after (`src/update.zig:337`,
   `src/update.zig:408`); the API body is capped at 10 MB, the asset at 256 MB, the sidecar
   at 64 KB (`src/update.zig:21-23`).
@@ -246,7 +255,7 @@ returning.
 | Retry with capped exponential backoff on weather-shaped statuses and on failures before the request is readable; a response head that never arrives is not retried; a `Retry-After` longer than two minutes is not waited out | a dropped connection or a rate limit ending the run; a re-sent turn billed twice | `src/main.zig:2025`, `src/main.zig:2052`, `src/main.zig:2064`, `src/main.zig:2095` |
 | Session log created exclusively, both name shapes pruned at 200 records | one run erasing another's log, unbounded growth | `src/main.zig:1048`, `src/main.zig:1083`, `src/main.zig:1107` |
 | Values validated where they are set | a mistyped level or ceiling reaching the wire as a 400 | `src/main.zig:408`, `src/main.zig:426`, `src/main.zig:500` |
-| Fuzz corpora for the parsers that take untrusted bytes: the release body, the sidecar, the completion stream, the config file, the command line and a JSON string | malformed provider, release, config or command-line input | `src/update.zig:1214`, `src/update.zig:1301`, `src/main.zig:3802`, `src/main.zig:2299`, `src/style.zig:459`, `src/chat.zig:469` |
+| Fuzz corpora for the parsers that take untrusted bytes: the release body, the sidecar, the completion stream, the config file, both command lines, a JSON string and a tool call | malformed provider, release, config, command-line or tool-call input | `src/update.zig:1214`, `src/update.zig:1301`, `src/main.zig:3802`, `src/main.zig:2299`, `src/style.zig:459`, `src/chat.zig:469`, `src/tool.zig:1282` |
 
 ### Gaps, ranked by exploitability and impact
 

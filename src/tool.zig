@@ -1307,6 +1307,137 @@ test "the tool gutter stays one line whatever the model sent" {
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, long_line, "\n"));
 }
 
+// The tool name and the argument object are the model's, and the model decides
+// what to send from files in the tree, so both are untrusted bytes crossing a
+// boundary. Three things happen to them before any tool runs: the arguments
+// are parsed as JSON, the counts the model wrote become limits and deadlines,
+// and one line is written to the gutter for a reader that splits on newlines.
+// `std.testing.fuzz` runs this corpus on every `zig build test`, and through
+// the fuzzer's mutations when the test binary is built in fuzz mode.
+//
+// The corpus is what the harness has to be able to read: an empty call, each
+// tool's own argument names, the keys that differ per tool, the counts as
+// integers, as floats, as strings, negative, past the ceiling and not numbers
+// at all, a value that is text where a count belongs and a count where text
+// belongs, deeply nested and empty objects, an array or a scalar instead of an
+// object, a truncated object, escapes and lone bytes inside a string, and the
+// argument names themselves, which is what decides whose key the gutter reads.
+const call_corpus = [_][]const u8{
+    "",
+    "\n",
+    " ",
+    "{}",
+    "[]",
+    "null",
+    "7",
+    "\"text\"",
+    "{",
+    "{\"command\":\"ls -la\"}",
+    "{\"command\":\"rg -n 'x'\\nsecond line\\u001b[31m\\u0000\\xff\"}",
+    "{\"command\":\"\",\"timeout_ms\":0}",
+    "{\"command\":\"build\",\"timeout_ms\":1}",
+    "{\"command\":\"build\",\"timeout_ms\":\"600000\"}",
+    "{\"command\":\"build\",\"timeout_ms\":-1}",
+    "{\"command\":\"build\",\"timeout_ms\":1.5e300}",
+    "{\"command\":\"build\",\"timeout_ms\":99999999999999999999999}",
+    "{\"command\":\"build\",\"timeout_ms\":null}",
+    "{\"command\":\"build\",\"timeout_ms\":true}",
+    "{\"command\":\"build\",\"timeout_ms\":[1]}",
+    "{\"command\":\"build\",\"timeout_ms\":{\"ms\":5}}",
+    "{\"path\":\"src/main.zig\",\"offset\":0,\"limit\":1}",
+    "{\"path\":\"src/main.zig\",\"offset\":-1,\"limit\":\"12\"}",
+    "{\"pattern\":\"fn main\",\"lang\":\"zig\"}",
+    "{\"pattern\":\"日本\" ** 40}",
+    "{\"subcommand\":\"log\",\"limit\":400}",
+    "{\"subcommand\":\"log\",\"limit\":0}",
+    "{\"subcommand\":\"log\",\"limit\":-5}",
+    "{\"subcommand\":\"log\",\"limit\":\"all\"}",
+    "{\"subcommand\":\"log\",\"limit\":1e30}",
+    "{\"subcommand\":\"log\",\"limit\":null}",
+    "{\"limit\":18446744073709551615}",
+    "{\"path\":\"a\",\"content\":\"\\u0000\\u001b\\u007f\\ud83d\\ude80\"}",
+    "{\"content\":7}",
+    "{\"command\":7}",
+    "{\"COMMAND\":\"ls\"}",
+    "{\"command\":\"ls\",\"command\":\"pwd\"}",
+    "{\"nested\":{\"command\":\"ls\",\"path\":\"a\",\"pattern\":\"p\",\"limit\":3}}",
+    "{\"a\":{\"b\":{\"c\":{\"command\":\"ls\"}}}}",
+    "{\"unknown\":[1,2,3],\"command\":\"ls\"}",
+    "{\"command\":\"ls\",\"extra\":\"x\"}",
+    "{\"command\":\"ls\"",
+    "{\"command\":\"\\xc3\"}",
+    "{\"command\":\"\\xff\\xfe\"}",
+    "{\"command\":\"\\u0000\"}",
+    "{\"command\":\"caf\\u00e9 \\u65e5\\u8a00 \\ud83d\\ude80\"}",
+    "{\"command\":\"line1\\nline2\\r\\nline3\"}",
+    "{\"command\":\"\\u2028\\u2029\"}",
+    "{\"command\":\"a\" ** 500}",
+    "{\"command\":\"日\" ** 500}",
+};
+
+test "a fuzzed tool call leaves one gutter line and limits inside their ceilings" {
+    try std.testing.fuzz({}, fuzzToolCall, .{ .corpus = &call_corpus });
+}
+
+fn fuzzToolCall(_: void, smith: *std.testing.Smith) !void {
+    const gpa = std.testing.allocator;
+    var scratch: [8 * 1024]u8 = undefined;
+    const text = if (smith.in) |seed| seed else scratch[0..smith.slice(&scratch)];
+
+    // The name is the first line and the arguments are the rest, so the
+    // fuzzer's bytes reach both halves rather than only the JSON.
+    const split = std.mem.indexOfScalar(u8, text, '\n') orelse text.len;
+    const name = text[0..split];
+    const raw = if (split == text.len) "" else text[split + 1 ..];
+
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    // The same refusal `runTool` makes: a call whose arguments are not an
+    // object reaches no tool and names none, whatever the bytes were.
+    const parsed = std.json.parseFromSlice(std.json.Value, arena, raw, .{}) catch return;
+    const args = switch (parsed.value) {
+        .object => |o| o,
+        else => return,
+    };
+
+    // The gutter line is a fixed-size buffer, and its whole purpose is to be
+    // one line a reader splits on: a line over the buffer, or one carrying a
+    // second newline, is a call the operator sees twice or not at all.
+    var buf: [gutter_line_max]u8 = undefined;
+    const line = toolCallLine(arena, &buf, name, args) catch return error.TestUnexpectedResult;
+    try std.testing.expect(line.len <= gutter_line_max);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(line));
+    try std.testing.expect(std.mem.startsWith(u8, line, "\u{23fa} "));
+    try std.testing.expect(std.mem.endsWith(u8, line, "\n"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, line, "\n"));
+
+    // Nothing but the line's own newline is a byte a terminal acts on: the
+    // name and the detail came from the model, and the model read them out of
+    // the tree, so an escape sequence here is a repository repainting the
+    // operator's screen.
+    for (line) |c| {
+        if (c == '\n') continue;
+        try std.testing.expect(c >= 0x20 and c != 0x7f);
+    }
+
+    // The counts the model wrote are the only numbers a tool acts on, and
+    // every one of them is bounded before a subprocess is started. A line
+    // count of zero reads as an empty file, and a deadline of zero is a
+    // deadline already spent, so neither may come out of a call.
+    try std.testing.expect(gitLineLimit(args) >= 1);
+    try std.testing.expect(gitLogLines(gitLineLimit(args)) <= git_log_line_ceiling);
+    const deadline = bashTimeoutMs(requestedTimeoutMs(args.get("timeout_ms")), null);
+    try std.testing.expect(deadline >= 1);
+    try std.testing.expect(deadline <= max_bash_timeout_ms);
+    // A run's own budget lowers the deadline further rather than raising it.
+    try std.testing.expectEqual(
+        @min(deadline, @as(u64, 1)),
+        bashTimeoutMs(requestedTimeoutMs(args.get("timeout_ms")), 1),
+    );
+}
+
 test "a capped tool result says how much was dropped" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();

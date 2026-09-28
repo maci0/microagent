@@ -74,6 +74,16 @@ release, and `microagent update` moves you to it.
   twice says the same thing. A bad `--max-turns`, `--max-tokens` or `--reasoning-effort` value is a
   message the parser returns rather than a call that exits the process, which is what let the
   command line be read at all outside a subprocess.
+- Fuzz harnesses for the two untrusted inputs that had none: a model tool call and the `update`
+  subcommand's own command line. The tool-call harness parses a fuzzed argument object and
+  asserts the gutter line stays one line inside its fixed buffer with no byte a terminal acts
+  on, and that every count the model wrote (`limit`, `timeout_ms`) lands inside its ceiling
+  before a subprocess is started. The `update` harness asserts a `--repo` is always bytes some
+  argument carried, that a repo `validRepo` refuses never becomes a request, and that one it
+  accepts only ever names `api.github.com`. Both run their corpus on every `zig build test`
+  through `std.testing.fuzz`.
+- Stale `path:line` references in `THREAT_MODEL.md` now point at the functions they name; the
+  gutter and `terminalSafe` rows had been citing the dispatcher above them.
 - `MDEBUG=1` prints the configuration the run resolved: model, base url, the ceilings, the level
   each style key took, and the name of the variable or file the API key came from. The key is never
   printed and a base url is the redacted spelling. Precedence spans three sources per option, and
