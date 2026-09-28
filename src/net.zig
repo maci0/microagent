@@ -1,14 +1,16 @@
 //! What the four modules that touch the machine share: the CA-bundle escape
-//! hatch, a deadline, the two output sinks (stderr for notes and stdout for the
+//! hatch, the home directory and the variables read out of the environment, a
+//! deadline, the two output sinks (stderr for notes and stdout for the
 //! answers a caller parses), the path a write through a symlink really lands on,
 //! the two budgets a value read out of the environment or off the wire is held
-//! to, and the reading of an HTTP date off the wire, which is wire format rather
-//! than any one caller's policy.
+//! to, the line framing a streamed body is cut on, and the reading of an HTTP
+//! date off the wire, which is wire format rather than any one caller's policy.
 //!
 //! A leaf module over the other leaf: it imports `chat` and nothing else, so
 //! the agent run, the session log and `update` can each use it without
 //! importing one another. `chat` is imported for the one escaping the notes
-//! here need, which is the escaping the rest of the program uses.
+//! here need, which is the escaping the rest of the program uses. The argv the
+//! two command-line fuzzers take is `fuzzargv`, beside this and not here.
 
 const std = @import("std");
 const Io = std.Io;
@@ -344,22 +346,6 @@ fn daysFromCivil(year: i64, month: u32, day: u32) i64 {
     const day_of_year = @divTrunc(153 * month_of_era + 2, 5) + @as(i64, day) - 1; // 0 through 365
     const day_of_era = year_of_era * 365 + @divTrunc(year_of_era, 4) - @divTrunc(year_of_era, 100) + day_of_year;
     return era * 146097 + day_of_era - 719468;
-}
-
-/// The fuzzer's bytes as an `argv`, one word per space-separated run, so they
-/// reach a command-line parser as arguments rather than as a single opaque
-/// word. The agent's flags and `update`'s are parsed by two different parsers
-/// that both need the same shape. The words borrow `text`, so the caller's
-/// buffer (or the corpus seed) must outlive the returned slice.
-pub fn fuzzArgv(text: []const u8, argv: *[64][]const u8) []const []const u8 {
-    var n: usize = 0;
-    var words = std.mem.tokenizeAny(u8, text, " \t\n");
-    while (words.next()) |word| {
-        if (n == argv.len) break;
-        argv[n] = word;
-        n += 1;
-    }
-    return argv[0..n];
 }
 
 test "the CA bundle comes from the project's variable first, then the system one" {

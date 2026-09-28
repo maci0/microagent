@@ -1151,7 +1151,7 @@ const Captured = struct {
 /// build cache or a database lock for every later turn of the run and for
 /// whatever starts next, and a timeout that fires while the shell is still there
 /// leaves the compiler or test server it launched running without it.
-pub fn runCapped(
+fn runCapped(
     io: Io,
     arena: std.mem.Allocator,
     argv: []const []const u8,
@@ -1338,7 +1338,7 @@ fn waitBounded(
 
 /// True when a stream filled the cap with bytes still arriving, so the captured
 /// bytes are the beginning of the output and not all of it.
-pub fn atCaptureLimit(captured: Captured) bool {
+fn atCaptureLimit(captured: Captured) bool {
     return captured.dropped[0] or captured.dropped[1];
 }
 

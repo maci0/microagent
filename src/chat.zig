@@ -1,9 +1,13 @@
-//! The value types one turn of a conversation is made of, and the JSON writer
-//! every request body and usage line goes through.
+//! The value types one turn of a conversation is made of, the JSON writer every
+//! request body and usage line goes through, and the one escaping every value
+//! quoted into a diagnostic passes through.
 //!
-//! A leaf module, like `net`: it imports nothing from the agent loop, the tools
-//! or `update`, so all three can speak the same turn without importing each
-//! other.
+//! A leaf module, under `net` and the rest: it imports nothing from the agent
+//! loop, the tools or `update`, so all three can speak the same turn without
+//! importing each other. The escaping and the text helpers sit here rather than
+//! beside their callers for the same reason: a tool name, a config key, a
+//! release tag, a session directory and a path pasted back are all bytes this
+//! program did not choose, and they are normalized once.
 
 const std = @import("std");
 const Io = std.Io;
@@ -244,12 +248,12 @@ fn jsonNeedsEscape(c: u8) bool {
 
 /// The most bytes one UTF-8 character is made of, which bounds how far back
 /// from the end of a string the search for an unfinished character looks.
-pub const utf8_max_sequence_bytes = 4;
+const utf8_max_sequence_bytes = 4;
 
 /// The length of the UTF-8 sequence starting at `i`, or 0 where the bytes are
 /// not one: a bad lead byte, a truncated tail, or an overlong or surrogate
 /// encoding all read as a replacement rather than being copied through.
-pub fn utf8SequenceLen(s: []const u8, i: usize) usize {
+fn utf8SequenceLen(s: []const u8, i: usize) usize {
     const want = std.unicode.utf8ByteSequenceLength(s[i]) catch return 0;
     const end = i + want;
     if (end > s.len) return 0;

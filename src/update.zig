@@ -8,13 +8,14 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const fuzzargv = @import("fuzzargv.zig");
 const net = @import("net.zig");
 const chat = @import("chat.zig");
 
 const version = @import("build_options").version;
 
-pub const default_repo = "maci0/microagent";
-pub const tool_name = "microagent";
+const default_repo = "maci0/microagent";
+const tool_name = "microagent";
 
 const exec_mode: std.Io.File.Permissions = @enumFromInt(@as(std.posix.mode_t, 0o755));
 
@@ -39,7 +40,7 @@ fn quoteUntrusted(arena: std.mem.Allocator, text: []const u8) []const u8 {
     return chat.safeText(arena, text, net.quoted_value_bytes);
 }
 
-pub const Verdict = enum {
+const Verdict = enum {
     current,
     missing_asset,
     untrusted_url,
@@ -48,7 +49,7 @@ pub const Verdict = enum {
     replaced,
 };
 
-pub const Inputs = struct {
+const Inputs = struct {
     running: []const u8,
     tag: []const u8,
     asset_url: ?[]const u8 = null,
@@ -58,12 +59,12 @@ pub const Inputs = struct {
     basename: []const u8 = "",
 };
 
-pub const ListedAsset = struct {
+const ListedAsset = struct {
     name: []const u8,
     url: []const u8,
 };
 
-pub const Release = struct {
+const Release = struct {
     tag: []const u8,
     page: []const u8,
     assets: []const ListedAsset,
@@ -71,7 +72,7 @@ pub const Release = struct {
 
 /// One leading `v` on either side, then exact equality. `v0.1.0` is `0.1.0`,
 /// and so is a running build labelled the same way as the tag it matches.
-pub fn sameRelease(running: []const u8, tag: []const u8) bool {
+fn sameRelease(running: []const u8, tag: []const u8) bool {
     return std.mem.eql(u8, bareVersion(running), bareVersion(tag));
 }
 
@@ -83,7 +84,7 @@ fn bareVersion(release: []const u8) []const u8 {
 /// `v` on either side. Components are `major.minor.patch`, a missing one is 0.
 /// Anything else (a pre-release suffix, a fork's tag) is `.eq`, which leaves
 /// the caller on exact equality rather than guessing an order.
-pub fn compareVersions(running: []const u8, tag: []const u8) std.math.Order {
+fn compareVersions(running: []const u8, tag: []const u8) std.math.Order {
     const a = parseTriple(running) orelse return .eq;
     const b = parseTriple(tag) orelse return .eq;
     for (a, b) |an, bn| {
@@ -110,7 +111,7 @@ fn parseTriple(release: []const u8) ?[3]u64 {
 /// The release matrix names macOS `aarch64-macos` and `x86_64-macos` (no abi)
 /// and Linux `arch-linux-musl`. Zig's abi tag for those macOS targets is
 /// `none`; appending it asks for an asset the release does not publish.
-pub fn targetTriple(buf: []u8, arch: []const u8, os_name: []const u8, abi: []const u8) []const u8 {
+fn targetTriple(buf: []u8, arch: []const u8, os_name: []const u8, abi: []const u8) []const u8 {
     if (std.mem.eql(u8, abi, "none")) {
         return std.fmt.bufPrint(buf, "{s}-{s}", .{ arch, os_name }) catch buf[0..0];
     }
@@ -121,20 +122,20 @@ pub fn targetTriple(buf: []u8, arch: []const u8, os_name: []const u8, abi: []con
 /// static musl binary runs on a glibc host, so a `-gnu` build asks for the
 /// musl asset instead of one the release does not publish. macOS has no abi
 /// tag in its asset name.
-pub fn assetTriple(buf: []u8, arch: []const u8, os_name: []const u8, abi: []const u8) []const u8 {
+fn assetTriple(buf: []u8, arch: []const u8, os_name: []const u8, abi: []const u8) []const u8 {
     if (std.mem.eql(u8, os_name, "linux")) return targetTriple(buf, arch, "linux", "musl");
     return targetTriple(buf, arch, os_name, abi);
 }
 
-pub fn thisAssetTriple(buf: []u8) []const u8 {
+fn thisAssetTriple(buf: []u8) []const u8 {
     return assetTriple(buf, @tagName(builtin.cpu.arch), @tagName(builtin.os.tag), @tagName(builtin.abi));
 }
 
-pub fn writeAssetName(buf: []u8, tag: []const u8, target: []const u8) error{NameTooLong}![]const u8 {
+fn writeAssetName(buf: []u8, tag: []const u8, target: []const u8) error{NameTooLong}![]const u8 {
     return std.fmt.bufPrint(buf, "microagent-{s}-{s}", .{ tag, target }) catch return error.NameTooLong;
 }
 
-pub fn writeSidecarName(buf: []u8, asset_name: []const u8) error{NameTooLong}![]const u8 {
+fn writeSidecarName(buf: []u8, asset_name: []const u8) error{NameTooLong}![]const u8 {
     return std.fmt.bufPrint(buf, "{s}.sha256", .{asset_name}) catch return error.NameTooLong;
 }
 
@@ -148,7 +149,7 @@ fn repoPartOk(part: []const u8) bool {
 }
 
 /// `owner/name` only. A URL, a second slash, or an empty side is not a repo.
-pub fn validRepo(text: []const u8) bool {
+fn validRepo(text: []const u8) bool {
     if (std.mem.indexOf(u8, text, "://") != null) return false;
     const slash = std.mem.findScalar(u8, text, '/') orelse return false;
     const owner = text[0..slash];
@@ -165,7 +166,7 @@ const release_api_url_fixed = "https://api.github.com/repos//releases/latest";
 
 /// The release API URL. A repo that is not `owner/name` fails here, before
 /// any bytes are requested.
-pub fn releaseApiUrl(buf: []u8, repo: []const u8) error{ BadRepo, NameTooLong }![]const u8 {
+fn releaseApiUrl(buf: []u8, repo: []const u8) error{ BadRepo, NameTooLong }![]const u8 {
     if (!validRepo(repo)) return error.BadRepo;
     return std.fmt.bufPrint(buf, release_api_url_fmt, .{repo}) catch
         return error.NameTooLong;
@@ -188,7 +189,7 @@ fn hostTrusted(host: []const u8) bool {
 
 /// https, and the host is `github.com`, `*.github.com`, or `*.githubusercontent.com`.
 /// Userinfo and lookalikes such as `github.com.evil.com` are refused.
-pub fn trustedGithubUrl(url: []const u8) bool {
+fn trustedGithubUrl(url: []const u8) bool {
     const prefix = "https://";
     if (url.len < prefix.len) return false;
     for (prefix, 0..) |c, i| {
@@ -217,7 +218,7 @@ pub fn trustedGithubUrl(url: []const u8) bool {
 /// reason to see it. The host allowlist already makes every host here GitHub's;
 /// narrowing it to the one API that authenticates keeps the grant as wide as the
 /// check that uses it rather than as wide as the allowlist.
-pub fn bearerFor(url: []const u8, bearer: ?[]const u8) ?[]const u8 {
+fn bearerFor(url: []const u8, bearer: ?[]const u8) ?[]const u8 {
     const api = "https://api.github.com/";
     if (bearer == null or url.len < api.len) return null;
     for (api, 0..) |c, i| {
@@ -228,7 +229,7 @@ pub fn bearerFor(url: []const u8, bearer: ?[]const u8) ?[]const u8 {
 
 /// Stdout of `--check` is this URL, or nothing when the page is not a GitHub
 /// https URL.
-pub fn releasePageLine(url: []const u8) error{UntrustedUrl}![]const u8 {
+fn releasePageLine(url: []const u8) error{UntrustedUrl}![]const u8 {
     if (!trustedGithubUrl(url)) return error.UntrustedUrl;
     return url;
 }
@@ -236,14 +237,14 @@ pub fn releasePageLine(url: []const u8) error{UntrustedUrl}![]const u8 {
 /// `--check` never downloads an asset. An equal version never does either,
 /// and neither does a published tag older than the running build: installing it
 /// would replace a newer binary with an older one.
-pub fn fetchesAsset(check_only: bool, running: []const u8, tag: []const u8) bool {
+fn fetchesAsset(check_only: bool, running: []const u8, tag: []const u8) bool {
     if (check_only) return false;
     if (compareVersions(running, tag) == .gt) return false;
     return !sameRelease(running, tag);
 }
 
 /// Sidecar line as `sha256sum` writes it: `<hex>  <basename>`.
-pub fn checksumMatches(asset: []const u8, sidecar: []const u8, basename: []const u8) bool {
+fn checksumMatches(asset: []const u8, sidecar: []const u8, basename: []const u8) bool {
     const line_end = std.mem.findScalar(u8, sidecar, '\n') orelse sidecar.len;
     var line = sidecar[0..line_end];
     if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
@@ -280,7 +281,7 @@ pub fn decide(in: Inputs) Verdict {
 
 /// Writes `asset` over `dest_name` only when the verdict is `replaced`.
 /// A symlink is followed so the real binary changes, not the link.
-pub fn replaceVerified(
+fn replaceVerified(
     io: std.Io,
     dir: std.Io.Dir,
     dest_name: []const u8,
@@ -299,7 +300,7 @@ pub fn replaceVerified(
     try af.replace(io);
 }
 
-pub fn formatCurrent(buf: []u8, tool: []const u8, running: []const u8, tag: []const u8) ![]const u8 {
+fn formatCurrent(buf: []u8, tool: []const u8, running: []const u8, tag: []const u8) ![]const u8 {
     return std.fmt.bufPrint(buf, "{s} {s} is current (latest release: {s})", .{ tool, running, tag });
 }
 
@@ -307,23 +308,23 @@ pub fn formatCurrent(buf: []u8, tool: []const u8, running: []const u8, tag: []co
 /// installed all the same, because `sameRelease` did not match and the caller
 /// cannot prove the running build is newer; the line only says that the
 /// comparison was not made, which "is current" would not.
-pub fn formatUncompared(buf: []u8, tool: []const u8, running: []const u8, tag: []const u8) ![]const u8 {
+fn formatUncompared(buf: []u8, tool: []const u8, running: []const u8, tag: []const u8) ![]const u8 {
     return std.fmt.bufPrint(buf, "{s} {s} is not the latest release ({s}), which is not a version triple to compare against", .{ tool, running, tag });
 }
 
-pub fn formatNewRelease(buf: []u8, tag: []const u8, running: []const u8) ![]const u8 {
+fn formatNewRelease(buf: []u8, tag: []const u8, running: []const u8) ![]const u8 {
     return std.fmt.bufPrint(buf, "New release: {s} (running {s})", .{ tag, running });
 }
 
-pub fn formatAhead(buf: []u8, running: []const u8, tag: []const u8) ![]const u8 {
+fn formatAhead(buf: []u8, running: []const u8, tag: []const u8) ![]const u8 {
     return std.fmt.bufPrint(buf, "{s} is newer than the latest release ({s}); nothing to install", .{ running, tag });
 }
 
-pub fn formatInstalled(buf: []u8, tag: []const u8, path: []const u8) ![]const u8 {
+fn formatInstalled(buf: []u8, tag: []const u8, path: []const u8) ![]const u8 {
     return std.fmt.bufPrint(buf, "Installed {s} to {s}", .{ tag, path });
 }
 
-pub fn parseRelease(arena: std.mem.Allocator, body: []const u8) !Release {
+fn parseRelease(arena: std.mem.Allocator, body: []const u8) !Release {
     // Only a body that is not the documented shape is a malformed release.
     // Running out of memory is the machine, not the payload, and reporting it
     // as a bad response sends the operator to GitHub for the wrong thing.
@@ -370,7 +371,7 @@ pub fn parseRelease(arena: std.mem.Allocator, body: []const u8) !Release {
     };
 }
 
-pub fn assetUrl(rel: Release, name: []const u8) ?[]const u8 {
+fn assetUrl(rel: Release, name: []const u8) ?[]const u8 {
     for (rel.assets) |asset| {
         if (std.mem.eql(u8, asset.name, name)) return asset.url;
     }
@@ -625,7 +626,7 @@ fn fetchBody(
 /// arrived in is freed: two copies of a megabyte-scale binary resident at once,
 /// and a second pass over the bytes for nothing. This hands the buffer over
 /// instead, so the fetch writes each byte into the allocation the caller frees.
-pub const Fetched = struct {
+const Fetched = struct {
     bytes: []u8,
     gpa: std.mem.Allocator,
 
@@ -718,7 +719,7 @@ const usage_text =
     \\
 ;
 
-pub fn printUsage(io: std.Io) void {
+fn printUsage(io: std.Io) void {
     // Text the caller may have piped at something that read a few lines and
     // left; a closed stream costs it nothing.
     net.writeOut(io, usage_text) catch {};
@@ -1402,7 +1403,7 @@ fn fuzzUpdateArgs(_: void, smith: *std.testing.Smith) !void {
     const text = if (smith.in) |seed| seed else raw[0..smith.slice(&raw)];
 
     var argv: [64][]const u8 = undefined;
-    const words = net.fuzzArgv(text, &argv);
+    const words = fuzzargv.argv(text, &argv);
 
     const parsed = parseArgs(words);
     const repo = switch (parsed) {

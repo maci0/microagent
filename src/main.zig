@@ -13,13 +13,15 @@
 //! call is reached by model-supplied text, and the per-run log is written from a
 //! finished response), and `style` (the reply-style levels the system prompt is
 //! built from) and `update` (the one subcommand, `microagent update`) sit on
-//! those.
+//! those. `fuzzargv` sits outside that layering: only the two command-line
+//! parsers, this one and `update`'s, import it, and only their fuzzers call it.
 
 const std = @import("std");
 const Io = std.Io;
 
 const build_options = @import("build_options");
 const chat_mod = @import("chat.zig");
+const fuzzargv = @import("fuzzargv.zig");
 const net = @import("net.zig");
 const session_mod = @import("session.zig");
 const style_mod = @import("style.zig");
@@ -3397,7 +3399,7 @@ fn fuzzArgs(_: void, smith: *std.testing.Smith) !void {
     const text: []const u8 = if (smith.in) |seed| seed else raw[0..smith.slice(&raw)];
 
     var argv: [64][]const u8 = undefined;
-    const words = net.fuzzArgv(text, &argv);
+    const words = fuzzargv.argv(text, &argv);
 
     var buf: [512]u8 = undefined;
     var opts: Options = .{};
