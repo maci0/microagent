@@ -481,8 +481,7 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
     // default here is 400 lines, and 400 long diff lines pass the capture cap,
     // so a call the model asked to be trimmed came back as
     // `error: git diff failed: StreamTooLong` with no lines at all.
-    // Empty rather than undefined, for the reason `runSearchTool` says: a spawn
-    // that fails on its own never writes the out-param.
+    // Empty rather than undefined, for the reason `runSearchTool` gives.
     var got: Partial = .{ .stdout = &.{}, .stderr = &.{}, .dropped = .{ false, false } };
     const res = runCapped(io, arena, argv, max_tool_output * 4, net.durationMs(boundedMs(tool_timeout_ms, ceiling_ms)), environ_map, &got) catch |err|
         return failedOutput(arena, got, try missingProgram(arena, try std.fmt.allocPrint(arena, "git {s}", .{cmd}), git_install, err));
@@ -819,9 +818,7 @@ fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_
     // wrong: a build that printed every error before it hung is the case this
     // is for. Its output comes back with the reason, and a command that printed
     // nothing is the bare reason it always was.
-    // Empty rather than undefined, for the reason `runSearchTool` gives: a
-    // spawn that fails on its own never writes the out-param, and the failure
-    // below reads it to say what the child printed before it did.
+    // Empty rather than undefined, for the reason `runSearchTool` gives.
     var got: Partial = .{ .stdout = &.{}, .stderr = &.{}, .dropped = .{ false, false } };
     const res = runCapped(io, arena, &.{ "/bin/sh", "-c", command }, capture_limit, net.durationMs(timeout_ms), environ_map, &got) catch |err| switch (err) {
         error.Timeout => return failedOutput(arena, got, try std.fmt.allocPrint(arena, "error: command timed out after {d}ms", .{timeout_ms})),
@@ -833,7 +830,7 @@ fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_
     // second copy of a cap's worth of output per call to produce bytes it
     // already had. `res` is arena-owned and outlives the call, and the caller
     // only reads it, so the slice is as good as a copy of it.
-    const clean = !atCaptureLimit(res) and res.term == .exited and res.term.exited == 0;
+    const clean = !res.partial().atCaptureLimit() and res.term == .exited and res.term.exited == 0;
     if (clean and res.stderr.len == 0 and res.stdout.len > 0) return res.stdout;
     if (clean and res.stdout.len == 0 and res.stderr.len > 0) return res.stderr;
     return captureResult(arena, .{
@@ -1102,6 +1099,13 @@ fn readFailed(arena: std.mem.Allocator, path: []const u8, err: anyerror) []const
         "error: cannot read the file";
 }
 
+/// What a `write` or an `edit` says when the bytes did not land: the same
+/// words whichever way they were being put there.
+fn writeFailed(arena: std.mem.Allocator, path: []const u8, err: anyerror) []const u8 {
+    return std.fmt.allocPrint(arena, "error: cannot write {s}: {s}", .{ path, @errorName(err) }) catch
+        "error: cannot write the file";
+}
+
 /// Bytes one read of a streamed file brings in.
 const read_chunk = 8 * 1024;
 
@@ -1213,7 +1217,7 @@ fn toolWrite(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]cons
     const content = chat.str(args.get("content")) orelse
         return std.fmt.allocPrint(arena, "error: missing content", .{});
     writeFileAtomic(io, std.Io.Dir.cwd(), path, content) catch |err|
-        return std.fmt.allocPrint(arena, "error: cannot write {s}: {s}", .{ path, @errorName(err) });
+        return writeFailed(arena, path, err);
     return std.fmt.allocPrint(arena, "wrote {d} bytes to {s}", .{ content.len, path });
 }
 
@@ -1274,7 +1278,7 @@ fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]const
     const all = if (args.get("replace_all")) |v| v == .bool and v.bool else false;
 
     const raw = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_edit_bytes)) catch |err|
-        return std.fmt.allocPrint(arena, "error: cannot read {s}: {s}", .{ path, @errorName(err) });
+        return readFailed(arena, path, err);
     if (old.len == 0) return std.fmt.allocPrint(arena, "error: old_string is empty", .{});
     // An edit is a tool call the model can issue twice: a turn that was cut
     // before the result reached it, a re-read to check the change landed, a
@@ -1339,7 +1343,7 @@ fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]const
         return std.fmt.allocPrint(arena, "error: replacing old_string with new_string would leave old_string matchable in {s}, so a second run of this edit would apply again; include more context in old_string", .{path});
     }
     writeFileAtomic(io, std.Io.Dir.cwd(), path, buf.items) catch |err|
-        return std.fmt.allocPrint(arena, "error: cannot write {s}: {s}", .{ path, @errorName(err) });
+        return writeFailed(arena, path, err);
     return std.fmt.allocPrint(arena, "replaced {d} occurrence(s) in {s}", .{ count, path });
 }
 
@@ -1749,12 +1753,6 @@ fn waitBounded(
     // the run nothing.
     if (join_err) |err| return err;
     return waiting.term;
-}
-
-/// True when a stream filled the cap with bytes still arriving, so the captured
-/// bytes are the beginning of the output and not all of it.
-fn atCaptureLimit(captured: Captured) bool {
-    return captured.partial().atCaptureLimit();
 }
 
 /// One tool result as the model reads it: capped, cut on a code point

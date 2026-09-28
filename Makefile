@@ -95,9 +95,13 @@ help:
 	  'watch [FILTER=...]    rerun the suite on every source change, until Ctrl-C' \
 	  'preflight             name every tool check and lint need that is not on PATH' \
 	  'fmt                   rewrite every tracked .zig and .py file in format style' \
+	  'fmt-python            rewrite the tracked .py files, which zig fmt does not reach' \
 	  'fmt-check             what check runs over the same files, without rewriting' \
 	  'check                 preflight, zig-version, fmt-check, the linters, the tests, an optimized build' \
 	  'lint                  the pin checks, then shellcheck, ruff and yamllint' \
+	  'lint-shell            shellcheck over every tracked .sh file' \
+	  'lint-python           ruff check and ruff format --check over every tracked .py file' \
+	  'lint-yaml             yamllint over every tracked .yml and .yaml file' \
 	  'lint-versions         check ruff and yamllint against the versions the gate runs, and that every pin is hashed' \
 	  'lint-lock             check the Harbor lock carries the manifest pins, a hash each, and nothing else' \
 	  'zig-version           check the local zig against the version the release is built with' \

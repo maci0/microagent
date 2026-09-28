@@ -1995,9 +1995,8 @@ fn streamChat(
         };
         if (debug_enabled) std.debug.print("[mdebug] head status={d} enc={s}\n", .{ @intFromEnum(response.head.status), @tagName(response.head.content_encoding) });
         if (response.head.status != .ok) {
-            // A provider that refuses one of our optional fields gets one more
-            // request without them, rather than a failed run: the field is a
-            // preference, not a requirement.
+            // The one retry the declaration above is for, on the status that
+            // carries the refusal.
             if (response.head.status == .bad_request and !dropped_optional and opts.reasoning_effort != null) {
                 dropped_optional = true;
                 var plain = opts;
@@ -2386,6 +2385,19 @@ const StreamFrame = struct {
     };
 };
 
+/// Why the provider stopped, on the last frame that carries it. `length` means
+/// the response was cut at `max_tokens`; the caller says so rather than
+/// appending a prefix of an answer as if it were the whole one.
+///
+/// Both parse paths land it before the delta, because a frame may carry the
+/// reason with no delta beside it.
+fn applyFinishReason(gpa: std.mem.Allocator, result: *chat_mod.ChatResult, value: ?std.json.Value) !void {
+    const reason = chat_mod.str(value) orelse return;
+    const owned = try chat_mod.ownString(gpa, reason);
+    result.deinitFinish(gpa);
+    result.finish_reason = owned;
+}
+
 /// Folds one frame through the declared shapes. False means the frame did not
 /// fit them and nothing was applied, so the caller parses it the long way.
 fn applyDeclared(
@@ -2420,16 +2432,7 @@ fn applyDeclared(
     }
     if (frame.choices.len == 0) return true;
     const choice = frame.choices[0];
-    // Why the provider stopped, on the last frame that carries it. `length`
-    // means the response was cut at `max_tokens`; the caller says so rather
-    // than appending a prefix of an answer as if it were the whole one. This
-    // has to land before the delta, because the generic path lands it there
-    // and a frame may carry the reason with no delta beside it.
-    if (chat_mod.str(choice.finish_reason)) |reason| {
-        const owned = try chat_mod.ownString(gpa, reason);
-        result.deinitFinish(gpa);
-        result.finish_reason = owned;
-    }
+    try applyFinishReason(gpa, result, choice.finish_reason);
     const delta = choice.delta orelse return true;
 
     if (delta.content) |text| try appendStreamed(gpa, text, result, out_buf);
@@ -2728,14 +2731,7 @@ fn applyFrame(
     if (choices != .array or choices.array.items.len == 0) return;
     const choice = choices.array.items[0];
     if (choice != .object) return;
-    // Why the provider stopped, on the last frame that carries it. `length`
-    // means the response was cut at `max_tokens`; the caller says so rather
-    // than appending a prefix of an answer as if it were the whole one.
-    if (chat_mod.str(choice.object.get("finish_reason"))) |reason| {
-        const owned = try chat_mod.ownString(gpa, reason);
-        result.deinitFinish(gpa);
-        result.finish_reason = owned;
-    }
+    try applyFinishReason(gpa, result, choice.object.get("finish_reason"));
     const delta = choice.object.get("delta") orelse return;
     if (delta != .object) return;
 
@@ -3305,8 +3301,7 @@ test "every value on the config trace is escaped and left readable" {
     // mojibake, the same way every other diagnostic quotes a value.
     try std.testing.expectEqualStrings("\u{fffd}", traceText(arena, "\xff"));
 
-    // Long values are not cut to the quote budget: the trace exists to let a
-    // reader recognize the value, and a truncated path names no directory.
+    // Well past the quote budget every other diagnostic cuts at.
     const long_path = "/home/" ++ "d" ** 400 ++ "/sessions";
     const shown = traceText(arena, long_path);
     try std.testing.expectEqualStrings(long_path, shown);
@@ -5537,6 +5532,26 @@ test "a gap in the tool-call indexes leaves no nameless call behind" {
     try std.testing.expectEqual(@as(usize, 1), calls.items.len);
 }
 
+/// The ids a two-call frame carries before the drop, and the ones left after
+/// it, so the cases that drop a call on a missing name, arguments or id assert
+/// the same shape over the same fold rather than repeating it.
+const KeptCallIds = struct { before: [][]const u8, after: [][]const u8 };
+
+fn foldCallIds(arena: std.mem.Allocator, payload: []const u8) !KeptCallIds {
+    var result: chat_mod.ChatResult = .{};
+    var calls: std.ArrayList(chat_mod.ToolCall) = .empty;
+    var out_buf: std.ArrayList(u8) = .empty;
+    var unparsable: usize = 0;
+    try applyFrame(arena, arena, payload, &result, &calls, &out_buf, &unparsable);
+    try std.testing.expectEqual(@as(usize, 2), calls.items.len);
+    const before = try arena.alloc([]const u8, calls.items.len);
+    for (calls.items, before) |call, *id| id.* = call.id;
+    _ = keepRunnableCalls(arena, &calls);
+    const after = try arena.alloc([]const u8, calls.items.len);
+    for (calls.items, after) |call, *id| id.* = call.id;
+    return .{ .before = before, .after = after };
+}
+
 // A call whose arguments stopped mid-object is a prefix of a call, and the
 // assistant message carries the arguments back to the provider as they are. A
 // provider that reads them rejects the next request, so one truncated turn ends
@@ -5557,16 +5572,9 @@ test "a tool call cut mid-argument is dropped rather than sent on" {
         "{\"index\":0,\"id\":\"call_cut\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\": \\\"ls -\"}}," ++
         "{\"index\":1,\"id\":\"call_ok\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\": \\\"ls\\\"}\"}}" ++
         "]}}]}";
-    var result: chat_mod.ChatResult = .{};
-    var calls: std.ArrayList(chat_mod.ToolCall) = .empty;
-    var out_buf: std.ArrayList(u8) = .empty;
-    var unparsable: usize = 0;
-    try applyFrame(arena, arena, cut, &result, &calls, &out_buf, &unparsable);
-    try std.testing.expectEqual(@as(usize, 2), calls.items.len);
-
-    _ = keepRunnableCalls(arena, &calls);
-    try std.testing.expectEqual(@as(usize, 1), calls.items.len);
-    try std.testing.expectEqualStrings("call_ok", calls.items[0].id);
+    const kept = try foldCallIds(arena, cut);
+    try std.testing.expectEqual(@as(usize, 1), kept.after.len);
+    try std.testing.expectEqualStrings("call_ok", kept.after[0]);
 }
 
 // The id is what a tool message is paired to, and it is the third member of the
@@ -5584,17 +5592,10 @@ test "a tool call with no id is dropped rather than sent on" {
         "{\"index\":0,\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\": \\\"ls\\\"}\"}}," ++
         "{\"index\":1,\"id\":\"call_ok\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\": \\\"ls\\\"}\"}}" ++
         "]}}]}";
-    var result: chat_mod.ChatResult = .{};
-    var calls: std.ArrayList(chat_mod.ToolCall) = .empty;
-    var out_buf: std.ArrayList(u8) = .empty;
-    var unparsable: usize = 0;
-    try applyFrame(arena, arena, payload, &result, &calls, &out_buf, &unparsable);
-    try std.testing.expectEqual(@as(usize, 2), calls.items.len);
-    try std.testing.expectEqual(@as(usize, 0), calls.items[0].id.len);
-
-    _ = keepRunnableCalls(arena, &calls);
-    try std.testing.expectEqual(@as(usize, 1), calls.items.len);
-    try std.testing.expectEqualStrings("call_ok", calls.items[0].id);
+    const kept = try foldCallIds(arena, payload);
+    try std.testing.expectEqual(@as(usize, 0), kept.before[0].len);
+    try std.testing.expectEqual(@as(usize, 1), kept.after.len);
+    try std.testing.expectEqualStrings("call_ok", kept.after[0]);
 }
 
 // A stream is delivered at least once. A relay that reconnects replays from the

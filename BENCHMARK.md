@@ -25,7 +25,7 @@ No runtime, no package manager, no node_modules, no python. Eight files under `s
 the value types a turn is made of, `session.zig` the per-run log, `style.zig` the reply styles,
 `update.zig` the self-update, `net.zig` the sinks, deadlines and CA bundle the rest share, and
 `fuzzargv.zig` the argv both command-line fuzzers feed a parser),
-17 522 lines.
+17 642 lines.
 The sizes in this table are `ls -l` on a fresh build of this tree; every other number below comes
 from the two bench scripts.
 
@@ -309,7 +309,6 @@ not a controlled experiment.
 
 - **DSH's own `benchmarks/`** (terminal-io, session-open, active-stream-reconnect, ...) measure that
   harness's internals, not a coding agent's usefulness.
-- **SWE-bench Pro** — only the Verified stride sample above was run here.
 - **A full SWE-bench Verified set** — the 13 instances below are a sample; see "What a full run would
   take".
 
@@ -499,7 +498,8 @@ thing to fix.
 
 Read honestly: pooled over 26 paired trials microagent is ahead by two trials, and on Terminal-Bench
 the two runs split. Nothing here is a decisive win; 13 instances cannot decide a two-task gap, and
-opencode's own two SWE runs differ by 0.23 (0.462 to 0.692) — larger than the gap between harnesses.
+opencode's own SWE scores span 0.23 (0.462 here to 0.692 at the longer timeout below) — wider than
+the 0.077 between the two harnesses pooled over these 26 trials.
 
 ### kimi
 
@@ -564,7 +564,7 @@ picking the best row would be picking noise:
 | `microagent-r5` | same | 5/13 | 0 |
 | `microagent-r8` | verification gate, reasoning off | 6/13 | 0 |
 | `microagent-r9` | stronger completion rule, reasoning on | 7/13 | 2 |
-| **pooled** | | **46/91 = 0.505** | |
+| **pooled** | | **51/104 = 0.490** | |
 
 opencode's three runs on the same instances: 6/13, 7/13, 9/13 (the 9 at a 1200 s timeout) —
 22/39 = 0.564 pooled. The two harnesses are inside each other's noise on this sample, and 13
