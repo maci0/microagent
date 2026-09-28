@@ -3,8 +3,13 @@ extends: default
 rules:
   # Workflow steps are long shell blocks; a comment column at 80 would wrap
   # every explanation line in them. A cap is still worth having, so a pasted
-  # block or a generated matrix cannot grow a line no reviewer can read: the
-  # longest one here is 123, so 160 leaves the current files alone.
+  # block or a generated matrix cannot grow a line no reviewer can read.
+  #
+  # The longest line here is the release.yml step that reports what the
+  # published release carried, at 148, so 160 leaves every current file alone
+  # with 12 columns to spare. The composite actions are the tightest at 123,
+  # which is where a lower cap would have to start, so the headroom is stated
+  # against the longest file rather than the shortest.
   line-length:
     max: 160
   document-start: disable
