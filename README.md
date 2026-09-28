@@ -66,8 +66,9 @@ The flags, abridged; `microagent --help` is the full text.
                        (env MICROAGENT_CA_BUNDLE, SSL_CERT_FILE). Needed in
                        images that ship no ca-certificates.
     --budget <seconds> stop starting turns after this long, then take one last
-                       turn to make the edit, which may run 5 minutes past it,
-                       at least 1 (env MICROAGENT_BUDGET_SECONDS)
+                       turn to make the edit, which may run 5 minutes past it;
+                       at least 1, and leaving it out is what says "no budget"
+                       (env MICROAGENT_BUDGET_SECONDS)
     --reasoning-effort <level>
                        reasoning.effort sent to the provider: minimal, low,
                        medium, high, or none to disable (env MICROAGENT_REASONING_EFFORT)
@@ -170,9 +171,9 @@ quietly. With `caveman = "off"` and `ponytail = "off"`, the system prompt is exa
 harness sent before styles existed.
 
 `MDEBUG=1` prints the configuration the run resolved: model, base url (credentials in it redacted),
-the ceilings, the level each style key took, and the name of the variable or file the API key came
-from. The key itself is never printed. Precedence spans three sources per option, so this is how you
-tell which one answered.
+the ceilings, the level each style key took, the style config file that was read, and the name of
+the variable or file the API key came from. The key itself is never printed. Precedence spans three
+sources per option, so this is how you tell which one answered.
 
 ### Output contract
 

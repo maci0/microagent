@@ -174,9 +174,10 @@ pub fn main(init: std.process.Init) !void {
         if (ceiling(u32, &env_buf, "MICROAGENT_MAX_TOKENS", v, &opts.max_tokens)) |m| configError(io, "{s}", .{m});
     }
     opts.ca_bundle = net.caBundlePath(init.environ_map);
-    if (envValue(init.environ_map, "MICROAGENT_BUDGET_SECONDS")) |v|
-        opts.budget_s = budgetSeconds(v) orelse
-            return configError(io, "MICROAGENT_BUDGET_SECONDS must be a number of seconds of at least 1, got '{s}'", .{v});
+    if (envValue(init.environ_map, "MICROAGENT_BUDGET_SECONDS")) |v| {
+        var env_buf: [256]u8 = undefined;
+        if (budgetSeconds(&env_buf, "MICROAGENT_BUDGET_SECONDS", v, &opts.budget_s)) |m| return configError(io, "{s}", .{m});
+    }
     opts.session_dir = sessionDir(init);
 
     var err_buf: [512]u8 = undefined;
@@ -211,9 +212,9 @@ pub fn main(init: std.process.Init) !void {
     // message is appended once, in the wire format, with no model in between.
     var msgs: std.ArrayList(u8) = .empty;
     defer msgs.deinit(gpa);
-    const style = loadStyle(io, init, init.arena.allocator(), opts.config);
-    traceConfig(io, init.arena.allocator(), opts, style, key.source);
-    const reply_style = try style.ruleset(init.arena.allocator());
+    const loaded = loadStyle(io, init, init.arena.allocator(), opts.config);
+    traceConfig(io, init.arena.allocator(), opts, loaded, key.source);
+    const reply_style = try loaded.style.ruleset(init.arena.allocator());
     const prompt = if (reply_style.len == 0)
         system_prompt
     else
@@ -265,9 +266,11 @@ const help_text =
     \\                         images that ship no ca-certificates.
     \\      --budget <seconds>
     \\                         stop starting turns after this long, and say so.
-    \\                         The last turn it takes may run 5 minutes past it;
-    \\                         a turn cut off there is discarded, not half-applied.
-    \\                         At least 1 (env MICROAGENT_BUDGET_SECONDS)
+    \\                         At least 1; leaving it out is what says "no
+    \\                         budget". The last turn it takes may run 5 minutes
+    \\                         past it; a turn cut off there is discarded, not
+    \\                         half-applied
+    \\                         (env MICROAGENT_BUDGET_SECONDS)
     \\      --reasoning-effort <level>
     \\                         reasoning.effort sent to the provider: minimal, low,
     \\                         medium, high, or none to disable (env MICROAGENT_REASONING_EFFORT)
@@ -311,8 +314,9 @@ const help_text =
     \\
     \\MDEBUG=1                 trace a stuck stream on stderr, and print the
     \\                         configuration this run resolved: model, base
-    \\                         url, ceilings, style levels, and the name of
-    \\                         the source the api key came from, never the key.
+    \\                         url, ceilings, style levels, the style config
+    \\                         file that was read, and the name of the source
+    \\                         the api key came from, never the key.
     \\                         0, off, no, false and an empty value all leave
     \\                         it off.
     \\
@@ -464,16 +468,17 @@ fn displayUrl(arena: std.mem.Allocator, url: []const u8) []const u8 {
     return std.fmt.allocPrint(arena, "{s}[redacted]@{s}", .{ url[0 .. scheme_end + "://".len], rest[at + 1 ..] }) catch url;
 }
 
-/// The wall-clock budget in seconds, from a flag or a variable, trimmed the way
-/// every other numeric option here is: a value quoted with a space around it is
-/// a number a shell left in, not a bad one. Zero is not a budget: the deadline
-/// it builds is already spent when the loop first asks, so the run takes one
-/// final push turn, spends the tokens for it, and stops, which reads as a
-/// provider that went quiet rather than the zero that was asked for. Null
-/// leaves the two callers free to name where the value came from.
-fn budgetSeconds(value: []const u8) ?u64 {
-    const seconds = std.fmt.parseInt(u64, std.mem.trim(u8, value, " \t\r\n"), 10) catch return null;
-    return if (seconds == 0) null else seconds;
+/// The wall-clock budget in seconds, from a flag or a variable, or the message
+/// saying it is not one. It goes through `ceiling` like the turn and token
+/// limits, so a zero budget is refused the same way: zero is not "no limit" to
+/// the loop, it is a deadline that has already passed, so the first turn the run
+/// would take is the forced final push and then it stops. A caller that meant
+/// no ceiling has to say so by leaving the option out.
+fn budgetSeconds(buf: []u8, from: []const u8, value: []const u8, out: *?u64) ?[]const u8 {
+    var seconds: u64 = undefined;
+    if (ceiling(u64, buf, from, value, &seconds)) |m| return m;
+    out.* = seconds;
+    return null;
 }
 
 /// How much of a value an error message quotes back, cut on a codepoint
@@ -557,8 +562,7 @@ fn setValued(
         .ca_bundle => opts.ca_bundle = value,
         .config => opts.config = value,
         .reasoning_effort => return reasoningEffort(buf, value, &opts.reasoning_effort),
-        .budget => opts.budget_s = budgetSeconds(value) orelse
-            return std.fmt.bufPrint(buf, "--budget must be a number of seconds of at least 1, got '{s}'", .{clip(value)}) catch "bad --budget",
+        .budget => return budgetSeconds(buf, "--budget", value, &opts.budget_s),
         .max_turns => return ceiling(usize, buf, "--max-turns", value, &opts.max_turns),
         .max_tokens => return ceiling(u32, buf, "--max-tokens", value, &opts.max_tokens),
     }
@@ -664,14 +668,21 @@ fn resolveKey(io: Io, init: std.process.Init, given: []const u8) Key {
 /// them: the project's own variable first, then the provider's.
 const key_vars = [_][]const u8{ "MICROAGENT_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY" };
 
+/// The reply-style levels for this run and the file they were read from, the
+/// latter for the trace: precedence here spans three sources, so a level on its
+/// own cannot say whether a file, a variable or a built-in default set it.
+const LoadedStyle = struct { style: style_mod.Style, source: ?[]const u8 };
+
 /// The reply-style levels for this run, from the TOML config named by
 /// --config, MICROAGENT_CONFIG or `$HOME/.microagent/config.toml`, then the
 /// MICROAGENT_CAVEMAN / MICROAGENT_PONYTAIL overrides, then the built-in
 /// defaults. A missing file, an unreadable one, or an unknown key costs the run
-/// nothing: the levels that were understood still apply.
-fn loadStyle(io: Io, init: std.process.Init, arena: std.mem.Allocator, config: []const u8) style_mod.Style {
+/// nothing: the levels that were understood still apply. The source is the file
+/// that was looked for, readable or not, because the question the trace answers
+/// is which one was consulted.
+fn loadStyle(io: Io, init: std.process.Init, arena: std.mem.Allocator, config: []const u8) LoadedStyle {
     var style: style_mod.Style = .{};
-    const source = styleConfigPath(init, arena, config);
+    const source = styleConfigPath(init.environ_map, arena, config);
     var text: ?[]const u8 = null;
     if (source.path) |p| {
         text = std.Io.Dir.cwd().readFileAlloc(io, p, arena, .limited(max_config_bytes)) catch |err| blk: {
@@ -690,7 +701,7 @@ fn loadStyle(io: Io, init: std.process.Init, arena: std.mem.Allocator, config: [
             net.note(io, arena, "microagent: {s} is not a level; keeping the default\n", .{unknown.key});
         }
     }
-    return style;
+    return .{ .style = style, .source = source.path };
 }
 
 /// The configuration this run resolved, on stderr when MDEBUG is on. Precedence
@@ -698,12 +709,13 @@ fn loadStyle(io: Io, init: std.process.Init, arena: std.mem.Allocator, config: [
 /// is to be told; the key is named by the source it came from and never
 /// printed, and a base url is the redacted spelling so credentials in one do
 /// not reach a log either.
-fn traceConfig(io: Io, arena: std.mem.Allocator, opts: Options, style: style_mod.Style, key_source: []const u8) void {
+fn traceConfig(io: Io, arena: std.mem.Allocator, opts: Options, style: LoadedStyle, key_source: []const u8) void {
     if (!debug_enabled) return;
     net.note(io, arena,
         \\[mdebug] model={s} base_url={s}
         \\[mdebug] max_turns={d} max_tokens={d} budget_s={s} reasoning_effort={s}
         \\[mdebug] ca_bundle={s} session_dir={s}
+        \\[mdebug] style_config={s}
         \\[mdebug] caveman={s} ponytail={s}
         \\[mdebug] api key from {s}
         \\
@@ -716,8 +728,9 @@ fn traceConfig(io: Io, arena: std.mem.Allocator, opts: Options, style: style_mod
         opts.reasoning_effort orelse "unset",
         if (opts.ca_bundle.len == 0) "unset" else opts.ca_bundle,
         if (opts.session_dir.len == 0) "off" else opts.session_dir,
-        style.caveman.name(),
-        style.ponytail.name(),
+        style.source orelse "none",
+        style.style.caveman.name(),
+        style.style.ponytail.name(),
         key_source,
     });
 }
@@ -739,14 +752,15 @@ const StyleSource = struct { path: ?[]const u8, named: bool };
 
 /// Where the style config is read from: --config, else MICROAGENT_CONFIG, else
 /// `$HOME/.microagent/config.toml`. An empty MICROAGENT_CONFIG turns the
-/// file off, as does a home that is not there.
-fn styleConfigPath(init: std.process.Init, arena: std.mem.Allocator, config: []const u8) StyleSource {
+/// file off, as does a home that is not there. Takes the environment map
+/// rather than the whole `Init`, so the precedence is testable without one.
+fn styleConfigPath(env: *const std.process.Environ.Map, arena: std.mem.Allocator, config: []const u8) StyleSource {
     if (config.len > 0) return .{ .path = std.fs.path.resolve(arena, &.{config}) catch config, .named = true };
-    if (init.environ_map.get("MICROAGENT_CONFIG")) |path| {
+    if (env.get("MICROAGENT_CONFIG")) |path| {
         if (path.len == 0) return .{ .path = null, .named = false };
         return .{ .path = std.fs.path.resolve(arena, &.{path}) catch path, .named = true };
     }
-    const home = init.environ_map.get("HOME") orelse return .{ .path = null, .named = false };
+    const home = env.get("HOME") orelse return .{ .path = null, .named = false };
     const path = std.fs.path.join(arena, &.{ home, ".microagent", "config.toml" }) catch
         return .{ .path = null, .named = false };
     return .{ .path = std.fs.path.resolve(arena, &.{path}) catch path, .named = false };
@@ -2055,18 +2069,35 @@ test "a wrong command line names the flag and the value it was given" {
     var buf: [512]u8 = undefined;
     try std.testing.expectEqualStrings("unknown or incomplete argument '--nope'", parseArgs(&buf, &.{"--nope"}, &opts).?);
     try std.testing.expectEqualStrings("--model needs a model id", parseArgs(&buf, &.{"--model"}, &opts).?);
-    try std.testing.expectEqualStrings("--budget must be a number of seconds of at least 1, got 'soon'", parseArgs(&buf, &.{ "--budget", "soon" }, &opts).?);
-    // A budget of zero is refused rather than run: the deadline it builds has
-    // already passed when the loop first asks, so the run takes a final push
-    // turn it pays for and stops.
-    var zero: Options = .{};
-    try std.testing.expectEqualStrings("--budget must be a number of seconds of at least 1, got '0'", parseArgs(&buf, &.{ "--budget", "0" }, &zero).?);
-    try std.testing.expectEqual(@as(?u64, null), zero.budget_s);
+    try std.testing.expectEqualStrings("--budget must be a number, got 'soon'", parseArgs(&buf, &.{ "--budget", "soon" }, &opts).?);
     try std.testing.expectEqualStrings("prompt given twice: 'one' and 'two'", parseArgs(&buf, &.{ "one", "two" }, &opts).?);
     var joined: Options = .{};
     try std.testing.expectEqualStrings("prompt given twice: 'one' and 'two'", parseArgs(&buf, &.{ "-p", "one", "--print=two" }, &joined).?);
     // An empty word is an empty prompt, not an argument nobody knows.
     try std.testing.expectEqualStrings("the prompt is empty: pass the task as an argument or with --print", parseArgs(&buf, &.{""}, &opts).?);
+}
+
+// A zero budget is a deadline that has already passed, not the absence of one:
+// the run takes the forced final push as its only turn and stops, having
+// changed nothing. Every numeric option refuses zero for the same reason, and
+// the ceilings say so already; the budget is the one that used to accept it.
+test "a budget of zero is refused like every other zero ceiling" {
+    var opts: Options = .{};
+    var buf: [512]u8 = undefined;
+    try std.testing.expectEqualStrings("--budget must be at least 1", parseArgs(&buf, &.{ "--budget", "0" }, &opts).?);
+    try std.testing.expectEqual(@as(?u64, null), opts.budget_s);
+
+    // The same rule on the environment path, where a harness that computed a
+    // per-review budget sets it from a template that may be empty of seconds.
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("MICROAGENT_BUDGET_SECONDS", "0");
+    try std.testing.expectEqualStrings("MICROAGENT_BUDGET_SECONDS must be at least 1", budgetSeconds(&buf, "MICROAGENT_BUDGET_SECONDS", env.get("MICROAGENT_BUDGET_SECONDS").?, &opts.budget_s).?);
+    try std.testing.expectEqual(@as(?u64, null), opts.budget_s);
+
+    // A real budget still takes, trimmed the way a shell leaves it.
+    try std.testing.expectEqual(@as(?[]const u8, null), budgetSeconds(&buf, "--budget", " 90 ", &opts.budget_s));
+    try std.testing.expectEqual(@as(?u64, 90), opts.budget_s);
 }
 
 test "help and version win wherever they appear" {
@@ -3591,6 +3622,43 @@ test "the trace switch is on only for a value that says so" {
     try std.testing.expect(debugEnabled(&env));
     try env.put("MDEBUG", "on");
     try std.testing.expect(debugEnabled(&env));
+}
+
+test "the style config path follows flag, then variable, then home" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+
+    // A flag names the file outright, and it wins over the variable below it.
+    try env.put("MICROAGENT_CONFIG", "/from/env.toml");
+    try env.put("HOME", "/home/one");
+    try std.testing.expectEqualStrings("/from/flag.toml", styleConfigPath(&env, arena, "/from/flag.toml").path.?);
+    try std.testing.expect(styleConfigPath(&env, arena, "/from/flag.toml").named);
+
+    // The variable is next, and the flag does not name one when it is absent.
+    try std.testing.expectEqualStrings("/from/env.toml", styleConfigPath(&env, arena, "").path.?);
+    try std.testing.expect(styleConfigPath(&env, arena, "").named);
+
+    // An empty variable is the documented way to turn the file off, and the
+    // home below it must not answer it.
+    try env.put("MICROAGENT_CONFIG", "");
+    try std.testing.expect(styleConfigPath(&env, arena, "").path == null);
+
+    // With neither, the home is where the file is looked for, and it is not
+    // something the caller named, so its absence stays quiet.
+    var home_only: std.process.Environ.Map = .init(std.testing.allocator);
+    defer home_only.deinit();
+    try home_only.put("HOME", "/home/one");
+    const home = styleConfigPath(&home_only, arena, "");
+    try std.testing.expect(std.mem.endsWith(u8, home.path.?, "/home/one/.microagent/config.toml"));
+    try std.testing.expect(!home.named);
+
+    // No home at all is no file.
+    var bare: std.process.Environ.Map = .init(std.testing.allocator);
+    defer bare.deinit();
+    try std.testing.expect(styleConfigPath(&bare, arena, "").path == null);
 }
 
 // The session store is a per-run directory nothing used to delete from, so a
