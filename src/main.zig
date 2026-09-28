@@ -819,9 +819,17 @@ fn resolveKey(io: Io, init: std.process.Init, given: []const u8) Key {
         ".secrets",
         "openrouter",
     }) catch return .{ .value = "", .source = "none" };
-    if (tool_mod.readSecret(io, init.arena.allocator(), fallback)) |v| {
-        if (v.len != 0) return .{ .value = v, .source = fallback };
-        net.note(io, init.arena.allocator(), "microagent: {s} is empty; no key in it\n", .{fallback});
+    switch (tool_mod.readSecret(io, init.arena.allocator(), fallback)) {
+        .found => |v| {
+            if (v.len != 0) return .{ .value = v, .source = fallback };
+            net.note(io, init.arena.allocator(), "microagent: {s} is empty; no key in it\n", .{fallback});
+        },
+        // A key that is set in a file this process cannot read is not the same
+        // as no key, and the difference is the whole of what the caller does
+        // next: the first is a permissions problem on a file that holds a
+        // working key, the second is a key to go and find.
+        .unreadable => |u| net.note(io, init.arena.allocator(), "microagent: {s} could not be read ({s}); it may hold a key this process cannot reach, and no key was taken from it\n", .{ fallback, @errorName(u.reason) }),
+        .absent => {},
     }
     return .{ .value = "", .source = "none" };
 }
@@ -1386,8 +1394,21 @@ fn streamChat(
                     net.note(io, arena, "microagent: {s} answered HTTP {d}, retrying in {d}ms (attempt {d}/{d})\n", .{
                         shown_url, @intFromEnum(response.head.status), affordable, attempt + 1, max_attempts,
                     });
-                    waitMs(io, affordable) catch {};
-                    continue;
+                    // The same rule `waitBeforeRetry` follows: a sleep that
+                    // failed is not a sleep, and continuing would answer a
+                    // provider that asked for a pause with an immediate second
+                    // request, which is the refusal the header was meant to
+                    // prevent. Falling out of the block is what gives the turn
+                    // up, with the reason on stderr.
+                    waited: {
+                        waitMs(io, affordable) catch |wait_err| {
+                            net.note(io, arena, "microagent: the {d}ms wait {s} asked for could not be taken ({s}); the turn is given up rather than retried at once\n", .{
+                                affordable, shown_url, @errorName(wait_err),
+                            });
+                            break :waited;
+                        };
+                        continue;
+                    }
                 }
                 // The provider asked for longer than this run has left. Waiting
                 // the full ask would put the run to sleep inside the caller's
@@ -1499,7 +1520,7 @@ fn streamChat(
     }
 
     if (unparsable > 0)
-        net.note(io, arena, "microagent: {d} frame(s) of the completion stream from {s} were not JSON and their content is not in this turn\n", .{ unparsable, shown_url });
+        net.note(io, arena, "microagent: {d} frame(s) of the completion stream from {s} were not JSON, or carried a token count that is not a number; their content and their counts are not in this turn\n", .{ unparsable, shown_url });
     // The turn's own ceiling, reached while the stream was still arriving. Past
     // it `appendStreamed` and `applyCallDelta` drop every further byte, and a
     // dropped argument fragment is what makes a tool call the next turn cannot
@@ -1637,6 +1658,7 @@ fn applyDeclared(
     result: *chat_mod.ChatResult,
     calls: *std.ArrayList(chat_mod.ToolCall),
     out_buf: *std.ArrayList(u8),
+    unparsable: *usize,
 ) !bool {
     // A frame the shapes cannot hold is the slow path's job. An allocation that
     // failed is not a frame that would not parse, so it is not answered with
@@ -1657,7 +1679,7 @@ fn applyDeclared(
             .cached = if (u.prompt_tokens_details) |d| d.cached_tokens else null,
             .cache_hit = u.prompt_cache_hit_tokens,
             .cache_read = u.cache_read_input_tokens,
-        });
+        }, unparsable);
     }
     if (frame.choices.len == 0) return true;
     const choice = frame.choices[0];
@@ -1708,22 +1730,27 @@ const UsageFields = struct {
 /// from reading as a run of zero for the rest: a stream that spreads its usage
 /// over several frames, or spells a total in one and the parts in another, is
 /// folded counter by counter rather than replaced field by field.
-fn applyUsage(result: *chat_mod.ChatResult, u: UsageFields) void {
-    if (chat_mod.maybeNum(u.prompt)) |v| result.prompt_tokens = v;
-    if (chat_mod.maybeNum(u.completion)) |v| result.completion_tokens = v;
-    if (chat_mod.maybeNum(u.total)) |v| {
+///
+/// A counter the frame spelled as a string and that is not a number is counted
+/// in `unparsable` and left where it was, rather than folded in as a zero: the
+/// count the run then reports is the one the provider really sent, and the
+/// frames whose counters it could not read are named on stderr.
+fn applyUsage(result: *chat_mod.ChatResult, u: UsageFields, unparsable: *usize) void {
+    if (chat_mod.maybeNum(u.prompt, unparsable)) |v| result.prompt_tokens = v;
+    if (chat_mod.maybeNum(u.completion, unparsable)) |v| result.completion_tokens = v;
+    if (chat_mod.maybeNum(u.total, unparsable)) |v| {
         result.total_tokens = v;
         // A zero is not a total the provider stands behind: it is the field
         // left where it started, and the sum below is what stands in for it.
         if (v != 0) result.total_from_provider = true;
     }
-    if (chat_mod.maybeNum(u.reasoning)) |v| result.reasoning_tokens = v;
-    if (chat_mod.maybeNum(u.cached)) |v| result.cached_tokens = v;
+    if (chat_mod.maybeNum(u.reasoning, unparsable)) |v| result.reasoning_tokens = v;
+    if (chat_mod.maybeNum(u.cached, unparsable)) |v| result.cached_tokens = v;
     if (result.cached_tokens == 0) {
-        if (chat_mod.maybeNum(u.cache_hit)) |v| result.cached_tokens = v;
+        if (chat_mod.maybeNum(u.cache_hit, unparsable)) |v| result.cached_tokens = v;
     }
     if (result.cached_tokens == 0) {
-        if (chat_mod.maybeNum(u.cache_read)) |v| result.cached_tokens = v;
+        if (chat_mod.maybeNum(u.cache_read, unparsable)) |v| result.cached_tokens = v;
     }
     // A provider that has sent no total of its own gets the sum of the parts
     // recomputed on every frame, so a stream that splits the parts across
@@ -1799,10 +1826,12 @@ fn applyCallDelta(
 /// it may survive: strings that do are copied into `gpa`, which lives as long
 /// as the response they belong to.
 ///
-/// `unparsable` counts the frames that were not JSON. A frame the parser cannot
-/// read holds content and tool-call arguments the turn will not have, so it is
-/// counted and the caller says so; dropping it without a count leaves a
-/// response that is short and looks complete.
+/// `unparsable` counts the frames that were not JSON, and the token counts
+/// inside the frames that were. A frame the parser cannot read holds content
+/// and tool-call arguments the turn will not have, and a count it cannot read
+/// is a number this run did not bill, so both are counted and the caller says
+/// so; dropping either without a count leaves a response that is short and a
+/// bill that looks complete.
 fn applyFrame(
     scratch: std.mem.Allocator,
     gpa: std.mem.Allocator,
@@ -1815,7 +1844,7 @@ fn applyFrame(
     // The declared shapes cover every frame a provider sends in practice. The
     // generic parse behind them still runs for anything that does not fit, so
     // this is a speedup and not a narrowing of what is accepted.
-    if (try applyDeclared(scratch, gpa, payload, result, calls, out_buf)) return;
+    if (try applyDeclared(scratch, gpa, payload, result, calls, out_buf, unparsable)) return;
 
     const parsed = std.json.parseFromSlice(std.json.Value, scratch, payload, .{}) catch |err| switch (err) {
         // Counted as unreadable only when it really was: a frame that would not
@@ -1851,7 +1880,7 @@ fn applyFrame(
             .cached = cached,
             .cache_hit = u.object.get("prompt_cache_hit_tokens"),
             .cache_read = u.object.get("cache_read_input_tokens"),
-        });
+        }, unparsable);
     };
     const choices = root.object.get("choices") orelse return;
     if (choices != .array or choices.array.items.len == 0) return;
@@ -2191,7 +2220,16 @@ fn waitBeforeRetry(io: Io, arena: std.mem.Allocator, url: []const u8, attempt: u
     net.note(io, arena, "microagent: {s} {s} failed ({s}), retrying (attempt {d}/{d})\n", .{
         what, url, @errorName(err), attempt + 1, max_attempts,
     });
-    waitMs(io, wait) catch {};
+    // A wait that could not be taken is not a wait. Returning true anyway sent
+    // the next attempt the instant the sleep failed, which is the one thing the
+    // backoff exists to prevent, and it did it silently: the line above already
+    // promised a delay the run then did not take.
+    waitMs(io, wait) catch |wait_err| {
+        net.note(io, arena, "microagent: the {d}ms wait before that attempt to {s} could not be taken ({s}); the attempt is abandoned rather than sent at once\n", .{
+            wait, url, @errorName(wait_err),
+        });
+        return false;
+    };
     return true;
 }
 
@@ -3412,6 +3450,35 @@ test "a total summed from parts counts the parts a later frame brings" {
     // A total the provider does send is its own number, and it still wins.
     try sink.feed("{\"choices\":[{\"delta\":{}}],\"usage\":{\"total_tokens\":999}}");
     try std.testing.expectEqual(@as(u64, 999), sink.result.total_tokens);
+}
+
+// A count the provider spelled as a string and that is not a number is a frame
+// that carried no count. Folding it in as a zero replaced the count an earlier
+// frame really sent, and the usage line a monitor bills from then reports a
+// run that spent nothing, with nothing on the operator's screen to say why.
+test "a token count that is not a number is counted, not folded in as zero" {
+    var sink = FrameSink.init(std.testing.allocator);
+    defer sink.deinit();
+
+    try sink.feed("{\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":900,\"completion_tokens\":18}}");
+    try std.testing.expectEqual(@as(usize, 0), sink.unparsable);
+    try std.testing.expectEqual(@as(u64, 918), sink.result.total_tokens);
+
+    // A number too large for the parse is still a number, so it folds.
+    try sink.feed("{\"choices\":[{\"delta\":{}}],\"usage\":{\"total_tokens\":\"1234\"}}");
+    try std.testing.expectEqual(@as(usize, 0), sink.unparsable);
+    try std.testing.expectEqual(@as(u64, 1234), sink.result.total_tokens);
+
+    // One that is not a number at all leaves the count where the provider put
+    // it and is counted, so the stream loop names it on stderr.
+    try sink.feed("{\"choices\":[{\"delta\":{}}],\"usage\":{\"total_tokens\":\"many\"}}");
+    try std.testing.expectEqual(@as(usize, 1), sink.unparsable);
+    try std.testing.expectEqual(@as(u64, 1234), sink.result.total_tokens);
+
+    // The generic path, behind the declared shapes, is the same rule.
+    try sink.feed("{\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":\"lots\"}}");
+    try std.testing.expectEqual(@as(usize, 2), sink.unparsable);
+    try std.testing.expectEqual(@as(u64, 900), sink.result.prompt_tokens);
 }
 
 /// The `[` and the system message a run starts from, in the bytes the agent

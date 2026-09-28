@@ -409,6 +409,16 @@ const Capped = struct {
         self.writer = .{ .vtable = &self.vtable, .buffer = &.{} };
     }
 
+    /// Empties the buffer and clears the cap flag, so a fetch that is tried
+    /// again writes into a body that is empty rather than one that still holds
+    /// the bytes the failed attempt read: two attempts' bodies concatenated are
+    /// a body no release ever published, and the checksum that gates the
+    /// install is computed over exactly those bytes.
+    fn reset(self: *Capped) void {
+        self.body.writer.end = 0;
+        self.over = false;
+    }
+
     fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
         const self: *Capped = @fieldParentPtr("writer", w);
         var total: usize = 0;
@@ -457,7 +467,16 @@ fn fail(io: std.Io, comptime fmt: []const u8, args: anytype) u8 {
 /// the same answer to. `client` is shared across the three fetches a run makes
 /// so the CA store is loaded once. On an HTTP error `status_out` carries the
 /// code, which is the difference between "no release yet" and "rate limit".
+///
+/// A connection that failed before the response started, and a status the
+/// provider is using to say it is busy rather than that the request was wrong,
+/// are retried: an update is a GET, so a second request is free of every effect
+/// the first one had beyond bytes nobody acted on. What is not retried is a
+/// status that names the request as the problem, a body past the cap, and an
+/// allocation that failed, since none of them is a transient condition.
 fn fetchInto(
+    io: std.Io,
+    arena: std.mem.Allocator,
     client: *std.http.Client,
     capped: *Capped,
     url: []const u8,
@@ -470,17 +489,93 @@ fn fetchInto(
         break :blk priv_buf[0..1];
     } else &.{};
 
-    const result = client.fetch(.{
-        .location = .{ .url = url },
-        .headers = .{ .user_agent = .{ .override = "microagent/" ++ version } },
-        .privileged_headers = priv_headers,
-        .response_writer = &capped.writer,
-    }) catch |err| {
-        if (capped.over) return error.PayloadTooLarge;
-        return err;
+    var attempt: u32 = 1;
+    while (true) : (attempt += 1) {
+        const result = client.fetch(.{
+            .location = .{ .url = url },
+            .headers = .{ .user_agent = .{ .override = "microagent/" ++ version } },
+            .privileged_headers = priv_headers,
+            .response_writer = &capped.writer,
+        }) catch |err| {
+            if (capped.over) return error.PayloadTooLarge;
+            if (!transient(err) or attempt >= max_fetch_attempts) return err;
+            if (!waitBeforeFetchRetry(io, arena, url, attempt, err)) return err;
+            capped.reset();
+            continue;
+        };
+        status_out.* = result.status;
+        if (@intFromEnum(result.status) < 400) return;
+        if (!retryableStatus(result.status) or attempt >= max_fetch_attempts) return error.HttpStatus;
+        if (!waitBeforeFetchRetry(io, arena, url, attempt, error.HttpStatus)) return error.HttpStatus;
+        capped.reset();
+    }
+}
+
+/// Attempts one fetch makes before the error is the caller's. Three, with the
+/// schedule below, is the same budget the agent's own request loop spends.
+const max_fetch_attempts: u32 = 3;
+/// The wait before the first retry, doubled per attempt and capped. A provider
+/// that is briefly busy is the case this covers, and the schedule is the one
+/// the agent run already uses for the same failure.
+const fetch_retry_base_ms: u64 = 1000;
+const fetch_retry_max_ms: u64 = 30_000;
+
+/// Whether a transport failure is worth another attempt. The set is the
+/// failures a second connection can answer: the name did not resolve or the
+/// route to it is down, the connection was refused or reset or dropped, the
+/// TLS handshake did not complete. A body past the cap and a failed allocation
+/// are not here, and neither is anything this program got wrong: `OutOfMemory`
+/// repeats, and every other error the fetch can name is a decision the client
+/// or the URL already made.
+fn transient(err: anyerror) bool {
+    return switch (err) {
+        error.TemporaryNameServerFailure,
+        error.NameServerFailure,
+        error.UnknownHostName,
+        error.HostLacksNetworkAddresses,
+        error.NetworkDown,
+        error.ConnectionRefused,
+        error.ConnectionResetByPeer,
+        error.ConnectionAborted,
+        error.BrokenPipe,
+        error.ConnectionTimedOut,
+        error.Timeout,
+        error.TlsInitializationFailed,
+        => true,
+        else => false,
     };
-    status_out.* = result.status;
-    if (@intFromEnum(result.status) >= 400) return error.HttpStatus;
+}
+
+/// Statuses that say the provider is busy rather than that the request was
+/// wrong. A 404 names a release or an asset that is not published, and asking
+/// again for the same name changes nothing.
+fn retryableStatus(status: std.http.Status) bool {
+    return switch (@intFromEnum(status)) {
+        408, 425, 429 => true,
+        else => @intFromEnum(status) >= 500,
+    };
+}
+
+/// Says the retry is coming and waits for it. False means the wait could not be
+/// taken, and the caller must surface its error rather than send the next
+/// request at once: a wait that did not happen is not a backoff.
+fn waitBeforeFetchRetry(io: std.Io, arena: std.mem.Allocator, url: []const u8, attempt: u32, err: anyerror) bool {
+    const wait = fetchRetryBackoffMs(attempt);
+    net.note(io, arena, "microagent update: {s} failed ({s}), retrying in {d}ms (attempt {d}/{d})\n", .{
+        url, @errorName(err), wait, attempt + 1, max_fetch_attempts,
+    });
+    io.sleep(.{ .nanoseconds = wait *| std.time.ns_per_ms }, .awake) catch |sleep_err| {
+        net.note(io, arena, "microagent update: the {d}ms wait before that attempt to {s} could not be taken ({s}); the update is abandoned rather than retried at once\n", .{
+            wait, url, @errorName(sleep_err),
+        });
+        return false;
+    };
+    return true;
+}
+
+fn fetchRetryBackoffMs(attempt: u32) u64 {
+    const shift: u6 = @intCast(@min(attempt -| 1, 6));
+    return @min(fetch_retry_base_ms *| (@as(u64, 1) << shift), fetch_retry_max_ms);
 }
 
 /// One GET, body capped at `max_size` while it streams, copied into `arena`.
@@ -492,6 +587,7 @@ fn fetchInto(
 /// is a few kilobytes; the asset goes through `fetchAsset` instead, which keeps
 /// the buffer it arrived in rather than paying for a second copy of a binary.
 fn fetchBody(
+    io: std.Io,
     client: *std.http.Client,
     gpa: std.mem.Allocator,
     arena: std.mem.Allocator,
@@ -503,7 +599,7 @@ fn fetchBody(
     var capped: Capped = undefined;
     try capped.start(gpa, max_size);
     defer capped.body.deinit();
-    try fetchInto(client, &capped, url, bearer, status_out);
+    try fetchInto(io, arena, client, &capped, url, bearer, status_out);
     return try arena.dupe(u8, capped.body.written());
 }
 
@@ -525,6 +621,8 @@ pub const Fetched = struct {
 };
 
 fn fetchAsset(
+    io: std.Io,
+    arena: std.mem.Allocator,
     client: *std.http.Client,
     gpa: std.mem.Allocator,
     url: []const u8,
@@ -535,7 +633,7 @@ fn fetchAsset(
     var capped: Capped = undefined;
     try capped.start(gpa, max_size);
     errdefer capped.body.deinit();
-    try fetchInto(client, &capped, url, bearer, status_out);
+    try fetchInto(io, arena, client, &capped, url, bearer, status_out);
     return .{ .bytes = try capped.body.toOwnedSlice(), .gpa = gpa };
 }
 
@@ -784,7 +882,7 @@ fn runChecked(
 
     const bearer = githubBearer(arena, env);
     var status: std.http.Status = .ok;
-    const body = fetchBody(&client, gpa, arena, api, bearerFor(api, bearer), max_api_bytes, &status) catch |err| {
+    const body = fetchBody(io, &client, gpa, arena, api, bearerFor(api, bearer), max_api_bytes, &status) catch |err| {
         if (err == error.HttpStatus) return fail(io, "GitHub returned HTTP {d} for {s}{s}", .{
             @intFromEnum(status), repo, statusHint(status),
         });
@@ -854,12 +952,12 @@ fn runChecked(
     // The URL the response named is unbounded, and these lines print into a
     // fixed buffer, so the asset name is what identifies the download. The name
     // is the tag inside it, so it is quoted for a reader the way the tag is.
-    var asset = fetchAsset(&client, gpa, a_url, bearerFor(a_url, bearer), max_asset_bytes, &status) catch |err|
+    var asset = fetchAsset(io, arena, &client, gpa, a_url, bearerFor(a_url, bearer), max_asset_bytes, &status) catch |err|
         return downloadFailure(io, asset_name_text, status, err);
     defer asset.deinit();
     var side_what_buf: [320]u8 = undefined;
     const side_what = std.fmt.bufPrint(&side_what_buf, "the checksum sidecar for {s}", .{asset_name_text}) catch asset_name_text;
-    const sidecar = fetchBody(&client, gpa, arena, s_url, bearerFor(s_url, bearer), max_sidecar_bytes, &status) catch |err|
+    const sidecar = fetchBody(io, &client, gpa, arena, s_url, bearerFor(s_url, bearer), max_sidecar_bytes, &status) catch |err|
         return downloadFailure(io, side_what, status, err);
 
     const decision = decide(.{
@@ -911,6 +1009,69 @@ const asset_base = "microagent-v0.1.0-x86_64-linux-musl";
 
 fn copyOf(io: std.Io, dir: std.Io.Dir) ![]u8 {
     return dir.readFileAlloc(io, "microagent", std.testing.allocator, .limited(64));
+}
+
+// A retried fetch is only correct if what it retries is a condition a second
+// request can answer. A DNS failure, a refused or reset connection and a busy
+// provider are; a 404 names a release or asset that is not published, a body
+// past the cap is the same body however many times it is asked for, and an
+// allocation that failed fails again. Retrying any of those spends the
+// operator's time to arrive at the same answer.
+test "update: only a transient failure or a busy provider is retried" {
+    try std.testing.expect(transient(error.UnknownHostName));
+    try std.testing.expect(transient(error.ConnectionRefused));
+    try std.testing.expect(transient(error.ConnectionResetByPeer));
+    try std.testing.expect(transient(error.TemporaryNameServerFailure));
+    try std.testing.expect(transient(error.TlsInitializationFailed));
+
+    try std.testing.expect(!transient(error.OutOfMemory));
+    try std.testing.expect(!transient(error.PayloadTooLarge));
+    try std.testing.expect(!transient(error.HttpStatus));
+    try std.testing.expect(!transient(error.UntrustedUrl));
+    try std.testing.expect(!transient(error.ChecksumMismatch));
+
+    try std.testing.expect(retryableStatus(.internal_server_error));
+    try std.testing.expect(retryableStatus(.service_unavailable));
+    try std.testing.expect(retryableStatus(.too_many_requests));
+    try std.testing.expect(retryableStatus(.request_timeout));
+
+    // A name that is not published is a 404 whichever way it is asked for.
+    try std.testing.expect(!retryableStatus(.not_found));
+    try std.testing.expect(!retryableStatus(.unauthorized));
+    try std.testing.expect(!retryableStatus(.forbidden));
+}
+
+// The body a retry writes into still holds the bytes the failed attempt read.
+// Concatenating the two is a body no release published, and the checksum that
+// gates the install is computed over exactly those bytes, so the failure would
+// read as a tampering refusal rather than as a retried fetch.
+test "update: a retried fetch starts from an empty body" {
+    var capped: Capped = undefined;
+    try capped.start(std.testing.allocator, 1024);
+    defer capped.body.deinit();
+    try capped.writer.writeAll("first attempt");
+    try std.testing.expectEqualStrings("first attempt", capped.body.written());
+    try std.testing.expect(!capped.over);
+
+    capped.reset();
+    try std.testing.expectEqualStrings("", capped.body.written());
+    try std.testing.expect(!capped.over);
+
+    // The cap flag is cleared with it, so a body that stopped the first attempt
+    // for being too long does not stop the second for the same reason.
+    capped.over = true;
+    capped.reset();
+    try std.testing.expect(!capped.over);
+}
+
+// The schedule is 1s, 2s, 4s, capped, and it does not overflow on an attempt
+// counter that has run away.
+test "update: the fetch backoff doubles, caps, and never overflows" {
+    try std.testing.expectEqual(@as(u64, 1000), fetchRetryBackoffMs(1));
+    try std.testing.expectEqual(@as(u64, 2000), fetchRetryBackoffMs(2));
+    try std.testing.expectEqual(@as(u64, 4000), fetchRetryBackoffMs(3));
+    try std.testing.expectEqual(fetch_retry_max_ms, fetchRetryBackoffMs(30));
+    try std.testing.expectEqual(fetch_retry_max_ms, fetchRetryBackoffMs(std.math.maxInt(u32)));
 }
 
 test "update: a v-prefixed tag equals the running version exactly" {

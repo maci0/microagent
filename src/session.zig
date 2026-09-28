@@ -98,6 +98,11 @@ const session_name_attempts = 8;
 /// usage records, which is the whole reason the log exists. Every name is
 /// opened exclusively and a taken one moves to the next, so a repeat run writes
 /// beside the first rather than over it.
+///
+/// The failure that is not a taken name is said. Running out of the name
+/// attempts is the one case that is expected to be quiet, and it is left to the
+/// caller: it needs a clock that repeats the same nanosecond `attempts` times,
+/// which the operator can do something about and a silent log cannot show.
 fn createSessionLog(io: Io, arena: std.mem.Allocator, session_dir: []const u8, stamp: i128) ?Io.File {
     var attempt: usize = 0;
     while (attempt < session_name_attempts) : (attempt += 1) {
@@ -107,15 +112,25 @@ fn createSessionLog(io: Io, arena: std.mem.Allocator, session_dir: []const u8, s
         const path = std.fs.path.join(arena, &.{ session_dir, name }) catch return null;
         return std.Io.Dir.createFileAbsolute(io, path, .{ .exclusive = true }) catch |err| switch (err) {
             error.PathAlreadyExists => continue,
-            else => return null,
+            else => |e| {
+                net.note(io, arena, "microagent: a session log under {s} could not be created ({s}); this run records no usage\n", .{ session_dir, @errorName(e) });
+                return null;
+            },
         };
     }
+    net.note(io, arena, "microagent: {d} session log names under {s} were already taken; this run records no usage\n", .{ session_name_attempts, session_dir });
     return null;
 }
 
 /// This run's log, or null when the run asked for none. Takes the directory
 /// and the model rather than the caller's whole options, so the log's contract
 /// with the loop is the two values a record needs and nothing else.
+///
+/// A null costs the run nothing, but a run whose log is off is a run a monitor
+/// cannot follow, and the two ways it goes off look the same from outside: a
+/// store the caller turned off, and a store this run could not open. Only the
+/// second is said, so an operator whose watch shows nothing learns which of the
+/// two it is.
 pub fn open(io: Io, arena: std.mem.Allocator, session_dir: []const u8, model: []const u8) ?Session {
     if (session_dir.len == 0) return null;
     // Every record names the directory it ran in. That is what attributes the
@@ -191,15 +206,29 @@ fn isSessionLogName(name: []const u8) bool {
 /// digit and a short stamp sorts below a long one, so a lexicographic sort puts
 /// a re-run's `<stamp>-1.jsonl` ahead of the `<stamp>.jsonl` that was written
 /// before it, and hands the retention window the wrong file of the pair. Only
-/// this program's own `<digits>[-<digits>].jsonl` files are touched. Every
-/// failure is ignored: a store that cannot be pruned costs a run nothing.
+/// this program's own `<digits>[-<digits>].jsonl` files are touched.
+///
+/// A walk that fails part way through leaves a list of only the names it
+/// reached, and pruning from that list is not a smaller prune: the entries
+/// still standing are the ones the walk never saw, so the files deleted are
+/// whichever of the seen ones sort lowest rather than the oldest ones in the
+/// store. The whole pass is abandoned instead, and the run is told, because a
+/// store that keeps growing is a cost while logs this run did not mean to
+/// delete are the data.
+///
+/// A delete that fails is the same failure with no way to see it: the count
+/// still drops by one, so the store looks pruned and is not, and it happens
+/// again on the next run. The failures are counted and named once.
 ///
 /// Through the cwd, the way `open` creates the directory and `createSessionLog`
 /// creates the log: `MICROAGENT_SESSION_DIR=logs/x` is a legal value, and a
 /// reader that insists the path is absolute turns it into a panic in a checked
 /// build.
 fn pruneSessions(io: Io, arena: std.mem.Allocator, session_dir: []const u8) void {
-    var dir = std.Io.Dir.openDir(std.Io.Dir.cwd(), io, session_dir, .{ .iterate = true }) catch return;
+    var dir = std.Io.Dir.openDir(std.Io.Dir.cwd(), io, session_dir, .{ .iterate = true }) catch |err| {
+        net.note(io, arena, "microagent: the session store under {s} could not be read for pruning ({s}); it is not pruned and is left as it stands\n", .{ session_dir, @errorName(err) });
+        return;
+    };
     defer dir.close(io);
 
     const Found = struct { path: []u8, key: LogName };
@@ -211,9 +240,18 @@ fn pruneSessions(io: Io, arena: std.mem.Allocator, session_dir: []const u8) void
     // The walk is scoped: the walker holds the directory handle, and deleting
     // through `dir` while it is still open closes that handle under it.
     {
-        var walker = dir.walk(arena) catch return;
+        var walker = dir.walk(arena) catch |err| {
+            net.note(io, arena, "microagent: the session store under {s} could not be walked for pruning ({s}); it is not pruned and is left as it stands\n", .{ session_dir, @errorName(err) });
+            return;
+        };
         defer walker.deinit();
-        while (walker.next(io) catch return) |entry| {
+        while (true) {
+            const entry = walker.next(io) catch |err| {
+                net.note(io, arena, "microagent: the session store under {s} could not be read past {d} of its logs ({s}); nothing is pruned, because pruning from a partial list would delete whichever logs it saw rather than the oldest ones\n", .{
+                    session_dir, found.items.len, @errorName(err),
+                });
+                return;
+            } orelse break;
             if (entry.kind != .file) continue;
             const key = logName(entry.basename) orelse continue;
             // What is kept is the path from the store's root, not the basename.
@@ -235,9 +273,17 @@ fn pruneSessions(io: Io, arena: std.mem.Allocator, session_dir: []const u8) void
     }.lessThan);
 
     var i: usize = 0;
+    var failed: usize = 0;
+    var first_err: ?anyerror = null;
     while (i < found.items.len - max_session_logs) : (i += 1) {
-        dir.deleteFile(io, found.items[i].path) catch {};
+        dir.deleteFile(io, found.items[i].path) catch |err| {
+            failed += 1;
+            if (first_err == null) first_err = err;
+        };
     }
+    if (failed != 0) net.note(io, arena, "microagent: {d} of {d} session logs under {s} could not be deleted ({s}); the store is over its {d}-log limit and stays that way until they can be\n", .{
+        failed, found.items.len - max_session_logs, session_dir, @errorName(first_err.?), max_session_logs,
+    });
 }
 
 /// Closes the log and clears the slot, so the handle is closed exactly once.
@@ -771,4 +817,64 @@ test "a log in a subdirectory is pruned where it is, not by its bare name" {
         }
     }
     try std.testing.expectEqual(max_session_logs, left);
+}
+
+// A store that cannot be opened is a store that is not pruned, and nothing
+// else in the run says so: the log this run writes goes on arriving, so the
+// monitor sees a live run and a directory that is quietly over its limit, and
+// every later run prunes nothing and says nothing. The reason is named instead.
+test "a store that cannot be opened is named, and deletes nothing" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // A path nothing holds, under a directory that does exist, so the failure
+    // is the store's and not a typo in the test's own temporary directory.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_path = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+    const missing = try std.fs.path.join(arena, &.{ dir_path, "not-a-store" });
+
+    // The call the run makes. It returns rather than propagating, because a
+    // store that cannot be pruned costs the run nothing but its disk; what
+    // changed is that the run is told, so an operator watching the directory
+    // fill knows to look.
+    pruneSessions(io, arena, missing);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "not-a-store", .{}));
+}
+
+// A run whose store cannot be created records nothing, and from outside a
+// monitor sees the same thing as a run whose log was turned off. Only the
+// first is a problem with the machine, so only the first is named.
+test "a store that cannot be created gives the run no log rather than a silent one" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_path = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+
+    // A regular file where the store's directory should be. `createDirPath`
+    // refuses it, and the run goes on with no log rather than a broken one.
+    // The path is the one `open` is given: an absolute one, so nothing is
+    // created outside this test's own temporary directory.
+    try tmp.dir.writeFile(io, .{ .sub_path = "blocked", .data = "not a directory" });
+    const store = try std.fmt.allocPrint(arena, "{s}{c}blocked{c}sessions", .{ dir_path, std.fs.path.sep, std.fs.path.sep });
+
+    try std.testing.expectEqual(@as(?Session, null), open(io, arena, store, "test/model"));
+    // Still not a directory: the refusal left nothing behind for the next run
+    // to walk into.
+    const still_a_file = try tmp.dir.readFileAlloc(io, "blocked", arena, .limited(64));
+    try std.testing.expectEqualStrings("not a directory", still_a_file);
 }

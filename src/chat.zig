@@ -215,10 +215,30 @@ pub fn num(v: ?std.json.Value) u64 {
 /// a frame that carries `cached_tokens` alone must not read as a run that spent
 /// no prompt tokens. A declared field the provider omitted parses as JSON
 /// `null` rather than as an absent optional, so both are null here.
-pub fn maybeNum(v: ?std.json.Value) ?u64 {
+///
+/// A count the frame spelled as a string is read as the number it spells, the
+/// way the model-supplied counts in `tool` are: a provider that quotes
+/// `prompt_tokens` meant a prompt-token count, and reading the quotes as zero
+/// is a run whose usage line reports it spent nothing.
+///
+/// A string that is not a number is the same case as an omitted field rather
+/// than the case of a zero count: the frame carried no count, and folding `0`
+/// in would erase the count an earlier frame set. It is counted in
+/// `unparsable` rather than folded in, because a counter the run read as zero
+/// is a bill that comes up short with nothing on the operator's screen to say
+/// why.
+pub fn maybeNum(v: ?std.json.Value, unparsable: ?*usize) ?u64 {
     const value = v orelse return null;
     if (value == .null) return null;
-    return num(v);
+    switch (value) {
+        .string, .number_string => |s| {
+            return std.fmt.parseInt(u64, std.mem.trim(u8, s, " \t\r\n"), 10) catch {
+                if (unparsable) |n| n.* += 1;
+                return null;
+            };
+        },
+        else => return num(v),
+    }
 }
 
 /// A count the model sent, as a `usize`. `num` saturates at the `u64` ceiling,
