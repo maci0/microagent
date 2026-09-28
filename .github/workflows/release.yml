@@ -103,6 +103,24 @@ jobs:
           fi
           cat release-notes.md
 
+      # A section the tag names is the whole note. Anything still parked under
+      # [Unreleased] would be dropped from the published notes and land in the
+      # next release under a version the consumer never ran, so a tag is
+      # refused while the section is not empty.
+      - name: the changelog has nothing left unreleased
+        run: |
+          set -euo pipefail
+          stranded="$(awk '
+            index($0, "## [Unreleased]") == 1 { inside = 1; next }
+            /^## / { inside = 0 }
+            inside
+          ' CHANGELOG.md | sed '/./,$!d')"
+          if [ -n "$stranded" ]; then
+            echo "CHANGELOG.md still has unreleased entries that tag ${GITHUB_REF_NAME} would drop from the notes:" >&2
+            echo "$stranded" >&2
+            exit 1
+          fi
+
       - name: publish
         env:
           GH_TOKEN: ${{ github.token }}

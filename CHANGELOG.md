@@ -128,11 +128,13 @@ release, and `microagent update` moves you to it.
   calls had run, so it reported a gap that included them, and a monitor dividing a response's tokens
   by it got a rate for a generation that was never continuous. It is now taken when the completion
   stream ends, before the tools run.
-- A `bash` call now takes its process tree down with it. `bash` runs through the capped runner,
-  which spawned the child in the caller's process group and so killed only the shell: a command
-  that backgrounded work, or ran past its deadline holding the pipes open, left the rest of the tree
-  running. It is now its own group leader, and the group is signalled on every exit path, the way
-  the search and git tools already were.
+- A tool call now takes its whole process tree down with it. The subprocess tools spawned their
+  child in the caller's process group, so the signal sent on a timeout, on a capture cap or on a
+  normal exit reached only the shell: a command that backgrounded work, or ran past its deadline
+  holding the pipes open, left the build, test server or compiler it had started running on, holding
+  a port, a build cache or a lock for every later turn of the run and for whatever started next.
+  Each child now leads its own process group, and the group is signalled on every exit path, through
+  the one `ToolProcess` the `bash`, `search`, `ast` and `git` tools share.
 - A streamed tool call's name and id are released with the rest of the response. They are copies
   the run allocator owns, and only the argument buffer was handed back, so a long run leaked two
   small strings per call.
@@ -151,11 +153,6 @@ release, and `microagent update` moves you to it.
   turn from the prefix of one, and a tool call whose arguments were cut mid-JSON looked like one the
   model had finished sending. The reason is read from the stream, noted on stderr, and recorded per
   response in the session log as `finish_reason`.
-- A `bash` call no longer leaves its process tree behind. The child leads its own process group and
-  the group is signalled on the way out, as the search and git tools already did: a model-supplied
-  command that backgrounds work and exits left that work holding a port, a build cache or a lock for
-  every later turn of the run and for whatever started next.
-
 - A `bash` call can no longer run without a deadline. `timeout_ms` is model output and was taken as
   sent, so a value past anything a run survives left the child with no timeout at all and the
   process-group kill that reaps it never fired. It is now capped at 600 s, with the 120 s default
@@ -202,10 +199,6 @@ release, and `microagent update` moves you to it.
 - `microagent update` compares the running version and the published tag with one leading `v` ignored on
   both sides. It ignored the prefix on the tag only, so a `v`-prefixed running version never matched a
   `v`-prefixed tag.
-- A `bash` call that timed out or hit its capture cap left its process tree running. Only the shell
-  that was spawned was signalled, so the build, test server or compiler it started went on holding the
-  next turn's resources. `bash` now runs in its own process group and the whole group is signalled, as
-  `search`, `ast` and `git` already did.
 - `--budget` and `MICROAGENT_BUDGET_SECONDS` trim the value, as `--max-turns`, `--max-tokens` and the
   reasoning level already did. A number quoted with a space around it was reported as not a number.
 - A `git` `limit` of 0 returned the whole output rather than no lines: the loop that stops at the limit
