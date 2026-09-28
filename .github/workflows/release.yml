@@ -222,3 +222,53 @@ jobs:
             --title "microagent ${GITHUB_REF_NAME}" --notes-file release-notes.md \
             dist/microagent-*
           gh release edit "${GITHUB_REF_NAME}" --draft=false
+
+      # Publishing hands a glob to the API and reports success, which says the
+      # call was accepted rather than that the release carries what a consumer
+      # will ask it for. An asset the upload silently skipped, an asset from a
+      # previous tag still attached to the draft, or a sidecar naming bytes other
+      # than the asset beside it, all publish green and fail on the machine that
+      # runs `update`. So this reads the release back through the same API a
+      # consumer's `update` uses and compares it with dist/: the same asset
+      # names, every one byte-identical to the build, every sidecar naming the
+      # digest of the asset it sits beside.
+      - name: the published release is the one this tag built
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "$(gh release view "${GITHUB_REF_NAME}" --json isDraft --jq .isDraft)" != "false" ]; then
+            echo "release ${GITHUB_REF_NAME} is still a draft after publish" >&2
+            exit 1
+          fi
+          published="$(gh release view "${GITHUB_REF_NAME}" --json assets --jq '.assets[].name' | sort)"
+          built="$(cd dist && ls microagent-* | sort)"
+          if [ "$published" != "$built" ]; then
+            echo "the published release and this tag's build disagree on the asset list" >&2
+            echo "published: $(echo "$published" | tr '\n' ' ')" >&2
+            echo "built: $(echo "$built" | tr '\n' ' ')" >&2
+            exit 1
+          fi
+          # An empty dist/ is a build that produced nothing, and an empty
+          # published list would compare equal to it.
+          test -n "$built" || { echo "dist/ holds no assets, so there is nothing to have published" >&2; exit 1; }
+          verify="${RUNNER_TEMP}/published"
+          rm -rf "$verify" && mkdir -p "$verify"
+          for asset in $built; do
+            gh release download "${GITHUB_REF_NAME}" --pattern "$asset" --dir "$verify"
+            if ! cmp "dist/$asset" "$verify/$asset"; then
+              echo "the published $asset is not the one this run built" >&2
+              exit 1
+            fi
+          done
+          for target in $(make --no-print-directory release-targets); do
+            name="microagent-${GITHUB_REF_NAME}-${target}"
+            got="$(sha256sum "$verify/$name" | cut -d' ' -f1)"
+            want="$(cut -d' ' -f1 < "dist/$name.sha256")"
+            if [ "$got" != "$want" ]; then
+              echo "$name.sha256 names $want; the published $name is $got" >&2
+              exit 1
+            fi
+          done
+          echo "published release ${GITHUB_REF_NAME} carries $(echo "$built" | wc -l) assets, each byte-identical to dist/ and matching its sidecar"

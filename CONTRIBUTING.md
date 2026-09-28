@@ -105,8 +105,8 @@ Source is formatted with `zig fmt`; `make fmt` applies it, and `ruff format`
 does the same for the Harbor adapter. The three linters cover what `zig fmt`
 cannot: the bench
 shell, the Harbor adapter under `integrations/harbor` (rules in
-[ruff.toml](ruff.toml)) and the workflows and the composite toolchain action
-(rules in [.yamllint](.yamllint)).
+[ruff.toml](ruff.toml)) and the workflows, the composite toolchain action and
+the Dependabot config (rules in [.yamllint](.yamllint)).
 
 ## Tests
 

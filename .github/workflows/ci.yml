@@ -109,7 +109,7 @@ jobs:
       - name: the Harbor adapter is ruff-clean and ruff-formatted
         run: make lint-python
 
-      - name: the workflows and the shared toolchain action are yamllint-clean
+      - name: the workflows, the shared toolchain action and the dependabot config are yamllint-clean
         run: make lint-yaml
 
   release-assets:

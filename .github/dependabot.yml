@@ -1,0 +1,26 @@
+# Every action in the workflows and the composite toolchain action is pinned to a
+# commit sha, so a new upstream release cannot turn a green run red on its own.
+# The cost of that is a pin nothing moves: a sha stops naming a supported
+# runner, or an action a workflow needs, and the pipeline only finds out on a
+# push. Dependabot opens the bump, which is a diff of the sha and the version
+# comment beside it, reviewed and gated like any other change.
+#
+# Only the actions ecosystem is declared. The linter pins in
+# lint-requirements.txt are deliberately not: `make lint-versions` refuses a
+# bump to that file that forgets the version named in the Makefile, so a bot
+# opening that pull request would produce a red pipeline by construction. That
+# pair moves by hand, as one change, and `make lint-versions` is what says so.
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - ci
+    groups:
+      actions:
+        patterns:
+          - "*"

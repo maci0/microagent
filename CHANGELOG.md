@@ -20,6 +20,21 @@ release, and `microagent update` moves you to it.
   compares each row against `bench/instructions.baseline`. It builds first, since
   the script reads the test build's `options.zig` and stops with a reminder when
   there is none.
+- The release workflow reads the published release back after publishing it and
+  compares it with `dist/`: the release is no longer a draft, it carries exactly
+  the assets this tag built and nothing else, each one byte-identical to the file
+  that was uploaded, and each `.sha256` sidecar names the digest of the asset
+  beside it. `gh release upload` reporting success said the call was accepted,
+  not that a consumer's `update` would find the asset it asks for; a skipped
+  asset or a stale one left on a resumed draft published green and failed on the
+  machine that downloaded it.
+- `.github/dependabot.yml` for the actions ecosystem. Every action in the
+  workflows and the shared toolchain action is pinned to a commit sha, so a new
+  upstream release cannot turn a green run red on its own, and a sha that stops
+  naming a supported runner is found on a push rather than in review. The linter
+  pins in `lint-requirements.txt` are deliberately left out: `make lint-versions`
+  refuses a bump to that file that forgets the version named in the Makefile, so
+  a bot opening that pull request would produce a red pipeline by construction.
 - `make watch` reruns the unit test suite on every source change, and
   `make watch FILTER=...` narrows it to the tests whose name contains the
   substring, the way `make test-one` narrows one run. It wraps

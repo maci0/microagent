@@ -205,7 +205,7 @@ fmt-python:
 # The Zig sources have no linter beyond zig fmt, which check runs; the shell,
 # Python and YAML around them do, and a shell that only fails when a benchmark
 # runs is a shell nobody has read. Keep these in step with
-# .github/workflows/ci.yml.
+# .github/workflows/ci.yml and .github/dependabot.yml.
 lint: lint-versions lint-lock lint-shell lint-python lint-yaml
 
 # A version mismatch is reported by name rather than surfacing later as a
@@ -292,7 +292,7 @@ lint-python:
 	ruff format --check --config ruff.toml integrations/harbor
 
 lint-yaml:
-	yamllint -c .yamllint .github/workflows/ .github/actions/
+	yamllint -c .yamllint .github/workflows/ .github/actions/ .github/dependabot.yml
 
 # The CI gate, so a formatting, lint or test failure shows up here rather than
 # after a push. Keep these in step with .github/workflows/ci.yml. The release
