@@ -2509,20 +2509,27 @@ test "a long run keeps the conversation bounded and the cache alive between comp
         }
         try msgs.append(arena, ']');
 
-        // What this turn shares with the last one, before compaction moves it.
-        var shared: usize = 0;
-        while (shared < previous.len and shared < msgs.items.len and previous[shared] == msgs.items[shared]) shared += 1;
-        var cacheable = shared;
+        // Under the soft limit compaction returns before it reads anything, so
+        // the turn only appended and shares all of the last one. Measuring that
+        // would mean copying and comparing the whole conversation on every turn
+        // to learn something already known, so only the turns where compaction
+        // can actually fire are measured.
+        var cacheable: usize = previous.len;
+        if (msgs.items.len > conversation_soft_limit) {
+            var shared: usize = 0;
+            while (shared < previous.len and shared < msgs.items.len and previous[shared] == msgs.items[shared]) shared += 1;
+            cacheable = shared;
 
-        try compactMessages(std.testing.io, arena, &msgs, scratch_state.allocator(), &floor);
+            try compactMessages(std.testing.io, arena, &msgs, scratch_state.allocator(), &floor);
 
-        // Compaction rewrote the conversation, so what survived it is the real
-        // figure: on those turns it is next to nothing.
-        var after: usize = 0;
-        while (after < previous.len and after < msgs.items.len and previous[after] == msgs.items[after]) after += 1;
-        if (after < cacheable) {
-            cacheable = after;
-            compactions += 1;
+            // Compaction rewrote the conversation, so what survived it is the
+            // real figure: on those turns it is next to nothing.
+            var after: usize = 0;
+            while (after < previous.len and after < msgs.items.len and previous[after] == msgs.items[after]) after += 1;
+            if (after < cacheable) {
+                cacheable = after;
+                compactions += 1;
+            }
         }
         sum_sent += msgs.items.len;
         sum_cacheable += cacheable;
