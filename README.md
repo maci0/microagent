@@ -271,6 +271,12 @@ converged and which burned the budget, are in [BENCHMARK.md](BENCHMARK.md#useful
 No `stream` flags are needed: usage is always machine-readable. No session transcripts are written,
 so no `usage.roots` entry is required either.
 
+## Security
+
+The agent runs shell commands as you do, on files it reads, so the repository it works in and
+the endpoint it talks to are both part of the surface. [THREAT_MODEL.md](THREAT_MODEL.md) has the
+entry points, the boundaries, the controls that exist and the gaps, each with a file reference.
+
 ## External benchmarks
 
 microagent runs on [Harbor](https://github.com/laude-institute/harbor) benchmarks — Terminal-Bench 2

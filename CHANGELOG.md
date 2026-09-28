@@ -20,6 +20,9 @@ release, and `microagent update` moves you to it.
   (rules in `.yamllint`), and CI runs all three as their own blocking job. A defect in
   the bench scripts or the adapter is a wrong benchmark result rather than a failing
   test, so nothing caught it before.
+- `THREAT_MODEL.md`: the attack surface as a whole, entry points, trust boundaries, assets,
+  the threats on each boundary, the controls the code implements and the gaps it does not
+  cover, each with a file reference.
 
 ### Fixed
 
