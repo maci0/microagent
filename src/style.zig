@@ -103,6 +103,10 @@ pub const Style = struct {
     /// parser: the rest of the format (numbers, arrays, dates, nested tables)
     /// has nowhere to go.
     ///
+    /// A `#` comment is understood, and may trail a key, a value or a table
+    /// header, because the file the README hands out is written that way. One
+    /// inside a quoted value is text rather than a comment, as TOML has it.
+    ///
     /// A leading byte order mark is dropped before the first line is read. An
     /// editor that saves UTF-8 with one writes it ahead of the first key, and
     /// a key spelled `\u{feff}caveman` matches nothing here, so the file's own
@@ -116,8 +120,14 @@ pub const Style = struct {
             if (line.len == 0 or line[0] == '#') continue;
             if (line[0] == '[') {
                 // `[style]` scopes the keys below it to this config; any other
-                // table belongs to something else and is skipped.
-                ours = std.mem.eql(u8, std.mem.trim(u8, line, " \t[]"), "style");
+                // table belongs to something else and is skipped. A comment may
+                // trail the header, which is how a table is labelled in the file
+                // the README hands out: `[style] # how terse the replies are`
+                // names the same table as `[style]`, and reading the name off
+                // the whole line made every key under it somebody else's, so
+                // each one was reported as an unknown key and the level the file
+                // asked for stayed at its default.
+                ours = isStyleTable(line);
                 continue;
             }
             if (!ours) continue;
@@ -158,16 +168,33 @@ pub const Problem = struct {
     bad_value: bool,
 };
 
+/// Whether a trimmed line is this config's own `[style]` table header.
+///
+/// The name is what is between the brackets, and what follows the closing
+/// bracket may only be whitespace or a comment. Reading the name off the whole
+/// line instead made a labelled header name no table at all, which turned every
+/// key under it into an unknown key.
+fn isStyleTable(line: []const u8) bool {
+    if (line[0] != '[') return false;
+    const close = std.mem.indexOfScalar(u8, line, ']') orelse return false;
+    const rest = std.mem.trim(u8, line[close + 1 ..], " \t");
+    if (rest.len != 0 and rest[0] != '#') return false;
+    return std.mem.eql(u8, std.mem.trim(u8, line[1..close], " \t"), "style");
+}
+
 /// A quoted TOML value without its quotes, stopping at the closing quote so a
-/// trailing `# comment` is not part of the level. A bare value is taken as
-/// written: `caveman = ultra` is not valid TOML, but it is not worth an error
-/// either.
+/// trailing `# comment` is not part of the level, and a `#` inside the quotes is
+/// text rather than the start of one. A bare value stops at a `#` for the same
+/// reason, so a comment trails it the way it trails a quoted one; it is
+/// otherwise taken as written, because `caveman = ultra` is not valid TOML but
+/// is not worth an error either.
 fn unquote(raw: []const u8) []const u8 {
-    if (raw.len < 2) return raw;
-    const quote = raw[0];
-    if (quote != '"' and quote != '\'') return raw;
-    const end = std.mem.indexOfScalarPos(u8, raw, 1, quote) orelse return raw;
-    return raw[1..end];
+    const bare = raw[0 .. std.mem.indexOfScalar(u8, raw, '#') orelse raw.len];
+    if (bare.len < 2) return bare;
+    const quote = bare[0];
+    if (quote != '"' and quote != '\'') return bare;
+    const end = std.mem.indexOfScalarPos(u8, bare, 1, quote) orelse return bare;
+    return bare[1..end];
 }
 
 /// A level named case- and whitespace-insensitively, or null when the value is
@@ -353,6 +380,39 @@ test "the config reads either root or [style] keys, and nothing else" {
     const empty = style.applyToml("caveman =\n").?;
     try std.testing.expectEqualStrings("caveman", empty.key);
     try std.testing.expect(empty.bad_value);
+}
+
+// A `#` comment trails a key, a value and a table header alike, and the README
+// says so. Reading the name off the whole header line made a labelled table
+// name no table at all, so every key under it was reported as an unknown key and
+// the levels the file asked for stayed at their defaults: a config that looks
+// right and changes nothing.
+test "a comment trails a key, a value and a table header" {
+    var style: Style = .{};
+    try std.testing.expect(style.applyToml(
+        "# the reply style.\n" ++
+            "[style] # how terse the agent writes\n" ++
+            "caveman = \"lite\" # not as terse as ultra\n" ++
+            "ponytail = full # not valid TOML, and read anyway\n",
+    ) == null);
+    try std.testing.expectEqual(CavemanLevel.lite, style.caveman);
+    try std.testing.expectEqual(PonytailLevel.full, style.ponytail);
+
+    // A quoted value is cut at its closing quote, so a `#` after it is a
+    // comment and one the value itself carries is text, not a comment.
+    var hashed: Style = .{};
+    const problem = hashed.applyToml("caveman = \"lite # off\"\n").?;
+    try std.testing.expectEqualStrings("caveman", problem.key);
+    try std.testing.expect(problem.bad_value);
+
+    // A table that is not ours stays not ours with a comment on it too, and
+    // something after the closing bracket that is neither is not a header at
+    // all.
+    var other: Style = .{};
+    try std.testing.expect(other.applyToml("[model] # somebody else's\ncaveman = \"off\"\n") == null);
+    try std.testing.expectEqual(CavemanLevel.ultra, other.caveman);
+    try std.testing.expect(other.applyToml("[style] junk\ncaveman = \"off\"\n") == null);
+    try std.testing.expectEqual(CavemanLevel.ultra, other.caveman);
 }
 
 test "a config an editor saved with a byte order mark reads the same" {
