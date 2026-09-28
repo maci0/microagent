@@ -28,6 +28,17 @@ verify_cmd="${GAUNTLET_VERIFY:-}"
 work_root="${GAUNTLET_WORK:-${TMPDIR:-/tmp}/microagent-gauntlet}"
 agents=${*:-microagent}
 
+# The tool that runs the review is named here rather than left to the shell: a
+# `gauntlet` that is not on PATH exits 127 into the log, every count below stays
+# at its default of zero, and the row lands in gauntlet-results.jsonl as a
+# review that ran and found nothing. That is worse than an error, because it is
+# indistinguishable from a real zero. Exit 2 is the same code bench/instructions.sh
+# uses for a measurement it could not take.
+if ! command -v gauntlet >/dev/null 2>&1; then
+	printf '%s: gauntlet is not on PATH, so no review below can run and no row is written\n' "$0" >&2
+	exit 2
+fi
+
 printf '%-40s %6s %6s %7s %8s %8s %8s  %s\n' agent passed failed files wall_s tokens verify rc
 printf '%s\n' "-------------------------------------------------------------------------------------------------------"
 

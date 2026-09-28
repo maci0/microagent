@@ -142,11 +142,17 @@ a benchmark.
 
 A parser that reads bytes it did not write gets a `std.testing.fuzz` harness and
 a corpus beside it, in the same file. The corpus is what the harness asserts on
-during an ordinary `zig build test`; build the test binary in fuzz mode to run
-the fuzzer's mutations from the same seeds. A harness asserts the invariants,
-not just the absence of a crash: a turn assembled from a fuzzed provider stream
-has to serialize as a valid request body, and a release body has to earn the
-verdict that installs it.
+during an ordinary `zig build test`, and that is where a new seed is written
+down. The fuzzer's mutations, from the same seeds and then beyond them, want
+`zig build test --fuzz`, and that does not build on the 0.16.0 this repository
+pins: the toolchain's own test runner fails to compile under `-ffuzz`
+(`compiler/test_runner.zig:566`, an `@errorReturnTrace()` the fuzzer's
+instrumentation gives a different type), so the command fails before it reaches
+a harness. Nothing in this tree can fix that, and a seed added to a corpus is
+still asserted on every `make check` in the meantime. A harness asserts the
+invariants, not just the absence of a crash: a turn assembled from a fuzzed
+provider stream has to serialize as a valid request body, and a release body has
+to earn the verdict that installs it.
 
 ## Version and changelog
 

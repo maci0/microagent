@@ -680,6 +680,10 @@ export MICROAGENT_API_KEY=...      # or leave unset to read ~/.secrets/openroute
 export MICROAGENT_MODEL=deepseek/deepseek-v4-flash
 sh bench/run.sh microagent kimi opencode
 sh bench/overhead.sh
+sh bench/gauntlet.sh microagent kimi
 ```
+
+`make bench`, `make overhead` and `make gauntlet` wrap those three, each
+building the binary and putting it on PATH first.
 
 Raw rows land in `bench/results.jsonl`.

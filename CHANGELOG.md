@@ -147,6 +147,19 @@ release, and `microagent update` moves you to it.
 
 ### Changed
 
+- `make gauntlet AGENTS=...` wraps `bench/gauntlet.sh`, the usefulness
+  benchmark whose results BENCHMARK.md publishes, beside the `make bench` and
+  `make overhead` targets that already wrap its two siblings, and the
+  `Reproducing` block names the command. Each of the three scripts invoked the
+  harnesses by bare name and skipped the ones missing from PATH, so running one
+  without the target on it recorded a skipped row rather than a measured one.
+
+- CONTRIBUTING.md no longer sends a contributor to `zig build test --fuzz` as if
+  it ran. It does not build on the pinned 0.16.0: the toolchain's own test
+  runner fails to compile under `-ffuzz`, so the command ends in eight
+  compiler errors before a harness is reached. The corpus is still asserted on
+  by every `zig build test`, which is where a new seed has to be written down.
+
 - A run that stops at a ceiling exits 3 instead of 0. `--max-turns`, and a budget
   that ended the last turn, both leave a prefix of an answer on stdout while
   reporting success, so a script reading the text read a truncated review as a
@@ -260,6 +273,11 @@ release, and `microagent update` moves you to it.
   into the provider while the provider was still refusing. IMF-fixdate's year
   field is four digits wide and is now read as such, and a count that fits is
   clamped rather than discarded.
+- `bench/gauntlet.sh` names a missing `gauntlet` and exits 2 instead of running
+  the whole comparison. The tool was invoked by bare name, so on a host without
+  it each review exited 127 into a log nothing reads, every count kept its
+  default of zero, and the row was appended to `bench/gauntlet-results.jsonl` as
+  a review that had run and found nothing, beside real rows in the same file.
 - A `Retry-After` sent as an HTTP date is read, not ignored. RFC 9110 lets a
   server answer with either a count of seconds or an instant, and the run only
   read the first: a provider or a gateway that computed a deadline against its
