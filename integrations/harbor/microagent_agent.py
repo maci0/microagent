@@ -271,12 +271,29 @@ class Microagent(BaseAgent):
                 timeout_sec=60,
             )
             self._ca_uploaded = check.return_code == 0
-            self.logger.info(
-                "ca bundle %s -> %s (%s bytes reported)",
-                bundle,
-                REMOTE_CA_PATH,
-                (check.stdout or "").strip() or f"write failed: {check.stderr}",
-            )
+            if self._ca_uploaded:
+                self.logger.info(
+                    "ca bundle %s -> %s (%s bytes reported)",
+                    bundle,
+                    REMOTE_CA_PATH,
+                    (check.stdout or "").strip(),
+                )
+            else:
+                # A bundle that was named and did not land is not the same as no
+                # bundle: the run continues on the container's own trust store,
+                # and a bare image has none, so the first request dies as
+                # TlsInitializationFailed with nothing in the log to connect it
+                # to this. The message says what was dropped and why, and is a
+                # warning because the one branch that could be made loud by
+                # raising would cost the trial the work the tree already holds.
+                self.logger.warning(
+                    "ca bundle %s did not land at %s (%s); the container keeps its own "
+                    "trust store, and a bare image has none. Set MICROAGENT_CA_BUNDLE to "
+                    "a PEM this host can read.",
+                    bundle,
+                    REMOTE_CA_PATH,
+                    (check.stderr or "").strip() or f"exit {check.return_code}",
+                )
         else:
             # Named, because the failure it leads to is a TLS error inside a
             # container nobody can reach the filesystem of: a host whose trust
@@ -296,6 +313,28 @@ class Microagent(BaseAgent):
         if result.return_code != 0:
             raise RuntimeError(f"microagent did not run in the container: {result.stdout or ''}{result.stderr or ''}")
         self.logger.info("microagent ready: %s", (result.stdout or "").strip())
+
+    def write_log(self, path: Path, text: str) -> None:
+        """One of the run's own logs, written without letting the write end a run.
+
+        The transcript is a record of what happened, and the tree it describes is
+        what the verifier scores. A `write_text` that raised took that second
+        thing with it: a full disk, a quota, or a logs directory harbor had not
+        yet created turned a run whose work was on disk into a recorded exception
+        and a zero, which is the one outcome both the timeout branch and the
+        exit-3 branch below exist to avoid. So the failure is said on the host,
+        where an operator is looking, and the run carries on to be scored.
+
+        The parent is created here rather than left to exist, because a logs
+        directory that is not there is the ordinary way this fails on a fresh
+        harbor version, and the run that would have recorded it is the one that
+        has to keep going.
+        """
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        except OSError as error:
+            self.logger.warning("could not write %s (%s)", path, error)
 
     async def run(
         self,
@@ -357,13 +396,13 @@ class Microagent(BaseAgent):
             if "timed out" not in str(error).lower():
                 raise
             self.logger.warning("microagent hit the %ss agent timeout; scoring the tree as it stands", agent_timeout)
-            (self.logs_dir / "microagent-timeout.txt").write_text(str(error), encoding="utf-8")
+            self.write_log(self.logs_dir / "microagent-timeout.txt", str(error))
             return
         # UTF-8 named rather than left to the locale: a host running under
         # LANG=C or a legacy code page raises on a non-ASCII byte, and the run's
         # own transcript is the one log that must always land.
-        started.write_text(result.stdout or "", encoding="utf-8")
-        (self.logs_dir / "microagent-stderr.txt").write_text(result.stderr or "", encoding="utf-8")
+        self.write_log(started, result.stdout or "")
+        self.write_log(self.logs_dir / "microagent-stderr.txt", result.stderr or "")
 
         usage = last_usage(result.stdout or "")
         context.n_input_tokens = usage.get("prompt_tokens")

@@ -29,7 +29,24 @@ release, and `microagent update` moves you to it.
   host reads, and it was refused there: after a container start and a binary upload, in a
   log the operator was not watching. It is now named at the command line.
 
+- A host CA bundle that does not land in the container is a warning naming the bundle and
+  the reason, rather than an info line with "write failed" inside a message about a byte
+  count. The run still continues on the container's own trust store, which a bare image
+  does not have, so the first request dies as `TlsInitializationFailed` with nothing in
+  the log to connect it to the host that had a bundle to give.
+
 ### Fixed
+
+- The harbor adapter's own logs cannot end a run the verifier has to score. Writing
+  `microagent-stdout.txt`, `microagent-stderr.txt` or `microagent-timeout.txt` raised on a
+  filesystem that refused it, and a `FileNotFoundError` out of a log write was recorded as
+  a trial exception: the tree the agent changed was on disk and was scored as nothing,
+  which is the outcome the timeout and exit-3 branches both exist to avoid. The parent
+  directory is created, the write is attempted, and a failure is reported on the host
+  where an operator is looking.
+
+- The tool-call index test called `dropUnusableCalls`, which the unusable-call sweep was
+  renamed away from, so the suite did not compile.
 
 - A write through a chain of symlinks writes the file at the end of the chain
   rather than replacing the link in the middle of it. Only the first link was

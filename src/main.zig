@@ -4840,7 +4840,7 @@ test "a tool call index past the cap is dropped, not allocated" {
         // An index sizes the list, so the last call kept sits at its own index
         // and the slots below it are the placeholders the sweep drops.
         try std.testing.expectEqual(case.slots, sink.calls.items.len);
-        dropUnusableCalls(sink.run.allocator(), &sink.calls);
+        _ = keepRunnableCalls(sink.run.allocator(), &sink.calls);
         try std.testing.expectEqual(@as(usize, if (case.index >= max_tool_calls) 0 else 1), sink.calls.items.len);
         if (case.slots != 0) try std.testing.expectEqualStrings("call_1", sink.calls.items[0].id);
     }
