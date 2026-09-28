@@ -260,10 +260,11 @@ fn checksumMatches(asset: []const u8, sidecar: []const u8, basename: []const u8)
     const hex = line[0..hex_len];
     if (!std.mem.eql(u8, line[hex_len..name_at], "  ")) return false;
     if (!std.mem.eql(u8, line[name_at..], basename)) return false;
-    for (hex) |c| if (!std.ascii.isHex(c)) return false;
     var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(asset, &digest, .{});
     const got = std.fmt.bytesToHex(digest, .lower);
+    // A byte that is not a hex digit cannot fold onto one of `got`'s, so the
+    // comparison is the whole of the check.
     for (hex, 0..) |c, i| {
         if (std.ascii.toLower(c) != got[i]) return false;
     }

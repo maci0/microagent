@@ -1223,20 +1223,18 @@ const Budget = struct {
     }
 
     /// Whether this run can afford to wait `want_ms` before its next attempt,
-    /// and how long it may wait. Null means it cannot, and the caller must not
-    /// make the attempt: a retry taken after a refusal the provider is still
-    /// refusing is a second billable refusal, and one taken by sitting out the
-    /// wait is a turn that never arrives.
+    /// False means the caller must not make the attempt: a retry taken after a
+    /// refusal the provider is still refusing is a second billable refusal, and
+    /// one taken by sitting out the wait is a turn that never arrives.
     ///
     /// A provider asking for two minutes is weather and sitting it out is the
     /// right answer to it. Sitting it out inside a caller's per-review timeout
     /// is not: the run is killed mid-sleep with nothing to show for it, which
     /// is the one thing the budget exists to prevent. So the wait is taken only
     /// when the budget covers it.
-    fn affordableWaitMs(self: Budget, io: Io, want_ms: u64) ?u64 {
-        const left = self.remainingMs(io) orelse return want_ms;
-        if (want_ms >= left) return null;
-        return want_ms;
+    fn canAffordWait(self: Budget, io: Io, want_ms: u64) bool {
+        const left = self.remainingMs(io) orelse return true;
+        return want_ms < left;
     }
 
     /// The same budget with `seconds` more to run. The final push is the one
@@ -1759,9 +1757,9 @@ fn streamChat(
                 // willing to wait, and the schedule stands where it is not.
                 const asked = retryAfterMs(io, response.head.bytes);
                 const wait = asked orelse net.retryBackoffMs(attempt, max_backoff_ms);
-                if (budget.affordableWaitMs(io, wait)) |affordable| {
+                if (budget.canAffordWait(io, wait)) {
                     net.note(io, arena, "microagent: {s} answered HTTP {d}, retrying in {d}ms (attempt {d}/{d})\n", .{
-                        shown_url, @intFromEnum(response.head.status), affordable, attempt + 1, max_attempts,
+                        shown_url, @intFromEnum(response.head.status), wait, attempt + 1, max_attempts,
                     });
                     // The same rule `waitBeforeRetry` follows: a sleep that
                     // failed is not a sleep, and continuing would answer a
@@ -1770,9 +1768,9 @@ fn streamChat(
                     // prevent. Falling out of the block is what gives the turn
                     // up, with the reason on stderr.
                     waited: {
-                        waitMs(io, affordable) catch |wait_err| {
+                        waitMs(io, wait) catch |wait_err| {
                             net.note(io, arena, "microagent: the {d}ms wait {s} asked for could not be taken ({s}); the turn is given up rather than retried at once\n", .{
-                                affordable, shown_url, @errorName(wait_err),
+                                wait, shown_url, @errorName(wait_err),
                             });
                             break :waited;
                         };
@@ -2853,12 +2851,13 @@ fn worthAnotherAttempt(stage: request_stage, err: anyerror) bool {
 /// `streamChat` gives.
 fn waitBeforeRetry(io: Io, arena: std.mem.Allocator, url: []const u8, attempt: u32, what: []const u8, err: anyerror, budget: Budget) bool {
     if (attempt >= max_attempts) return false;
-    const wait = budget.affordableWaitMs(io, net.retryBackoffMs(attempt, max_backoff_ms)) orelse {
+    const backoff = net.retryBackoffMs(attempt, max_backoff_ms);
+    if (!budget.canAffordWait(io, backoff)) {
         net.note(io, arena, "microagent: {s} {s} failed ({s}), and the {d}ms before another attempt would pass the run's budget; this one is the last\n", .{
-            what, url, @errorName(err), net.retryBackoffMs(attempt, max_backoff_ms),
+            what, url, @errorName(err), backoff,
         });
         return false;
-    };
+    }
     net.note(io, arena, "microagent: {s} {s} failed ({s}), retrying (attempt {d}/{d})\n", .{
         what, url, @errorName(err), attempt + 1, max_attempts,
     });
@@ -2866,9 +2865,9 @@ fn waitBeforeRetry(io: Io, arena: std.mem.Allocator, url: []const u8, attempt: u
     // the next attempt the instant the sleep failed, which is the one thing the
     // backoff exists to prevent, and it did it silently: the line above already
     // promised a delay the run then did not take.
-    waitMs(io, wait) catch |wait_err| {
+    waitMs(io, backoff) catch |wait_err| {
         net.note(io, arena, "microagent: the {d}ms wait before that attempt to {s} could not be taken ({s}); the attempt is abandoned rather than sent at once\n", .{
-            wait, url, @errorName(wait_err),
+            backoff, url, @errorName(wait_err),
         });
         return false;
     };
@@ -5159,15 +5158,15 @@ test "a wait the budget cannot cover is not taken" {
     // nobody put a ceiling on. This is the two-minute ask and the run's own
     // schedule, and both are taken exactly as before.
     const unbounded: Budget = .{};
-    try std.testing.expectEqual(@as(?u64, max_retry_after_ms), unbounded.affordableWaitMs(std.testing.io, max_retry_after_ms));
-    try std.testing.expectEqual(@as(?u64, net.retryBackoffMs(2, max_backoff_ms)), unbounded.affordableWaitMs(std.testing.io, net.retryBackoffMs(2, max_backoff_ms)));
+    try std.testing.expect(unbounded.canAffordWait(std.testing.io, max_retry_after_ms));
+    try std.testing.expect(unbounded.canAffordWait(std.testing.io, net.retryBackoffMs(2, max_backoff_ms)));
 
     // Spent: nothing is affordable, not even a millisecond, so no attempt is
     // made and the run ends with the reason already on stderr.
     const spent: Budget = .{ .deadline_ns = 0 };
-    try std.testing.expectEqual(@as(?u64, null), spent.affordableWaitMs(std.testing.io, 1));
-    try std.testing.expectEqual(@as(?u64, null), spent.affordableWaitMs(std.testing.io, net.retryBackoffMs(0, max_backoff_ms)));
-    try std.testing.expectEqual(@as(?u64, null), spent.affordableWaitMs(std.testing.io, max_retry_after_ms));
+    try std.testing.expect(!spent.canAffordWait(std.testing.io, 1));
+    try std.testing.expect(!spent.canAffordWait(std.testing.io, net.retryBackoffMs(0, max_backoff_ms)));
+    try std.testing.expect(!spent.canAffordWait(std.testing.io, max_retry_after_ms));
 }
 
 test "a budget too large to count in milliseconds is a ceiling, not a trap" {
