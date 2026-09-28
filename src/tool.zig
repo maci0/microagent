@@ -1163,6 +1163,23 @@ fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]const
         rest = rest[at + old.len ..];
     }
     try buf.appendSlice(arena, rest);
+    // A match the check above cannot see: it proves `new` cannot re-create
+    // `old` inside itself, and not that `old` is gone from the file. The
+    // rewrite is `P ++ new ++ S`, so the bytes before the span are still there
+    // and `new` can match against them: `aab` with `ab` -> `b` is the small
+    // case, where the first run leaves `ab`, which matches again and takes a
+    // byte off the file with every duplicate. A dedent is the same shape with
+    // real code, where a line of five spaces replaced by four re-matches on the
+    // space in front of it and walks one column left per duplicate.
+    //
+    // The rewritten buffer is the only place the question can be asked of, and
+    // asking it of anything else is what left the hole: both branches of the
+    // loop above replace every occurrence they reach, so a match still in here
+    // is one this rewrite created, and the next run of this call would find it
+    // and apply again.
+    if (std.mem.indexOf(u8, buf.items, old) != null) {
+        return std.fmt.allocPrint(arena, "error: replacing old_string with new_string would leave old_string matchable in {s}, so a second run of this edit would apply again; include more context in old_string", .{path});
+    }
     writeFileAtomic(io, std.Io.Dir.cwd(), path, buf.items) catch |err|
         return std.fmt.allocPrint(arena, "error: cannot write {s}: {s}", .{ path, @errorName(err) });
     return std.fmt.allocPrint(arena, "replaced {d} occurrence(s) in {s}", .{ count, path });
@@ -3366,6 +3383,28 @@ test "an edit issued twice leaves the file the first run left" {
     try args.put(arena, "new_string", .{ .string = "x" });
     try std.testing.expect(std.mem.startsWith(u8, try toolEdit(std.testing.io, arena, args), "no change:"));
     try std.testing.expectEqualStrings("a x b", try cwd.tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
+
+    // The boundary shape: the replacement holds no copy of the text it
+    // replaces, so the check above passes it, and the match re-forms against
+    // the byte in front of the span instead. `aab` with `ab` -> `b` leaves `ab`,
+    // which the second run matches and shortens to `b`. Refused on the first
+    // run, so a duplicate of this call is refused with it.
+    try args.put(arena, "old_string", .{ .string = "ab" });
+    try args.put(arena, "new_string", .{ .string = "b" });
+    try cwd.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.txt", .data = "aab" });
+    try std.testing.expect(std.mem.startsWith(u8, try toolEdit(std.testing.io, arena, args), "error: replacing old_string"));
+    try std.testing.expectEqualStrings("aab", try cwd.tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
+
+    // The same shape on a line, which is the one a dedent arrives in: the
+    // match reaches into the space in front of the statement, so the first run
+    // leaves a line that still matches and every duplicate takes one more space
+    // off it.
+    try args.put(arena, "old_string", .{ .string = "  f();" });
+    try args.put(arena, "new_string", .{ .string = " f();" });
+    try args.put(arena, "replace_all", .{ .bool = true });
+    try cwd.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.txt", .data = "if x:\n   f();\n" });
+    try std.testing.expect(std.mem.startsWith(u8, try toolEdit(std.testing.io, arena, args), "error: replacing old_string"));
+    try std.testing.expectEqualStrings("if x:\n   f();\n", try cwd.tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
 }
 
 // An ast-grep rewrite has the same re-run question an edit does and the same
