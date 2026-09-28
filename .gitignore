@@ -2,6 +2,10 @@ zig-out/
 .zig-cache/
 zig-pkg/
 dist/
+# The release note release.yml builds out of the checked-out tree, so a run
+# that is cut short between writing it and publishing it leaves a file a
+# `git status` offers to commit.
+release-notes.md
 __pycache__/
 .scratch/
 # The Harbor adapter's musl binary, one name per host architecture. It is a

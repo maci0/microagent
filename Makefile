@@ -593,15 +593,19 @@ checksums:
 		echo "neither sha256sum nor shasum is on PATH, so the sidecars update verifies cannot be written" >&2; \
 		exit 2; \
 	}; \
+	written=0; \
 	for asset in microagent-v*; do \
 		case "$$asset" in *.sha256|*.tmp) continue;; esac; \
-		test -e "$$asset" || { \
-			echo "no tagged assets in dist/, run 'make release-assets TAG=v0.2.0' first" >&2; \
-			exit 2; \
-		}; \
+		test -e "$$asset" || continue; \
 		$$sum "$$asset" > "$$asset.sha256.tmp"; \
 		mv "$$asset.sha256.tmp" "$$asset.sha256"; \
-	done
+		written=$$((written + 1)); \
+	done; \
+	test "$$written" -gt 0 || { \
+		echo "no tagged assets in dist/, so no sidecar was written: run 'make release-assets TAG=v0.2.0' first" >&2; \
+		exit 2; \
+	}; \
+	echo "wrote $$written sidecars in dist/"
 
 # Two independent builds of the same source must be byte-identical, or a
 # released checksum describes one binary and a rebuild produces another. Every

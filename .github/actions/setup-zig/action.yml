@@ -33,7 +33,9 @@ runs:
     # platform.
     - name: point the global cache at a known path
       shell: bash
-      run: echo "ZIG_GLOBAL_CACHE_DIR=$RUNNER_TEMP/zig-global" >> "$GITHUB_ENV"
+      run: |
+        set -euo pipefail
+        echo "ZIG_GLOBAL_CACHE_DIR=$RUNNER_TEMP/zig-global" >> "$GITHUB_ENV"
 
     # Two caches rather than one, because the two directories change at
     # different rates and a single key over both re-uploads the expensive one
@@ -76,4 +78,4 @@ runs:
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ runner.temp }}/zig-global
-        key: zig-global-${{ runner.os }}-${{ steps.zig.outputs.version }}
+        key: zig-global-${{ runner.os }}-${{ runner.arch }}-${{ steps.zig.outputs.version }}
