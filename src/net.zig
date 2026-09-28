@@ -739,3 +739,300 @@ test "every month name reads as the month the epoch counts" {
     for ([_][]const u8{ "", "Ju", "Junx", "Jun1", "Sept", "0" }) |name|
         try std.testing.expectEqual(@as(?u32, null), monthFromName(name));
 }
+
+// The header a server or a gateway in front of it wrote, whole and as the
+// grammar leaves it. `std.testing.fuzz` runs this corpus through the harness on
+// every `zig build test`, and through the fuzzer's mutations when the test
+// binary is built in fuzz mode. The date a real origin sends, the two obsolete
+// forms RFC 9110 no longer requires, the epoch and a leap day at the century
+// rule's edge, the widest year the grammar spells, and the shapes that reach
+// the day arithmetic with something it cannot use: a year of the wrong width, a
+// zone that is not GMT, a clock field out of range, a day past the end of its
+// month, a trailing field the grammar does not carry, and a header cut short.
+const http_date_corpus = [_][]const u8{
+    "",
+    ",",
+    "GMT",
+    "Sun, 06 Nov 1994 08:49:37 GMT",
+    "Sun, 06 Nov 1994 08:49:37 GMT ",
+    "Sun, 06 Nov 1994 08:49:37 GMT extra",
+    "Sun, 06 Nov 1994 08:49:37 UTC",
+    "Sunday, 06-Nov-94 08:49:37 GMT",
+    "Sun Nov  6 08:49:37 1994",
+    "Thu, 01 Jan 1970 00:00:00 GMT",
+    "Thu, 01 Jan 1970 00:00:01 GMT",
+    "Fri, 31 Dec 9999 23:59:59 GMT",
+    "Fri, 31 Dec 9999 23:59:60 GMT",
+    "Wed, 29 Feb 2024 12:00:00 GMT",
+    "Thu, 29 Feb 2400 00:00:00 GMT",
+    "Wed, 29 Feb 9996 00:00:00 GMT",
+    "Sun, 06 Nov 0 08:49:37 GMT",
+    "Sun, 06 Nov 10000 08:49:37 GMT",
+    "Sun, 06 Nov 9223372036854775807 08:49:37 GMT",
+    "Sun, 06 Nov 99999999999999 08:49:37 GMT",
+    "Sun, 06 Nov -197 08:49:37 GMT",
+    "Sun, 06 Nov 20260 08:49:37 GMT",
+    "Sun, 06 Nov 1970 -1:00:00 GMT",
+    "Sun, 06 Nov 1970 08:49:37:00 GMT",
+    "Sun, 00 Nov 1970 08:49:37 GMT",
+    "Sun, 31 Nov 1970 08:49:37 GMT",
+    "Sun, 31 Apr 1970 08:49:37 GMT",
+    "Sun, 29 Feb 1900 08:49:37 GMT",
+    "Sun, 32 Jan 1970 08:49:37 GMT",
+    "Sun, 06 Xxx 1970 08:49:37 GMT",
+    "Sun, 06 Nov 1970 24:00:00 GMT",
+    "Sun, 06 Nov 1970 08:60:00 GMT",
+    "Sun, 06 Nov 1970 08:49:61 GMT",
+    "Sun, 06 Nov 1970 08:49:-1 GMT",
+    "Sun,\t06\tNov\t1970\t08:49:37\tGMT",
+    "Sun, 06 Nov 1970 08:49:37 GMT\x00",
+    "Sun, 06 Nov 1970 08:49:37 G\x00MT",
+    ",,,,,,,,,,,,,,,,",
+    "Sun, 06 Nov 1970 08:49:37 GMT,",
+};
+
+test "a fuzzed Retry-After date names the instant it spells, and never one outside it" {
+    try std.testing.fuzz({}, fuzzHttpDate, .{ .corpus = &http_date_corpus });
+}
+
+fn fuzzHttpDate(_: void, smith: *std.testing.Smith) !void {
+    var scratch: [128]u8 = undefined;
+    const raw: []const u8 = if (smith.in) |seed| seed else scratch[0..smith.slice(&scratch)];
+
+    const got = httpDateEpochSeconds(raw) orelse return;
+
+    // The first instant and the last the grammar can spell, so a value the
+    // parser returned is inside the range the header could have named. The
+    // year a sender has no way of meaning multiplied the day count past the 64
+    // bits it has, and what came back was a date at the opposite end of the
+    // calendar: a header that overflows is a run that waits for years, or one
+    // that stops waiting at all.
+    const first = daysFromCivil(1, 1, 1) * @as(i64, std.time.s_per_day);
+    const last = daysFromCivil(http_date_year_max, 12, 31) * @as(i64, std.time.s_per_day) +
+        23 * @as(i64, std.time.s_per_hour) + 59 * @as(i64, std.time.s_per_min) + 60;
+    if (got < first or got > last) {
+        std.debug.print("\nhttp_date: '{s}' reads as {d}, outside {d}..{d}\n", .{ raw, got, first, last });
+        return error.TestUnexpectedResult;
+    }
+
+    // The day count the header's own fields name, counted by the calendar
+    // below, against the one the parser's arithmetic arrived at. The two come
+    // out of different code over the same bytes, so a leap rule, a month length
+    // or an off-by-one either of them has is a disagreement rather than a value
+    // that is wrong in both halves at once. The lookups behind the fields are
+    // the module's own, which the unit test above pins month by month; what is
+    // compared here is the arithmetic they feed. The clock is carried across
+    // whole, so a leap second (23:59:60) counts as the day it belongs to
+    // rather than rolling into the one after it.
+    const after_comma = raw[std.mem.indexOfScalar(u8, raw, ',').? + 1 ..];
+    var fields = std.mem.tokenizeScalar(u8, after_comma, ' ');
+    const spelled_day = std.fmt.parseInt(u32, fields.next().?, 10) catch return;
+    const spelled_month = monthFromName(fields.next().?) orelse return;
+    const spelled_year = httpDateYear(fields.next().?) orelse return;
+    var clock = std.mem.splitScalar(u8, fields.next().?, ':');
+    const spelled_hour = std.fmt.parseInt(i64, clock.next().?, 10) catch return;
+    const spelled_minute = std.fmt.parseInt(i64, clock.next().?, 10) catch return;
+    const spelled_second = std.fmt.parseInt(i64, clock.next().?, 10) catch return;
+    const want = stdDaysFromCivil(spelled_year, spelled_month, spelled_day) * @as(i64, std.time.s_per_day) +
+        spelled_hour * @as(i64, std.time.s_per_hour) +
+        spelled_minute * @as(i64, std.time.s_per_min) + spelled_second;
+    if (got != want) {
+        std.debug.print("\nhttp_date: '{s}' reads as {d}, the calendar says {d}\n", .{ raw, got, want });
+        return error.TestUnexpectedResult;
+    }
+
+    // The instant written back the way a server would spell it reads as itself.
+    // The date is rebuilt from the epoch by the standard library's own calendar
+    // rather than by `daysFromCivil`, so a century rule or a month length the
+    // forward path gets wrong is caught here rather than being asserted against
+    // itself. The library counts days forward from 1970, so a date before the
+    // epoch is held to the range above and nothing else.
+    //
+    // The leap second at 23:59:60 on the last day the grammar can spell is the
+    // one value the parser hands back that it does not read back: it names an
+    // instant one second past the last the four-digit year field can carry.
+    // Nothing downstream cares (a caller only ever subtracts it from a clock),
+    // so it is held to the range above and the round trip starts after it.
+    const last_second_of_the_last_day = daysFromCivil(http_date_year_max, 12, 31) * @as(i64, std.time.s_per_day) +
+        23 * @as(i64, std.time.s_per_hour) + 59 * @as(i64, std.time.s_per_min) + 60;
+    if (got < 0 or got >= last_second_of_the_last_day) return;
+    var header: [64]u8 = undefined;
+    const written = writeHttpDate(got, &header) catch |err| {
+        std.debug.print("\nhttp_date: {d} does not fit an IMF-fixdate: {t}\n", .{ got, err });
+        return err;
+    };
+    const again = httpDateEpochSeconds(written) orelse {
+        std.debug.print("\nhttp_date: '{s}' does not read back from {d}\n", .{ written, got });
+        return error.TestUnexpectedResult;
+    };
+    if (again != got) {
+        std.debug.print("\nhttp_date: '{s}' reads as {d} and again as {d}\n", .{ written, got, again });
+        return error.TestUnexpectedResult;
+    }
+}
+
+/// `seconds` as the IMF-fixdate a server would have sent it, into `buf`.
+///
+/// The weekday is named from the day count with 1970-01-01 (a Thursday) as the
+/// zero, and the parser is documented not to check that field, so it is the one
+/// part of the round trip left unverified.
+fn writeHttpDate(seconds: i64, buf: []u8) ![]const u8 {
+    // A floor and not a truncation, so a leap second (23:59:60) lands on the
+    // day it belongs to rather than on the one before it.
+    const days: u47 = @intCast(@divFloor(seconds, std.time.s_per_day));
+    const into_day: u17 = @intCast(@mod(seconds, std.time.s_per_day));
+    const date: std.time.epoch.EpochDay = .{ .day = days };
+    const year_and_day = date.calculateYearDay();
+    const month_and_day = year_and_day.calculateMonthDay();
+    const clock: std.time.epoch.DaySeconds = .{ .secs = into_day };
+    return std.fmt.bufPrint(
+        buf,
+        "{s}, {d:0>2} {s} {d:0>4} {d:0>2}:{d:0>2}:{d:0>2} GMT",
+        .{
+            weekdays[@mod(days + weekday_epoch_offset, weekdays.len)],
+            @as(u16, month_and_day.day_index) + 1,
+            calendar_months[month_and_day.month.numeric() - 1],
+            year_and_day.year,
+            clock.getHoursIntoDay(),
+            clock.getMinutesIntoHour(),
+            clock.getSecondsIntoMinute(),
+        },
+    );
+}
+
+/// The weekday names in the order the epoch's own day falls in.
+const weekdays = [_][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+
+/// How far the epoch's own day sits into `weekdays`: 1970-01-01 was a Thursday,
+/// which is the fourth name there.
+const weekday_epoch_offset: u47 = 4;
+
+// The body a streamed response arrives as, and the shapes that break a reader
+// splitting it a line at a time. `std.testing.fuzz` runs this corpus through
+// the harness on every `zig build test`, and through the fuzzer's mutations when
+// the test binary is built in fuzz mode. A completion frame and a file's lines,
+// the two byte orders a line ending arrives in, a line longer than one read, and
+// the records that arrive with nothing between them.
+const line_split_corpus = [_][]const u8{
+    "",
+    "\n",
+    "\n\n\n",
+    "\r\n",
+    "data: [DONE]\n",
+    "data: {\"choices\":[]}\ndata: [DONE]\n",
+    "data: {\"choices\":[]}\r\ndata: [DONE]\r\n",
+    "data: a\ndata: b\ndata: c\n",
+    "one\ntwo\nthree\n",
+    "a\n\nb\n",
+    "\na\n\n",
+    "data: fir",
+    "st\ndata: second\n",
+    "no trailing newline",
+    "\r\r\n",
+    "\n\r",
+    "line\n\n\n\nline\n",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nb\ncccccccccccccccccccccccccccccccc\n",
+};
+
+test "a fuzzed body cut into lines loses no byte and searches none of them twice" {
+    try std.testing.fuzz({}, fuzzLineSplit, .{ .corpus = &line_split_corpus });
+}
+
+fn fuzzLineSplit(_: void, smith: *std.testing.Smith) !void {
+    const gpa = std.testing.allocator;
+    var scratch: [256]u8 = undefined;
+    const wire: []const u8 = if (smith.in) |seed| seed else scratch[0..smith.slice(&scratch)];
+
+    // A read hands over whatever the network had, so the same bytes arrive
+    // under a different split on every run. The size comes out of the input
+    // itself, which keeps one byte arriving at a time in the corpus.
+    const chunk: usize = if (wire.len == 0) 1 else 1 + @as(usize, wire[0]) % 8;
+
+    var line_arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer line_arena_state.deinit();
+    const lines = line_arena_state.allocator();
+
+    var seen: std.ArrayList([]u8) = .empty;
+    defer seen.deinit(gpa);
+
+    // The stream loop's own shape: append what a read brought, drain the lines
+    // it completed, drop what was consumed. The counter is what makes the scan
+    // cost visible, so a `scanned` that is not lowered past the bytes already
+    // consumed is a body searched again from the front on every read.
+    var pending: std.ArrayList(u8) = .empty;
+    defer pending.deinit(gpa);
+    var scanned: usize = 0;
+    var searched: usize = 0;
+
+    var carried = wire;
+    while (true) {
+        const piece = carried[0..@min(chunk, carried.len)];
+        carried = carried[piece.len..];
+        try pending.appendSlice(gpa, piece);
+
+        var start: usize = 0;
+        while (true) {
+            // Each call looks at exactly the bytes between the old cursor and
+            // the new one, whether it found a newline or ran off the end.
+            const was = scanned;
+            const found = nextLineEnd(pending.items, &scanned);
+            searched += scanned - was;
+            const at = found orelse break;
+            try seen.append(gpa, try lines.dupe(u8, pending.items[start..at]));
+            start = at + 1;
+        }
+        if (start > 0) {
+            const rest = pending.items.len - start;
+            std.mem.copyForwards(u8, pending.items[0..rest], pending.items[start..]);
+            pending.items.len = rest;
+            scanned -= start;
+        }
+        if (carried.len == 0) break;
+    }
+
+    // Every byte of the body was looked at, and each of them once: the split is
+    // linear in the size of what arrived, whatever the read boundaries were.
+    try std.testing.expectEqual(wire.len, searched);
+
+    // The lines the run would have carried are the ones a whole-body split
+    // gives, in the same order and spelled the same way. A cursor that runs
+    // past a line that has already arrived drops it; one that does not move
+    // leaves it in the buffer and hands the next read a body that starts
+    // halfway through a record. The count is the newlines, because a record
+    // the body ends without ending is still in the buffer, held for the read
+    // that would finish it.
+    var newlines: usize = 0;
+    for (wire) |byte| {
+        if (byte == '\n') newlines += 1;
+    }
+    try std.testing.expectEqual(newlines, seen.items.len);
+
+    var want = std.mem.splitScalar(u8, wire, '\n');
+    for (seen.items) |line| {
+        const expected = want.next() orelse {
+            std.debug.print("\nline_split: no line left for {d} bytes\n", .{line.len});
+            return error.TestUnexpectedResult;
+        };
+        try std.testing.expectEqualStrings(expected, line);
+    }
+}
+
+/// Days from 1970-01-01 to the date the header spells, counted the long way.
+///
+/// `daysFromCivil` reaches the number through the closed form that shifts the
+/// year to start in March; this walks the same days one year and one month at a
+/// time, off the standard library's own year length. Two implementations of one
+/// count, so a leap rule, a month length or an off-by-one either of them has is
+/// a disagreement a fuzzer can see, where a value checked against itself stays
+/// wrong in both halves at once.
+fn stdDaysFromCivil(year: i64, month: u32, day: u32) i64 {
+    var total: i64 = 0;
+    var y: i64 = 1970;
+    while (y < year) : (y += 1) total += std.time.epoch.getDaysInYear(@intCast(y));
+    while (y > year) : (y -= 1) total -= std.time.epoch.getDaysInYear(@intCast(y - 1));
+    var m: u32 = 1;
+    while (m < month) : (m += 1)
+        total += std.time.epoch.getDaysInMonth(@intCast(year), @enumFromInt(m));
+    return total + @as(i64, day) - 1;
+}
