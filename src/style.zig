@@ -1,5 +1,6 @@
-//! Reply-style modes appended to the system prompt, with the levels set from
-//! one TOML config.
+//! Reply-style modes appended to the system prompt, with the levels set from a
+//! TOML config and from `MICROAGENT_CAVEMAN` / `MICROAGENT_PONYTAIL`, which win
+//! over the file.
 //!
 //! Two independent knobs, both a level the task asked for and both a prompt
 //! fragment rather than a code path:
@@ -66,9 +67,9 @@ pub const Style = struct {
     caveman: CavemanLevel = .ultra,
     ponytail: PonytailLevel = .full,
 
-    /// The most fragments a pair of levels contributes: the three strings a
-    /// header is made of, a wenyan line, and one body and one shared block per
-    /// knob.
+    /// The most fragments a pair of levels contributes: three strings per knob's
+    /// header, a wenyan line, one body and one shared block per knob, and the
+    /// newline that separates the two blocks. 3 + 3 + 1 + 2 + 2 + 1 = 12.
     const ruleset_max_parts: usize = 12;
 
     /// The prompt fragment these levels add. Empty when both are off, so an
@@ -132,8 +133,9 @@ pub const Style = struct {
     /// has nowhere to go.
     ///
     /// A `#` comment is understood, and may trail a key, a value or a table
-    /// header, because the file the README hands out is written that way. One
-    /// inside a quoted value is text rather than a comment, as TOML has it.
+    /// header, because the file the README hands out is written that way. It is
+    /// cut before the value is read, so a `#` inside a quoted value is not text
+    /// the way TOML has it (see `unquote`).
     ///
     /// A leading byte order mark is dropped before the first line is read. An
     /// editor that saves UTF-8 with one writes it ahead of the first key, and
@@ -211,11 +213,15 @@ fn isStyleTable(line: []const u8) bool {
 }
 
 /// A quoted TOML value without its quotes, stopping at the closing quote so a
-/// trailing `# comment` is not part of the level, and a `#` inside the quotes is
-/// text rather than the start of one. A bare value stops at a `#` for the same
-/// reason, so a comment trails it the way it trails a quoted one; it is
-/// otherwise taken as written, because `caveman = ultra` is not valid TOML but
-/// is not worth an error either.
+/// trailing `# comment` is not part of the level. A bare value stops at a `#`
+/// for the same reason, so a comment trails it the way it trails a quoted one;
+/// it is otherwise taken as written, because `caveman = ultra` is not valid
+/// TOML but is not worth an error either.
+///
+/// The `#` is cut before the quote is looked for, not after, so a `#` a quoted
+/// value itself carries is not text the way TOML has it: `caveman = "lite #
+/// off"` arrives here as the unterminated value `"lite ` and is reported as a
+/// level this build does not have.
 fn unquote(raw: []const u8) []const u8 {
     const bare = raw[0 .. std.mem.indexOfScalar(u8, raw, '#') orelse raw.len];
     if (bare.len < 2) return bare;
@@ -426,8 +432,9 @@ test "a comment trails a key, a value and a table header" {
     try std.testing.expectEqual(CavemanLevel.lite, style.caveman);
     try std.testing.expectEqual(PonytailLevel.full, style.ponytail);
 
-    // A quoted value is cut at its closing quote, so a `#` after it is a
-    // comment and one the value itself carries is text, not a comment.
+    // A `#` is cut before the quote is looked for, so one after the closing
+    // quote is a comment and one the quoted value itself carries leaves the
+    // value unterminated, which is a level this build does not have.
     var hashed: Style = .{};
     const problem = hashed.applyToml("caveman = \"lite # off\"\n").?;
     try std.testing.expectEqualStrings("caveman", problem.key);

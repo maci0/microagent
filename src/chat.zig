@@ -1,6 +1,7 @@
 //! The value types one turn of a conversation is made of, the JSON writer every
-//! request body and usage line goes through, and the one escaping every value
-//! quoted into a diagnostic passes through.
+//! request body and usage line goes through, and the escaping a value quoted
+//! into a diagnostic goes through (`safeText` here, and the tool module's
+//! `terminalSafe` for a provider error body).
 //!
 //! A leaf module, under `net` and the rest: it imports nothing from the agent
 //! loop, the tools or `update`, so all three can speak the same turn without
@@ -171,6 +172,9 @@ pub const ChatResult = struct {
     /// counted, so the last index is the whole of what has to be remembered.
     over_cap_index: ?usize = null,
 
+    /// Releases `finish_reason` only when it has bytes, because a non-empty
+    /// field is the one `ownString` copied for this run: the shared empty slice
+    /// is not this run's to free, and a copied one is a leak if it is kept.
     pub fn deinitFinish(self: *ChatResult, gpa: std.mem.Allocator) void {
         if (!std.mem.eql(u8, self.finish_reason, &.{})) gpa.free(self.finish_reason);
         self.finish_reason = &.{};
@@ -223,6 +227,9 @@ pub const JsonBuf = struct {
         return &self.allocating.writer;
     }
 
+    /// Hands back the buffer and gives up ownership of it: the `Allocating` is
+    /// reset, so this is the last call on this `JsonBuf` and any write after it
+    /// starts a new buffer.
     pub fn items(self: *JsonBuf) []u8 {
         self.list = self.allocating.toArrayList();
         return self.list.items;
@@ -355,6 +362,10 @@ pub fn partialTailLen(s: []const u8) usize {
     return 0;
 }
 
+/// A JSON string, and nothing else. A number, a `number_string` or a container
+/// is not one, so a call carrying a bare number reads as one that left the
+/// argument out; `maybeNum` is the reader that accepts both spellings of a
+/// number.
 pub fn str(v: ?std.json.Value) ?[]const u8 {
     const value = v orelse return null;
     return switch (value) {
@@ -363,6 +374,11 @@ pub fn str(v: ?std.json.Value) ?[]const u8 {
     };
 }
 
+/// A count as a `u64`: an integer, a float (truncated, and clamped at both
+/// ends), or a number spelled as a string or `number_string`. A bool, a
+/// container, a null and an absent field are all 0, which is the right answer
+/// for a counter that starts at zero and the wrong one for folding a frame into
+/// a total.
 pub fn num(v: ?std.json.Value) u64 {
     const value = v orelse return 0;
     return switch (value) {

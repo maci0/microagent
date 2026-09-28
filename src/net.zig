@@ -904,7 +904,7 @@ fn writeHttpDate(seconds: i64, buf: []u8) ![]const u8 {
 const weekdays = [_][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
 
 /// How far the epoch's own day sits into `weekdays`: 1970-01-01 was a Thursday,
-/// which is the fourth name there.
+/// which is `weekdays[4]`: the fifth name, at index 4.
 const weekday_epoch_offset: u47 = 4;
 
 // The body a streamed response arrives as, and the shapes that break a reader

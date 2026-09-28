@@ -44,7 +44,7 @@ path, and nothing per turn beyond one session-log write and one stdout write per
 
 | | before | after | why |
 | --- | --- | --- | --- |
-| un-cacheable request bytes | 3,592 B/turn | **2 B/turn** | the tool schemas were written after `messages`, so they fell outside the cacheable prefix every turn |
+| un-cacheable request bytes | 3,775 B/turn | **2 B/turn** | the tool schemas were written after `messages`, so they fell outside the cacheable prefix every turn |
 | streamed frame parse | 7,204 instr | **4,101 instr** | declared shapes instead of a `std.json.Value` tree, with the generic parse kept behind them |
 | ranged read of a long line | quadratic | **linear** | each 8 KB read re-searched and re-copied the whole accumulated buffer |
 | a retry wait past the budget | up to 6 min asleep | **refused** | `--budget` was defeated by the `Retry-After` path |
@@ -80,7 +80,7 @@ categories generalise past this repository:
 
 | class | why a profiler misses it | example |
 | --- | --- | --- |
-| wire bytes | no instruction is spent on them | 3.5 KB of tool schema re-read every turn |
+| wire bytes | no instruction is spent on them | 3.8 KB of tool schema re-read every turn |
 | waiting | the cost is sleep | a 429 sat the run out for six minutes inside `--budget` |
 | resident memory | instruction counts do not carry it | 48 MB retained after one large response |
 | fallback paths | the primary path works | `date +%s` standing in for a monotonic clock |

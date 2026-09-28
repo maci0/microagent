@@ -67,8 +67,9 @@ pub const default_bash_timeout_ms: u64 = 120_000;
 /// with a two-minute timeout starts happily at second 779 of a 780-second
 /// budget and the caller kills the run mid-command, which is what the budget
 /// exists to prevent. `ceiling_ms` is null when the run set no budget, and the
-/// floor is the caller's: it never hands a tool a zero timeout, which would
-/// fail before the tool could even start.
+/// floor is the caller's: nothing here stops a zero `wanted_ms`, and keeping one
+/// out is what `requestedTimeoutMs` answering null for a zero, and a constant
+/// timeout, do, because a zero would fail before the tool could even start.
 fn boundedMs(wanted_ms: u64, ceiling_ms: ?u64) u64 {
     const ceiling = ceiling_ms orelse return wanted_ms;
     return @min(wanted_ms, ceiling);
@@ -488,6 +489,11 @@ fn firstLines(arena: std.mem.Allocator, text: []const u8, limit: usize) ![]const
     return std.fmt.allocPrint(arena, "{s}... [output truncated at {d} lines]", .{ text[0..end], limit });
 }
 
+/// The one way into the tools below: the name and the arguments are the
+/// model's, so the payload is parsed and checked for an object before any name
+/// is compared, the gutter line is written, and only then is a name matched. A
+/// payload that is not an object, or a name that is not one of the seven,
+/// answers with an error string and no tool runs.
 pub fn runTool(io: Io, arena: std.mem.Allocator, call: chat.ToolCall, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map) ![]const u8 {
     const parsed = std.json.parseFromSlice(std.json.Value, arena, call.args.items, .{}) catch
         return std.fmt.allocPrint(arena, "error: tool arguments are not valid JSON", .{});
@@ -562,10 +568,12 @@ fn toolCallLine(arena: std.mem.Allocator, buf: []u8, tool: chat.Tool, args: std.
 /// valid UTF-8 sequence. A tool argument is whatever the model decided to send,
 /// and the model decides that from files in the tree, so a repository can put
 /// an escape sequence on the operator's screen through the gutter line, and a
-/// provider can put a broken byte in an error body. A diagnostic note shows
-/// both as `.`; the model's own output on stdout is left alone, because that is
-/// the answer the run was asked for. An allocation that fails yields no text
-/// rather than the text unescaped, which is the input this exists to remove.
+/// provider can put a broken byte in an error body. A diagnostic note replaces
+/// each control with a `.`, one byte for one byte, so a two-byte C1 sequence
+/// becomes two dots; the model's own output on stdout is left alone, because
+/// that is the answer the run was asked for. An allocation that fails yields no
+/// text rather than the text unescaped, which is the input this exists to
+/// remove.
 ///
 /// A byte that is not text is shown as a dot rather than written through. The
 /// body is the provider's own bytes, so a lone `0xff`, a continuation byte with
@@ -797,6 +805,10 @@ const credential_glob_table: [credential_globs_capacity][]const u8 = blk: {
 const credential_globs_capacity = credential_names.len + credential_extensions.len + credential_dirs.len + 3;
 
 const credential_globs: []const []const u8 = credential_glob_table[0..credential_globs_capacity];
+
+/// The matches `search` takes from one file, as `--max-count`. A file with more
+/// than this is cut at the count, and the cut is not marked in the result.
+const search_max_matches_per_file: usize = 200;
 
 /// The same names as git pathspec exclusions, built at compile time. `git` is
 /// handed a pathspec rather than a glob, so the leading `!` comes off and the
@@ -1156,6 +1168,10 @@ fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]const
     return std.fmt.allocPrint(arena, "replaced {d} occurrence(s) in {s}", .{ count, path });
 }
 
+/// Text search through ripgrep. `--max-count` bounds the matches per file, and
+/// nothing marks a result cut by it: `withCaptureNote` reports only the byte
+/// cap, so this is a bound that makes an unbounded answer unlikely rather than
+/// one the run announces.
 fn toolSearch(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map) ![]const u8 {
     const pattern = chat.str(args.get("pattern")) orelse return std.fmt.allocPrint(arena, "error: missing pattern", .{});
     const path = chat.str(args.get("path")) orelse ".";
@@ -1166,8 +1182,9 @@ fn toolSearch(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceilin
     // make true.
     if (isCredentialPath(path)) return try credentialRefusal(arena, .search, path, false);
     const glob = chat.str(args.get("glob"));
+    var max_count: [16]u8 = undefined;
     var argv: std.ArrayList([]const u8) = .empty;
-    try argv.appendSlice(arena, &.{ "rg", "--line-number", "--no-heading", "--color", "never", "--max-count", "200", "--glob-case-insensitive" });
+    try argv.appendSlice(arena, &.{ "rg", "--line-number", "--no-heading", "--color", "never", "--max-count", std.fmt.bufPrint(&max_count, "{d}", .{search_max_matches_per_file}) catch unreachable, "--glob-case-insensitive" });
     if (glob) |g| {
         try argv.appendSlice(arena, &.{ "--glob", g });
     }
@@ -1582,6 +1599,9 @@ pub fn toolResult(arena: std.mem.Allocator, output: []const u8) ![]const u8 {
     });
 }
 
+/// A tool call through the argument text the model sends, on the test io, with
+/// no run budget and this process's environment. It is the entry point the
+/// tests drive, so a tool's real dispatch path is the one under test.
 pub fn dispatch(arena: std.mem.Allocator, name: []const u8, args: []const u8) ![]const u8 {
     var call: chat.ToolCall = .{
         .id = try arena.dupe(u8, ""),

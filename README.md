@@ -119,9 +119,10 @@ MDEBUG=1                trace a stuck stream on stderr, and print the
 Every long flag also takes `--flag=value`, a flag wins over the environment variable for the same
 option, and a bare `--` ends the flags, so a task that begins with a dash is passed after it
 (`microagent -- "explain why -Werror fails"`). The exit status is 0 for a finished run, 1 for a
-failed one, 2 for a wrong command line, 3 for a run that stopped at a ceiling (`--max-turns`,
-`--max-spend-tokens`, or a budget that ran out) so the text on stdout is a prefix of the work rather
-than an answer, and 130
+failed one, 2 for a wrong command line, 3 for a run that stopped without an answer (a ceiling
+reached: `--max-turns`, `--max-spend-tokens`, a budget that ran out, or a last response that
+carried no text, was cut at `--max-tokens`, or that the provider stopped generating) so the text
+on stdout is a prefix of the work rather than an answer, and 130
 for an interrupt, which takes the tool subprocess with it. `microagent --help`, a bare
 `microagent help`, and `microagent update --help` are the full text; a wrong flag prints the reason
 and that help on stderr, so a script reading stdout gets nothing from a failed invocation.

@@ -298,9 +298,9 @@ fn logName(name: []const u8) ?LogName {
 /// again on the next run. The failures are counted and named once.
 ///
 /// Through the cwd, the way `open` creates the directory and `createSessionLog`
-/// creates the log: `MICROAGENT_SESSION_DIR=logs/x` is a legal value, and a
-/// reader that insists the path is absolute turns it into a panic in a checked
-/// build.
+/// creates the log: `createFileAbsolute` is a `cwd`-relative create, not a
+/// checked one, so `MICROAGENT_SESSION_DIR=logs/x` names a store the run really
+/// opens where it was asked for.
 fn pruneSessions(io: Io, arena: std.mem.Allocator, session_dir: []const u8) void {
     pruneSessionsTo(io, arena, session_dir, max_session_logs);
 }
@@ -422,8 +422,9 @@ pub fn elapsedMs(io: Io, clock: Io.Clock, since: i96) u64 {
 
 /// One record per response, into the log this run opened.
 ///
-/// A failure to *open* the log is a null and costs the run nothing, which is
-/// why `open` can stay quiet. A failure to *write* one is different: the
+/// A failure to *open* the log is a null and costs the run nothing, so `open`
+/// names it on stderr and the run continues. A failure to *write* one is
+/// different: the
 /// log was there, the run is producing records, and a store that has gone quiet
 /// (a full disk, a directory removed under the run) would otherwise leave the
 /// monitor reporting a run that stopped long before it did. It is named once and

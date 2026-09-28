@@ -246,8 +246,10 @@ fn releasePageLine(url: []const u8) error{UntrustedUrl}![]const u8 {
 }
 
 /// `--check` never downloads an asset. An equal version never does either,
-/// and neither does a published tag older than the running build: installing it
-/// would replace a newer binary with an older one.
+/// and neither does a tag that orders as older than the running build:
+/// installing it would replace a newer binary with an older one. A tag that is
+/// not a `major.minor.patch` triple orders as equal, so it is installed like
+/// any other release this build is not already.
 fn fetchesAsset(check_only: bool, running: []const u8, tag: []const u8) bool {
     if (check_only) return false;
     if (compareVersions(running, tag) == .gt) return false;
@@ -260,7 +262,7 @@ fn checksumMatches(asset: []const u8, sidecar: []const u8, basename: []const u8)
     var line = sidecar[0..line_end];
     if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
     const hex_len = std.crypto.hash.sha2.Sha256.digest_length * 2;
-    // Two spaces separate the digest from the name, so the name starts one
+    // Two spaces separate the digest from the name, so the name starts two
     // past the digest's two hex digits per byte.
     const name_at = hex_len + 2;
     if (line.len < name_at) return false;
@@ -278,6 +280,13 @@ fn checksumMatches(asset: []const u8, sidecar: []const u8, basename: []const u8)
     return true;
 }
 
+/// The one decision, from the release lookup's inputs to the verdict every
+/// message in the run is keyed on. The checks come in the order a caller
+/// reports them: an equal release is `current` whatever else is missing, then
+/// the asset URL, then the sidecar URL, then the bytes, then the digest. So
+/// `.current` says nothing about whether an asset was published, and a
+/// release with no asset and no sidecar is `missing_asset` rather than
+/// `missing_sidecar`.
 pub fn decide(in: Inputs) Verdict {
     if (sameRelease(in.running, in.tag)) return .current;
     const url = in.asset_url orelse return .missing_asset;
@@ -592,8 +601,8 @@ fn waitLine(arena: std.mem.Allocator, url: []const u8, wait: u64, err: anyerror)
 /// The body is copied and the buffer it arrived in is released on the way out.
 /// The arena copy is the one that has to outlive this call, and an arena frees
 /// its most recent allocation, so the buffer cannot be the arena's own and then
-/// released. For the two small bodies (`fetchAsset` is the exception) that copy
-/// is a few kilobytes; the asset goes through `fetchAsset` instead, which keeps
+/// released. For the two small bodies (the release lookup and the sidecar) that
+/// copy is a few kilobytes; the asset goes through `fetchAsset` instead, which keeps
 /// the buffer it arrived in rather than paying for a second copy of a binary.
 fn fetchBody(
     io: std.Io,
@@ -1895,9 +1904,11 @@ test "update: replaceVerified follows a chain of symlinked destinations" {
 const asset_base_fixture = "{\"name\":\"" ++ asset_base ++
     "\",\"browser_download_url\":\"https://github.com/maci0/microagent/releases/download/v0.1.0/" ++ asset_base ++ "\"}";
 
-/// A release the updater may install: a published asset on a GitHub URL, and
-/// one whose URLs are the lookalikes `trustedGithubUrl` has to refuse.
+/// A release the updater may install: a published asset on a GitHub URL.
 const published_release = "{\"tag_name\":\"v0.1.0\",\"html_url\":\"https://github.com/maci0/microagent/releases/tag/v0.1.0\",\"assets\":[" ++ asset_base_fixture ++ "]}";
+/// A release whose assets name the hosts `trustedGithubUrl` refuses: a
+/// lookalike domain, a trusted name in the path, http, a userinfo, and a
+/// raw.githubusercontent.com asset.
 const lookalike_release = "{\"tag_name\":\"v0.1.0\",\"html_url\":\"https://github.com/o/r\",\"assets\":[{\"name\":\"a\",\"browser_download_url\":\"https://github.com.evil.com/a\"},{\"name\":\"b\",\"browser_download_url\":\"https://evil.com/github.com/b\"},{\"name\":\"c\",\"browser_download_url\":\"http://github.com/c\"},{\"name\":\"d\",\"browser_download_url\":\"https://user@github.com/d\"},{\"name\":\"e\",\"browser_download_url\":\"https://raw.githubusercontent.com/e\"}]}";
 
 const release_corpus = [_][]const u8{

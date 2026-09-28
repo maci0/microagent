@@ -24,7 +24,7 @@ No runtime, no package manager, no node_modules, no python. Eight files under `s
 the value types a turn is made of, `session.zig` the per-run log, `style.zig` the reply styles,
 `update.zig` the self-update, `net.zig` the sinks, deadlines and CA bundle the rest share, and
 `fuzzargv.zig` the argv both command-line fuzzers feed a parser),
-15 608 lines.
+16 042 lines.
 The sizes in this table are `ls -l` on a fresh build of this tree; every other number below comes
 from the two bench scripts.
 
@@ -78,18 +78,18 @@ Prompt caching keys on the exact byte prefix of a request, so a turn's body has
 to be the previous turn's body plus the new messages. That only holds while
 nothing constant sits *behind* the growing array.
 
-The tool schemas used to be written after `messages`. They are 3,590 bytes for
+The tool schemas used to be written after `messages`. They are 3,775 bytes for
 the seven tools this binary advertises, and behind the conversation they fell
 outside the cacheable prefix on every turn of every run, so the provider
 re-read them each time:
 
 | | un-cacheable tail per turn |
 | --- | --- |
-| tool schemas written after `messages` | 3,592 bytes (~900 tokens) |
+| tool schemas written after `messages` | 3,775 bytes (~940 tokens) |
 | written before, as now | **2 bytes** |
 
 Three and a half kilobytes per turn, for the whole conversation. Over a
-100-turn review that is 0.36 MB of prefill the provider was being asked to do
+100-turn review that is 0.38 MB of prefill the provider was being asked to do
 again for no reason, and it was invisible to every counter in this file, because
 `cached_tokens` counts what was reused and never says what was not.
 
@@ -107,13 +107,13 @@ run:
 
 | | bytes |
 | --- | --- |
-| system prompt | 1,685 |
+| system prompt | 1,778 |
 | reply style (caveman ultra, ponytail full) | 1,616 |
-| the seven tool schemas | 3,590 |
+| the seven tool schemas | 3,775 |
 | the rest of the body: model, stream flags, `max_tokens`, JSON scaffolding | 133 |
-| **everything a request carries besides the conversation** | **7,024** |
+| **everything a request carries besides the conversation** | **7 302** |
 
-That 7,024 is the entire fixed cost of a request, and the schemas are just over
+That 7 302 is the entire fixed cost of a request, and the schemas are just over
 half of it: the price of seven tools plus a system prompt and a style block,
 which is the price of the harness being a harness. A `--reasoning-effort` adds
 the `reasoning` member to the last row, nothing here. It is re-sent every turn
@@ -455,7 +455,7 @@ is worth knowing what those bytes are.
 took, that is 72-143 KB per request (the range is the turn count, which the
 benchmark does not keep), against a `conversation_soft_limit` of 400 KB. So on
 a benchmark of this shape the limit does not fire: the conversation never gets
-near it, and the fixed 7,024 bytes a request carries is under 6% of one. The
+near it, and the fixed 7 302 bytes a request carries is under 6% of one. The
 prompt is evidence the agent accumulated, not the fixed harness cost and not
 compaction.
 
