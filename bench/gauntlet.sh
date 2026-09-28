@@ -116,6 +116,11 @@ for agent in $agents; do
 	[ -z "${failed:-}" ] && failed=0
 	[ -z "${changed:-}" ] && changed=0
 	[ -z "${tokens:-}" ] && tokens=-
+	# The JSONL column is a number or null, and `-` is this script's spelling
+	# of a harness that reported none. Deciding it here rather than inside a
+	# command substitution on the printf line is what makes a substitution that
+	# failed say so, instead of reading as a harness that reported no tokens.
+	if [ "$tokens" = - ]; then tokens_json=null; else tokens_json=$tokens; fi
 
 	# A diff is not the same as a working diff: run the project's own check.
 	verify=-
@@ -125,6 +130,6 @@ for agent in $agents; do
 
 	printf '%-40s %6s %6s %7s %8s %8s %8s  %s\n' "$agent" "$passed" "$failed" "$changed" "$elapsed" "$tokens" "$verify" "$rc"
 	printf '{"agent":"%s","passed":%s,"failed":%s,"changed_files":%s,"wall_s":%s,"tokens":%s,"verify":"%s","rc":%s}\n' \
-		"$agent" "$passed" "$failed" "$changed" "$elapsed" "$( [ "$tokens" = - ] && echo null || echo "$tokens" )" "$verify" "$rc" \
+		"$agent" "$passed" "$failed" "$changed" "$elapsed" "$tokens_json" "$verify" "$rc" \
 		>>"$root/bench/gauntlet-results.jsonl"
 done

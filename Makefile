@@ -329,24 +329,27 @@ zig-version:
 # deeper is linted by nothing and the gate still passes. xargs splits the list
 # if it grows past one command's argument limit, and exits non-zero either way.
 #
-# --enable names the optional checks, which are off unless asked for. These
-# four are the ones that find a defect rather than a spelling, and the tree
-# passes all four today, so turning them on costs nothing and covers two real
-# classes the default set leaves open:
+# --enable names the optional checks, which are off unless asked for. These six
+# are the ones that find a defect rather than a spelling, and the tree passes
+# all six today, so turning them on costs nothing and covers two real classes
+# the default set leaves open:
 # check-set-e-suppressed, a `set -e` whose failure is swallowed by a `||` or
 # `&&` and never reaches the shell; check-unassigned-upper, an uppercase
 # variable used on a path that never assigned it; deprecate-which, `which`
-# where the script runs under a shell or a PATH that may not carry it; and
+# where the script runs under a shell or a PATH that may not carry it;
 # avoid-null-test-override, a `[ -n $x ]` that tests a literal "null" the
-# script just assigned. The names are the ones shellcheck 0.9, the version the
-# ubuntu-24.04 image carries, already accepts, so this runs on the runner as
-# it runs here. check-extra-masked-returns (SC2312), quote-safe-variables
-# (SC2248) and require-variable-braces (SC2250) stay off: the tree does not
-# pass them, and rewriting thirteen benchmark scripts to satisfy a spelling
-# rule is not a change the gate should ask for. Enable them per file with a
-# `# shellcheck disable=` carrying the reason when one is worth taking.
+# script just assigned; check-extra-masked-returns, a command substitution
+# whose failure is discarded, which is how an empty command line reached
+# `sh -c` and was recorded as a pass; and quote-safe-variables, a bare `return`
+# whose value changes meaning if it ever carries one. The names are the ones
+# shellcheck 0.9, the version the ubuntu-24.04 image carries, already accepts,
+# so this runs on the runner as it runs here. require-variable-braces (SC2250)
+# stays off: it is a spelling rule, and asking thirteen benchmark scripts to
+# write `${root}` where `$root` is the same word is a change the gate should
+# not ask for. Enable it per file with a `# shellcheck disable=` carrying the
+# reason when one is worth taking.
 SHELLCHECK_OPTS := -x \
-	--enable=check-set-e-suppressed,check-unassigned-upper,deprecate-which,avoid-null-test-override
+	--enable=check-set-e-suppressed,check-unassigned-upper,deprecate-which,avoid-null-test-override,check-extra-masked-returns,quote-safe-variables
 
 lint-shell:
 	@set -eu; \

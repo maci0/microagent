@@ -29,7 +29,8 @@ agents=${*:-microagent}
 # shell that runs it: the inner shell reads PROMPT from the environment, so the
 # expansion is escaped here and quoted there.
 argv_for() {
-	printf '%s "%s"' "$(harness_argv "$1")" "\$PROMPT"
+	words=$(harness_argv "$1") || return 1
+	printf '%s "%s"' "$words" "\$PROMPT"
 }
 
 printf '%-10s %-14s %8s %10s %8s  %s\n' agent task wall_s tokens lines result
@@ -73,6 +74,18 @@ for agent in $agents; do
 		# persists after the function in a POSIX shell.
 		PROMPT=$prompt
 		export PROMPT
+		# The command line is spelled once, here, and checked, because a
+		# substitution inside the call to run_limited would leave an empty
+		# command line when it failed and `sh -c ''` exits 0: a harness whose
+		# invocation could not be spelled would be recorded as a run that
+		# passed, with no output and no tokens, and the check would read an
+		# empty tree.
+		if ! cmd=$(argv_for "$agent"); then
+			printf '%-10s %-14s %8s %10s %8s  %s\n' "$agent" "$task" - - - argv-error
+			printf '{"agent":"%s","task":"%s","wall_s":null,"tokens":null,"lines":"n/a","result":"argv-error"}\n' \
+				"$agent" "$task" >>"$results"
+			continue
+		fi
 		# No clock, no number. A duration measured off a wall clock is
 		# recorded in results.jsonl beside durations that were not, and nothing
 		# downstream can tell them apart.
@@ -82,7 +95,7 @@ for agent in $agents; do
 				"$agent" "$task" >>"$results"
 			continue
 		fi
-		run_limited "$timeout_s" "$work" sh -c "$(argv_for "$agent")" >"$work/.out" 2>"$work/.err"
+		run_limited "$timeout_s" "$work" sh -c "$cmd" >"$work/.out" 2>"$work/.err"
 		rc=$?
 		# The clock is read at both ends and both readings have to answer. A
 		# source that reads for the first one can still fail for the second, and
@@ -117,6 +130,12 @@ for agent in $agents; do
 		# microagent prints cumulative usage per response; the last line is the run total.
 		tokens=$(grep -o '"total_tokens":[0-9]*' "$work/.out" 2>/dev/null | tail -1 | cut -d: -f2)
 		[ -z "$tokens" ] && tokens=-
+		# The JSONL column is a number or null, and `-` is this script's spelling
+		# of a harness that reported none. Deciding it here rather than inside a
+		# command substitution on the printf line is what makes a substitution
+		# that failed say so, instead of reading as a harness that reported no
+		# tokens.
+		if [ "$tokens" = - ]; then tokens_json=null; else tokens_json=$tokens; fi
 
 		# The row is about the check, so it reports the check's own exit code.
 		# The harness's rc answers a different question, and a row reading
@@ -132,6 +151,6 @@ for agent in $agents; do
 
 		printf '%-10s %-14s %8s %10s %8s  %s\n' "$agent" "$task" "$wall" "$tokens" "$lines" "$result"
 		printf '{"agent":"%s","task":"%s","wall_s":%s,"tokens":%s,"lines":"%s","result":"%s"}\n' \
-			"$agent" "$task" "$wall" "$( [ "$tokens" = - ] && echo null || echo "$tokens" )" "$lines" "$result" >>"$results"
+			"$agent" "$task" "$wall" "$tokens_json" "$lines" "$result" >>"$results"
 	done
 done

@@ -118,6 +118,6 @@ else
 		rc=$?
 		kill "$watchdog" 2>/dev/null
 		wait "$watchdog" 2>/dev/null
-		return $rc
+		return "$rc"
 	}
 fi

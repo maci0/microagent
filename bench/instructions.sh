@@ -77,7 +77,18 @@ opts=$(find "$root/.zig-cache/c" -maxdepth 2 -name options.zig -type f 2>/dev/nu
 # the moment zig is installed somewhere else.
 zigenv=$("$zig" env)
 lib=$(printf '%s' "$zigenv" | sed -n 's/.*\.lib_dir = "\([^"]*\)".*/\1/p' | head -n 1)
-[ -n "$lib" ] && [ -d "$lib" ] || lib=$(dirname "$(printf '%s' "$zigenv" | sed -n 's/.*\.std_dir = "\([^"]*\)".*/\1/p' | head -n 1)")
+if [ -z "$lib" ] || [ ! -d "$lib" ]; then
+	std=$(printf '%s' "$zigenv" | sed -n 's/.*\.std_dir = "\([^"]*\)".*/\1/p' | head -n 1)
+	# `dirname` of an empty word is `.`, a directory this script is standing
+	# in, so the empty reading is refused here. Left to the build it is
+	# `--zig-lib-dir .`, and the compiler's message about a lib_dir says
+	# nothing about the `zig env` line that read it wrong.
+	[ -n "$std" ] || {
+		printf 'bench/instructions.sh: %s env reports no std_dir, so there is no lib directory to build against\n' "$zig" >&2
+		exit 2
+	}
+	lib=$(dirname "$std")
+fi
 
 # Median of $runs samples of one binary. The median, not the mean, because the
 # first run pays for the page faults on a binary that was just written and the

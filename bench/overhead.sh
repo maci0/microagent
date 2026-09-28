@@ -52,9 +52,16 @@ for agent in $agents; do
 	# The harness's own spelling of a one-shot prompt, so a CLI that needs a
 	# subcommand is measured through it instead of through a `-p` it refuses.
 	# Splitting the words apart is the point: the name and its subcommand are
-	# one command line and the prompt is the last of them.
-	# shellcheck disable=SC2046
-	run_limited 180 "$work" $(harness_argv "$agent") "$prompt" >"$work/out" 2>&1
+	# one command line and the prompt is the last of them. Read on its own line
+	# and checked, so an invocation that could not be spelled is a named error
+	# rather than a run of the harness's name alone.
+	if ! words=$(harness_argv "$agent"); then
+		printf '%s: %s has no known invocation, skipping it\n' "$0" "$agent" >&2
+		rm -rf "$work"
+		continue
+	fi
+	# shellcheck disable=SC2086
+	run_limited 180 "$work" $words "$prompt" >"$work/out" 2>&1
 	# Both ends of the clock are checked, not just the first. An empty reading
 	# is not an error awk reports, it reads as a field worth 0, so a second
 	# reading that failed divided one raw nanosecond count by a billion and

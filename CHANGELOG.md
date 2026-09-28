@@ -141,6 +141,19 @@ release, and `microagent update` moves you to it.
   `MICROAGENT_BUDGET_SECONDS` was cut to the room the agent timeout leaves now
   says so on the job log, with both numbers, so a score read from that log is
   not a score measured under working time nobody chose.
+- A benchmark harness whose command line could not be spelled is recorded as an
+  `argv-error` row instead of a pass. `bench/run.sh` and `bench/overhead.sh`
+  built it inside the call that ran it, so a substitution that failed left
+  `sh -c ''` to exit 0 with no output and no tokens, and the check then read an
+  empty tree and passed. The command line is read on its own line and checked
+  now, and the gate runs the two shellcheck checks that name the class
+  (`check-extra-masked-returns` and `quote-safe-variables`), which the tree
+  passes.
+- `bench/instructions.sh` says which `zig env` line read wrong when there is no
+  lib directory to build against. The fallback was a command substitution
+  inside an `||` chain, and `dirname` of an empty word is `.`, a directory, so
+  the run went on to ask the compiler for `--zig-lib-dir .`. The std_dir reading
+  is checked before it is used and the script exits 2 naming the path.
 - `microagent update` no longer installs a pre-release over a newer build. A tag
   with a `-rc1` suffix was not a version the ordering could read, so it ordered
   as equal to everything and past the guard that stops a downgrade: a build on
