@@ -154,6 +154,10 @@ pub const Style = struct {
             if (!ours) continue;
             const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
             const key = std.mem.trim(u8, line[0..eq], " \t");
+            // A line with nothing before the `=` names no key, so there is
+            // nothing to report: naming the empty one would put a blank key
+            // in the line the caller prints.
+            if (key.len == 0) continue;
             const value = unquote(std.mem.trim(u8, line[eq + 1 ..], " \t"));
             if (std.mem.eql(u8, key, "caveman")) {
                 if (parseCaveman(value)) |level| {
@@ -406,4 +410,96 @@ test "the longest ruleset carries both blocks in full" {
     defer gpa.free(block);
     try std.testing.expect(std.mem.indexOf(u8, block, "level: wenyan-ultra") != null);
     try std.testing.expect(std.mem.indexOf(u8, block, "level: ultra") != null);
+}
+
+// The config file is the one input the tree hands the binary that nobody in
+// the run wrote: a user edits it, a repository ships one, and it is read
+// before the first request. `std.testing.fuzz` runs this corpus through the
+// harness on every `zig build test` and through the fuzzer's mutations when
+// the test binary is built in fuzz mode. The corpus covers the shapes a real
+// config and a wrong one have: keys at the root and under `[style]`, a table
+// that belongs to something else, single and double quotes, a value with a
+// trailing comment, an unterminated quote, a key with no `=`, a bare value,
+// a level spelled in a case or with a space, and the same key twice.
+const toml_corpus = [_][]const u8{
+    "",
+    "\n\n\n",
+    "# a comment\ncaveman = \"lite\"\n",
+    "caveman = \"off\"\nponytail = \"off\"\n",
+    "[style]\ncaveman = \"wenyan-lite\"\n",
+    "[ model ]\ncaveman = \"lite\"\n",
+    "[style\ncaveman = \"lite\"\n",
+    "caveman",
+    "caveman =\n",
+    "caveman = \"\n",
+    "caveman = 'full' # trailing\n",
+    "caveman = ultra\n",
+    "caveman = \"LITE\"\n",
+    "caveman = \" wenyan \"\n",
+    "caveman = \"wenyan\"\n",
+    "ponytail = \"wenyan\"\n",
+    "caveman = \"brief\"\nponytail = \"review\"\n",
+    "caveman = \"off\"\ncaveman = \"ultra\"\n",
+    "[style]\ncaveman = \"lite\"\n[model]\ncaveman = \"off\"\n",
+    "[model]\ncaveman = \"off\"\n[style]\nponytail = \"ultra\"\n",
+    "  caveman   =   \"lite\"  \r\n",
+    "= \"lite\"\n",
+    "[]\ncaveman = \"lite\"\n",
+    "key_without_value = \n",
+    "\u{0}caveman = \"lite\"\n",
+    "[style]\n#caveman = \"off\"\ncaveman = \"wenyan-ultra\"\n",
+    "caveman = \"\"\ncaveman = \"\"\n",
+};
+
+test "a fuzzed config leaves a style the prompt writer can spell" {
+    try std.testing.fuzz({}, fuzzToml, .{ .corpus = &toml_corpus });
+}
+
+fn fuzzToml(_: void, smith: *std.testing.Smith) !void {
+    const gpa = std.testing.allocator;
+    var raw: [8 * 1024]u8 = undefined;
+    const text: []const u8 = if (smith.in) |seed| seed else raw[0..smith.slice(&raw)];
+
+    var style: Style = .{};
+    const problem = style.applyToml(text);
+
+    // The reader either found nothing to say or named a key that is in the
+    // file, which is the whole claim a caller makes about the `Problem` it
+    // turns into a line on stderr.
+    if (problem) |p| {
+        try std.testing.expect(p.key.len > 0);
+        try std.testing.expect(std.mem.indexOf(u8, text, p.key) != null);
+        // Only the two keys this file defines can hold a value it did not
+        // recognize; any other key is somebody else's, and is named as such.
+        if (p.bad_value) try std.testing.expect(std.mem.eql(u8, p.key, "caveman") or std.mem.eql(u8, p.key, "ponytail"));
+    }
+
+    // Whatever the file said, the levels in force are ones the parser can
+    // name, so a level never reaches the prompt as a spelling nothing reads
+    // back. The same text read twice says the same thing.
+    try std.testing.expectEqual(style.caveman, parseCaveman(style.caveman.name()).?);
+    try std.testing.expectEqual(style.ponytail, parsePonytail(style.ponytail.name()).?);
+    var again: Style = .{};
+    const again_problem = again.applyToml(text);
+    try std.testing.expectEqual(style.caveman, again.caveman);
+    try std.testing.expectEqual(style.ponytail, again.ponytail);
+    try std.testing.expectEqual(problem == null, again_problem == null);
+
+    // The block the run sends is built from the levels, so a fuzzed config can
+    // only reach a prompt fragment that names the level it turned on.
+    const block = try style.ruleset(gpa);
+    defer gpa.free(block);
+    if (style.caveman == .off and style.ponytail == .off) {
+        try std.testing.expectEqualStrings("", block);
+        return;
+    }
+    if (style.caveman != .off) {
+        try std.testing.expect(std.mem.indexOf(u8, block, style.caveman.name()) != null);
+        try std.testing.expect(std.mem.indexOf(u8, block, "CAVEMAN MODE ACTIVE") != null);
+    }
+    if (style.ponytail != .off) {
+        const named = try std.fmt.allocPrint(gpa, "PONYTAIL MODE ACTIVE - level: {s}", .{style.ponytail.name()});
+        defer gpa.free(named);
+        try std.testing.expect(std.mem.indexOf(u8, block, named) != null);
+    }
 }

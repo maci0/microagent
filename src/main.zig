@@ -150,9 +150,18 @@ pub fn main(init: std.process.Init) !void {
     var opts: Options = .{};
     if (envValue(init.environ_map, "MICROAGENT_MODEL")) |v| opts.model = v;
     if (envValue(init.environ_map, "MICROAGENT_BASE_URL")) |v| opts.base_url = v;
-    if (envValue(init.environ_map, "MICROAGENT_REASONING_EFFORT")) |v| opts.reasoning_effort = reasoningEffort(io, v);
-    if (envValue(init.environ_map, "MICROAGENT_MAX_TURNS")) |v| opts.max_turns = ceiling(usize, io, "MICROAGENT_MAX_TURNS", v);
-    if (envValue(init.environ_map, "MICROAGENT_MAX_TOKENS")) |v| opts.max_tokens = ceiling(u32, io, "MICROAGENT_MAX_TOKENS", v);
+    if (envValue(init.environ_map, "MICROAGENT_REASONING_EFFORT")) |v| {
+        var env_buf: [256]u8 = undefined;
+        if (reasoningEffort(&env_buf, v, &opts.reasoning_effort)) |m| configError(io, "{s}", .{m});
+    }
+    if (envValue(init.environ_map, "MICROAGENT_MAX_TURNS")) |v| {
+        var env_buf: [256]u8 = undefined;
+        if (ceiling(usize, &env_buf, "MICROAGENT_MAX_TURNS", v, &opts.max_turns)) |m| configError(io, "{s}", .{m});
+    }
+    if (envValue(init.environ_map, "MICROAGENT_MAX_TOKENS")) |v| {
+        var env_buf: [256]u8 = undefined;
+        if (ceiling(u32, &env_buf, "MICROAGENT_MAX_TOKENS", v, &opts.max_tokens)) |m| configError(io, "{s}", .{m});
+    }
     opts.ca_bundle = net.caBundlePath(init.environ_map);
     if (envValue(init.environ_map, "MICROAGENT_BUDGET_SECONDS")) |v|
         opts.budget_s = budgetSeconds(v) orelse
@@ -160,7 +169,7 @@ pub fn main(init: std.process.Init) !void {
     opts.session_dir = sessionDir(init);
 
     var err_buf: [512]u8 = undefined;
-    if (parseArgs(io, &err_buf, args.items[1..], &opts)) |msg| return usageError(io, "{s}", .{msg});
+    if (parseArgs(&err_buf, args.items[1..], &opts)) |msg| return usageError(io, "{s}", .{msg});
     switch (opts.action) {
         .help => {
             net.writeOut(io, help_text);
@@ -350,10 +359,17 @@ fn debugEnabled(env: *const std.process.Environ.Map) bool {
 const reasoning_efforts = [_][]const u8{ "minimal", "low", "medium", "high", "none" };
 const reasoning_effort_names = "minimal, low, medium, high, none";
 
-fn reasoningEffort(io: Io, value: []const u8) []const u8 {
+/// The level, written through `out`, or the message saying it is not one.
+/// The caller decides what a message does with it, because the flag path
+/// hands it back as a usage error while the environment path exits on it.
+fn reasoningEffort(buf: []u8, value: []const u8, out: *?[]const u8) ?[]const u8 {
     const v = std.mem.trim(u8, value, " \t\r\n");
-    for (reasoning_efforts) |level| if (std.mem.eql(u8, v, level)) return v;
-    return configError(io, "reasoning effort '{s}' is not one of: {s}", .{ value, reasoning_effort_names });
+    for (reasoning_efforts) |level| if (std.mem.eql(u8, v, level)) {
+        out.* = v;
+        return null;
+    };
+    return std.fmt.bufPrint(buf, "reasoning effort '{s}' is not one of: {s}", .{ clip(value), reasoning_effort_names }) catch
+        "reasoning effort is not one of: " ++ reasoning_effort_names;
 }
 
 /// A ceiling from a flag or a variable, checked the same way on both paths:
@@ -361,12 +377,17 @@ fn reasoningEffort(io: Io, value: []const u8) []const u8 {
 /// sends no request, prints no answer and no usage line, and exits 0, which a
 /// harness reads as a finished review rather than as a ceiling that was set
 /// wrong; the same number sent as `max_tokens` is one the provider rejects, and
-/// learning that costs a whole turn. `T` is the wire type of the option.
-fn ceiling(comptime T: type, io: Io, from: []const u8, value: []const u8) T {
+/// learning that costs a whole turn. `T` is the wire type of the option. The
+/// number is written through `out` and a bad value is a message, for the same
+/// reason `reasoningEffort` returns one.
+fn ceiling(comptime T: type, buf: []u8, from: []const u8, value: []const u8, out: *T) ?[]const u8 {
     const n = std.fmt.parseInt(T, std.mem.trim(u8, value, " \t\r\n"), 10) catch
-        return configError(io, "{s} must be a number, got '{s}'", .{ from, value });
-    if (n == 0) return configError(io, "{s} must be at least 1", .{from});
-    return n;
+        return std.fmt.bufPrint(buf, "{s} must be a number, got '{s}'", .{ from, clip(value) }) catch
+            "must be a number";
+    if (n == 0) return std.fmt.bufPrint(buf, "{s} must be at least 1", .{from}) catch
+        "must be at least 1";
+    out.* = n;
+    return null;
 }
 
 /// The same list spelled as the sentence an error needs, so adding a provider
@@ -496,7 +517,6 @@ fn flagNeeds(buf: []u8, flag: ValuedFlag, fallback: []const u8) []const u8 {
 /// The option one valued flag sets. A value the option refuses says so and
 /// returns the message; null means it was taken.
 fn setValued(
-    io: Io,
     buf: []u8,
     opts: *Options,
     option: ValuedOption,
@@ -509,11 +529,11 @@ fn setValued(
         .api_key => opts.api_key = value,
         .ca_bundle => opts.ca_bundle = value,
         .config => opts.config = value,
-        .reasoning_effort => opts.reasoning_effort = reasoningEffort(io, value),
+        .reasoning_effort => return reasoningEffort(buf, value, &opts.reasoning_effort),
         .budget => opts.budget_s = budgetSeconds(value) orelse
-            return std.fmt.bufPrint(buf, "--budget must be a number of seconds, got '{s}'", .{value}) catch "bad --budget",
-        .max_turns => opts.max_turns = ceiling(usize, io, "--max-turns", value),
-        .max_tokens => opts.max_tokens = ceiling(u32, io, "--max-tokens", value),
+            return std.fmt.bufPrint(buf, "--budget must be a number of seconds, got '{s}'", .{clip(value)}) catch "bad --budget",
+        .max_turns => return ceiling(usize, buf, "--max-turns", value, &opts.max_turns),
+        .max_tokens => return ceiling(u32, buf, "--max-tokens", value, &opts.max_tokens),
     }
     return null;
 }
@@ -526,7 +546,7 @@ fn setValued(
 /// `--flag=value`, the form `microagent update` already took, so both commands
 /// spell an option the same way. `--help` and `--version` win wherever they
 /// appear, and stop the parse there.
-fn parseArgs(io: Io, buf: []u8, argv: []const []const u8, opts: *Options) ?[]const u8 {
+fn parseArgs(buf: []u8, argv: []const []const u8, opts: *Options) ?[]const u8 {
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
         const arg = argv[i];
@@ -551,7 +571,7 @@ fn parseArgs(io: Io, buf: []u8, argv: []const []const u8, opts: *Options) ?[]con
             // are the same mistake, so both say the same thing.
             const v = joined orelse flagValue(argv, i) orelse return flagNeeds(buf, flag, "bad arguments");
             if (v.len == 0) return flagNeeds(buf, flag, "bad arguments");
-            if (setValued(io, buf, opts, flag.option, v)) |m| return m;
+            if (setValued(buf, opts, flag.option, v)) |m| return m;
             if (joined == null) i += 1;
         } else if (arg.len > 0 and arg[0] != '-') {
             // A bare argument is the prompt. gauntlet's custom-agent
@@ -1913,7 +1933,7 @@ test "the command line parses in either flag form and in any order" {
     var opts: Options = .{};
     var buf: [512]u8 = undefined;
     const argv = [_][]const u8{ "fix it", "--model=some/model", "--budget=90", "--max-turns", "7" };
-    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(std.testing.io, &buf, &argv, &opts));
+    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &argv, &opts));
     try std.testing.expectEqualStrings("fix it", opts.prompt);
     try std.testing.expectEqualStrings("some/model", opts.model);
     try std.testing.expectEqual(@as(?u64, 90), opts.budget_s);
@@ -1921,7 +1941,7 @@ test "the command line parses in either flag form and in any order" {
 
     var short: Options = .{};
     const short_argv = [_][]const u8{ "-m", "some/model", "-b", "http://localhost:1234/v1", "-p", "fix it" };
-    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(std.testing.io, &buf, &short_argv, &short));
+    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &short_argv, &short));
     try std.testing.expectEqualStrings("some/model", short.model);
     try std.testing.expectEqualStrings("http://localhost:1234/v1", short.base_url);
     try std.testing.expectEqualStrings("fix it", short.prompt);
@@ -1929,7 +1949,7 @@ test "the command line parses in either flag form and in any order" {
     // A value quoted with a space around it is a number the shell left in.
     var padded: Options = .{};
     const padded_argv = [_][]const u8{ "--budget", " 90 ", "--max-turns", " 7 " };
-    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(std.testing.io, &buf, &padded_argv, &padded));
+    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &padded_argv, &padded));
     try std.testing.expectEqual(@as(?u64, 90), padded.budget_s);
     try std.testing.expectEqual(@as(usize, 7), padded.max_turns);
 }
@@ -1937,23 +1957,173 @@ test "the command line parses in either flag form and in any order" {
 test "a wrong command line names the flag and the value it was given" {
     var opts: Options = .{};
     var buf: [512]u8 = undefined;
-    try std.testing.expectEqualStrings("unknown or incomplete argument '--nope'", parseArgs(std.testing.io, &buf, &.{"--nope"}, &opts).?);
-    try std.testing.expectEqualStrings("--model needs a model id", parseArgs(std.testing.io, &buf, &.{"--model"}, &opts).?);
-    try std.testing.expectEqualStrings("--budget must be a number of seconds, got 'soon'", parseArgs(std.testing.io, &buf, &.{ "--budget", "soon" }, &opts).?);
-    try std.testing.expectEqualStrings("prompt given twice: 'one' and 'two'", parseArgs(std.testing.io, &buf, &.{ "one", "two" }, &opts).?);
+    try std.testing.expectEqualStrings("unknown or incomplete argument '--nope'", parseArgs(&buf, &.{"--nope"}, &opts).?);
+    try std.testing.expectEqualStrings("--model needs a model id", parseArgs(&buf, &.{"--model"}, &opts).?);
+    try std.testing.expectEqualStrings("--budget must be a number of seconds, got 'soon'", parseArgs(&buf, &.{ "--budget", "soon" }, &opts).?);
+    try std.testing.expectEqualStrings("prompt given twice: 'one' and 'two'", parseArgs(&buf, &.{ "one", "two" }, &opts).?);
     var joined: Options = .{};
-    try std.testing.expectEqualStrings("prompt given twice: 'one' and 'two'", parseArgs(std.testing.io, &buf, &.{ "-p", "one", "--print=two" }, &joined).?);
+    try std.testing.expectEqualStrings("prompt given twice: 'one' and 'two'", parseArgs(&buf, &.{ "-p", "one", "--print=two" }, &joined).?);
 }
 
 test "help and version win wherever they appear" {
     var opts: Options = .{};
     var buf: [512]u8 = undefined;
-    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(std.testing.io, &buf, &.{ "a prompt", "--help" }, &opts));
+    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &.{ "a prompt", "--help" }, &opts));
     try std.testing.expectEqual(Action.help, opts.action);
 
     var v: Options = .{};
-    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(std.testing.io, &buf, &.{ "-V", "--model" }, &v));
+    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &.{ "-V", "--model" }, &v));
     try std.testing.expectEqual(Action.version, v.action);
+}
+
+// The command line is the one input surface that is always untrusted: a
+// wrapper script, a CI job and a human all spell it, and every one of them can
+// put a value where a flag belongs. `std.testing.fuzz` runs this corpus on
+// every `zig build test` and through the fuzzer's mutations when the test
+// binary is built in fuzz mode. The corpus is what the harness must be able to
+// read: an unknown flag, both spellings of a valued flag, a value joined with
+// `=`, an empty value, a flag that ends the line, a prompt given twice, a
+// ceiling that is not a number, a ceiling of zero, a budget that is not a
+// number, an unknown reasoning level, and a bare `-`.
+const args_corpus = [_][]const u8{
+    "",
+    " ",
+    "-",
+    "--",
+    "-p hi",
+    "--print=hi",
+    "hi",
+    "-h",
+    "--help",
+    "-V",
+    "--version",
+    "hi --help",
+    "--model",
+    "-m",
+    "--model=",
+    "-m=some/model",
+    "--model some/model --budget 90 --max-turns 7 --max-tokens 4096",
+    "-m some/model -b http://localhost:1234/v1 -p hi -k secret",
+    "--ca-bundle /etc/ca.pem --config ~/.microagent/config.toml",
+    "--reasoning-effort high --reasoning-effort=none",
+    "--reasoning-effort shout",
+    "--budget 0",
+    "--budget -1",
+    "--budget soon",
+    "--budget 99999999999999999999999",
+    "--max-turns 0",
+    "--max-turns x",
+    "--max-turns -3",
+    "--max-tokens 0",
+    "--max-tokens 1e30",
+    "one two",
+    "-p one --print two",
+    "--nope",
+    "-x",
+    "--print=--help",
+    "--print=-p",
+    "\u{0}\u{1}\u{7f}",
+    "--print \u{65e5}\u{8a00}",
+    "--",
+    "-m --budget",
+    "-m",
+    "--print",
+};
+
+test "a fuzzed command line sets an option only from an argument it was given" {
+    try std.testing.fuzz({}, fuzzArgs, .{ .corpus = &args_corpus });
+}
+
+fn fuzzArgs(_: void, smith: *std.testing.Smith) !void {
+    var raw: [8 * 1024]u8 = undefined;
+    const text: []const u8 = if (smith.in) |seed| seed else raw[0..smith.slice(&raw)];
+
+    // One word per space-separated run, so the fuzzer's bytes reach the parser
+    // as arguments rather than as a single opaque one.
+    var argv: [64][]const u8 = undefined;
+    var n: usize = 0;
+    var words = std.mem.tokenizeAny(u8, text, " \t\n");
+    while (words.next()) |word| {
+        if (n == argv.len) break;
+        argv[n] = word;
+        n += 1;
+    }
+
+    var buf: [512]u8 = undefined;
+    var opts: Options = .{};
+    const msg = parseArgs(&buf, argv[0..n], &opts);
+    if (msg) |m| try std.testing.expect(m.len > 0);
+
+    // `--help` and `--version` stop the parse where they are, so an argument
+    // after one of them sets nothing, whatever it says.
+    const stops = blk: {
+        for (argv[0..n]) |arg| {
+            if (isFlag(arg, "-h", "--help")) break :blk Action.help;
+            if (isFlag(arg, "-V", "--version")) break :blk Action.version;
+        }
+        break :blk Action.run;
+    };
+    if (stops != .run) {
+        try std.testing.expectEqual(stops, opts.action);
+        try std.testing.expectEqualStrings(default_model, opts.model);
+        try std.testing.expectEqual(max_turns_default, opts.max_turns);
+        return;
+    }
+
+    // Every option is either the default or a word from the command line: a
+    // parser that composes a value out of an argument, or that keeps one after
+    // refusing it, hands a run a model id or a key nobody typed.
+    for ([_][]const u8{ opts.model, opts.base_url, opts.api_key, opts.ca_bundle, opts.config, opts.prompt }) |value| {
+        if (isDefault(value)) continue;
+        try std.testing.expect(inArgv(argv[0..n], value));
+    }
+    if (opts.reasoning_effort) |level| try std.testing.expect(inArgv(argv[0..n], level));
+    try std.testing.expect(opts.max_turns >= 1);
+    try std.testing.expect(opts.max_tokens >= 1);
+    if (opts.reasoning_effort) |level| {
+        var known_level = false;
+        for (reasoning_efforts) |known| {
+            if (std.mem.eql(u8, level, known)) known_level = true;
+        }
+        try std.testing.expect(known_level);
+    }
+    if (msg == null and opts.budget_s == null) return;
+    // A budget is a number a word on the line spells, not a number the parser
+    // invented from one.
+    if (opts.budget_s) |seconds| {
+        var on_the_line = false;
+        for (argv[0..n]) |arg| {
+            const n_ = std.fmt.parseInt(u64, std.mem.trim(u8, arg, " \t\r\n"), 10) catch continue;
+            if (n_ == seconds) on_the_line = true;
+        }
+        try std.testing.expect(on_the_line);
+    }
+
+    // The same line parsed twice says the same thing, so an operator who
+    // reruns the failing invocation sees the failure again.
+    var again: Options = .{};
+    var again_buf: [512]u8 = undefined;
+    const again_msg = parseArgs(&again_buf, argv[0..n], &again);
+    try std.testing.expectEqualStrings(opts.prompt, again.prompt);
+    try std.testing.expectEqual(opts.max_turns, again.max_turns);
+    try std.testing.expectEqual(opts.max_tokens, again.max_tokens);
+    try std.testing.expectEqual(again_msg == null, msg == null);
+}
+
+/// Whether a value is the default that `Options` starts with, which is what an
+/// argument that never arrived leaves behind.
+fn isDefault(value: []const u8) bool {
+    return std.mem.eql(u8, value, default_model) or
+        std.mem.eql(u8, value, default_base_url) or
+        value.len == 0;
+}
+
+/// Whether `value` came out of a word on the command line, whole or cut at the
+/// `=` of a joined `--flag=value`. An option the parser did not take keeps the
+/// default, so a value that is in no word was written by the parser itself.
+fn inArgv(argv: []const []const u8, value: []const u8) bool {
+    for (argv) |arg| if (std.mem.indexOf(u8, arg, value) != null) return true;
+    return false;
 }
 
 // A tool result, a filename or a working directory may hold bytes that are not

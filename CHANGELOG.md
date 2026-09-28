@@ -48,6 +48,15 @@ release, and `microagent update` moves you to it.
   `zig build test` through `std.testing.fuzz`, and both assert the invariants a crash-only harness
   misses: the turn a stream produces still serializes as a valid request body, and a release body only
   reaches `.replaced` when both download URLs are trusted and the published checksum matches the bytes.
+- Fuzz harnesses for the two other untrusted parsers: the reply-style config file and the command
+  line. The config harness asserts that a line the file cannot use is named by a key that is in the
+  file, that every level in force is one the parser can name back, and that the prompt block built
+  from a fuzzed config names the level it turned on. The command-line harness asserts that no option
+  holds a value no argument carried, that `--help` and `--version` stop the parse, that a ceiling is
+  never zero and a reasoning level is always one the provider knows, and that the same line parsed
+  twice says the same thing. A bad `--max-turns`, `--max-tokens` or `--reasoning-effort` value is a
+  message the parser returns rather than a call that exits the process, which is what let the
+  command line be read at all outside a subprocess.
 - `MDEBUG=1` prints the configuration the run resolved: model, base url, the ceilings, the level
   each style key took, and the name of the variable or file the API key came from. The key is never
   printed and a base url is the redacted spelling. Precedence spans three sources per option, and
@@ -109,6 +118,9 @@ release, and `microagent update` moves you to it.
   opened the file for writing and emptied what was there, and a `write` is the one tool call a run
   cannot undo. A model that means an empty file says so, as `"content": ""`. The result changes from
   `wrote 0 bytes to <path>` to `error: missing content` in that one case.
+- A config line with nothing before its `=` names no key, and the style reader no longer reports
+  one. `= "lite"` was read as a key of zero length, so the run reported an unreadable config with
+  a blank key on stderr.
 - `read` refuses a credentials file. Its result goes into the conversation, and the conversation is
   re-sent to the provider on every turn after it, so a `read` of `.env`, a `.pem`, an `id_ed25519`
   or `$HOME/.secrets/openrouter` shipped a live key to a third party and kept shipping it for the
