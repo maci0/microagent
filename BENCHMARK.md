@@ -498,6 +498,30 @@ returns `401 The API Key appears to be invalid or may have expired` against
 `https://api.kimi.com/coding/v1`. A zero recorded from a failed setup would be a lie, so there is no
 kimi column rather than a zero column.
 
+## A regression the benchmarks caught immediately
+
+Two SWE-bench runs this round came back 13/13 `RuntimeError: microagent exited 3`. Exit 3 is
+"stopped at a ceiling with the answer unfinished", and it was correct: a refactor of the agent loop
+had made a turn that asked for tools end the run instead of looping, so every run stopped after its
+first tool call. Reproduced in the task container and locally in one command
+(`microagent --budget 300 --max-turns 12 "list the files, then say done"`), fixed by continuing the
+loop on `.wants_tools`, and verified: the same command now exits 0 after two turns.
+
+The point for this document: a benchmark that only reports a mean hides this. thirteen identical
+exceptions in 87 seconds is what a broken loop looks like, and it would have been read as "the model
+scored 0.000" if the exception column were not printed.
+
+## Verification gate
+
+The measured failure mode behind it: a SWE-bench instance that ended after 20 turns with **zero**
+test commands, while every instance that passed ran five to fifteen. The loop now tracks, per tool
+call, whether the run has edited the tree and whether it has run a test runner; if it edited without
+ever verifying, it is asked once to run the tests before the run is allowed to finish.
+
+Honest accounting: across the 13-instance run that followed, the gate fired on one instance
+(`sympy__sympy-13877`) and that instance still failed. It is kept as a safety net for a failure mode
+that is real and cheap to catch, not as a measured improvement.
+
 ## Harness faults found by running the benchmarks
 
 Two of these cost whole tasks before they were fixed, and neither was visible without a real
