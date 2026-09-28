@@ -67,9 +67,9 @@ const max_response_bytes = 16 * 1024 * 1024;
 const max_frame_bytes: usize = 1024 * 1024;
 /// The reply-style config is a handful of keys; a bigger file is not one.
 const max_config_bytes: usize = 64 * 1024;
-/// Ceiling on a file `read` returns whole. A source file is kilobytes, so the
-/// cap is what keeps one `read` of a multi-gigabyte artifact out of the
-/// A provider's error body is a diagnostic, not a payload.
+/// A provider's error body is a diagnostic, not a payload, so it is bounded
+/// tight: the text goes on stderr and nothing reads it as a tool result. The
+/// `read` tool's own ceiling is `tool_mod.max_read_bytes`.
 const max_error_body_bytes: usize = 16 * 1024;
 
 const system_prompt =
@@ -1184,7 +1184,7 @@ fn sessionRecord(
 /// Prompt caching keys on the exact byte prefix of a request, so a turn's body
 /// has to be the previous turn's body plus the new messages. That only holds
 /// while nothing constant sits *behind* the growing array: the tool schema is
-/// 2.8 KB, and written after `messages` it fell outside the cacheable prefix
+/// 3.0 KB, and written after `messages` it fell outside the cacheable prefix
 /// on every turn of every run, so the provider re-read it each time. Member
 /// order is not significant in JSON, so the constant fields go first and the
 /// conversation ends the body.
@@ -1482,16 +1482,6 @@ fn dropNamelessCalls(gpa: std.mem.Allocator, calls: *std.ArrayList(chat_mod.Tool
     calls.shrinkRetainingCapacity(kept);
 }
 
-/// Folds one SSE payload into the response being built.
-///
-/// `scratch` is reset by the caller after every frame, so nothing parsed out of
-/// it may survive: strings that do are copied into `gpa`, which lives as long
-/// as the response they belong to.
-///
-/// `unparsable` counts the frames that were not JSON. A frame the parser cannot
-/// read holds content and tool-call arguments the turn will not have, so it is
-/// counted and the caller says so; dropping it without a count leaves a
-/// response that is short and looks complete.
 /// The frame shapes `applyFrame` reads, declared so the common frame parses
 /// without building a `std.json.Value` tree.
 ///
@@ -1701,6 +1691,16 @@ fn applyCallDelta(
     }
 }
 
+/// Folds one SSE payload into the response being built.
+///
+/// `scratch` is reset by the caller after every frame, so nothing parsed out of
+/// it may survive: strings that do are copied into `gpa`, which lives as long
+/// as the response they belong to.
+///
+/// `unparsable` counts the frames that were not JSON. A frame the parser cannot
+/// read holds content and tool-call arguments the turn will not have, so it is
+/// counted and the caller says so; dropping it without a count leaves a
+/// response that is short and looks complete.
 fn applyFrame(
     scratch: std.mem.Allocator,
     gpa: std.mem.Allocator,
@@ -2443,9 +2443,12 @@ test "the tool schema sits inside the cacheable prefix, not behind the conversat
     const tools_at = std.mem.indexOf(u8, body, "\"tools\":").?;
     const messages_at = std.mem.indexOf(u8, body, "\"messages\":").?;
     try std.testing.expect(tools_at < messages_at);
-    // Worth ordering only because the schema is worth caching: 2.8 KB is
+    // Worth ordering only because the schema is worth caching: 3.0 KB is
     // several hundred tokens of prefill the provider would otherwise repeat.
-    try std.testing.expect(tools_json.len > 1024);
+    // The band is here so the size the comments quote cannot drift again
+    // unnoticed; a schema that leaves it is big enough to want remeasuring.
+    try std.testing.expect(tools_json.len > 2 * 1024);
+    try std.testing.expect(tools_json.len < 8 * 1024);
     try std.testing.expectEqualStrings(tools_json, body[tools_at + 8 ..][0..tools_json.len]);
 }
 
@@ -3345,9 +3348,6 @@ test "one bad style value does not cost the run the levels it did understand" {
 /// Cheap env-gated trace, for debugging a stuck stream. Set once from MDEBUG
 /// before any turn runs.
 var debug_enabled: bool = false;
-
-// have to be refused with the tool's own error text instead of reaching a
-// subprocess.
 
 test "a gap in the tool-call indexes leaves no nameless call behind" {
     const gpa = std.testing.allocator;

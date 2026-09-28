@@ -14,15 +14,15 @@ where `timeout` is not installed.
 
 | build | binary |
 | --- | --- |
-| `-Doptimize=ReleaseSmall` (stripped) | 762 KB |
-| `-Doptimize=ReleaseFast` (stripped) | 1.37 MB |
-| `-Doptimize=ReleaseSafe` (stripped) | 1.37 MB |
+| `-Doptimize=ReleaseSmall` (stripped) | 768 KB |
+| `-Doptimize=ReleaseFast` (stripped) | 1.38 MB |
+| `-Doptimize=ReleaseSafe` (stripped) | 1.38 MB |
 | `Debug` (unstripped) | 31.8 MB |
 
 No runtime, no package manager, no node_modules, no python. Six files under `src/`
 (`main.zig` the agent loop and its wiring, `tool.zig` the tools and the process runner, `chat.zig`
 the value types a turn is made of, `style.zig` the reply styles, `update.zig` the self-update, and
-`net.zig` the sinks, deadlines and CA bundle the rest share), 6 152 lines.
+`net.zig` the sinks, deadlines and CA bundle the rest share), 7 570 lines.
 The sizes in this table are `ls -l` on a fresh build of this tree; every other number below comes
 from the two bench scripts.
 

@@ -1,6 +1,7 @@
-//! What the two programs over one machine share: the CA-bundle escape hatch, a
-//! deadline, the two output sinks (stderr for notes and stdout for the answers
-//! a caller parses), and the path a write through a symlink really lands on.
+//! What the three modules that touch the machine share: the CA-bundle escape
+//! hatch, a deadline, the two output sinks (stderr for notes and stdout for the
+//! answers a caller parses), and the path a write through a symlink really lands
+//! on.
 //!
 //! A leaf module. It imports nothing from the rest of the program, so the
 //! agent run and `update` can both use it without either of them importing

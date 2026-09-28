@@ -3,7 +3,7 @@
 //! match the `.sha256` sidecar the release publishes.
 //!
 //! The decision (repo shape, exact version, asset name, checksum, trusted URL)
-//! is pure; `run` is the only function that talks to GitHub or names the
+//! is pure; `runChecked` is the only function that talks to GitHub or names the
 //! running executable, and tests never execute it.
 
 const std = @import("std");
@@ -453,7 +453,7 @@ fn replaceExecutable(io: std.Io, exe: []const u8, asset: []const u8) !void {
 }
 
 /// A download that failed, reported the way the release lookup is: the code
-/// itself when GitHub sent one, plus the hint for the two codes whose cause is
+/// itself when GitHub sent one, plus the hint for the statuses whose cause is
 /// worth naming. The URL the response named is unbounded, so the caller passes
 /// what it already holds: the asset name, or the sidecar described through it.
 fn downloadFailure(
@@ -519,8 +519,9 @@ fn githubBearer(arena: std.mem.Allocator, env: *std.process.Environ.Map) ?[]cons
     return std.fmt.allocPrint(arena, "Bearer {s}", .{tok}) catch null;
 }
 
-/// The two HTTP codes whose cause is worth naming: no release is published for
-/// the repo yet, and the anonymous API rate limit.
+/// The HTTP statuses whose cause is worth naming, and there are two causes
+/// behind three codes: no release is published for the repo yet (404), and the
+/// anonymous API rate limit, which GitHub answers as either 403 or 429.
 fn statusHint(status: std.http.Status) []const u8 {
     return switch (status) {
         .not_found => " (no published release)",

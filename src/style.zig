@@ -92,6 +92,7 @@ pub const PonytailLevel = enum {
         }
     }
 
+    /// The spelling that goes in the config file and in the injected header.
     pub fn name(self: PonytailLevel) []const u8 {
         for (levels) |row| if (row.level == self) return row.name;
         unreachable; // the comptime check above rules this out

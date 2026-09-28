@@ -68,8 +68,9 @@ The flags, abridged; `microagent --help` is the full text.
                        (env MICROAGENT_CA_BUNDLE, SSL_CERT_FILE). Needed in
                        images that ship no ca-certificates.
     --budget <seconds> stop starting turns after this long, then take one last
-                       turn to make the edit, which may run 5 minutes past it;
-                       at least 1, and leaving it out is what says "no budget"
+                       turn to make the edit, which may run 5 minutes past it; a
+                       turn cut off there is discarded, not half-applied. At
+                       least 1, and leaving it out is what says "no budget"
                        (env MICROAGENT_BUDGET_SECONDS)
     --reasoning-effort <level>
                        reasoning.effort sent to the provider: minimal, low,
