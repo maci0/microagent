@@ -814,64 +814,34 @@ test "update: checksum match replaces a copy; mismatch, missing sidecar, and a b
 
     try tmp.dir.writeFile(io, .{ .sub_path = "microagent", .data = "old-binary" });
 
-    const current = decide(.{
-        .running = "0.1.0",
-        .tag = "v0.1.0",
-        .asset_url = good_url,
-        .asset = "abc",
-        .sidecar_url = good_side_url,
-        .sidecar = good_side,
-        .basename = asset_base,
-    });
-    try std.testing.expectEqual(Verdict.current, current);
-    try std.testing.expectError(error.Refused, replaceVerified(io, tmp.dir, "microagent", current, "abc"));
-
-    const mismatch = decide(.{
-        .running = "0.1.0",
-        .tag = "v0.2.0",
-        .asset_url = good_url,
-        .asset = "abc",
-        .sidecar_url = good_side_url,
-        .sidecar = bad_side,
-        .basename = asset_base,
-    });
-    try std.testing.expectEqual(Verdict.checksum_mismatch, mismatch);
-    try std.testing.expectError(error.Refused, replaceVerified(io, tmp.dir, "microagent", mismatch, "abc"));
-
-    const missing = decide(.{
-        .running = "0.1.0",
-        .tag = "v0.2.0",
-        .asset_url = good_url,
-        .asset = "abc",
-        .sidecar_url = null,
-        .basename = asset_base,
-    });
-    try std.testing.expectEqual(Verdict.missing_sidecar, missing);
-    try std.testing.expectError(error.Refused, replaceVerified(io, tmp.dir, "microagent", missing, "abc"));
-
-    const untrusted = decide(.{
-        .running = "0.1.0",
-        .tag = "v0.2.0",
-        .asset_url = "http://github.com/maci0/microagent/releases/download/v0.2.0/" ++ asset_base,
-        .asset = "abc",
-        .sidecar_url = good_side_url,
-        .sidecar = good_side,
-        .basename = asset_base,
-    });
-    try std.testing.expectEqual(Verdict.untrusted_url, untrusted);
-    try std.testing.expectError(error.Refused, replaceVerified(io, tmp.dir, "microagent", untrusted, "abc"));
-
-    const off_host = decide(.{
-        .running = "0.1.0",
-        .tag = "v0.2.0",
-        .asset_url = "https://example.com/microagent",
-        .asset = "abc",
-        .sidecar_url = good_side_url,
-        .sidecar = good_side,
-        .basename = asset_base,
-    });
-    try std.testing.expectEqual(Verdict.untrusted_url, off_host);
-    try std.testing.expectError(error.Refused, replaceVerified(io, tmp.dir, "microagent", off_host, "abc"));
+    // Every verdict but `replaced` refuses the write, so each case also checks
+    // that the binary on disk is untouched.
+    const refusals = [_]struct { want: Verdict, in: Inputs }{
+        .{
+            .want = .current,
+            .in = .{ .running = "0.1.0", .tag = "v0.1.0", .asset_url = good_url, .asset = "abc", .sidecar_url = good_side_url, .sidecar = good_side, .basename = asset_base },
+        },
+        .{
+            .want = .checksum_mismatch,
+            .in = .{ .running = "0.1.0", .tag = "v0.2.0", .asset_url = good_url, .asset = "abc", .sidecar_url = good_side_url, .sidecar = bad_side, .basename = asset_base },
+        },
+        .{
+            .want = .missing_sidecar,
+            .in = .{ .running = "0.1.0", .tag = "v0.2.0", .asset_url = good_url, .asset = "abc", .sidecar_url = null, .basename = asset_base },
+        },
+        .{
+            .want = .untrusted_url,
+            .in = .{ .running = "0.1.0", .tag = "v0.2.0", .asset_url = "http://github.com/maci0/microagent/releases/download/v0.2.0/" ++ asset_base, .asset = "abc", .sidecar_url = good_side_url, .sidecar = good_side, .basename = asset_base },
+        },
+        .{
+            .want = .untrusted_url,
+            .in = .{ .running = "0.1.0", .tag = "v0.2.0", .asset_url = "https://example.com/microagent", .asset = "abc", .sidecar_url = good_side_url, .sidecar = good_side, .basename = asset_base },
+        },
+    };
+    for (refusals) |c| {
+        try std.testing.expectEqual(c.want, decide(c.in));
+        try std.testing.expectError(error.Refused, replaceVerified(io, tmp.dir, "microagent", c.want, "abc"));
+    }
 
     {
         const got = try copyOf(io, tmp.dir);

@@ -2,8 +2,8 @@
 //!
 //! One binary, one loop: stream a chat completion, run whatever tools it asks
 //! for, feed the results back, stop when it stops calling tools. Tool work is
-//! delegated to the real tools on PATH (ripgrep, ast-grep, git, compilers) --
-//! there is no built-in search or patch engine to keep in sync with them.
+//! delegated to the real tools on PATH (ripgrep, ast-grep, git, compilers),
+//! so there is no built-in search or patch engine here to keep in sync with them.
 
 const std = @import("std");
 const Io = std.Io;
@@ -117,6 +117,10 @@ const Usage = struct {
         self.total +|= result.total_tokens;
     }
 };
+
+/// The five counters, in the order every JSON usage writer here emits them: a
+/// reader takes them by name, so one place spells the key list.
+const usage_fields = "\"prompt_tokens\":{d},\"cached_tokens\":{d},\"completion_tokens\":{d},\"reasoning_tokens\":{d},\"total_tokens\":{d}";
 
 const ChatResult = struct {
     content: std.ArrayList(u8) = .empty,
@@ -237,12 +241,11 @@ pub fn main(init: std.process.Init) !void {
     try appendMessage(gpa, &msgs, "system", prompt);
     try appendMessage(gpa, &msgs, "user", opts.prompt);
 
-    const reason = run(&client, io, gpa, init.arena.allocator(), opts, &msgs) catch |err| {
+    run(&client, io, gpa, init.arena.allocator(), opts, &msgs) catch |err| {
         const msg = try std.fmt.allocPrint(init.arena.allocator(), "microagent: {s}\n", .{@errorName(err)});
         std.Io.File.stderr().writeStreamingAll(io, msg) catch {};
         std.process.exit(1);
     };
-    _ = reason;
 }
 
 /// Injected when the wall-clock budget runs out: the model has done its
@@ -378,7 +381,7 @@ fn resolveStyle(
     return null;
 }
 
-/// The agent loop. Returns the number of chat completions made.
+/// The agent loop: keep asking until the model stops calling tools.
 fn run(
     client: *std.http.Client,
     io: Io,
@@ -386,7 +389,7 @@ fn run(
     arena: std.mem.Allocator,
     opts: Options,
     msgs: *std.ArrayList(u8),
-) !usize {
+) !void {
     const started = Io.Timestamp.now(io, .awake).nanoseconds;
     const session = openSession(io, gpa, arena, opts);
     defer closeSession(io, session);
@@ -417,7 +420,7 @@ fn run(
                 var result = try streamChat(client, io, turn_arena, opts, body);
                 try finishTurn(io, turn_arena, gpa, msgs, &result, &usage);
                 writeSessionRecord(io, turn_arena, session, elapsedMs(io, asked), &result);
-                return turn + 1;
+                return;
             }
         }
         try compactMessages(gpa, msgs, turn_arena);
@@ -426,7 +429,7 @@ fn run(
         var result = try streamChat(client, io, turn_arena, opts, body);
         try finishTurn(io, turn_arena, gpa, msgs, &result, &usage);
         writeSessionRecord(io, turn_arena, session, elapsedMs(io, asked), &result);
-        if (result.calls.items.len == 0) return turn + 1;
+        if (result.calls.items.len == 0) return;
 
         // One turn left: say so, rather than ending on a truncated answer that
         // reads like a finished one.
@@ -434,7 +437,6 @@ fn run(
             net.note(io, arena, "microagent: last turn (--max-turns {d})\n", .{opts.max_turns});
     }
     net.note(io, arena, "microagent: stopped at the --max-turns ceiling ({d})\n", .{opts.max_turns});
-    return turn;
 }
 
 /// Where the session log goes: MICROAGENT_SESSION_DIR, else a directory beside
@@ -534,7 +536,7 @@ fn sessionRecord(
     try writeJsonString(w, cwd);
     try w.writeAll(",\"model\":");
     try writeJsonString(w, model);
-    try w.print(",\"elapsed_ms\":{d},\"usage\":{{\"prompt_tokens\":{d},\"cached_tokens\":{d},\"completion_tokens\":{d},\"reasoning_tokens\":{d},\"total_tokens\":{d}", .{
+    try w.print(",\"elapsed_ms\":{d},\"usage\":{{" ++ usage_fields, .{
         elapsed_ms, result.prompt_tokens, result.cached_tokens, result.completion_tokens, result.reasoning_tokens, result.total_tokens,
     });
     try w.writeAll("}}\n");
@@ -760,6 +762,38 @@ fn applyFrame(
     };
 }
 
+/// Ceilings shared by every tool that shells out: how long a read-only
+/// subprocess may run, and how much of its stderr is worth keeping. stdout gets
+/// `max_tool_output * 4` everywhere, and is trimmed to `max_tool_output` by
+/// `clamp` before it reaches the model.
+const tool_timeout_ms: u64 = 60_000;
+const tool_stderr_limit: usize = 4096;
+
+fn runToolProcess(
+    io: Io,
+    arena: std.mem.Allocator,
+    argv: []const []const u8,
+    stderr_limit: usize,
+) !std.process.RunResult {
+    return std.process.run(arena, io, .{
+        .argv = argv,
+        .stdout_limit = .limited(max_tool_output * 4),
+        .stderr_limit = .limited(stderr_limit),
+        .timeout = durationMs(tool_timeout_ms),
+    });
+}
+
+/// A tool that delegates to a binary already on PATH: the caller builds the
+/// argv, and the failure text, the empty result and the two output streams are
+/// handled the same way for each of them.
+fn runSearchTool(io: Io, arena: std.mem.Allocator, argv: []const []const u8, what: []const u8) ![]u8 {
+    const res = runToolProcess(io, arena, argv, tool_stderr_limit) catch |err|
+        return std.fmt.allocPrint(arena, "error: {s} failed: {s}", .{ what, @errorName(err) });
+    if (res.stdout.len > 0) return res.stdout;
+    if (res.stderr.len > 0) return res.stderr;
+    return std.fmt.allocPrint(arena, "(no matches)", .{});
+}
+
 /// Read-only git, with the subcommands fixed here rather than assembled by the
 /// model. Deterministic, no shell quoting, and the output is capped: a raw
 /// `git log` in a big repository is thousands of lines of context nobody reads.
@@ -794,12 +828,8 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     try argv.append(arena, "--");
     if (path) |p| try argv.append(arena, p);
 
-    const res = std.process.run(arena, io, .{
-        .argv = argv.items,
-        .stdout_limit = .limited(max_tool_output * 4),
-        .stderr_limit = .limited(4096),
-        .timeout = durationMs(60_000),
-    }) catch |err| return std.fmt.allocPrint(arena, "error: git {s} failed: {s}", .{ cmd, @errorName(err) });
+    const res = runToolProcess(io, arena, argv.items, tool_stderr_limit) catch |err|
+        return std.fmt.allocPrint(arena, "error: git {s} failed: {s}", .{ cmd, @errorName(err) });
     const text = if (res.stdout.len > 0) res.stdout else res.stderr;
     if (text.len == 0) return std.fmt.allocPrint(arena, "(git {s}: no output)", .{cmd});
     return firstLines(arena, text, limit);
@@ -934,7 +964,7 @@ fn finishTurn(
     var usage_line = JsonBuf.init(arena);
     const w = usage_line.writer();
     try w.writeAll("{\"type\":\"usage\",\"usage\":{");
-    try w.print("\"prompt_tokens\":{d},\"cached_tokens\":{d},\"completion_tokens\":{d},\"reasoning_tokens\":{d},\"total_tokens\":{d}", .{
+    try w.print(usage_fields, .{
         usage.prompt, usage.cached, usage.completion, usage.reasoning, usage.total,
     });
     try w.writeAll("}}\n");
@@ -1076,15 +1106,7 @@ fn toolSearch(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 
         try argv.appendSlice(arena, &.{ "--glob", g });
     }
     try argv.appendSlice(arena, &.{ "--", pattern, path });
-    const res = std.process.run(arena, io, .{
-        .argv = argv.items,
-        .stdout_limit = .limited(max_tool_output * 4),
-        .stderr_limit = .limited(4096),
-        .timeout = durationMs(60_000),
-    }) catch |err| return std.fmt.allocPrint(arena, "error: ripgrep failed: {s}", .{@errorName(err)});
-    if (res.stdout.len > 0) return res.stdout;
-    if (res.stderr.len > 0) return res.stderr;
-    return std.fmt.allocPrint(arena, "(no matches)", .{});
+    return runSearchTool(io, arena, argv.items, "ripgrep");
 }
 
 /// Structural search/rewrite through ast-grep. `rewrite` set means the change
@@ -1101,15 +1123,7 @@ fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     if (rewrite) |r| try argv.appendSlice(arena, &.{ "--rewrite", r, "--update-all" });
     try argv.appendSlice(arena, &.{ "--", path });
 
-    const res = std.process.run(arena, io, .{
-        .argv = argv.items,
-        .stdout_limit = .limited(max_tool_output * 4),
-        .stderr_limit = .limited(4096),
-        .timeout = durationMs(60_000),
-    }) catch |err| return std.fmt.allocPrint(arena, "error: ast-grep failed: {s}", .{@errorName(err)});
-    if (res.stdout.len > 0) return res.stdout;
-    if (res.stderr.len > 0) return res.stderr;
-    return std.fmt.allocPrint(arena, "(no matches)", .{});
+    return runSearchTool(io, arena, argv.items, "ast-grep");
 }
 
 fn appendMessage(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), role: []const u8, content: []const u8) !void {
@@ -1399,65 +1413,77 @@ test "conversation and tool schema serialize as one valid request body" {
     }
 }
 
-test "a long stream costs the largest frame, not the sum of frames" {
-    const gpa = std.testing.allocator;
-    var run_state = std.heap.ArenaAllocator.init(gpa);
-    defer run_state.deinit();
-    var frame_state = std.heap.ArenaAllocator.init(gpa);
-    defer frame_state.deinit();
+/// The three sinks `applyFrame` fills, on the two allocators it parses with:
+/// one that lives for the whole test and one released after every frame, the
+/// arrangement the stream loop uses.
+const FrameSink = struct {
+    run: std.heap.ArenaAllocator,
+    scratch: std.heap.ArenaAllocator,
+    result: ChatResult = .{},
+    calls: std.ArrayList(ToolCall) = .empty,
+    out_buf: std.ArrayList(u8) = .empty,
 
-    var result: ChatResult = .{};
-    var calls: std.ArrayList(ToolCall) = .empty;
-    var out_buf: std.ArrayList(u8) = .empty;
+    fn init(allocator: std.mem.Allocator) FrameSink {
+        return .{
+            .run = std.heap.ArenaAllocator.init(allocator),
+            .scratch = std.heap.ArenaAllocator.init(allocator),
+        };
+    }
+
+    fn deinit(self: *FrameSink) void {
+        self.scratch.deinit();
+        self.run.deinit();
+    }
+
+    /// Scratch bytes still held after the last frame fed.
+    fn scratchCapacity(self: *FrameSink) usize {
+        return self.scratch.queryCapacity();
+    }
+
+    fn feed(self: *FrameSink, payload: []const u8) !void {
+        try applyFrame(self.scratch.allocator(), self.run.allocator(), payload, &self.result, &self.calls, &self.out_buf);
+        _ = self.scratch.reset(.retain_capacity);
+    }
+};
+
+test "a long stream costs the largest frame, not the sum of frames" {
+    var sink = FrameSink.init(std.testing.allocator);
+    defer sink.deinit();
 
     const payload = "{\"choices\":[{\"delta\":{\"content\":\"tok\"}}]}";
     const frames: usize = 20_000;
 
     // Reference point: the scratch capacity one frame needs.
-    try applyFrame(frame_state.allocator(), run_state.allocator(), payload, &result, &calls, &out_buf);
-    const one_frame_capacity = frame_state.queryCapacity();
-    _ = frame_state.reset(.retain_capacity);
+    try sink.feed(payload);
+    const one_frame_capacity = sink.scratchCapacity();
 
     var i: usize = 1;
-    while (i < frames) : (i += 1) {
-        try applyFrame(frame_state.allocator(), run_state.allocator(), payload, &result, &calls, &out_buf);
-        _ = frame_state.reset(.retain_capacity);
-    }
+    while (i < frames) : (i += 1) try sink.feed(payload);
 
-    try std.testing.expectEqual(frames * 3, result.content.items.len);
-    try std.testing.expectEqual(frames * 3, out_buf.items.len);
+    try std.testing.expectEqual(frames * 3, sink.result.content.items.len);
+    try std.testing.expectEqual(frames * 3, sink.out_buf.items.len);
     // The work counter this test asserts on: scratch bytes retained after the
     // last frame. It must equal what one frame needed, not grow with the frame
     // count, which is what it did before the per-frame reset (20_000 frames'
     // worth of parse trees were kept alive in the run arena).
     try std.testing.expect(one_frame_capacity > 0);
-    try std.testing.expectEqual(one_frame_capacity, frame_state.queryCapacity());
+    try std.testing.expectEqual(one_frame_capacity, sink.scratchCapacity());
 }
 
 test "tool call fragments merge by index across frames" {
-    const gpa = std.testing.allocator;
-    var run_state = std.heap.ArenaAllocator.init(gpa);
-    defer run_state.deinit();
-    var frame_state = std.heap.ArenaAllocator.init(gpa);
-    defer frame_state.deinit();
-
-    var result: ChatResult = .{};
-    var calls: std.ArrayList(ToolCall) = .empty;
-    var out_buf: std.ArrayList(u8) = .empty;
+    var sink = FrameSink.init(std.testing.allocator);
+    defer sink.deinit();
 
     const frames = [_][]const u8{
         "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"pa\"}}]}}]}",
         "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"th\\\":\\\"a.zig\\\"}\",\"arguments_end\":null}}]}}]}",
     };
-    for (frames) |f| {
-        try applyFrame(frame_state.allocator(), run_state.allocator(), f, &result, &calls, &out_buf);
-        _ = frame_state.reset(.retain_capacity);
-    }
+    for (frames) |f| try sink.feed(f);
 
-    try std.testing.expectEqual(@as(usize, 1), calls.items.len);
-    try std.testing.expectEqualStrings("call_1", calls.items[0].id);
-    try std.testing.expectEqualStrings("read", calls.items[0].name);
-    try std.testing.expectEqualStrings("{\"path\":\"a.zig\"}", calls.items[0].args.items);
+    try std.testing.expectEqual(@as(usize, 1), sink.calls.items.len);
+    try std.testing.expectEqualStrings("call_1", sink.calls.items[0].id);
+    try std.testing.expectEqualStrings("read", sink.calls.items[0].name);
+    try std.testing.expectEqualStrings("{\"path\":\"a.zig\"}", sink.calls.items[0].args.items);
 }
 
 // A provider streams one call's `arguments` as many small fragments. Copying
@@ -1497,20 +1523,18 @@ test "streamed argument fragments cost linear arena bytes" {
 }
 
 test "usage counters land on the result" {
-    var run_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer run_state.deinit();
-    var result: ChatResult = .{};
-    var calls: std.ArrayList(ToolCall) = .empty;
-    var out_buf: std.ArrayList(u8) = .empty;
-    const payload =
-        "{\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":22,\"total_tokens\":33,\"completion_tokens_details\":{\"reasoning_tokens\":7}}}";
-    try applyFrame(run_state.allocator(), run_state.allocator(), payload, &result, &calls, &out_buf);
-    try std.testing.expectEqual(@as(u64, 11), result.prompt_tokens);
-    try std.testing.expectEqual(@as(u64, 22), result.completion_tokens);
-    try std.testing.expectEqual(@as(u64, 33), result.total_tokens);
-    try std.testing.expectEqual(@as(u64, 7), result.reasoning_tokens);
+    var sink = FrameSink.init(std.testing.allocator);
+    defer sink.deinit();
+
+    try sink.feed(
+        "{\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":22,\"total_tokens\":33,\"completion_tokens_details\":{\"reasoning_tokens\":7}}}",
+    );
+    try std.testing.expectEqual(@as(u64, 11), sink.result.prompt_tokens);
+    try std.testing.expectEqual(@as(u64, 22), sink.result.completion_tokens);
+    try std.testing.expectEqual(@as(u64, 33), sink.result.total_tokens);
+    try std.testing.expectEqual(@as(u64, 7), sink.result.reasoning_tokens);
     // Nothing in this frame says the prompt was cached, so it is a full miss.
-    try std.testing.expectEqual(@as(u64, 0), result.cached_tokens);
+    try std.testing.expectEqual(@as(u64, 0), sink.result.cached_tokens);
 }
 
 // The cache counter is what turns "we probably reuse the prefix" into a number
@@ -1522,14 +1546,11 @@ test "cached prompt tokens read every provider spelling" {
         "{\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":900,\"cache_read_input_tokens\":768}}",
     };
     for (spellings) |payload| {
-        var run_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-        defer run_state.deinit();
-        var result: ChatResult = .{};
-        var calls: std.ArrayList(ToolCall) = .empty;
-        var out_buf: std.ArrayList(u8) = .empty;
-        try applyFrame(run_state.allocator(), run_state.allocator(), payload, &result, &calls, &out_buf);
-        try std.testing.expectEqual(@as(u64, 900), result.prompt_tokens);
-        try std.testing.expectEqual(@as(u64, 768), result.cached_tokens);
+        var sink = FrameSink.init(std.testing.allocator);
+        defer sink.deinit();
+        try sink.feed(payload);
+        try std.testing.expectEqual(@as(u64, 900), sink.result.prompt_tokens);
+        try std.testing.expectEqual(@as(u64, 768), sink.result.cached_tokens);
     }
 }
 
@@ -1592,21 +1613,17 @@ test "tool output truncation keeps whole lines" {
     try std.testing.expectEqualStrings("solo\n", try firstLines(arena, "solo\n", 1));
 }
 
-test "compaction elides old tool output and keeps the recent turns" {
-    const gpa = std.testing.allocator;
-    var scratch_state = std.heap.ArenaAllocator.init(gpa);
-    defer scratch_state.deinit();
-
-    var msgs: std.ArrayList(u8) = .empty;
-    defer msgs.deinit(gpa);
-
-    // A conversation well past the limit: 120 tool results of 8 KB each.
-    const blob = "x" ** 8192;
+/// A conversation past the compaction limit, in the bytes the agent appends:
+/// the system and user messages, then `count` tool results of `blob` each.
+fn conversationHeader(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), system: []const u8) !void {
     try msgs.appendSlice(gpa, "[");
-    try appendMessage(gpa, &msgs, "system", "you are a coding agent");
-    try appendMessage(gpa, &msgs, "user", "fix the bug");
+    try appendMessage(gpa, msgs, "system", system);
+    try appendMessage(gpa, msgs, "user", "fix the bug");
+}
+
+fn appendToolResults(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), count: usize, blob: []const u8) !void {
     var i: usize = 0;
-    while (i < 120) : (i += 1) {
+    while (i < count) : (i += 1) {
         if (msgs.items.len > 1) try msgs.append(gpa, ',');
         var msg = JsonBuf.init(gpa);
         try msg.writer().writeAll("{\"role\":\"tool\",\"tool_call_id\":\"call_");
@@ -1618,6 +1635,19 @@ test "compaction elides old tool output and keeps the recent turns" {
         msg.list.deinit(gpa);
     }
     try msgs.append(gpa, ']');
+}
+
+test "compaction elides old tool output and keeps the recent turns" {
+    const gpa = std.testing.allocator;
+    var scratch_state = std.heap.ArenaAllocator.init(gpa);
+    defer scratch_state.deinit();
+
+    var msgs: std.ArrayList(u8) = .empty;
+    defer msgs.deinit(gpa);
+
+    const blob = "x" ** 8192;
+    try conversationHeader(gpa, &msgs, "you are a coding agent");
+    try appendToolResults(gpa, &msgs, 120, blob);
     const before = msgs.items.len;
     try std.testing.expect(before > conversation_soft_limit);
 
@@ -1648,28 +1678,14 @@ test "compaction leaves the cached prefix byte-identical" {
     var msgs: std.ArrayList(u8) = .empty;
     defer msgs.deinit(gpa);
 
-    try msgs.appendSlice(gpa, "[");
+    const blob = "x" ** 8192;
     // Characters a JSON round trip could re-spell: quote, backslash, newline,
     // a control byte, and a non-ASCII byte.
-    try appendMessage(gpa, &msgs, "system", "you are a coding agent: \"a\\b\"\n\u{7} caf\u{00e9}");
-    try appendMessage(gpa, &msgs, "user", "fix the bug");
+    try conversationHeader(gpa, &msgs, "you are a coding agent: \"a\\b\"\n\u{7} caf\u{00e9}");
     const prefix = try gpa.dupe(u8, msgs.items);
     defer gpa.free(prefix);
+    try appendToolResults(gpa, &msgs, 120, blob);
 
-    const blob = "x" ** 8192;
-    var i: usize = 0;
-    while (i < 120) : (i += 1) {
-        if (msgs.items.len > 1) try msgs.append(gpa, ',');
-        var msg = JsonBuf.init(gpa);
-        try msg.writer().writeAll("{\"role\":\"tool\",\"tool_call_id\":\"call_");
-        try msg.writer().print("{d}", .{i});
-        try msg.writer().writeAll("\",\"content\":");
-        try writeJsonString(msg.writer(), blob);
-        try msg.writer().writeAll("}");
-        try msgs.appendSlice(gpa, msg.items());
-        msg.list.deinit(gpa);
-    }
-    try msgs.append(gpa, ']');
     try std.testing.expect(msgs.items.len > conversation_soft_limit);
 
     try compactMessages(gpa, &msgs, scratch_state.allocator());
@@ -1940,15 +1956,10 @@ test "a repeated session log writes beside the first and never over it" {
 }
 
 test "a tool call index past the cap is dropped, not allocated" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    var result: ChatResult = .{};
-    var calls: std.ArrayList(ToolCall) = .empty;
-    var out_buf: std.ArrayList(u8) = .empty;
-    const payload = "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":4000000000,\"function\":{\"name\":\"bash\"}}]}}]}";
-    try applyFrame(arena, arena, payload, &result, &calls, &out_buf);
-    try std.testing.expectEqual(@as(usize, 0), calls.items.len);
+    var sink = FrameSink.init(std.testing.allocator);
+    defer sink.deinit();
+    try sink.feed("{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":4000000000,\"function\":{\"name\":\"bash\"}}]}}]}");
+    try std.testing.expectEqual(@as(usize, 0), sink.calls.items.len);
 }
 
 test "the env levels override the config file's, and a bad one is named" {
