@@ -2611,8 +2611,17 @@ fn compactMessages(
     var jb = chat_mod.JsonBuf.initCapacity(gpa, @max(size, 1));
     defer jb.list.deinit(gpa);
     try std.json.Stringify.value(parsed.value, .{}, jb.writer());
+    // `items()` hands the written bytes out of the writer, so it is asked once:
+    // a second call reads the writer after it has given them up.
+    const rewritten = jb.items();
+    // The room is taken before the old conversation is dropped, so the copy
+    // below cannot fail. Clearing first and appending second hands the whole
+    // conversation to an allocation that had no room for it: the `try` returns
+    // with `msgs` empty, and the run dies of `OutOfMemory` on a prompt that is
+    // the empty string rather than the one it had spent the run building.
+    try msgs.ensureUnusedCapacity(gpa, rewritten.len);
     msgs.clearRetainingCapacity();
-    try msgs.appendSlice(gpa, jb.items());
+    msgs.appendSliceAssumeCapacity(rewritten);
 }
 
 /// The flush the stream loop uses. It writes every whole character in the
