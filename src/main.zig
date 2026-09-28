@@ -3612,6 +3612,35 @@ test "compaction leaves the cached prefix byte-identical" {
     try std.testing.expect(std.mem.endsWith(u8, msgs.items, "\"content\":\"" ++ blob ++ "\"}]"));
 }
 
+test "a tool timeout is cut to what is left of the budget" {
+    const io = std.testing.io;
+    const now = Io.Timestamp.now(io, .awake).nanoseconds;
+
+    // No budget: every tool keeps the timeout it asked for.
+    try std.testing.expectEqual(@as(?u64, null), (Budget{}).remainingMs(io));
+    try std.testing.expectEqual(@as(u64, 120_000), (Budget{}).toolTimeoutMs(io, 120_000));
+
+    // Ten minutes of budget left: a shorter request is untouched, a longer one
+    // is not, because it cannot finish before the deadline it would cross.
+    const fresh = Budget.of(now, 600);
+    try std.testing.expectEqual(@as(u64, 30_000), fresh.toolTimeoutMs(io, 30_000));
+    // A range, not an equality: the clock moves between building the budget and
+    // asking it, and by a millisecond or two that is not a defect.
+    const wanted = fresh.toolTimeoutMs(io, 600_000);
+    try std.testing.expect(wanted <= 600_000 and wanted > 599_000);
+
+    // Nearly spent: clamped, but never to zero, which would fail before the
+    // tool started and read as a broken tool rather than a spent budget.
+    const nearly = Budget{ .deadline_ns = now + 2 * std.time.ns_per_s };
+    try std.testing.expectEqual(tool_timeout_floor_ms, nearly.toolTimeoutMs(io, 120_000));
+
+    // Spent: remaining is zero, and the clamp still leaves the floor.
+    const spent = Budget{ .deadline_ns = now - 1 };
+    try std.testing.expectEqual(@as(u64, 0), spent.remainingMs(io).?);
+    try std.testing.expectEqual(tool_timeout_floor_ms, spent.toolTimeoutMs(io, 120_000));
+    try std.testing.expect(spent.expired(io));
+}
+
 test "a CA bundle path that cannot be read falls back to the system store" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
