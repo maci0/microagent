@@ -59,6 +59,7 @@ make test-one FILTER="..."  # one test, while you are mid-edit
 make watch                  # the suite again on every source change, until Ctrl-C
 make preflight              # name any tool check and lint need that is not on PATH
 make lint                   # the pin checks, shellcheck, ruff and yamllint on their own
+make instructions CHECK=--check   # retired instructions per unit, and a band it must stay inside
 ```
 
 `make watch` is `zig build test --watch`, the build system's own mode, so the
@@ -67,6 +68,18 @@ edit loop is one command rather than an editor task and a `make test` after it.
 the declared test names before the watch starts, because a filter that matches
 nothing reports success while running no test. Neither mode is what `check`
 runs, so a green watch is not a push: `make check` is still the gate.
+
+`make instructions` is the one gate that is not in `make check`, and the reason
+is worth stating rather than leaving as an omission. It measures retired
+instructions, not time, because wall clock moves with frequency scaling and the
+CPU quota and a wall-clock gate fails on a busy runner for reasons that have
+nothing to do with the code; retired instructions for a fixed binary and a
+fixed input repeat to within 0.001%. It needs `perf`, and a shared CI runner
+may have performance counters switched off, so a gate that cannot measure is a
+gate that fails for the wrong reason on someone else's machine. It exits 1 when
+a row leaves its band and 2 when a row cannot be measured at all, so run it
+before a push that touches a hot path and re-record
+`bench/instructions.baseline` only when the change is meant to move it.
 
 `make check` is the whole gate: it is the same `zig fmt --check`, the same
 `ruff check`, `ruff format --check` and `yamllint`, the same `zig build test`,
