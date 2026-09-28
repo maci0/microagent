@@ -166,6 +166,14 @@ release, and `microagent update` moves you to it.
   harness by name on a fresh clone, so the documented command measured nothing.
   `make help` also described `lint` as the three linters, dropping the version and
   lock pin checks the target runs.
+- A conversation of small tool results is still bounded. Compaction replaced a tool result with a
+  marker only once it passed 4 KB, so a run whose tools answered in a kilobyte or two had nothing
+  for it to replace: the conversation grew a turn at a time with no ceiling, and the run eventually
+  asked for a context the provider refuses, which is a 400 nothing retries. A pass that elided
+  nothing is now followed by one that replaces any result longer than its own marker, and both
+  passes share the one size budget, so the conversation lands where the first pass alone would have
+  put it. A conversation with no tool output at all to elide, which is the one case left, is now
+  said on stderr rather than left growing silently.
 - A base url that is not a url is refused as one. `--base-url api.openai.com/v1` and
   `MICROAGENT_BASE_URL` set the same way were reported as "the API key would go to ... in the
   clear", a security warning about a value that never reaches the network; the plaintext check

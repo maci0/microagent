@@ -38,6 +38,15 @@ const conversation_soft_limit = 400 * 1024;
 /// the marker is not worth the rewrite, so such a result stays whole and the
 /// conversation grows instead.
 const min_elided_bytes = 4096;
+/// The marker that replaces elided output, so its length is one number rather
+/// than the two that would each have to be edited to agree.
+const elision_marker = "[earlier tool output elided: {d} bytes]";
+/// The shortest marker above, and so the smallest tool result where replacing
+/// the content with one takes bytes out of the conversation rather than putting
+/// them in. It is the floor the second compaction pass works to, the one that
+/// runs when every result this run has is a small one and the limit above
+/// elides nothing at all.
+const min_marker_bytes = "[earlier tool output elided: 0 bytes]".len;
 const max_turns_default = 100;
 /// Ceiling on what one response may generate, sent as `max_tokens`. Without it
 /// the provider's own limit is the only bound: a model that fails to stop
@@ -1609,6 +1618,40 @@ fn applyFrame(
     };
 }
 
+/// Replaces the oldest tool results longer than `threshold` with a marker, oldest
+/// first, and answers how many bytes that took out of the conversation. Stops
+/// once the conversation would hold `target` bytes, so every pass shares one
+/// size budget with the ones before it. Results are replaced in place and no
+/// message is dropped, so every `tool_call_id` still has the message that
+/// answers it.
+fn elideToolResults(
+    arena: std.mem.Allocator,
+    array: std.json.Array,
+    threshold: usize,
+    target: usize,
+) !usize {
+    var size: usize = 0;
+    for (array.items) |*message| {
+        if (size >= target) break;
+        const object = switch (message.*) {
+            .object => |o| o,
+            else => continue,
+        };
+        const role = chat_mod.str(object.get("role")) orelse continue;
+        if (!std.mem.eql(u8, role, "tool")) continue;
+        const content = object.getPtr("content") orelse continue;
+        const text = switch (content.*) {
+            .string => |t| t,
+            else => continue,
+        };
+        if (text.len <= threshold) continue;
+        const marker = try std.fmt.allocPrint(arena, elision_marker, .{text.len});
+        size += text.len - marker.len;
+        content.* = .{ .string = marker };
+    }
+    return size;
+}
+
 /// Replaces the content of the oldest large tool results with a marker once the
 /// conversation outgrows `conversation_soft_limit`, down to half of it.
 ///
@@ -1618,12 +1661,20 @@ fn applyFrame(
 /// re-sent every turn. Messages are never dropped, so `tool_call_id` pairing
 /// stays valid.
 ///
+/// A run whose tool output is all under `min_elided_bytes` has nothing the
+/// first pass may replace, and a prompt that grows a turn at a time is a run
+/// that eventually asks for a context the provider refuses. So a pass that
+/// elided nothing is followed by one that takes any result longer than its own
+/// marker, however small, which is the smallest replacement that still takes
+/// bytes out. Both passes share the one target, so the conversation still lands
+/// where the first pass alone would have put it.
+///
 /// `floor` is the length the conversation has to grow past before another pass
 /// is worth its parse. Finding out what is elidable means parsing the whole
-/// conversation, and a run whose tool output is all under `min_elided_bytes` has
-/// nothing left to elide: the same pass would re-parse and re-walk a growing
-/// conversation on every remaining turn to learn the same thing, which is
-/// quadratic in the run. One more soft limit of appended conversation is far
+/// conversation, and a conversation of nothing but the model's own words is
+/// never elidable at either threshold: the same pass would re-parse and re-walk
+/// a growing conversation on every remaining turn to learn the same thing, which
+/// is quadratic in the run. One more soft limit of appended conversation is far
 /// more than enough to have made something elidable again, so the run pays one
 /// wasted parse per soft limit rather than one per turn.
 ///
@@ -1662,25 +1713,24 @@ fn compactMessages(
 
     const target = conversation_soft_limit / 2;
     var size = msgs.items.len;
-    for (array.items) |*message| {
-        if (size <= target) break;
-        const object = switch (message.*) {
-            .object => |o| o,
-            else => continue,
-        };
-        const role = chat_mod.str(object.get("role")) orelse continue;
-        if (!std.mem.eql(u8, role, "tool")) continue;
-        const content = object.getPtr("content") orelse continue;
-        const text = switch (content.*) {
-            .string => |t| t,
-            else => continue,
-        };
-        if (text.len < min_elided_bytes) continue;
-        const marker = try std.fmt.allocPrint(arena, "[earlier tool output elided: {d} bytes]", .{text.len});
-        size -= text.len - marker.len;
-        content.* = .{ .string = marker };
+    const wanted = msgs.items.len - target;
+    size -= try elideToolResults(arena, array, min_elided_bytes, wanted);
+    if (size > conversation_soft_limit) {
+        // Every result this run has is a small one, so the pass above found
+        // nothing worth its marker and the conversation would grow a turn at a
+        // time with no ceiling, until the provider refuses a context this run
+        // built. Anything longer than the marker it becomes is worth
+        // replacing, and the model is told the results are gone rather than
+        // finding an elision it never saw.
+        net.note(io, arena, "microagent: no tool result reached {d} bytes, so the oldest ones are being replaced with a marker to keep the prompt under {d} bytes; the detail they held is not in the next turn\n", .{ min_elided_bytes, conversation_soft_limit });
+        size -= try elideToolResults(arena, array, min_marker_bytes, wanted -| (msgs.items.len - size));
     }
     if (size == msgs.items.len) {
+        // Nothing either pass may replace: the conversation is the model's own
+        // words, and those stay whatever the prompt costs. The run keeps
+        // sending it, and an operator watching a bill needs to know the prompt
+        // is no longer bounded rather than finding out in the provider's error.
+        net.note(io, arena, "microagent: the conversation is {d} bytes and holds no tool output to elide, so it is sent whole from here; every further turn re-sends all of it\n", .{msgs.items.len});
         floor.* = msgs.items.len +| conversation_soft_limit;
         return;
     }
@@ -2946,6 +2996,46 @@ test "compaction elides old tool output and keeps the recent turns" {
     try std.testing.expect(std.mem.startsWith(u8, array.items[2].object.get("content").?.string, "[earlier tool output elided"));
 }
 
+// A run that reads files in small pieces, or one whose tools answer in a line or
+// two, produces results no bigger than `min_elided_bytes` and all of them at
+// once. There is nothing the first pass of compaction may replace, so the
+// conversation grows a turn at a time and the prompt that is re-sent every turn
+// has no ceiling at all: the run eventually asks for a context the provider
+// refuses, which is a 400 nothing retries.
+test "a conversation of small tool results is still bounded" {
+    const gpa = std.testing.allocator;
+    var scratch_state = std.heap.ArenaAllocator.init(gpa);
+    defer scratch_state.deinit();
+
+    var msgs: std.ArrayList(u8) = .empty;
+    defer msgs.deinit(gpa);
+
+    const blob = "x" ** 1024;
+    try openConversation(gpa, &msgs, "you are a coding agent", "fix the bug");
+    try appendToolResults(gpa, &msgs, 500, blob);
+    const before = msgs.items.len;
+    try std.testing.expect(before > conversation_soft_limit);
+    try std.testing.expect(blob.len < min_elided_bytes);
+
+    var floor: usize = 0;
+    try compactMessages(std.testing.io, gpa, &msgs, scratch_state.allocator(), &floor);
+
+    // The bound is the point: a run that cannot elide a large result is still
+    // brought under the limit rather than left growing.
+    try std.testing.expect(msgs.items.len <= conversation_soft_limit);
+    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, msgs.items, .{});
+    defer parsed.deinit();
+    const array = parsed.value.array;
+    // Nothing is dropped, so every tool_call_id still has its message, and the
+    // newest results are the ones the model is still acting on.
+    try std.testing.expectEqual(@as(usize, 502), array.items.len);
+    try std.testing.expectEqualStrings("system", array.items[0].object.get("role").?.string);
+    const last = array.items[array.items.len - 1].object;
+    try std.testing.expectEqualStrings("call_499", last.get("tool_call_id").?.string);
+    try std.testing.expectEqual(@as(usize, 1024), last.get("content").?.string.len);
+    try std.testing.expect(std.mem.startsWith(u8, array.items[2].object.get("content").?.string, "[earlier tool output elided"));
+}
+
 // The stream arrives in reads of a fixed size, so a frame longer than one read
 // is handed over in pieces. Splitting has to find every line exactly once and
 // search each byte of it once, whether it lands whole or a byte at a time.
@@ -3000,13 +3090,13 @@ test "a frame split across reads yields the same lines, and is searched once" {
     try std.testing.expectEqual(wire.items.len, searched);
 }
 
-// A conversation past the soft limit whose tool results are all under the
-// elision floor has nothing to compact, and finding that out costs a full parse
-// of the conversation. Repeating it on every turn is quadratic in the run, so
-// a pass that elided nothing holds the next one off until the conversation has
-// grown by another soft limit. The skip never outlives the reason for it: once
-// the conversation does grow past the floor, the pass runs and elides as
-// before.
+// A conversation past the soft limit that holds nothing compaction may replace
+// is a conversation of the model's own words, which are never elided. Finding
+// that out costs a full parse of the conversation, and repeating it on every
+// turn is quadratic in the run, so a pass that elided nothing holds the next one
+// off until the conversation has grown by another soft limit. The skip never
+// outlives the reason for it: once the conversation does grow past the floor, the
+// pass runs and elides as before.
 test "a conversation with nothing to elide is not re-parsed every turn" {
     const gpa = std.testing.allocator;
     var scratch_state = std.heap.ArenaAllocator.init(gpa);
@@ -3015,10 +3105,12 @@ test "a conversation with nothing to elide is not re-parsed every turn" {
     var msgs: std.ArrayList(u8) = .empty;
     defer msgs.deinit(gpa);
 
-    // Every tool result is just under `min_elided_bytes`, so nothing is
-    // elidable and the conversation is well past the soft limit.
+    // Every message is the model's own, so neither pass of compaction has
+    // anything to replace and the conversation is well past the soft limit.
     try conversationHeader(gpa, &msgs, "you are a coding agent");
-    try appendToolResults(gpa, &msgs, 200, "x" ** (min_elided_bytes - 64));
+    try msgs.append(gpa, ']');
+    var i: usize = 0;
+    while (i < 100) : (i += 1) try growConversation(gpa, &msgs, "assistant", "x" ** 8192);
     const before = msgs.items.len;
     try std.testing.expect(before > conversation_soft_limit);
 
@@ -3029,25 +3121,27 @@ test "a conversation with nothing to elide is not re-parsed every turn" {
 
     // Still over the soft limit, but below the floor: the turn is skipped
     // rather than paying the parse again.
-    try growConversation(gpa, &msgs, "y" ** 8192);
+    try growConversation(gpa, &msgs, "assistant", "y" ** 8192);
     try compactMessages(std.testing.io, gpa, &msgs, scratch_state.allocator(), &floor);
     try std.testing.expect(msgs.items.len > before);
     try std.testing.expectEqual(before + conversation_soft_limit, floor);
 
-    // Past the floor, a result big enough to elide is picked up again.
-    while (msgs.items.len <= floor) try growConversation(gpa, &msgs, "z" ** 8192);
+    // Past the floor, a tool result big enough to elide is picked up again.
+    while (msgs.items.len <= floor) try growConversation(gpa, &msgs, "tool", "z" ** 8192);
     const grown = msgs.items.len;
     try compactMessages(std.testing.io, gpa, &msgs, scratch_state.allocator(), &floor);
     try std.testing.expectEqual(conversation_soft_limit, floor);
     try std.testing.expect(msgs.items.len < grown);
 }
 
-// Appends a tool result to an already-closed conversation, the way a turn does.
-fn growConversation(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), blob: []const u8) !void {
+// Appends a message to an already-closed conversation, the way a turn does.
+fn growConversation(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), role: []const u8, blob: []const u8) !void {
     msgs.shrinkRetainingCapacity(msgs.items.len - 1);
     try msgs.append(gpa, ',');
     var msg = chat_mod.JsonBuf.init(gpa);
-    try msg.writer().writeAll("{\"role\":\"tool\",\"tool_call_id\":\"call_x\",\"content\":");
+    try msg.writer().writeAll("{\"role\":");
+    try chat_mod.writeJsonString(msg.writer(), role);
+    try msg.writer().writeAll(",\"content\":");
     try chat_mod.writeJsonString(msg.writer(), blob);
     try msg.writer().writeAll("}");
     try msgs.appendSlice(gpa, msg.items());
