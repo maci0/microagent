@@ -2483,7 +2483,23 @@ fn applyCallDelta(
         call.name = owned;
     }
     if (args) |v| {
-        try call.args.appendSlice(gpa, clampToResponseCap(result, v));
+        const piece = clampToResponseCap(result, v);
+        // A relay that reconnects replays the frames it already sent, so one
+        // slot can be announced twice: the second delivery repeats the id and
+        // the name and carries the whole argument string again, and appending
+        // it to the first delivery's leaves two objects glued together, which
+        // is not an object, so the call is dropped as unreadable and the work
+        // it asked for is never done. The id is what tells the two apart: a
+        // continuation of a call never re-announces it, so a frame carrying
+        // the id and an argument string that is an object on its own is a
+        // delivery rather than a fragment, and it is the whole of what the
+        // slot holds.
+        if (id != null and id.?.len != 0 and
+            call.args.items.len > 0 and argumentsAreAnObject(gpa, piece))
+        {
+            call.args.clearRetainingCapacity();
+        }
+        try call.args.appendSlice(gpa, piece);
     }
 }
 
@@ -5245,6 +5261,61 @@ test "a dropped tool call is reported, and a turn that dropped none is not" {
     try std.testing.expectEqual(@as(usize, 0), kept.unusable);
     try std.testing.expect(droppedCallNotice(arena, "http://x/v1/chat/completions", kept, 0) == null);
     try std.testing.expect(droppedCallNotice(arena, "http://x", .{}, 0) == null);
+}
+
+// A relay that reconnects replays the frames it already sent, so the same slot
+// is announced twice with the whole argument string both times. Appending the
+// second delivery to the first glued two objects together, the call was dropped
+// as unreadable, and the work it asked for was never done.
+test "a slot the stream announced twice keeps the arguments the provider sent" {
+    const gpa = std.testing.allocator;
+    var run_state = std.heap.ArenaAllocator.init(gpa);
+    defer run_state.deinit();
+    const arena = run_state.allocator();
+
+    const one = "{\"choices\":[{\"delta\":{\"tool_calls\":[" ++
+        "{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"a.zig\\\"}\"}}" ++
+        "]}}]}";
+    const framed = [_][]const u8{ one, one, one };
+    var result: chat_mod.ChatResult = .{};
+    var calls: std.ArrayList(chat_mod.ToolCall) = .empty;
+    var out_buf: std.ArrayList(u8) = .empty;
+    var unparsable: usize = 0;
+    for (framed) |payload| try applyFrame(arena, arena, payload, &result, &calls, &out_buf, &unparsable);
+
+    const dropped = keepRunnableCalls(arena, &calls);
+    try std.testing.expectEqual(@as(usize, 0), dropped.unusable);
+    try std.testing.expectEqual(@as(usize, 0), dropped.duplicate);
+    try std.testing.expectEqual(@as(usize, 1), calls.items.len);
+    try std.testing.expectEqualStrings("call_1", calls.items[0].id);
+    try std.testing.expectEqualStrings("read", calls.items[0].name);
+    try std.testing.expectEqualStrings("{\"path\":\"a.zig\"}", calls.items[0].args.items);
+}
+
+// A call streamed one argument at a time is the ordinary shape and is not a
+// replay: no fragment re-announces the id, so the pieces still concatenate.
+test "a call streamed in fragments still reads as one argument object" {
+    const gpa = std.testing.allocator;
+    var run_state = std.heap.ArenaAllocator.init(gpa);
+    defer run_state.deinit();
+    const arena = run_state.allocator();
+
+    const head = "{\"choices\":[{\"delta\":{\"tool_calls\":[" ++
+        "{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\": \\\"ls\"}}" ++
+        "]}}]}";
+    const tail = "{\"choices\":[{\"delta\":{\"tool_calls\":[" ++
+        "{\"index\":0,\"function\":{\"arguments\":\" -l\\\"}\"}}" ++
+        "]}}]}";
+    var result: chat_mod.ChatResult = .{};
+    var calls: std.ArrayList(chat_mod.ToolCall) = .empty;
+    var out_buf: std.ArrayList(u8) = .empty;
+    var unparsable: usize = 0;
+    try applyFrame(arena, arena, head, &result, &calls, &out_buf, &unparsable);
+    try applyFrame(arena, arena, tail, &result, &calls, &out_buf, &unparsable);
+
+    const dropped = keepRunnableCalls(arena, &calls);
+    try std.testing.expectEqual(@as(usize, 0), dropped.unusable);
+    try std.testing.expectEqualStrings("{\"command\": \"ls -l\"}", calls.items[0].args.items);
 }
 
 // The parallel-call ceiling drops a call the model asked for, and the assistant
