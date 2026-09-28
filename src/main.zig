@@ -176,7 +176,7 @@ pub fn main(init: std.process.Init) !void {
     opts.ca_bundle = net.caBundlePath(init.environ_map);
     if (envValue(init.environ_map, "MICROAGENT_BUDGET_SECONDS")) |v|
         opts.budget_s = budgetSeconds(v) orelse
-            return configError(io, "MICROAGENT_BUDGET_SECONDS must be a number of seconds, got '{s}'", .{v});
+            return configError(io, "MICROAGENT_BUDGET_SECONDS must be a number of seconds of at least 1, got '{s}'", .{v});
     opts.session_dir = sessionDir(init);
 
     var err_buf: [512]u8 = undefined;
@@ -266,8 +266,8 @@ const help_text =
     \\      --budget <seconds>
     \\                         stop starting turns after this long, and say so.
     \\                         The last turn it takes may run 5 minutes past it;
-    \\                         a turn cut off there is discarded, not half-applied
-    \\                         (env MICROAGENT_BUDGET_SECONDS)
+    \\                         a turn cut off there is discarded, not half-applied.
+    \\                         At least 1 (env MICROAGENT_BUDGET_SECONDS)
     \\      --reasoning-effort <level>
     \\                         reasoning.effort sent to the provider: minimal, low,
     \\                         medium, high, or none to disable (env MICROAGENT_REASONING_EFFORT)
@@ -466,10 +466,14 @@ fn displayUrl(arena: std.mem.Allocator, url: []const u8) []const u8 {
 
 /// The wall-clock budget in seconds, from a flag or a variable, trimmed the way
 /// every other numeric option here is: a value quoted with a space around it is
-/// a number a shell left in, not a bad one. Null leaves the two callers free to
-/// name where the value came from.
+/// a number a shell left in, not a bad one. Zero is not a budget: the deadline
+/// it builds is already spent when the loop first asks, so the run takes one
+/// final push turn, spends the tokens for it, and stops, which reads as a
+/// provider that went quiet rather than the zero that was asked for. Null
+/// leaves the two callers free to name where the value came from.
 fn budgetSeconds(value: []const u8) ?u64 {
-    return std.fmt.parseInt(u64, std.mem.trim(u8, value, " \t\r\n"), 10) catch null;
+    const seconds = std.fmt.parseInt(u64, std.mem.trim(u8, value, " \t\r\n"), 10) catch return null;
+    return if (seconds == 0) null else seconds;
 }
 
 /// How much of a value an error message quotes back, cut on a codepoint
@@ -554,7 +558,7 @@ fn setValued(
         .config => opts.config = value,
         .reasoning_effort => return reasoningEffort(buf, value, &opts.reasoning_effort),
         .budget => opts.budget_s = budgetSeconds(value) orelse
-            return std.fmt.bufPrint(buf, "--budget must be a number of seconds, got '{s}'", .{clip(value)}) catch "bad --budget",
+            return std.fmt.bufPrint(buf, "--budget must be a number of seconds of at least 1, got '{s}'", .{clip(value)}) catch "bad --budget",
         .max_turns => return ceiling(usize, buf, "--max-turns", value, &opts.max_turns),
         .max_tokens => return ceiling(u32, buf, "--max-tokens", value, &opts.max_tokens),
     }
@@ -2051,7 +2055,13 @@ test "a wrong command line names the flag and the value it was given" {
     var buf: [512]u8 = undefined;
     try std.testing.expectEqualStrings("unknown or incomplete argument '--nope'", parseArgs(&buf, &.{"--nope"}, &opts).?);
     try std.testing.expectEqualStrings("--model needs a model id", parseArgs(&buf, &.{"--model"}, &opts).?);
-    try std.testing.expectEqualStrings("--budget must be a number of seconds, got 'soon'", parseArgs(&buf, &.{ "--budget", "soon" }, &opts).?);
+    try std.testing.expectEqualStrings("--budget must be a number of seconds of at least 1, got 'soon'", parseArgs(&buf, &.{ "--budget", "soon" }, &opts).?);
+    // A budget of zero is refused rather than run: the deadline it builds has
+    // already passed when the loop first asks, so the run takes a final push
+    // turn it pays for and stops.
+    var zero: Options = .{};
+    try std.testing.expectEqualStrings("--budget must be a number of seconds of at least 1, got '0'", parseArgs(&buf, &.{ "--budget", "0" }, &zero).?);
+    try std.testing.expectEqual(@as(?u64, null), zero.budget_s);
     try std.testing.expectEqualStrings("prompt given twice: 'one' and 'two'", parseArgs(&buf, &.{ "one", "two" }, &opts).?);
     var joined: Options = .{};
     try std.testing.expectEqualStrings("prompt given twice: 'one' and 'two'", parseArgs(&buf, &.{ "-p", "one", "--print=two" }, &joined).?);
@@ -2078,7 +2088,7 @@ test "help and version win wherever they appear" {
 // read: an unknown flag, both spellings of a valued flag, a value joined with
 // `=`, an empty value, a flag that ends the line, a prompt given twice, a
 // ceiling that is not a number, a ceiling of zero, a budget that is not a
-// number, an unknown reasoning level, and a bare `-`.
+// number or is zero, an unknown reasoning level, and a bare `-`.
 const args_corpus = [_][]const u8{
     "",
     " ",

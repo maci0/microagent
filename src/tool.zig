@@ -122,7 +122,14 @@ pub fn runToolProcess(
     multi.init(arena, io, multi_buffer.toStreams(), &.{ child.stdout.?, child.stderr.? });
     defer multi.deinit();
 
-    while (multi.fill(64, timeout)) |_| {
+    // The timeout is a deadline taken once, not a duration handed to every
+    // wait: `fill` arms its wait from now each time, so a child that keeps
+    // answering never spends it, and `yes` or a chatty build outlives a
+    // ten-minute ceiling by never going quiet for ten minutes. The reap on
+    // the way out is what kills it, and `budget.toolTimeoutMs` is only true
+    // of a tool that can be cut.
+    const deadline = timeout.toDeadline(io);
+    while (multi.fill(64, deadline)) |_| {
         if (multi.reader(0).bufferedLen() > stdout_limit) return error.StreamTooLong;
         if (multi.reader(1).bufferedLen() > stderr_limit) return error.StreamTooLong;
     } else |err| switch (err) {
@@ -130,6 +137,11 @@ pub fn runToolProcess(
         else => |e| return e,
     }
     try multi.checkAnyError();
+    // A child that filled the pipes it was given and then kept running has
+    // nothing left to read and is waited on below, which has no timeout of
+    // its own: the deadline is what catches it here, and the reap that runs
+    // on the way out takes the process group with it.
+    if (deadline.toDurationFromNow(io)) |left| if (left.raw.nanoseconds <= 0) return error.Timeout;
 
     const term = try child.wait(io);
     return .{
@@ -744,11 +756,16 @@ pub fn runCapped(
         .data = &vecs[i],
     } });
 
+    // One deadline for the whole drain, for the reason `runToolProcess` gives:
+    // a per-wait duration is re-armed by every read that arrives, so a
+    // command that never goes quiet for the length of the timeout is never
+    // timed out at all. The reap on the way out kills the group either way.
+    const deadline = timeout.toDeadline(io);
     var draining: usize = files.len;
     var read_err: ?anyerror = null;
     var dropped: [2]bool = .{ false, false };
     while (draining > 0) {
-        try batch.awaitConcurrent(io, timeout);
+        try batch.awaitConcurrent(io, deadline);
         while (batch.next()) |completion| {
             const i = completion.index;
             const n = completion.result.file_read_streaming catch |err| {
@@ -773,6 +790,9 @@ pub fn runCapped(
         }
     }
 
+    // Both pipes are at end of stream but the child may still be running, and
+    // the wait below takes no timeout of its own.
+    if (deadline.toDurationFromNow(io)) |left| if (left.raw.nanoseconds <= 0) return error.Timeout;
     const term = try child.wait(io);
     if (read_err) |err| return err;
     return .{ .stdout = out[0].items, .stderr = out[1].items, .term = term, .dropped = dropped };
@@ -1539,6 +1559,39 @@ test "a tool call reports the exit status of the command it ran" {
     try std.testing.expectEqualStrings("out", res.stdout);
     try std.testing.expectEqualStrings("err", res.stderr);
     try std.testing.expectEqual(@as(u8, 3), res.term.exited);
+}
+
+// A timeout that is re-armed by every read is not a timeout. Both runners
+// wait on the child's pipes in a loop, and a command that keeps writing never
+// lets one of those waits reach the end of the duration, so the call runs for
+// as long as the command keeps talking: a `yes` in a build script outlives a
+// ten-minute ceiling, and with it the run's own budget, which is cut from what
+// is left of that ceiling.
+test "a tool call is timed out by the clock, not by how long it stayed quiet" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // A byte every tenth of a second: fast enough that every wait ends in a
+    // read and is re-armed, slow enough that neither output cap is anywhere
+    // near being reached. What is left to end either call is the deadline.
+    // A host whose `sleep` has no fractional form fails the assertion below
+    // loudly rather than passing it.
+    const script = "while :; do printf x; sleep 0.1; done";
+    const budget_ms: u64 = 400;
+    const started = Io.Timestamp.now(io, .awake).nanoseconds;
+    try std.testing.expectError(error.Timeout, runCapped(io, arena, &.{ "/bin/sh", "-c", script }, 4096, net.durationMs(budget_ms)));
+    const after_capped = Io.Timestamp.now(io, .awake).nanoseconds - started;
+    try std.testing.expectError(error.Timeout, runToolProcess(io, arena, &.{ "/bin/sh", "-c", script }, 4096, 4096, net.durationMs(budget_ms)));
+    const spent = Io.Timestamp.now(io, .awake).nanoseconds - started;
+    // The deadline is what ended both calls, so neither returned before it:
+    // an error raised on the way in is a different fault wearing this one's
+    // name, and a lower bound is what tells the two apart.
+    try std.testing.expect(after_capped >= budget_ms * std.time.ns_per_ms);
+    try std.testing.expect(spent >= 2 * budget_ms * std.time.ns_per_ms);
 }
 
 // `bash` goes through the capped runner, not the search runner, and it is the

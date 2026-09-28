@@ -142,6 +142,18 @@ release, and `microagent update` moves you to it.
   and every error. The README said it; the help a script author reads first did not.
 - The session-close test helper named `ChatResult` without the module it lives in, so no build
   compiled: `zig build` and `make build` failed on the whole program, not only on a test.
+- A tool call is now cut off by its deadline rather than by how long it stayed quiet. Both runners
+  wait on the child's pipes in a loop, and the timeout was handed to each wait as a fresh duration,
+  so every read that arrived re-armed it: a command that keeps writing (a verbose build, a `yes` in
+  a test) never reached the end of the timeout and ran until the run's own budget or the harness
+  killed it, which also made `--budget` a promise the tools did not keep. The timeout is now an
+  instant taken once, and a child that closed its pipes and kept running is caught by the same
+  deadline. A tool call that times out says the same thing and leaves the same processes killed as
+  before.
+- `--budget 0` and `MICROAGENT_BUDGET_SECONDS=0` are refused the way a ceiling of zero is. The
+  deadline zero builds has already passed when the loop first asks, so the run took one final push
+  turn, paid for it, and stopped, which reads as a provider that went quiet rather than the zero
+  that was asked for.
 - `write` refuses a call with no `content` instead of writing an empty file. The tool schema names
   `content` as required, but the argument was read as an empty string when it was missing, so a call
   that arrived naming only a path (a model that forgot it, or arguments cut short in the stream)
