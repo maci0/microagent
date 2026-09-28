@@ -9,17 +9,22 @@
 //! it resolves, the provider request and the frames that come back. The parts it
 //! leans on are named modules, imported in one direction: `net` (sinks,
 //! deadlines, the CA bundle) and `chat` (the value types a turn is made of and
-//! its JSON writer) are leaves, `tool` and `session` sit on them (every tool
-//! call is reached by model-supplied text, and the per-run log is written from a
-//! finished response), and `style` and `update` are the two subcommands.
+//! its JSON writer) are leaves, `budget` (the deadline every part of a turn is
+//! held to) sits on nothing, `retry` (whether a failed attempt is worth making
+//! again) sits on `net` and `budget`, `tool` and `session` sit on the leaves
+//! (every tool call is reached by model-supplied text, and the per-run log is
+//! written from a finished response), and `style` and `update` are the two
+//! subcommands.
 
 const std = @import("std");
 const Io = std.Io;
 const builtin = @import("builtin");
 
 const build_options = @import("build_options");
+const budget_mod = @import("budget.zig");
 const chat_mod = @import("chat.zig");
 const net = @import("net.zig");
+const retry_mod = @import("retry.zig");
 const session_mod = @import("session.zig");
 const style_mod = @import("style.zig");
 const tool_mod = @import("tool.zig");
@@ -931,79 +936,6 @@ fn resolveStyle(
     return unknown;
 }
 
-/// The run's time budget as an instant on the monotonic clock the loop already
-/// reads. Every part of a turn asks this, not just the top of the loop: a
-/// provider that is slow rather than broken hands the loop one long turn, and a
-/// budget only checked between turns is a budget that provider ignores, which
-/// is the run being killed in the middle of the turn the budget exists to avoid.
-const Budget = struct {
-    /// Nanoseconds on the awake clock, or null when no budget was set.
-    deadline_ns: ?i96 = null,
-
-    fn of(started_ns: i96, seconds: ?u64) Budget {
-        const s = seconds orelse return .{};
-        return .{ .deadline_ns = started_ns + @as(i96, s) * std.time.ns_per_s };
-    }
-
-    fn expired(self: Budget, io: Io) bool {
-        const d = self.deadline_ns orelse return false;
-        return Io.Timestamp.now(io, .awake).nanoseconds >= d;
-    }
-
-    /// Milliseconds left on the budget, or null when there is no budget. Zero
-    /// means expired; callers that only care about that use `expired`.
-    fn remainingMs(self: Budget, io: Io) ?u64 {
-        const d = self.deadline_ns orelse return null;
-        const now = Io.Timestamp.now(io, .awake).nanoseconds;
-        if (now >= d) return 0;
-        return @intCast(@divTrunc(d - now, std.time.ns_per_ms));
-    }
-
-    /// The ceiling a tool's own deadline may not pass, or null when the run
-    /// set no budget. The floor stops a nearly-spent budget from handing a tool
-    /// a zero timeout, which fails instantly and reads as a broken tool rather
-    /// than a spent budget.
-    fn toolCeilingMs(self: Budget, io: Io) ?u64 {
-        const left = self.remainingMs(io) orelse return null;
-        return @max(left, tool_timeout_floor_ms);
-    }
-
-    /// Whether this run can afford to wait `want_ms` before its next attempt,
-    /// and how long it may wait. Null means it cannot, and the caller must not
-    /// make the attempt: a retry taken after a refusal the provider is still
-    /// refusing is a second billable refusal, and one taken by sitting out the
-    /// wait is a turn that never arrives.
-    ///
-    /// A provider asking for two minutes is weather and sitting it out is the
-    /// right answer to it. Sitting it out inside a caller's per-review timeout
-    /// is not: the run is killed mid-sleep with nothing to show for it, which
-    /// is the one thing the budget exists to prevent. So the wait is taken only
-    /// when the budget covers it.
-    fn affordableWaitMs(self: Budget, io: Io, want_ms: u64) ?u64 {
-        const left = self.remainingMs(io) orelse return want_ms;
-        if (want_ms >= left) return null;
-        return want_ms;
-    }
-
-    /// The same budget with `seconds` more to run. The final push is the one
-    /// turn that is allowed past the budget, and the grace is what keeps that
-    /// turn bounded too: it lands or it is cut off with a reason, never left
-    /// waiting on a provider that stopped answering.
-    fn withGraceNs(self: Budget, seconds: u64) Budget {
-        const d = self.deadline_ns orelse return self;
-        return .{ .deadline_ns = d + @as(i96, seconds) * std.time.ns_per_s };
-    }
-};
-
-/// How long the final turn may run past the budget. It exists to turn what the
-/// model has already read into one edit, which is a few tool calls, not a
-/// fresh investigation.
-const final_push_grace_s: u64 = 300;
-
-/// The shortest a tool timeout may be cut to, even with the budget spent: a
-/// zero timeout would fail before the tool could even start.
-const tool_timeout_floor_ms: u64 = 5_000;
-
 /// The agent loop: keep asking until the model stops calling tools.
 fn run(
     client: *std.http.Client,
@@ -1015,7 +947,7 @@ fn run(
     tool_env: *const std.process.Environ.Map,
 ) !void {
     const started = Io.Timestamp.now(io, .awake).nanoseconds;
-    const budget = Budget.of(started, opts.budget_s);
+    const budget = budget_mod.Budget.of(started, opts.budget_s);
     var session: ?session_mod.Session = session_mod.open(io, arena, opts.session_dir, opts.model);
     defer session_mod.close(io, &session);
     // What one turn allocates from the wire down -- the request body (a full
@@ -1039,7 +971,7 @@ fn run(
             // with a small diff, and the model has already done the reading.
             net.note(io, arena, "microagent: budget of {d}s reached after {d} turn(s); one final turn\n", .{ opts.budget_s.?, turn });
             try appendMessage(gpa, msgs, "user", final_push);
-            _ = try runTurn(client, io, turn_arena, gpa, opts, msgs, &session, &usage, budget.withGraceNs(final_push_grace_s), tool_env);
+            _ = try runTurn(client, io, turn_arena, gpa, opts, msgs, &session, &usage, budget.withGraceNs(budget_mod.final_push_grace_s), tool_env);
             return;
         }
         // The ceiling is announced on the turn it applies to, before it is
@@ -1067,7 +999,7 @@ fn runTurn(
     msgs: *std.ArrayList(u8),
     session: *?session_mod.Session,
     usage: *chat_mod.Usage,
-    budget: Budget,
+    budget: budget_mod.Budget,
     tool_env: *const std.process.Environ.Map,
 ) !bool {
     const body = try buildBody(arena, opts, msgs.items);
@@ -1132,7 +1064,7 @@ fn streamChat(
     arena: std.mem.Allocator,
     opts: Options,
     body: []const u8,
-    budget: Budget,
+    budget: budget_mod.Budget,
 ) !chat_mod.ChatResult {
     const url = try std.fmt.allocPrint(arena, "{s}/chat/completions", .{std.mem.trimEnd(u8, opts.base_url, "/")});
     const uri = std.Uri.parse(url) catch return error.InvalidUrl;
@@ -1179,23 +1111,23 @@ fn streamChat(
                 .{ .name = "accept", .value = "text/event-stream" },
             },
         }) catch |err| {
-            if (worthAnotherAttempt(.opened) and waitBeforeRetry(io, arena, shown_url, attempt, "opening the request to", err, budget)) continue;
+            if (retry_mod.worthAnotherAttempt(.opened) and retry_mod.waitBeforeRetry(io, arena, shown_url, attempt, "opening the request to", err, budget)) continue;
             return err;
         };
         req_slot = req;
         var open = &req_slot.?;
         open.transfer_encoding = .{ .content_length = body.len };
         open.sendBodyComplete(@constCast(body)) catch |err| {
-            if (worthAnotherAttempt(.sending) and waitBeforeRetry(io, arena, shown_url, attempt, "sending the request body to", err, budget)) continue;
+            if (retry_mod.worthAnotherAttempt(.sending) and retry_mod.waitBeforeRetry(io, arena, shown_url, attempt, "sending the request body to", err, budget)) continue;
             return err;
         };
         if (debug_enabled) std.debug.print("[mdebug] request sent, body={d} bytes\n", .{body.len});
 
         var response = open.receiveHead(&redirect_buffer) catch |err| {
-            // `worthAnotherAttempt` is what says a head is not worth another
+            // `retry_mod.worthAnotherAttempt` is what says a head is not worth another
             // one; this is the operator's half of that, so a run that lost a
             // billable turn says so rather than reporting a connection fault.
-            if (!worthAnotherAttempt(.head))
+            if (!retry_mod.worthAnotherAttempt(.head))
                 net.note(io, arena, "microagent: the request to {s} was sent in full and its response never arrived ({s}); it is not sent again, because a second POST of one turn is a second billable completion\n", .{
                     shown_url, @errorName(err),
                 });
@@ -1203,20 +1135,20 @@ fn streamChat(
         };
         if (debug_enabled) std.debug.print("[mdebug] head status={d} enc={s}\n", .{ @intFromEnum(response.head.status), @tagName(response.head.content_encoding) });
         if (response.head.status != .ok) {
-            if (retryableStatus(response.head.status) and attempt < max_attempts) {
+            if (retry_mod.retryableStatus(response.head.status) and attempt < retry_mod.max_attempts) {
                 // A rate limit carries the wait the provider wants, and its own
                 // backoff is the wrong one to spend: this run's schedule is 1 s,
                 // 2 s, 4 s, and a provider that says "come back in 30" is still
                 // refusing at second 4, so each retry is a second billable
                 // refusal. The header wins where it is a number this run is
                 // willing to wait, and the schedule stands where it is not.
-                const asked = retryAfterMs(response.head.bytes);
-                const wait = asked orelse backoffMs(attempt);
+                const asked = retry_mod.retryAfterMs(response.head.bytes);
+                const wait = asked orelse retry_mod.backoffMs(attempt);
                 if (budget.affordableWaitMs(io, wait)) |affordable| {
                     net.note(io, arena, "microagent: {s} answered HTTP {d}, retrying in {d}ms (attempt {d}/{d})\n", .{
-                        shown_url, @intFromEnum(response.head.status), affordable, attempt + 1, max_attempts,
+                        shown_url, @intFromEnum(response.head.status), affordable, attempt + 1, retry_mod.max_attempts,
                     });
-                    waitMs(io, affordable) catch {};
+                    retry_mod.waitMs(io, affordable) catch {};
                     continue;
                 }
                 // The provider asked for longer than this run has left. Waiting
@@ -1853,7 +1785,7 @@ fn finishTurn(
     msgs: *std.ArrayList(u8),
     result: *chat_mod.ChatResult,
     usage: *chat_mod.Usage,
-    budget: Budget,
+    budget: budget_mod.Budget,
     tool_env: *const std.process.Environ.Map,
 ) !void {
     try msgs.appendSlice(gpa, ",");
@@ -1949,118 +1881,12 @@ fn appendMessage(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), role: []const
     try msgs.appendSlice(gpa, buf.items());
 }
 
-const max_attempts: u32 = 3;
-const retry_backoff_base_ms: u64 = 1000;
-const max_backoff_ms: u64 = 60_000;
-/// Enough doublings to reach the cap; the cap is what bounds the wait.
-const max_backoff_shift: u32 = 6;
-
-/// Statuses worth another attempt: the provider is busy, not the request wrong.
-/// A provider that answered has not generated the completion, so the turn
-/// behind this request is unbilled and sending it again costs nothing twice.
-fn retryableStatus(status: std.http.Status) bool {
-    return switch (@intFromEnum(status)) {
-        408, 409, 425, 429 => true,
-        else => @intFromEnum(status) >= 500,
-    };
-}
-
-/// How far one attempt got with the request before it failed.
-const request_stage = enum {
-    /// Nothing of the request reached the wire.
-    opened,
-    /// The body is partly on the wire, so the provider cannot have parsed a
-    /// turn out of it yet.
-    sending,
-    /// Every byte of the turn is on the wire and the provider has had it since.
-    head,
-};
-
-/// Whether a failure at this stage is worth sending the turn again.
-///
-/// Only the head is not. The provider read the whole request, so a connection
-/// that died before the response arrived may have generated and billed the
-/// completion anyway, and a second POST of the same conversation is a second
-/// billable completion for one turn. Losing that turn is the cheaper failure,
-/// so the run ends on the error and the operator is told it was not resent.
-/// An idempotency key would settle it, and the OpenAI-shaped completions API
-/// this speaks takes none, so the request cannot be made safe to send twice.
-fn worthAnotherAttempt(stage: request_stage) bool {
-    return stage != .head;
-}
-
-/// Names the endpoint and the step that failed, then sleeps before the next
-/// attempt. False means attempts are spent and the caller should surface the
-/// error. A retried request says so: without this line a provider that refuses
-/// two requests in a row and answers the third is a run that merely took
-/// longer, and nothing on the operator's screen explains the gap. Only the
-/// steps that fail before the request is on the wire come through here; one
-/// that fails after is not retried at all, for the reason the head branch in
-/// `streamChat` gives.
-fn waitBeforeRetry(io: Io, arena: std.mem.Allocator, url: []const u8, attempt: u32, what: []const u8, err: anyerror, budget: Budget) bool {
-    if (attempt >= max_attempts) return false;
-    const wait = budget.affordableWaitMs(io, backoffMs(attempt)) orelse {
-        net.note(io, arena, "microagent: {s} {s} failed ({s}), and the {d}ms before another attempt would pass the run's budget; this one is the last\n", .{
-            what, url, @errorName(err), backoffMs(attempt),
-        });
-        return false;
-    };
-    net.note(io, arena, "microagent: {s} {s} failed ({s}), retrying (attempt {d}/{d})\n", .{
-        what, url, @errorName(err), attempt + 1, max_attempts,
-    });
-    waitMs(io, wait) catch {};
-    return true;
-}
-
-/// Backoff before the next attempt: 1 s, 2 s, 4 s, capped. Saturating, because
-/// the shift and the multiply both overflow long before a u32 attempt counter
-/// does, and a checked build panicking where a release build wraps is not a
-/// property to want in a sleep.
-fn backoffMs(attempt: u32) u64 {
-    if (attempt == 0) return retry_backoff_base_ms;
-    const shift: u6 = @intCast(@min(attempt - 1, max_backoff_shift));
-    return @min(retry_backoff_base_ms *| (@as(u64, 1) << shift), max_backoff_ms);
-}
-
-fn waitFor(io: Io, attempt: u32) !void {
-    try waitMs(io, backoffMs(attempt));
-}
-
-fn waitMs(io: Io, ms: u64) !void {
-    try io.sleep(.{ .nanoseconds = ms *| std.time.ns_per_ms }, .awake);
-}
-
-/// The longest `Retry-After` this run will sit out. A provider asking for an
-/// hour is not a provider to wait an hour for, and the schedule behind it
-/// bounds the wait instead.
-const max_retry_after_ms: u64 = 120_000;
-
-/// The wait a 429 or 503 asks for, in milliseconds, or null when the header is
-/// absent or is not one this run will wait.
-///
-/// Only the delta-seconds form is read. The HTTP-date form is what a provider
-/// sends when it computes a deadline against a clock, and the run has no
-/// second clock to check it against; a header this cannot read falls back to
-/// the backoff schedule rather than being guessed at.
-fn retryAfterMs(head_bytes: []const u8) ?u64 {
-    var lines = std.mem.splitSequence(u8, head_bytes, "\r\n");
-    _ = lines.next(); // the status line
-    while (lines.next()) |line| {
-        if (line.len == 0) break;
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
-        if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, line[0..colon], " \t"), "retry-after")) continue;
-        const raw = std.mem.trim(u8, line[colon + 1 ..], " \t");
-        const seconds = std.fmt.parseInt(u64, raw, 10) catch return null;
-        const ms = std.math.mul(u64, seconds, std.time.ms_per_s) catch return null;
-        return @min(ms, max_retry_after_ms);
-    }
-    return null;
-}
-
 // A file's tests are collected only when the root file's test block imports
 // it, so the `update` subcommand's tests, the style levels' tests and the
 // session log's tests are pulled in here.
 test {
+    _ = budget_mod;
+    _ = retry_mod;
     _ = session_mod;
     _ = style_mod;
     _ = update_mod;
@@ -3313,36 +3139,6 @@ test "the api key is sent as the request's authorization header" {
     }
 }
 
-test "a tool timeout is cut to what is left of the budget" {
-    const io = std.testing.io;
-    const now = Io.Timestamp.now(io, .awake).nanoseconds;
-
-    // No budget: every tool keeps the timeout it asked for, so there is no
-    // ceiling to hand one.
-    try std.testing.expectEqual(@as(?u64, null), (Budget{}).remainingMs(io));
-    try std.testing.expectEqual(@as(?u64, null), (Budget{}).toolCeilingMs(io));
-
-    // Ten minutes of budget left: a shorter request is untouched, a longer one
-    // is cut, because it cannot finish before the deadline it would cross. The
-    // ceiling is the only thing a tool's own timeout is measured against, so it
-    // is the only thing asserted here; the min is `boundedMs`'s, and that it
-    // does the min is the tool's own test.
-    const fresh = Budget.of(now, 600);
-    const left = fresh.toolCeilingMs(io).?;
-    try std.testing.expect(left <= 600_000 and left > 599_000);
-
-    // Nearly spent: the floor, but never zero, which would fail before the tool
-    // started and read as a broken tool rather than a spent budget.
-    const nearly = Budget{ .deadline_ns = now + 2 * std.time.ns_per_s };
-    try std.testing.expectEqual(tool_timeout_floor_ms, nearly.toolCeilingMs(io).?);
-
-    // Spent: remaining is zero, and the ceiling still leaves the floor.
-    const spent = Budget{ .deadline_ns = now - 1 };
-    try std.testing.expectEqual(@as(u64, 0), spent.remainingMs(io).?);
-    try std.testing.expectEqual(tool_timeout_floor_ms, spent.toolCeilingMs(io).?);
-    try std.testing.expect(spent.expired(io));
-}
-
 test "a CA bundle path that cannot be read falls back to the system store" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
@@ -3379,26 +3175,6 @@ test "reasoning effort is only sent when asked for" {
     const none: Options = .{ .model = "m", .reasoning_effort = "none" };
     const body_none = try buildBody(gpa, none, msgs.items);
     try std.testing.expect(std.mem.indexOf(u8, body_none, "\"reasoning\":{\"enabled\":false}") != null);
-}
-
-test "only weather-shaped statuses are retried" {
-    try std.testing.expect(retryableStatus(.too_many_requests));
-    try std.testing.expect(retryableStatus(.bad_gateway));
-    try std.testing.expect(retryableStatus(.service_unavailable));
-    try std.testing.expect(!retryableStatus(.bad_request));
-    try std.testing.expect(!retryableStatus(.unauthorized));
-    try std.testing.expect(!retryableStatus(.not_found));
-}
-
-// The provider reading a whole request is the point at which the turn behind
-// it may already have been generated and billed. Resending it buys a second
-// billable completion for one turn, so a lost head ends the run instead, while
-// the two failures that happen before the request is readable on the far end
-// are the provider's weather and are still retried.
-test "a turn is resent only while the provider cannot have read it" {
-    try std.testing.expect(worthAnotherAttempt(.opened));
-    try std.testing.expect(worthAnotherAttempt(.sending));
-    try std.testing.expect(!worthAnotherAttempt(.head));
 }
 
 // A stream that ends without the provider's terminator is a dropped
@@ -3550,101 +3326,6 @@ test "a saturated token count does not overflow the run total" {
     usage.add(&ordinary);
     try std.testing.expectEqual(std.math.maxInt(u64), usage.prompt);
     try std.testing.expectEqual(std.math.maxInt(u64), usage.total);
-}
-
-test "backoff doubles, caps, and never overflows an attempt counter" {
-    try std.testing.expectEqual(@as(u64, 1000), backoffMs(0));
-    try std.testing.expectEqual(@as(u64, 1000), backoffMs(1));
-    try std.testing.expectEqual(@as(u64, 2000), backoffMs(2));
-    try std.testing.expectEqual(@as(u64, 4000), backoffMs(3));
-    try std.testing.expectEqual(max_backoff_ms, backoffMs(1000));
-}
-
-// A rate limit names the wait it wants. Retrying on this run's own 1 s/2 s/4 s
-// schedule instead is a second, third and fourth refusal from a provider that
-// asked for thirty seconds, and every one of them is billed as a request.
-// A provider that asks for longer than the run has left is weather the run
-// cannot wait out: sleeping the full ask puts it to bed inside the caller's
-// timeout, which is what --budget exists to stop, and retrying early is the
-// second billable refusal the header was there to prevent. So the decision is
-// the budget's.
-//
-// The two ends only, because std.testing.io's clock does not advance and a
-// deadline between them is arithmetic that needs a real one.
-test "a wait the budget cannot cover is not taken" {
-    // No budget: every wait is affordable, which is the behaviour for a run
-    // nobody put a ceiling on. This is the two-minute ask and the run's own
-    // schedule, and both are taken exactly as before.
-    const unbounded: Budget = .{};
-    try std.testing.expectEqual(@as(?u64, max_retry_after_ms), unbounded.affordableWaitMs(std.testing.io, max_retry_after_ms));
-    try std.testing.expectEqual(@as(?u64, backoffMs(2)), unbounded.affordableWaitMs(std.testing.io, backoffMs(2)));
-
-    // Spent: nothing is affordable, not even a millisecond, so no attempt is
-    // made and the run ends with the reason already on stderr.
-    const spent: Budget = .{ .deadline_ns = 0 };
-    try std.testing.expectEqual(@as(?u64, null), spent.affordableWaitMs(std.testing.io, 1));
-    try std.testing.expectEqual(@as(?u64, null), spent.affordableWaitMs(std.testing.io, backoffMs(0)));
-    try std.testing.expectEqual(@as(?u64, null), spent.affordableWaitMs(std.testing.io, max_retry_after_ms));
-}
-
-test "a Retry-After header sets the wait, and only a wait worth taking" {
-    const head =
-        "HTTP/1.1 429 Too Many Requests\r\n" ++
-        "content-type: application/json\r\n" ++
-        "retry-after: 30\r\n" ++
-        "content-length: 0\r\n\r\n";
-    try std.testing.expectEqual(@as(?u64, 30_000), retryAfterMs(head));
-
-    // The header's name is case-insensitive, and the value carries the spaces
-    // a real server puts around it.
-    const sloppy = "HTTP/1.1 503 Service Unavailable\r\nRetry-After:   7  \r\n\r\n";
-    try std.testing.expectEqual(@as(?u64, 7000), retryAfterMs(sloppy));
-
-    // A wait longer than this run will sit out falls back to the schedule
-    // rather than stalling the turn for an hour.
-    const forever = "HTTP/1.1 429 Too Many Requests\r\nretry-after: 3600\r\n\r\n";
-    try std.testing.expectEqual(@as(?u64, max_retry_after_ms), retryAfterMs(forever));
-
-    // Absent, and the forms this run cannot read, are all the backoff's
-    // business rather than a guess.
-    try std.testing.expectEqual(@as(?u64, null), retryAfterMs("HTTP/1.1 429 Too Many Requests\r\ncontent-length: 0\r\n\r\n"));
-    try std.testing.expectEqual(@as(?u64, null), retryAfterMs("HTTP/1.1 429 Too Many Requests\r\nretry-after: Wed, 21 Oct 2026 07:28:00 GMT\r\n\r\n"));
-    try std.testing.expectEqual(@as(?u64, null), retryAfterMs("HTTP/1.1 429 Too Many Requests\r\nretry-after: soon\r\n\r\n"));
-    // A count past what the multiply holds is a header this cannot read, not a
-    // wrap into a short wait.
-    try std.testing.expectEqual(@as(?u64, null), retryAfterMs("HTTP/1.1 429 Too Many Requests\r\nretry-after: 99999999999999999999\r\n\r\n"));
-}
-
-// The budget is a deadline, not a turn counter. Checked only at the top of the
-// loop, a provider that is slow rather than broken hands the run one long turn
-// and the budget is never asked again, which is the run being killed in the
-// middle of the turn the budget exists to avoid.
-test "the time budget is a deadline the turn itself is held to" {
-    const io = std.testing.io;
-    const now = Io.Timestamp.now(io, .awake).nanoseconds;
-
-    // No budget set is a budget that never runs out, at any point in a turn.
-    const none = Budget.of(now, null);
-    try std.testing.expect(!none.expired(io));
-
-    const short = Budget.of(now, 1);
-    try std.testing.expect(!short.expired(io));
-
-    // A deadline already in the past is spent, wherever it is read.
-    const spent = Budget.of(now, 0);
-    try std.testing.expect(spent.expired(io));
-    const long_gone = Budget.of(now - std.time.ns_per_s * 10, 1);
-    try std.testing.expect(long_gone.expired(io));
-
-    // The final push is the one turn allowed past the budget, and the grace is
-    // what keeps that turn bounded too: the grace moves the deadline later, so
-    // the push is not already over before it starts.
-    const push = short.withGraceNs(final_push_grace_s);
-    try std.testing.expect(!push.expired(io));
-    const push_later = spent.withGraceNs(final_push_grace_s);
-    try std.testing.expect(!push_later.expired(io));
-    // Grace on a run with no budget is still no budget.
-    try std.testing.expect(!none.withGraceNs(final_push_grace_s).expired(io));
 }
 
 // A generation the provider cut at `max_tokens` arrives with a clean
