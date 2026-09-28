@@ -310,29 +310,38 @@ pub fn runTool(io: Io, arena: std.mem.Allocator, call: chat.ToolCall, ceiling_ms
     return std.fmt.allocPrint(arena, "error: unknown tool '{s}'", .{call.name});
 }
 
+/// The gutter line, without the stream it is written to, so the one-line shape
+/// is a value a test can hold rather than a stream it has to capture. Every
+/// field is bounded, so the line fits a buffer of this length whatever the
+/// model sent: the marker, the name, one space, the detail and the newline.
+const gutter_line_max = 5 + 40 + 1 + 120 + 1;
+
 /// A one-line tool gutter on stderr, the shape gauntlet recognizes. The name
 /// and the detail are the provider's own text and may carry a newline or an
 /// escape sequence, either of which breaks the one-line-per-call shape a reader
 /// parses, so control characters are written as their two-character escapes.
 fn noteToolCall(io: Io, arena: std.mem.Allocator, name: []const u8, args: std.json.ObjectMap) void {
+    var buf: [gutter_line_max]u8 = undefined;
+    net.writeErr(io, toolCallLine(arena, &buf, name, args) catch return);
+}
+
+fn toolCallLine(arena: std.mem.Allocator, buf: []u8, name: []const u8, args: std.json.ObjectMap) ![]const u8 {
     // The interesting argument is not the same one for every tool: a structural
     // search is identified by its pattern, a bash call by its command.
     const detail = if (std.mem.eql(u8, name, "ast"))
         (chat.str(args.get("pattern")) orelse "")
     else
         (chat.str(args.get("command")) orelse chat.str(args.get("pattern")) orelse chat.str(args.get("path")) orelse "");
-    var buf: std.ArrayList(u8) = .empty;
-    buf.appendSlice(arena, "\u{23fa} ") catch return;
     // One spelling of "text the operator can be shown", shared with the
     // diagnostics: cut on a codepoint boundary, controls as `\xNN`, and a byte
     // that is not text as U+FFFD. A tool argument is whatever the model decided
     // to send, and the model decides that from files in the tree, so the gutter
     // line is a boundary like any other.
-    buf.appendSlice(arena, chat.safeText(arena, name, 40)) catch return;
-    buf.append(arena, ' ') catch return;
-    buf.appendSlice(arena, chat.safeText(arena, detail, 120)) catch return;
-    buf.append(arena, '\n') catch return;
-    net.writeErr(io, buf.items);
+    return std.fmt.bufPrint(
+        buf,
+        "\u{23fa} {s} {s}\n",
+        .{ chat.safeText(arena, name, 40), chat.safeText(arena, detail, 120) },
+    );
 }
 
 /// Bytes a terminal acts on rather than prints: the C0 controls, DEL, and the
@@ -1040,12 +1049,53 @@ test "the tool gutter stays one line whatever the model sent" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
+    var buf: [gutter_line_max]u8 = undefined;
 
-    var buf: std.ArrayList(u8) = .empty;
-    const text = chat.safeText(arena, "rg -n 'foo'\nnext line\u{1b}[31mred\xff", 120);
-    try buf.appendSlice(arena, text);
-    try std.testing.expectEqualStrings("rg -n 'foo'\\x0anext line\\x1b[31mred\u{fffd}", buf.items);
-    try std.testing.expect(std.mem.indexOfScalar(u8, buf.items, '\n') == null);
+    // The line the gutter writes, marker and newline included, with the
+    // control characters a command from the model can carry shown as their
+    // escapes. A gutter that dropped the marker, or ended without the newline
+    // the reader splits on, still read as one line here.
+    var args: std.json.ObjectMap = .empty;
+    try args.put(arena, "command", .{ .string = "rg -n 'foo'\nnext line\u{1b}[31mred\xff" });
+    try std.testing.expectEqualStrings(
+        "\u{23fa} bash rg -n 'foo'\\x0anext line\\x1b[31mred\u{fffd}\n",
+        try toolCallLine(arena, &buf, "bash", args),
+    );
+
+    // The argument named depends on the tool, and an argument that is not text
+    // is not printed as one.
+    const cases = [_]struct { name: []const u8, key: []const u8, detail: []const u8 }{
+        .{ .name = "ast", .key = "pattern", .detail = "fn main" },
+        .{ .name = "search", .key = "pattern", .detail = "TODO" },
+        .{ .name = "read", .key = "path", .detail = "src/main.zig" },
+        .{ .name = "bash", .key = "command", .detail = "ls -la" },
+    };
+    for (cases) |c| {
+        var one: std.json.ObjectMap = .empty;
+        try one.put(arena, c.key, .{ .string = c.detail });
+        try std.testing.expectEqualStrings(
+            try std.fmt.allocPrint(arena, "\u{23fa} {s} {s}\n", .{ c.name, c.detail }),
+            try toolCallLine(arena, &buf, c.name, one),
+        );
+
+        // A number where the name is would have been read as the detail, and
+        // the line says the tool with nothing after it instead.
+        var numbered: std.json.ObjectMap = .empty;
+        try numbered.put(arena, c.key, .{ .integer = 7 });
+        try std.testing.expectEqualStrings(
+            try std.fmt.allocPrint(arena, "\u{23fa} {s} \n", .{c.name}),
+            try toolCallLine(arena, &buf, c.name, numbered),
+        );
+    }
+
+    // A name and a detail longer than their budgets are cut, on a code point
+    // boundary, and the line still ends exactly once.
+    var long_args: std.json.ObjectMap = .empty;
+    try long_args.put(arena, "command", .{ .string = "日" ** 300 });
+    const long_line = try toolCallLine(arena, &buf, "search" ** 10, long_args);
+    try std.testing.expect(long_line.len <= gutter_line_max);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(long_line));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, long_line, "\n"));
 }
 
 test "a capped tool result says how much was dropped" {

@@ -3755,6 +3755,38 @@ test "the env levels override the config file's, and a bad one is named" {
     try std.testing.expect(typo.from_config);
     try std.testing.expect(!typo.bad_value);
     try std.testing.expectEqual(style_mod.CavemanLevel.lite, style.caveman);
+
+    // Every level a config key may name, a variable may name too, because both
+    // are read by the same parser. A level that reached one and not the other
+    // is a spelling a wrapper exporting the variable cannot set, and the two
+    // disagreeing is only visible where both paths are, which is here.
+    for (std.enums.values(style_mod.CavemanLevel)) |level| {
+        var from_env: style_mod.Style = .{};
+        try std.testing.expect(resolveStyle(&from_env, null, level.name(), null) == null);
+        try std.testing.expectEqual(level, from_env.caveman);
+
+        var cfg_buf: [96]u8 = undefined;
+        const cfg = try std.fmt.bufPrint(&cfg_buf, "caveman = \"{s}\"\n", .{level.name()});
+        var from_file: style_mod.Style = .{};
+        try std.testing.expect(resolveStyle(&from_file, cfg, null, null) == null);
+        try std.testing.expectEqual(level, from_file.caveman);
+    }
+    for (std.enums.values(style_mod.PonytailLevel)) |level| {
+        var from_env: style_mod.Style = .{};
+        try std.testing.expect(resolveStyle(&from_env, null, null, level.name()) == null);
+        try std.testing.expectEqual(level, from_env.ponytail);
+
+        var cfg_buf: [96]u8 = undefined;
+        const cfg = try std.fmt.bufPrint(&cfg_buf, "ponytail = \"{s}\"\n", .{level.name()});
+        var from_file: style_mod.Style = .{};
+        try std.testing.expect(resolveStyle(&from_file, cfg, null, null) == null);
+        try std.testing.expectEqual(level, from_file.ponytail);
+    }
+    // The bare `wenyan` shorthand is a config spelling, and the environment
+    // reads the same table, so it answers there too.
+    var shorthand: style_mod.Style = .{};
+    try std.testing.expect(resolveStyle(&shorthand, null, "wenyan", null) == null);
+    try std.testing.expectEqual(style_mod.CavemanLevel.wenyan_full, shorthand.caveman);
 }
 
 test "an environment variable set to nothing is not a value" {

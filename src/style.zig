@@ -384,16 +384,6 @@ test "the config reads either root or [style] keys, and nothing else" {
     try std.testing.expect(empty.bad_value);
 }
 
-test "the levels the environment accepts are the levels the config accepts" {
-    // The variables name a level, not a file, so what a var may say is what a
-    // key may say. Precedence between the two is main's business.
-    try std.testing.expectEqual(CavemanLevel.off, parseCaveman("off").?);
-    try std.testing.expectEqual(CavemanLevel.wenyan_full, parseCaveman("wenyan").?);
-    try std.testing.expect(parseCaveman("brief") == null);
-    try std.testing.expectEqual(PonytailLevel.ultra, parsePonytail("ultra").?);
-    try std.testing.expect(parsePonytail("review") == null);
-}
-
 test "the wenyan levels ask for classical Chinese" {
     const gpa = std.testing.allocator;
     const block = try (Style{ .caveman = .wenyan_full, .ponytail = .off }).ruleset(gpa);
@@ -409,8 +399,22 @@ test "the longest ruleset carries both blocks in full" {
     const gpa = std.testing.allocator;
     const block = try (Style{ .caveman = .wenyan_ultra, .ponytail = .ultra }).ruleset(gpa);
     defer gpa.free(block);
-    try std.testing.expect(std.mem.indexOf(u8, block, "level: wenyan-ultra") != null);
-    try std.testing.expect(std.mem.indexOf(u8, block, "level: ultra") != null);
+    // Every fragment each block is assembled from, in the order they are
+    // joined. A fragment dropped here, or a wenyan level that stopped adding
+    // its one line, leaves a rule the operator asked for that the model never
+    // reads, and a level header on its own is the one case that still passes a
+    // check for the header.
+    const want = try std.mem.concat(gpa, u8, &.{
+        "CAVEMAN MODE ACTIVE - level: wenyan-ultra\n",
+        wenyan_line,
+        cavemanBody(.wenyan_ultra),
+        caveman_shared,
+        "\nPONYTAIL MODE ACTIVE - level: ultra\n",
+        ponytailBody(.ultra),
+        ponytail_shared,
+    });
+    defer gpa.free(want);
+    try std.testing.expectEqualStrings(want, block);
 }
 
 // The config file is the one input the tree hands the binary that nobody in

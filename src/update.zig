@@ -955,6 +955,26 @@ test "update: checksum line is the published hex, two spaces, and the basename" 
     try std.testing.expect(!checksumMatches("abc", sidecar, "other"));
     const one_space = abc_sha ++ " " ++ asset_base;
     try std.testing.expect(!checksumMatches("abc", one_space, asset_base));
+
+    // A sidecar written on a host that ends its lines in CRLF still names the
+    // file, and so does one with no line ending at all.
+    try std.testing.expect(checksumMatches("abc", abc_sha ++ "  " ++ asset_base ++ "\r\n", asset_base));
+    try std.testing.expect(checksumMatches("abc", abc_sha ++ "  " ++ asset_base, asset_base));
+
+    // The digest is read as hex, so a file written by a tool that uppercases it
+    // is still the digest the bytes hash to.
+    var upper: [abc_sha.len]u8 = undefined;
+    for (abc_sha, 0..) |c, i| upper[i] = std.ascii.toUpper(c);
+    try std.testing.expect(checksumMatches("abc", upper ++ "  " ++ asset_base ++ "\n", asset_base));
+
+    // Anything after the basename is not the name this run asked for, and a
+    // line too short to hold a digest and a name is not a line at all.
+    try std.testing.expect(!checksumMatches("abc", abc_sha ++ "  " ++ asset_base ++ " extra\n", asset_base));
+    try std.testing.expect(!checksumMatches("abc", abc_sha ++ asset_base ++ "\n", asset_base));
+    try std.testing.expect(!checksumMatches("abc", "", asset_base));
+    // A name that is a prefix of the one published is a different file.
+    try std.testing.expect(!checksumMatches("abc", sidecar, asset_base[0 .. asset_base.len - 1]));
+    try std.testing.expect(!checksumMatches("abc", sidecar, "x" ++ asset_base));
 }
 
 test "update: fixture release picks the named asset" {
