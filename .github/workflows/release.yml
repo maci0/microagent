@@ -42,14 +42,15 @@ jobs:
       # published under the same ruff and yamllint a push was refused by.
       - uses: ./.github/actions/setup-linters
 
-      - name: tag names the build.zig.zon version
-        run: |
-          set -euo pipefail
-          version="$(make version)"
-          if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
-            echo "tag ${GITHUB_REF_NAME} does not name build.zig.zon version v${version}" >&2
-            exit 1
-          fi
+      # What the tag has to satisfy before anything is built: it names the
+      # version build.zig.zon declares, nothing is left stranded under
+      # [Unreleased] for the tag to drop, and the section it names is one the
+      # 0.y policy allows. The checks are `make check-release`, the same
+      # targets a laptop runs with `make check-release TAG=v0.2.0` before the
+      # tag exists, so the release note is written against a command rather
+      # than against a workflow nobody can run until they have pushed a tag.
+      - name: the tag names the version, and the changelog satisfies it
+        run: make check-release TAG="$GITHUB_REF_NAME"
 
       # A tag push does not match ci.yml's branch filter, so nothing else has
       # run the gate on this tree by the time these assets are published. The
@@ -79,39 +80,12 @@ jobs:
           set -euo pipefail
           make release-assets
           make checksums
-          # The host-arch asset must be the binary this tag names.
-          got="$("./dist/microagent-${GITHUB_REF_NAME}-x86_64-linux-musl" --version)"
-          test "$got" = "microagent ${GITHUB_REF_NAME#v}"
-          # Every asset is one a consumer's `update` will pick by triple, and only
-          # the host one can be run here, so the other three are checked by the
-          # format their target names. A cross build that produced the wrong
-          # object, or an empty one, used to publish and fail on a user's
-          # machine instead of here. The list is the Makefile's, the same one
-          # `make release-assets` built above, so a target added to the release
-          # is checked here without a second edit to this workflow.
-          check_format() {
-            local asset="$1" want="$2" got
-            got="$(od -An -tx1 -N4 "$asset" | tr -d ' \n')"
-            if [ "$got" != "$want" ]; then
-              echo "${asset} starts with ${got:-nothing}, expected ${want}" >&2
-              exit 1
-            fi
-          }
-          # Read into a variable and refused when empty: an empty list would
-          # leave the loop below unrun and this step green, which is the one
-          # outcome it exists to prevent. The list is the Makefile's, the one
-          # release-assets built from, so a target added there and not here is
-          # covered by this check rather than published unchecked.
-          targets="$(make --no-print-directory release-targets)"
-          test -n "$targets" || { echo "the Makefile names no published targets to check" >&2; exit 1; }
-          for target in $targets; do
-            case "$target" in
-              *-linux-musl) magic=7f454c46 ;;
-              *-macos) magic=cffaedfe ;;
-              *) echo "no expected object format known for ${target}" >&2; exit 1 ;;
-            esac
-            check_format "dist/microagent-${GITHUB_REF_NAME}-${target}" "$magic"
-          done
+          # The host asset is run and every published target is read back for
+          # the object format its name promises, off disk rather than from the
+          # build that wrote it. It is `make check-assets`, the same target a
+          # laptop runs after `make release-assets TAG=v0.2.0`, so a rehearsal
+          # of this release checks what the tag will check.
+          make check-assets
           ls -l dist
 
       # A tag push matches no branch filter in ci.yml, so the release-assets
@@ -124,76 +98,16 @@ jobs:
           REPRO_DIR: ${{ runner.temp }}/microagent-repro
         run: make check-reproducible
 
-      - name: the changelog has an entry for this tag
+      # The section this tag publishes, read out of CHANGELOG.md by
+      # `make check-changelog`, the same target the pre-publish gate ran one
+      # step earlier. It prints the notes and nothing else, so the file the
+      # publish step reads is the section the check just accepted rather than
+      # a second awk over the same file that can disagree with it.
+      - name: the changelog entry this tag publishes
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          awk -v want="$version" '
-            index($0, "## [" want "]") == 1 { inside = 1; next }
-            /^## / { inside = 0 }
-            inside
-          ' CHANGELOG.md > release-notes.md
-          sed -i '/./,$!d' release-notes.md
-          if [ ! -s release-notes.md ]; then
-            echo "CHANGELOG.md has no [${version}] entry, so there are no consumer-facing notes to publish" >&2
-            exit 1
-          fi
+          make --no-print-directory check-changelog VERSION="${GITHUB_REF_NAME#v}" > release-notes.md
           cat release-notes.md
-
-      # A section the tag names is the whole note. Anything still parked under
-      # [Unreleased] would be dropped from the published notes and land in the
-      # next release under a version the consumer never ran, so a tag is
-      # refused while the section is not empty.
-      - name: the changelog has nothing left unreleased
-        run: |
-          set -euo pipefail
-          stranded="$(awk '
-            index($0, "## [Unreleased]") == 1 { inside = 1; next }
-            /^## / { inside = 0 }
-            inside
-          ' CHANGELOG.md | sed '/./,$!d')"
-          if [ -n "$stranded" ]; then
-            echo "CHANGELOG.md still has unreleased entries that tag ${GITHUB_REF_NAME} would drop from the notes:" >&2
-            echo "$stranded" >&2
-            exit 1
-          fi
-
-      # The policy CONTRIBUTING.md and README state is that under 0.y the minor
-      # carries features and anything that changes what a run does by default,
-      # and a patch carries fixes. Nothing else checks that the tag agrees with
-      # the entries it publishes, so a patch tag carrying an `Added`, a
-      # `Changed` or a `Removed` section would ship a feature, a changed
-      # default or a removal under a version whose own number promises it did
-      # not happen.
-      - name: the tag matches the entries it publishes
-        run: |
-          set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          # The changelog reads newest first, so the version this one follows is
-          # the next numbered heading after it, empty when this is the first.
-          prev="$(awk -v want="$version" '
-            /^## \[/ {
-              heading=$0; sub(/^## \[/, "", heading); sub(/\].*/, "", heading)
-              if (heading == want) { found=1; next }
-              if (found && heading ~ /^[0-9]+\.[0-9]+\.[0-9]+$/) { print heading; exit }
-            }
-          ' CHANGELOG.md)"
-          # A patch bump is one that leaves major.minor alone.
-          line_of() { printf '%s\n' "$1" | awk -F. '{ print $1 "." $2 }'; }
-          if [ -n "$prev" ] && [ "$(line_of "$prev")" = "$(line_of "$version")" ] \
-            && [ "$prev" != "$version" ]; then
-            if awk -v want="$version" '
-                index($0, "## [" want "]") == 1 { inside=1; next }
-                /^## / { inside=0 }
-                inside && /^### (Added|Changed|Removed)$/ { found=1 }
-                END { exit found ? 0 : 1 }
-              ' CHANGELOG.md; then
-              echo "tag ${GITHUB_REF_NAME} is a patch over ${prev}, and its section has an Added, a Changed or a Removed entry" >&2
-              echo "under 0.y the minor carries features, anything that changes what a run does by default," >&2
-              echo "and anything taken away: bump the minor in build.zig.zon and CHANGELOG.md, or move those entries out of this section" >&2
-              exit 1
-            fi
-          fi
 
       - name: publish
         env:

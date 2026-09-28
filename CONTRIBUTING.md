@@ -178,14 +178,42 @@ Releases are tags: the release workflow publishes only when the tag names the
 `build.zig.zon` version, that version has a `CHANGELOG.md` entry, and the bump
 matches what the entry says. A patch tag whose section carries an `Added`, a
 `Changed` or a `Removed` entry is refused, because under `0.y` those are what
-the minor carries. The four published binaries and their asset names are spelled
+the minor carries. Those three rules are `make check-release TAG=vX.Y.Z` and
+`make check-changelog`, and release.yml runs those targets rather than its own
+copy of the rules. The four published binaries and their asset names are spelled
 once, in the [Makefile](Makefile), so a release can be built and checksummed on
 a laptop before the tag exists:
 
 ```sh
 make release-assets TAG=v0.2.0   # the four cross-built assets, in dist/
 make checksums                   # the sha256 sidecars `update` verifies
+make check-assets                # the host binary's version, and every asset's object format
 ```
+
+`make check-assets` reads `dist/` back rather than trusting the build that
+wrote it: it runs the host binary and compares its `--version` with the tag
+being built (the `TAG=` above, or the version `build.zig.zon` declares when
+there is none), and checks that each of the four assets starts with the object
+format its target name promises, because a cross build that produced the wrong
+object, or an empty one, publishes green and fails on a user's machine. It is
+the same target `ci.yml` runs over the rehearsal build and `release.yml` runs
+over the tagged one, so the check a laptop runs before a tag is the check the
+tag will run.
+
+The three rules a tag is refused for are commands here rather than shell inside
+`release.yml`, so a release note is written against something runnable:
+
+```sh
+make check-changelog              # the section for the version build.zig.zon declares, and the 0.y policy on it
+make check-changelog VERSION=0.2.1
+make check-release TAG=v0.2.1     # what a tag has to satisfy: the version, and nothing left under [Unreleased]
+```
+
+`make check-changelog` prints the section it checked, which is what a release
+publishes as the notes. `check-release` is the gate as a whole, and it refuses
+an entry still parked under `[Unreleased]`, since the tag would drop it from
+the published notes and land it in the next release under a version nobody ran.
+Run it after the version bump and the entry is written, before the tag is cut.
 
 `make check-reproducible` rebuilds every published target twice, from a cold
 cache and with a different clock, timezone and locale each time, and refuses a

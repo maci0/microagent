@@ -15,7 +15,7 @@ BIN := zig-out/bin/microagent
 export LC_ALL := C
 export TZ := UTC
 
-.PHONY: default help preflight version build small musl test test-one watch fmt fmt-check fmt-python lint lint-versions lint-lock zig-version required-zig-version release-targets check-targets check-reproducible lint-shell lint-python lint-yaml check bench gauntlet instructions overhead install release-assets checksums clean
+.PHONY: default help preflight version build small musl test test-one watch fmt fmt-check fmt-python lint lint-versions lint-lock zig-version required-zig-version release-targets check-targets check-assets check-changelog check-release check-reproducible lint-shell lint-python lint-yaml check bench gauntlet instructions overhead install release-assets checksums clean
 
 # The targets `microagent update` asks for, in the names release.yml publishes.
 # ci.yml rehearses the same list on every push and release.yml publishes it, so
@@ -109,6 +109,9 @@ help:
 	  'release-assets TAG=vX.Y.Z  the same, named as release.yml publishes them' \
 	  'release-targets       the published target triples, one per line' \
 	  'check-targets         every published target is one `update` asks for' \
+	  'check-assets TAG=...  the assets in dist/ are the ones the tag will publish' \
+	  'check-changelog [VERSION=...]  the changelog entry a tag would publish, and the 0.y policy on it' \
+	  'check-release TAG=vX.Y.Z  the tag names build.zig.zon, nothing is stranded unreleased' \
 	  'check-reproducible    every published target rebuilds byte-identical' \
 	  'checksums             sha256 sidecars for dist/ (after a tagged build)' \
 	  'required-zig-version  the zig version build.zig.zon declares' \
@@ -425,6 +428,135 @@ check-targets:
 	  echo "the release publishes no musl asset for it, so the Harbor adapter has nothing to upload" >&2; \
 	  exit 1; \
 	}
+
+# The changelog rules release.yml enforces on the tag, and the 0.y policy
+# CONTRIBUTING.md states, runnable before the tag exists. They were shell inside
+# release.yml, so the policy a contributor writes an entry against could only be
+# checked by pushing a tag: a patch carrying an `Added`, a section left under
+# [Unreleased] that the tag would drop, and a version with no notes at all were
+# all first found by a failed release job rather than by a command. VERSION is
+# the version under test and defaults to the one build.zig.zon declares, so the
+# check a contributor runs while drafting an entry asks the same question the
+# tag will.
+check-changelog:
+	@set -eu; \
+	want="$(VERSION)"; \
+	test -n "$$want" || want="$$($(MAKE) --no-print-directory version)"; \
+	section() { \
+	  awk -v want="$$1" ' \
+	    index($$0, "## [" want "]") == 1 { inside = 1; next } \
+	    /^## / { inside = 0 } \
+	    inside \
+	  ' CHANGELOG.md | sed '/./,$$!d'; \
+	}; \
+	notes="$$(section "$$want")"; \
+	test -n "$$notes" || { \
+	  echo "CHANGELOG.md has no [$$want] entry, so a tag naming it would publish no release notes" >&2; \
+	  echo "add it with the Keep a Changelog sections the file already uses" >&2; \
+	  exit 1; \
+	}; \
+	printf '%s\n' "$$notes"; \
+	prev="$$(awk -v want="$$want" ' \
+	  /^## \[/ { \
+	    heading = $$0; sub(/^## \[/, "", heading); sub(/\].*/, "", heading); \
+	    if (heading == want) { found = 1; next } \
+	    if (found && heading ~ /^[0-9]+\.[0-9]+\.[0-9]+$$/) { print heading; exit } \
+	  } \
+	' CHANGELOG.md)"; \
+	minor_of() { printf '%s\n' "$$1" | awk -F. '{ print $$1 "." $$2 }'; }; \
+	if [ -n "$$prev" ] && [ "$$(minor_of "$$prev")" = "$$(minor_of "$$want")" ] && [ "$$prev" != "$$want" ]; then \
+	  if printf '%s\n' "$$notes" | grep -q '^### \(Added\|Changed\|Removed\)$$'; then \
+	    echo "$$want is a patch over $$prev, and its section has an Added, a Changed or a Removed entry" >&2; \
+	    echo "under 0.y the minor carries features, anything that changes what a run does by default," >&2; \
+	    echo "and anything taken away: bump the minor in build.zig.zon and CHANGELOG.md, or move those entries out" >&2; \
+	    exit 1; \
+	  fi; \
+	fi
+
+# What a tag has to satisfy before release.yml will publish it: it names the
+# version build.zig.zon declares, and nothing is left stranded under
+# [Unreleased], where the tag would drop those entries from the published notes
+# and land them in the next release under a version the consumer never ran. Both
+# are properties of the tree a contributor is about to tag, so both are asked
+# here rather than in the workflow that would refuse the tag. `check-changelog`
+# carries the rest, and this target is the whole of the tag gate.
+check-release:
+	@test -n "$(TAG)" || { printf 'usage: make check-release TAG=vX.Y.Z\n' >&2; exit 2; }; \
+	want="v$$($(MAKE) --no-print-directory version)"; \
+	test "$(TAG)" = "$$want" || { \
+	  echo "tag $(TAG) does not name build.zig.zon version $$want, and release.yml refuses a tag that does not" >&2; \
+	  exit 1; \
+	}; \
+	stranded="$$(awk ' \
+	  index($$0, "## [Unreleased]") == 1 { inside = 1; next } \
+	  /^## / { inside = 0 } \
+	  inside \
+	' CHANGELOG.md | sed '/./,$$!d')"; \
+	test -z "$$stranded" || { \
+	  echo "CHANGELOG.md still has unreleased entries that tag $(TAG) would drop from the published notes:" >&2; \
+	  printf '%s\n' "$$stranded" >&2; \
+	  exit 1; \
+	}; \
+	$(MAKE) --no-print-directory check-changelog VERSION=$(patsubst v%,%,$(TAG))
+
+# The assets in dist/ are the ones the tag will publish, read back off the disk
+# rather than assumed from the build that wrote them. release.yml did this inline
+# over the same files, so a laptop rehearsal of a release checked nothing: only
+# the host binary was run and only its three peers were counted, and a check that
+# exists only in the workflow is a check the contributor who wrote the release
+# note never runs. Every published target is read, because a cross build that
+# produced the wrong object, or an empty one, publishes green and fails on a
+# consumer's machine. TAG is the tag the assets were built under, empty for the
+# rehearsal ci.yml builds on every push; the version each binary reports is the
+# one the tag names, or the one build.zig.zon declares when there is no tag.
+check-assets:
+	@set -eu; \
+	test -d dist || { echo "no dist/, run 'make release-assets TAG=v0.2.0' first" >&2; exit 2; }; \
+	if [ -z "$(TAG)" ]; then \
+	  for tagged in dist/microagent-v*; do \
+	    test -e "$$tagged" || continue; \
+	    echo "$$tagged is a tagged build, so this run wants the tag it was made with:" >&2; \
+	    echo "  make check-assets TAG=$$(printf '%s\n' "$$tagged" | sed -e 's|.*/microagent-\(v[0-9][^-]*\)-.*|\1|')" >&2; \
+	    exit 1; \
+	  done; \
+	fi; \
+	prefix="$(ASSET_PREFIX)"; \
+	want="$$($(MAKE) --no-print-directory version)"; \
+	if [ -n "$(TAG)" ]; then \
+	  test "$(TAG)" = "v$$want" || { \
+	    echo "dist/ was built for tag $(TAG), which is not the version build.zig.zon declares (v$$want)" >&2; \
+	    exit 1; \
+	  }; \
+	  want="$(patsubst v%,%,$(TAG))"; \
+	fi; \
+	host="dist/$${prefix}x86_64-linux-musl"; \
+	test -f "$$host" || { \
+	  echo "no $$host: 'make release-assets' builds every published target, and that one is missing" >&2; \
+	  exit 1; \
+	}; \
+	got="$$("$$host" --version)"; \
+	test "$$got" = "microagent $$want" || { \
+	  echo "$$host reports '$got', not 'microagent $$want', so the published asset is not the version this tag names" >&2; \
+	  exit 1; \
+	}; \
+	for target in $(RELEASE_TARGETS); do \
+	  asset="dist/$${prefix}$$target"; \
+	  test -f "$$asset" || { \
+	    echo "no $$asset: 'make release-assets' builds every published target, and that one is missing" >&2; \
+	    exit 1; \
+	  }; \
+	  magic="$$(od -An -tx1 -N4 "$$asset" | tr -d ' \n')"; \
+	  case "$$target" in \
+	    *-linux-musl) want_magic=7f454c46 ;; \
+	    *-macos) want_magic=cffaedfe ;; \
+	    *) echo "no expected object format known for $$target, so its asset cannot be checked here" >&2; exit 1 ;; \
+	  esac; \
+	  test "$$magic" = "$$want_magic" || { \
+	    echo "$$asset starts with $${magic:-nothing}, expected $$want_magic" >&2; \
+	    exit 1; \
+	  }; \
+	done; \
+	echo "$${prefix}* is a $$want build of every published target, and one of them runs here"
 
 # Every published target, cross-built, under the name release.yml publishes and
 # update.zig asks for. Running it without TAG is the rehearsal ci.yml does on

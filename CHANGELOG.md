@@ -24,6 +24,12 @@ release, and `microagent update` moves you to it.
   turn that reaches the ceiling is the one that finishes. The run announces itself on
   stderr at 80% of the ceiling, once, naming both numbers. Like `--budget`, leaving
   the option out is what says "no ceiling", and a value of zero is refused.
+- `make check-assets`, `make check-changelog` and `make check-release`, the
+  checks release.yml used to spell out in its own shell: the assets in `dist/`
+  are the ones the tag will publish, and a tag is refused for the changelog
+  rules it used to enforce only on the runner. Both workflows now call these
+  targets, so the release note is written against a command rather than
+  against a workflow nobody can run before they have pushed a tag.
 
 - A bare `help` is a request for the usage text, the way `microagent update help`
   already was. It used to be a coding run whose task was the word "help",

@@ -133,12 +133,14 @@ jobs:
           make release-assets
           ls -l dist
 
-      - name: the host binary reports the version in build.zig.zon
-        run: |
-          set -euo pipefail
-          version="$(make version)"
-          got="$(./dist/microagent-x86_64-linux-musl --version)"
-          test "$got" = "microagent $version"
+      # The host binary reports the version in build.zig.zon, and every
+      # published target is the object format its name promises. It is
+      # `make check-assets`, the same target release.yml runs over a tagged
+      # build and a laptop runs over `make release-assets`, so a push that
+      # would publish an asset that cross-compiles into the wrong bytes is
+      # refused here rather than by a user.
+      - name: the built assets are the ones a release would publish
+        run: make check-assets
 
       # Two independent builds of the same source must be byte-identical, or a
       # released checksum describes one binary and a rebuild produces another.
