@@ -2075,7 +2075,7 @@ fn finishTurn(
     const ceiling_ms = budget.toolCeilingMs(io);
     for (result.calls.items) |call| {
         if (isEdit(call.name)) progress.edited = true;
-        if (isTestRun(call.name, call.args)) progress.tested = true;
+        if (isTestRun(call.name, call.args.items)) progress.tested = true;
         // A call the budget will not pay for still gets a tool message. An
         // assistant turn that names calls the conversation never answers is one
         // the next request rejects, so the loop below would spend a turn on a

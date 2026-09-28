@@ -14,8 +14,9 @@ const net = @import("net.zig");
 /// How much of one tool's stdout reaches the model. The whole conversation is
 /// re-sent every turn, so what a tool prints is paid for again on each of them;
 /// a build log or a broad ripgrep is kilobytes. `clamp` cuts the rest at a
-/// codepoint boundary and says nothing, so a model reading a truncated log sees
-/// output that stops mid-file rather than a marker saying it did.
+/// codepoint boundary and appends a marker naming how much was dropped, so a
+/// model reading a truncated log knows the tail is missing rather than reading
+/// a build failure as the end of the output.
 const max_tool_output = 24 * 1024;
 
 /// Ceiling on a file `read` returns whole. A source file is kilobytes, so the
