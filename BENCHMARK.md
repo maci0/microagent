@@ -498,6 +498,28 @@ returns `401 The API Key appears to be invalid or may have expired` against
 `https://api.kimi.com/coding/v1`. A zero recorded from a failed setup would be a lie, so there is no
 kimi column rather than a zero column.
 
+## Where the 13-instance SWE-bench sample stands
+
+Every run of the same 13 instances, same model, same containers. This is the whole record, because
+picking the best row would be picking noise:
+
+| run | config | solved | exceptions |
+| --- | --- | --- | --- |
+| first | baseline harness | 5/13 | 0 |
+| `compacted` | conversation compaction | 7/13 | 0 |
+| `microagent-full` | git tool, workflow prompt, 150 turns, 2700 s | 8/13 | 0 |
+| `microagent-full-2` | same | 7/13 | 0 |
+| `microagent-r3` | same | 6/13 | 0 |
+| `microagent-r5` | same | 5/13 | 0 |
+| `microagent-r8` | verification gate, reasoning off | 6/13 | 0 |
+| `microagent-r9` | stronger completion rule, reasoning on | 7/13 | 2 |
+| **pooled** | | **46/91 = 0.505** | |
+
+opencode's three runs on the same instances: 6/13, 7/13, 9/13 (the 9 at a 1200 s timeout) —
+22/39 = 0.564 pooled. The two harnesses are inside each other's noise on this sample, and 13
+instances cannot resolve a difference below about 0.25 without hundreds of runs. Terminal-Bench 2,
+with 23 tasks and a categorical difference in finished trials, is where a claim can be made.
+
 ## A regression the benchmarks caught immediately
 
 Two SWE-bench runs this round came back 13/13 `RuntimeError: microagent exited 3`. Exit 3 is
