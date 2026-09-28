@@ -64,7 +64,8 @@ const max_tool_calls = 64;
 /// sending, and the caller chose the base url, not the server on the other end
 /// of it. Well past any real completion. The argument half is one budget for
 /// the whole response, not one per call: `max_tool_calls` calls at the ceiling
-/// each is a gigabyte the run never asked for.
+/// each is a gigabyte the run never asked for. A turn that reaches it is
+/// reported on stderr, because the bytes past it are dropped rather than held.
 const max_response_bytes = 16 * 1024 * 1024;
 /// Ceiling on one line of the completion stream, the bytes between newlines
 /// that `pending` holds for a frame that has not finished arriving.
@@ -1255,6 +1256,16 @@ fn streamChat(
 
     if (unparsable > 0)
         net.note(io, arena, "microagent: {d} frame(s) of the completion stream from {s} were not JSON and their content is not in this turn\n", .{ unparsable, shown_url });
+    // The turn's own ceiling, reached while the stream was still arriving. Past
+    // it `appendStreamed` and `applyCallDelta` drop every further byte, and a
+    // dropped argument fragment is what makes a tool call the next turn cannot
+    // dispatch: the run then reads its own `error: tool arguments are not valid
+    // JSON` and blames the model for a truncation nothing reported. Only a turn
+    // that arrived whole under the ceiling is a turn the model meant.
+    if (result.streamed >= max_response_bytes)
+        net.note(io, arena, "microagent: the completion stream from {s} reached the {d} byte ceiling for one turn with {d} tool call(s) still being assembled; anything past it is not in this turn, and a tool call whose arguments were cut cannot be dispatched\n", .{
+            shown_url, max_response_bytes, calls.items.len,
+        });
     // The provider closes a finished stream with a `[DONE]` frame. A stream
     // that ends without one was cut off partway, and the truncated turn below
     // would otherwise be appended as a complete answer: a turn that lost its

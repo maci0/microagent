@@ -172,6 +172,11 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- A turn that reaches the 16 MB per-response ceiling says so on stderr. Past it
+  the streamed content and the streamed tool-call arguments are dropped rather
+  than held, so a call whose arguments were cut arrived as
+  `error: tool arguments are not valid JSON` and the run blamed the model for a
+  truncation nothing had reported.
 - The README's benchmark commands lead with `make bench` and `make overhead`, the
   two targets that build `zig-out/bin/microagent` and put it on `PATH` for the run.
   The bare `bench/*.sh` form it documented first is the one that skips every
