@@ -295,15 +295,15 @@ fn ponytailBody(level: PonytailLevel) []const u8 {
     return switch (level) {
         .lite => "Prefer reuse over new code: look for a helper, type or pattern the repository already has\n" ++
             "before writing a new one. Use the standard library before adding a dependency.\n",
-        .full => "Prefer the laziest correct change. Ask first whether the change needs to exist at all; if it\n" ++
-            "does not, say so in one line. Reuse a helper, type or pattern the repository already has\n" ++
+        .full => "Prefer the laziest correct change. Settle first whether the change needs to exist at all; if\n" ++
+            "it does not, say so in one line. Reuse a helper, type or pattern the repository already has\n" ++
             "before writing a new one. Use the standard library and native platform features before\n" ++
             "adding code or a dependency. One line beats fifty. Fix the root cause, not the symptom:\n" ++
             "grep every caller of the function you are about to touch. No unrequested abstractions, no\n" ++
             "scaffolding for later, deletion over addition. Mark a deliberate shortcut that has a real\n" ++
             "ceiling with a comment naming that ceiling and the upgrade path.\n",
-        else => "Prefer the laziest correct change, taken as far as it goes. Ask first whether the change\n" ++
-            "needs to exist at all; if it does not, say so in one line. Reuse what the repository\n" ++
+        else => "Prefer the laziest correct change, taken as far as it goes. Settle first whether the\n" ++
+            "change needs to exist at all; if it does not, say so in one line. Reuse what the repository\n" ++
             "already has, then the standard library, then a native platform feature. Ship the smallest\n" ++
             "diff that fixes the root cause, not the symptom: grep every caller of the function you\n" ++
             "touch. No unrequested abstractions, no scaffolding for later, deletion over addition. Mark\n" ++

@@ -126,12 +126,14 @@ pub fn homeDir(env: *const std.process.Environ.Map) ?[]const u8 {
 /// file opening `path` would have written to and the only one a rename may
 /// replace.
 ///
-/// Both callers need it: `write` and `edit` so a rewrite through a link
-/// replaces the real file and leaves the link a link, and `update` so the
-/// binary is replaced rather than the link pointing at it. It is written once
-/// here because the answer is path arithmetic, and path arithmetic spelled
-/// inline is where a hardcoded `/` hides: the join goes through
-/// `std.fs.path`, so it uses the separator the target actually has.
+/// Three callers need it: `writeFileAtomic` (which `write` and `edit` share)
+/// so a rewrite through a link replaces the real file and leaves the link a
+/// link, `update` so the binary is replaced rather than the link pointing at
+/// it, and `credentialPath` in the tool module so a credential behind a link
+/// is recognized by the file it resolves to rather than by the name the model
+/// chose. It is written once here because the answer is path arithmetic, and
+/// path arithmetic spelled inline is where a hardcoded `/` hides: the join goes
+/// through `std.fs.path`, so it uses the separator the target actually has.
 ///
 /// The whole chain is followed, not only the first link. A chain is ordinary on
 /// both platforms this ships to: a version manager pointing at a per-version
@@ -315,8 +317,8 @@ pub fn retryableStatus(status: std.http.Status) bool {
     };
 }
 
-/// The longest `Retry-After` either network path will sit out. A provider asking
-/// for an hour is not a provider to wait an hour for, and the backoff schedule
+/// The longest `Retry-After` the agent run will sit out. A provider asking for
+/// an hour is not a provider to wait an hour for, and the backoff schedule
 /// behind it bounds the wait instead.
 pub const max_retry_after_ms: u64 = 120_000;
 
@@ -413,10 +415,10 @@ pub fn transientTransportError(err: anyerror) bool {
     };
 }
 
-/// The month names in the order `daysInMonth` counts them, and the form a
-/// `Retry-After` date spells them in. Exported so a header built for a test
-/// names its month the way the parser reads one, rather than a second spelling
-/// of the twelve that can drift from it.
+/// The month names in the order `std.time.epoch.getDaysInMonth` counts them,
+/// and the form a `Retry-After` date spells them in. Exported so a header built
+/// for a test names its month the way the parser reads one, rather than a
+/// second spelling of the twelve that can drift from it.
 pub const calendar_months = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
 
 /// An IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`) as seconds since the Unix

@@ -158,6 +158,21 @@ release, and `microagent update` moves you to it.
   past 2^32, so a shell with a 32-bit long wrapped it and the gate called a
   regression that was only arithmetic. The same convention
   `bench/gauntlet.sh` already follows for a nanosecond reading.
+- Comments and docs that had drifted from the code they sit on. `net.zig` named
+  a `daysInMonth` deleted two commits ago, claimed two callers where the
+  symlink resolver has three (the one behind the credential check was the one
+  missing), and said "either network path" for a `Retry-After` cap only the agent
+  run can reach. `main.zig` cited an 80k output-token total as if it were one
+  response, counted the test-runner table at 33 names when it holds 25, described
+  the JSON separators as gluing a key to the first word when they split it, and
+  named a `tool_mod` constant that is not exported. `update.zig` listed two of
+  the four published triples, and `tool.zig` listed six of the seven tools that
+  refuse a credential path. `PERFORMANCE.md` presented a 40-build instruction
+  total as a per-build figure, and `BENCHMARK.md` still carried the line count
+  from before the last four thousand lines landed. No behavior changed except one
+  prompt string: `ponytail` said "Ask first whether the change needs to exist"
+  in the same request as a system prompt that says "Do not ask questions", so it
+  now says "Settle first".
 - The bidi controls and zero-width characters are written out in every value
   quoted for the operator. They are well-formed UTF-8 carrying no C0 or C1
   control, so the escaping every diagnostic already went through passed them,

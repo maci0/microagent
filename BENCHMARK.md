@@ -25,7 +25,7 @@ No runtime, no package manager, no node_modules, no python. Eight files under `s
 the value types a turn is made of, `session.zig` the per-run log, `style.zig` the reply styles,
 `update.zig` the self-update, `net.zig` the sinks, deadlines and CA bundle the rest share, and
 `fuzzargv.zig` the argv both command-line fuzzers feed a parser),
-16 042 lines.
+17 522 lines.
 The sizes in this table are `ls -l` on a fresh build of this tree; every other number below comes
 from the two bench scripts.
 

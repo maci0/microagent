@@ -147,9 +147,10 @@ fn parseVersion(release: []const u8) ?Version {
     return out;
 }
 
-/// The release matrix names macOS `aarch64-macos` and `x86_64-macos` (no abi)
-/// and Linux `arch-linux-musl`. Zig's abi tag for those macOS targets is
-/// `none`; appending it asks for an asset the release does not publish.
+/// The release matrix publishes four triples: `x86_64-linux-musl`,
+/// `aarch64-linux-musl`, `x86_64-macos` and `aarch64-macos`. Zig's abi tag for
+/// those two macOS targets is `none`; appending it asks for an asset the release
+/// does not publish.
 fn targetTriple(buf: []u8, arch: []const u8, os_name: []const u8, abi: []const u8) error{NameTooLong}![]const u8 {
     if (std.mem.eql(u8, abi, "none")) {
         return std.fmt.bufPrint(buf, "{s}-{s}", .{ arch, os_name }) catch error.NameTooLong;

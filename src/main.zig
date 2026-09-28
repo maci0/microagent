@@ -38,8 +38,9 @@ const default_model = "deepseek/deepseek-v4-flash";
 /// task reached 1.7M cumulative input tokens that way.
 const conversation_soft_limit = 400 * 1024;
 /// Room for one whole tool message: the capped result plus the keys, the id
-/// and the JSON punctuation around it. A result is escaped as it is written,
-/// so this is the common case rather than a bound; the buffer still grows if a
+/// and the JSON punctuation around it. The result arrives unescaped, and a
+/// result at the cap also carries the truncation note `toolResult` appends, so
+/// this is a reservation rather than a bound; the buffer still grows when a
 /// result needs more, which is what a control byte in the output does.
 const tool_result_message_bytes = tool_mod.max_tool_output + tool_result_message_scaffolding_bytes;
 /// Everything in a tool message that is not the result: the role, the
@@ -70,9 +71,10 @@ const exit_incomplete: u8 = 3;
 /// the provider's own limit is the only bound: a model that fails to stop
 /// streams until something else stops it, and the run pays for every token of
 /// it, up to `max_response_bytes` per turn and `max_turns_default` turns deep.
-/// Well past the largest single tool call a coding turn needs (the whole SWE
-/// run in BENCHMARK.md is 80k output tokens across every instance), and low
-/// enough that one runaway turn cannot run up a real bill.
+/// Well past the largest single response a coding turn needs (the 13-instance
+/// SWE run in BENCHMARK.md bills 80k output tokens in total, so no one
+/// response in it came near this), and low enough that one runaway turn cannot
+/// run up a real bill.
 const default_max_tokens: u32 = 65_536;
 /// Parallel tool calls accepted from one response; higher indices are dropped.
 const max_tool_calls = 64;
@@ -104,7 +106,8 @@ const max_frame_bytes: usize = 1024 * 1024;
 const max_config_bytes: usize = 64 * 1024;
 /// A provider's error body is a diagnostic, not a payload, so it is bounded
 /// tight: the text goes on stderr and nothing reads it as a tool result. The
-/// `read` tool's own ceiling is `tool_mod.max_read_bytes`.
+/// `read` tool's own ceiling, `max_read_bytes` in the tool module, is three
+/// orders of magnitude above it.
 const max_error_body_bytes: usize = 16 * 1024;
 
 const system_prompt =
@@ -1575,8 +1578,9 @@ const test_runners = [_][]const u8{
 
 /// What separates one word of a tool call's arguments from the next. The JSON
 /// punctuation is in the set because the arguments arrive as the raw text the
-/// provider streamed, where `"command":"cargo test"` is one string with a key
-/// glued to the front of the first word.
+/// provider streamed, so a name whose words are split across it rather than
+/// across a space still tokenizes whole: `{"command":"cargo","other":"test"}`
+/// carries `cargo` and `test` as two of its words.
 const tool_word_separators = " \t\r\n\"{},:";
 
 /// The most words any name in `test_runners` is spelled as, counted out of the
@@ -1584,7 +1588,7 @@ const tool_word_separators = " \t\r\n\"{},:";
 /// enough for the longest name and no wider.
 const test_runner_max_words = blk: {
     var n: usize = 0;
-    // The tokenizer is run 33 times over short constants here, which is past
+    // The tokenizer is run once per name in the table here, which is past
     // the default comptime branch budget and nothing the shipped code hits.
     @setEvalBranchQuota(10_000);
     for (test_runners) |runner| {
@@ -1636,12 +1640,14 @@ const test_runner_words = blk: {
 /// That errs toward missing a run, which costs one extra verification turn.
 ///
 /// The haystack is the call's raw argument JSON, so the JSON punctuation cuts
-/// words too: `{"command":"cargo test"}` glues the key to the first word, and
-/// a runner welded to `{"command":"` is the one command this has to see.
+/// words too, which is what a name split across it rather than across a space
+/// needs: `{"command":"cargo","other":"test"}` tokenizes as `command`, `cargo`
+/// and `test`, and the last two are the run.
 ///
 /// The arguments are walked once, not once per name. Every name used to be
 /// searched for by tokenizing the whole string again, so a multi-kilobyte
-/// `bash` command was scanned 33 times over to answer one question, on the path
+/// `bash` command was scanned once per name in the table over to answer one
+/// question, on the path
 /// every tool call walks until the run has seen a test. A name matches where
 /// its words end at the word just read, so the last `test_runner_max_words`
 /// words are all the answer needs, and each name is tried against them once.

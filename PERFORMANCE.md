@@ -31,7 +31,7 @@ that moves is a gate that moved with it:
 | a streamed content frame (47 B) | — | 4,101 |
 | a streamed tool-argument frame | — | 9,253 |
 | compaction of a 1 MB conversation | 37,153,055 | one call |
-| building the request body | — | 113,949 |
+| building the request body (the row measures 40 of them) | 113,946 | 2,849 |
 | a ranged read of a 512 KB line | 7,543,588 | one call |
 
 Against a 284 s review and roughly 20,000 frames, the streaming path is on the order of ten

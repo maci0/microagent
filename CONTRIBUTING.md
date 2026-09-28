@@ -22,8 +22,9 @@ make            # zig-out/bin/microagent
 make small      # the ReleaseSmall binary
 ```
 
-`make check`, the gate, also needs `shellcheck`, `ruff` and `yamllint` on
-`PATH`. `make preflight` names any of the four it wants that is missing, with
+`make check`, the gate, also needs `shellcheck`, `ruff`, `yamllint` and `git` on
+`PATH`; the last one because every linter reads its file list with `git ls-files`.
+`make preflight` names any of the five it wants that is missing, with
 the command that installs it, and `make check` runs it first, so a clean clone
 missing a linter says which one instead of stopping at
 `make: ruff: No such file or directory`. `ruff` and `yamllint` are format- and

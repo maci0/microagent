@@ -870,9 +870,9 @@ test "every credential the name rule refuses is in the exclusion set git carries
 /// `/`.
 const path_sep = [_]u8{std.fs.path.sep};
 
-/// True when a path names a credential file, so the tools that read, search or
-/// name a path refuse it: `read`, `search`, `ast`, `git`, and the word check
-/// `bash` runs over its command. The path is
+/// True when a path names a credential file, so every tool that takes a path
+/// refuses it: `read`, `write`, `edit`, `search`, `ast`, `git`, and the word
+/// check `bash` runs over its command. The path is
 /// model-supplied text and never touches the filesystem before this runs, so
 /// the answer is a decision about the name, not about what opened.
 fn isCredentialPath(path: []const u8) bool {
