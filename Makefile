@@ -58,7 +58,7 @@ default: build
 # that is absent, with the command that installs it, before any of that runs.
 # The versions are the ones the rest of this file pins, so a tool that is
 # present but wrong is still `lint-versions` to catch.
-PREFLIGHT_TOOLS := $(ZIG) shellcheck ruff yamllint
+PREFLIGHT_TOOLS := $(ZIG) shellcheck ruff yamllint git
 preflight:
 	@set -eu; bad=0; \
 	for tool in $(PREFLIGHT_TOOLS); do \
@@ -73,6 +73,8 @@ preflight:
 	      echo "$$tool is not on PATH: 'uv tool install ruff@$(RUFF_VERSION)'" >&2 ;; \
 	    yamllint) \
 	      echo "$$tool is not on PATH: 'uv tool install yamllint==$(YAMLLINT_VERSION)'" >&2 ;; \
+	    git) \
+	      echo "$$tool is not on PATH: every linter's file list is read from it with 'git ls-files', so a clone without it lints nothing" >&2 ;; \
 	    *) \
 	      echo "$$tool is not on PATH" >&2 ;; \
 	  esac; \
@@ -318,6 +320,8 @@ zig-version:
 # if it grows past one command's argument limit, and exits non-zero either way.
 lint-shell:
 	@set -eu; \
+	files="$$(git ls-files '*.sh')"; \
+	test -n "$$files" || { echo "no tracked .sh file to lint" >&2; exit 1; }; \
 	git ls-files -z '*.sh' | xargs -0 shellcheck -x
 
 lint-python:
