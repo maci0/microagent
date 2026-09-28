@@ -1,0 +1,76 @@
+# Release pipeline: on a v* tag, build the four cross-compiled binaries the
+# `update` subcommand looks for, checksum each one, and publish them as a
+# GitHub release. The job only runs when the tag names the version in
+# build.zig.zon, so an asset can never be published under a version the binary
+# does not report.
+#
+# Zig cross-compiles every target here, so one Linux runner builds the macOS
+# binaries too; nothing links libc, so no target needs its own runner.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+
+      - name: tag names the build.zig.zon version
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^[[:space:]]*\.version = "\([^"]*\)".*/\1/p' build.zig.zon)"
+          if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not name build.zig.zon version v${version}" >&2
+            exit 1
+          fi
+
+      - name: build and checksum the release assets
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for target in x86_64-linux-musl aarch64-linux-musl x86_64-macos aarch64-macos; do
+            zig build -Dtarget="$target" -Doptimize=ReleaseSmall
+            install -m755 zig-out/bin/microagent "dist/microagent-${GITHUB_REF_NAME}-${target}"
+          done
+          cd dist
+          # sha256sum's "<hex>  <basename>" line is the sidecar `microagent
+          # update` verifies before it replaces anything.
+          for asset in microagent-v*; do
+            case "$asset" in *.sha256) continue;; esac
+            sha256sum "$asset" > "$asset.sha256"
+          done
+          # The host-arch asset must be the binary this tag names.
+          got="$("./microagent-${GITHUB_REF_NAME}-x86_64-linux-musl" --version)"
+          test "$got" = "microagent ${GITHUB_REF_NAME#v}"
+          ls -l
+
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "release ${GITHUB_REF_NAME} already exists; refusing to replace it" >&2
+            exit 1
+          fi
+          gh release create "${GITHUB_REF_NAME}" --verify-tag --draft \
+            --title "microagent ${GITHUB_REF_NAME}" --generate-notes \
+            dist/microagent-*
+          gh release edit "${GITHUB_REF_NAME}" --draft=false
