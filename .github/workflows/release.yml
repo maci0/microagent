@@ -2,7 +2,9 @@
 # `update` subcommand looks for, checksum each one, and publish them as a
 # GitHub release. The job only runs when the tag names the version in
 # build.zig.zon, so an asset can never be published under a version the binary
-# does not report.
+# does not report, and it only runs when CHANGELOG.md has an entry for that
+# version, so the release notes a consumer reads are the ones written for them
+# rather than a list of commit subjects.
 #
 # Zig cross-compiles every target here, so one Linux runner builds the macOS
 # binaries too; nothing links libc, so no target needs its own runner.
@@ -60,6 +62,22 @@ jobs:
           test "$got" = "microagent ${GITHUB_REF_NAME#v}"
           ls -l
 
+      - name: the changelog has an entry for this tag
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          awk -v want="$version" '
+            index($0, "## [" want "]") == 1 { inside = 1; next }
+            /^## / { inside = 0 }
+            inside
+          ' CHANGELOG.md > release-notes.md
+          sed -i '/./,$!d' release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "CHANGELOG.md has no [${version}] entry, so there are no consumer-facing notes to publish" >&2
+            exit 1
+          fi
+          cat release-notes.md
+
       - name: publish
         env:
           GH_TOKEN: ${{ github.token }}
@@ -70,7 +88,9 @@ jobs:
             echo "release ${GITHUB_REF_NAME} already exists; refusing to replace it" >&2
             exit 1
           fi
+          # The changelog section is the release note, so a consumer reads what
+          # changed for them instead of a list of commit subjects.
           gh release create "${GITHUB_REF_NAME}" --verify-tag --draft \
-            --title "microagent ${GITHUB_REF_NAME}" --generate-notes \
+            --title "microagent ${GITHUB_REF_NAME}" --notes-file release-notes.md \
             dist/microagent-*
           gh release edit "${GITHUB_REF_NAME}" --draft=false

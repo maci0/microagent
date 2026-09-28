@@ -57,6 +57,34 @@ pub fn sameRelease(running: []const u8, tag: []const u8) bool {
     return std.mem.eql(u8, running, bare);
 }
 
+/// Where the running build sits against a published tag, ignoring one leading
+/// `v` on either side. Components are `major.minor.patch`, a missing one is 0.
+/// Anything else (a pre-release suffix, a fork's tag) is `.eq`, which leaves
+/// the caller on exact equality rather than guessing an order.
+pub fn compareVersions(running: []const u8, tag: []const u8) std.math.Order {
+    const a = parseTriple(running) orelse return .eq;
+    const b = parseTriple(tag) orelse return .eq;
+    for (a, b) |an, bn| {
+        if (an != bn) return if (an < bn) .lt else .gt;
+    }
+    return .eq;
+}
+
+/// `major.minor.patch` with a missing component read as 0, or null when a
+/// component is not a plain number.
+fn parseTriple(release: []const u8) ?[3]u64 {
+    const v = if (std.mem.startsWith(u8, release, "v")) release[1..] else release;
+    var out = [3]u64{ 0, 0, 0 };
+    var it = std.mem.splitScalar(u8, v, '.');
+    var n: usize = 0;
+    while (it.next()) |c| {
+        if (n == out.len) return null;
+        out[n] = std.fmt.parseInt(u64, c, 10) catch return null;
+        n += 1;
+    }
+    return out;
+}
+
 /// The release matrix names macOS `aarch64-macos` and `x86_64-macos` (no abi)
 /// and Linux `arch-linux-musl`. Zig's abi tag for those macOS targets is
 /// `none`; appending it asks for an asset the release does not publish.
@@ -154,9 +182,12 @@ pub fn releasePageLine(url: []const u8) error{UntrustedUrl}![]const u8 {
     return url;
 }
 
-/// `--check` never downloads an asset. An equal version never does either.
+/// `--check` never downloads an asset. An equal version never does either,
+/// and neither does a published tag older than the running build: installing it
+/// would replace a newer binary with an older one.
 pub fn fetchesAsset(check_only: bool, running: []const u8, tag: []const u8) bool {
     if (check_only) return false;
+    if (compareVersions(running, tag) == .gt) return false;
     return !sameRelease(running, tag);
 }
 
@@ -226,6 +257,10 @@ pub fn formatCurrent(buf: []u8, tool: []const u8, running: []const u8, tag: []co
 
 pub fn formatNewRelease(buf: []u8, tag: []const u8, running: []const u8) ![]const u8 {
     return std.fmt.bufPrint(buf, "New release: {s} (running {s})", .{ tag, running });
+}
+
+pub fn formatAhead(buf: []u8, running: []const u8, tag: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(buf, "{s} is newer than the latest release ({s}); nothing to install", .{ running, tag });
 }
 
 pub fn formatInstalled(buf: []u8, tag: []const u8, path: []const u8) ![]const u8 {
@@ -452,8 +487,14 @@ pub fn run(
         return fail(io, "refusing to install unverified binary", .{});
 
     var line_buf: [256]u8 = undefined;
-    if (sameRelease(version, rel.tag)) {
+    const order = compareVersions(version, rel.tag);
+    if (order == .eq) {
         const line = formatCurrent(&line_buf, tool_name, version, rel.tag) catch
+            return fail(io, "could not format the version comparison", .{});
+        writeErr(io, line);
+        writeErr(io, "\n");
+    } else if (order == .gt) {
+        const line = formatAhead(&line_buf, version, rel.tag) catch
             return fail(io, "could not format the version comparison", .{});
         writeErr(io, line);
         writeErr(io, "\n");
@@ -630,6 +671,28 @@ test "update: --check and an equal version do not fetch an asset" {
     try std.testing.expect(!fetchesAsset(true, "0.1.0", "v0.2.0"));
     try std.testing.expect(!fetchesAsset(false, "0.1.0", "v0.1.0"));
     try std.testing.expect(fetchesAsset(false, "0.1.0", "v0.2.0"));
+}
+
+test "update: a build ahead of the latest release is not downgraded" {
+    try std.testing.expectEqual(std.math.Order.lt, compareVersions("0.1.0", "v0.2.0"));
+    try std.testing.expectEqual(std.math.Order.gt, compareVersions("0.2.0", "v0.1.1"));
+    try std.testing.expectEqual(std.math.Order.gt, compareVersions("1.0.0", "v0.9.9"));
+    try std.testing.expectEqual(std.math.Order.eq, compareVersions("0.1.0", "v0.1.0"));
+    try std.testing.expectEqual(std.math.Order.eq, compareVersions("0.1", "v0.1.0"));
+    // A tag that is not a dotted triple carries no order to claim, so it stays
+    // on the caller's explicit request rather than being blocked.
+    try std.testing.expectEqual(std.math.Order.eq, compareVersions("0.2.0-rc1", "v0.1.1"));
+
+    try std.testing.expect(!fetchesAsset(false, "0.2.0", "v0.1.1"));
+    try std.testing.expect(fetchesAsset(false, "0.2.0", "v0.2.0-rc1"));
+    try std.testing.expect(fetchesAsset(false, "0.1.0", "v0.2.0"));
+    try std.testing.expect(fetchesAsset(false, "0.1.0", "nightly"));
+
+    var buf: [128]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "0.2.0 is newer than the latest release (v0.1.1); nothing to install",
+        try formatAhead(&buf, "0.2.0", "v0.1.1"),
+    );
 }
 
 test "update: checksum line is the published hex, two spaces, and the basename" {

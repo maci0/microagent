@@ -158,6 +158,15 @@ only when the digest matches: a mismatch, a missing asset, or a release page tha
 https URL leaves the binary untouched. `GITHUB_TOKEN` lifts the anonymous API rate limit. Exit 1
 means the check or the install failed, 2 is a usage error.
 
+## Versioning
+
+The version is `build.zig.zon` and nothing else, and [CHANGELOG.md](CHANGELOG.md) is the record of
+what changed in it. The project is under `0.y`, so the minor takes features and any change to what a
+run does by default, and the patch takes fixes: upgrading a patch must not change an existing
+invocation. Breaking changes to the flags, the environment variables or the stdout and session-log
+JSON come with a changelog entry naming the before and the after, before the tag. Only the latest
+release is supported, with no backport window: a fix ships in the next release.
+
 ## Tools
 
 Seven tools, all of them thin wrappers over tools you already have:
