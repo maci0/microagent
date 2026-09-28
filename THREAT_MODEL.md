@@ -46,7 +46,7 @@ on its own is the API key.
 | `MICROAGENT_CA_BUNDLE`, `SSL_CERT_FILE` | the trust anchors for the provider host and for GitHub | `caBundlePath`, `src/net.zig:104`, read at `src/main.zig:235`; loaded at `src/main.zig:280` and `src/update.zig:903` |
 | `MICROAGENT_CONFIG`, `~/.microagent/config.toml` | reply-style levels, 64 KB cap | `styleConfigPath`, `src/main.zig:1108`; `loadStyle`, `src/main.zig:1003`; cap `max_config_bytes`, `src/main.zig:104` |
 | `MICROAGENT_CAVEMAN`, `MICROAGENT_PONYTAIL` | reply-style levels, overriding the config file | `loadStyle`, `src/main.zig:1003`; read at `src/main.zig:1003` |
-| `MICROAGENT_BUDGET_SECONDS`, `--budget` | wall-clock ceiling on the run | `optionalCeiling`, `src/main.zig:648`; carried by `Budget`, `src/main.zig:1163` |
+| `MICROAGENT_BUDGET_SECONDS`, `--budget` | wall-clock ceiling on the run, suspended time included | `optionalCeiling`, `src/main.zig:648`; carried by `Budget`, `src/main.zig:1163` |
 | `MICROAGENT_MAX_SPEND_TOKENS`, `--max-spend-tokens <n>` | run-wide token ceiling, counted before each turn | `optionalCeiling`, `src/main.zig:648`; read at `src/main.zig:242`; enforced at `src/main.zig:1352` |
 | `MICROAGENT_SESSION_DIR` | where the JSONL run log is written | `sessionDir`, `src/session.zig:27`; read at `src/main.zig:244` |
 | `MDEBUG` | writes protocol notes and the resolved configuration to stderr, never a key | `debugEnabled`, `src/main.zig:525`; `traceConfig`, `src/main.zig:1054` |

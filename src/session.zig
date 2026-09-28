@@ -206,6 +206,18 @@ fn logStamp(now_ns: i128) u128 {
     return if (now_ns < 0) 0 else @intCast(now_ns);
 }
 
+/// The stamp a record's `ts` field carries, in milliseconds since the epoch,
+/// from a clock reading in nanoseconds.
+///
+/// The same clamp `logStamp` applies, for the same machine: a clock set before
+/// 1970 reads negative, and a negative epoch is not an instant a monitor can
+/// order against the positive ones the rest of the store holds. Zero is the
+/// reading that says nothing about the time, which is all a clock before the
+/// epoch says.
+fn recordStampMs(now_ns: i96) i64 {
+    return if (now_ns < 0) 0 else @intCast(@divTrunc(now_ns, std.time.ns_per_ms));
+}
+
 /// Session logs kept on disk. The store is a per-run directory that nothing
 /// ever deleted from, so a machine running gauntlet loops accumulated one file
 /// per review forever; a monitor reads the recent runs, not the whole history.
@@ -391,8 +403,13 @@ pub fn close(io: Io, session: *?Session) void {
 /// How long the model spent on one response. It travels in the record because
 /// a monitor's polling gap covers the tools as well: dividing a turn's tokens
 /// by that gap reports a rate for a generation that was never continuous.
-pub fn elapsedMs(io: Io, since: i96) u64 {
-    const delta = Io.Timestamp.now(io, .awake).nanoseconds - since;
+///
+/// `clock` is the one `since` was read on, and it is an argument because the
+/// two are not interchangeable: an instant on one clock subtracted from a
+/// reading of another is the difference between two unrelated origins, so the
+/// clock the caller took its stamp on is the clock this subtracts it from.
+pub fn elapsedMs(io: Io, clock: Io.Clock, since: i96) u64 {
+    const delta = Io.Timestamp.now(io, clock).nanoseconds - since;
     if (delta <= 0) return 0;
     return @intCast(@divTrunc(delta, std.time.ns_per_ms));
 }
@@ -411,7 +428,7 @@ pub fn writeRecord(io: Io, arena: std.mem.Allocator, session: *?Session, elapsed
     // `s.dir` is the directory the run was given, escaped for the reason
     // `createSessionLog` gives.
     const shown = chat.safeTextAll(arena, s.dir);
-    const ts_ms: i64 = @intCast(@divTrunc(Io.Clock.real.now(io).nanoseconds, std.time.ns_per_ms));
+    const ts_ms = recordStampMs(Io.Clock.real.now(io).nanoseconds);
     const line = sessionRecord(arena, ts_ms, s.cwd, s.model, elapsed_ms, result) catch |err| {
         net.note(io, arena, "microagent: a session record for {s} could not be built ({s}); the rest of this run is not recorded\n", .{ shown, @errorName(err) });
         s.file.close(io);
@@ -917,6 +934,22 @@ test "the session store prunes by stamp, not by the bytes of the name" {
 // still reporting itself pruned. The stamp `open` hands over is the oldest
 // stamp there is rather than a negative one, so the log sorts and prunes like
 // any other.
+// A record's `ts` is the same machine's clock read a second time, and a
+// monitor orders the store by it. A negative epoch is not an instant: it sorts
+// below every record the store has ever held and reads as a run fifty-six years
+// old, so the same clamp the log's own name gets is the one the record gets.
+test "a record stamped from a clock before 1970 carries the epoch, not a negative" {
+    const before_epoch_ns: i96 = -1_000_000_000;
+    try std.testing.expectEqual(@as(i64, 0), recordStampMs(before_epoch_ns));
+    // And the far side of the epoch is the reading itself, so the clamp is not
+    // quietly taking every time before some other line.
+    try std.testing.expectEqual(@as(i64, 1_000), recordStampMs(1_000_000_000));
+    try std.testing.expectEqual(@as(i64, 1_759_000_000_000), recordStampMs(1_759_000_000_000_000_000));
+    // The zero the clamp gives is the value a reader of the store can still
+    // compare, which is the whole reason it is zero rather than the negative.
+    try std.testing.expect(recordStampMs(before_epoch_ns) >= 0);
+}
+
 test "a log named from a clock before 1970 is still one the pruner counts" {
     var store = try StoreFixture.init(std.testing.allocator);
     defer store.deinit();

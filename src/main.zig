@@ -1162,13 +1162,29 @@ fn resolveStyle(
     return unknown;
 }
 
-/// The run's time budget as an instant on the monotonic clock the loop already
-/// reads. Every part of a turn asks this, not just the top of the loop: a
-/// provider that is slow rather than broken hands the loop one long turn, and a
-/// budget only checked between turns is a budget that provider ignores, which
-/// is the run being killed in the middle of the turn the budget exists to avoid.
+/// The clock the run's budget is measured on: the one that keeps counting
+/// while the machine is suspended. `Io.Clock.awake` is CLOCK_MONOTONIC, and
+/// that clock stops for a suspend, so a laptop closed for the night wakes with
+/// the whole `--budget` still in hand and spends it all on a fresh provider
+/// bill, which is the exact outcome the ceiling exists to prevent. `.boot` is
+/// CLOCK_BOOTTIME on Linux and CLOCK_MONOTONIC_RAW on macOS, and both include
+/// the suspend. It stays monotonic either way, so an NTP step or a manual
+/// clock change cannot move a deadline, and a tool's own timeout stays on
+/// `.awake` because a child that was not running spent none of its own.
+const budget_clock: Io.Clock = .boot;
+
+/// The run's time budget as an instant on the clock the loop already reads.
+/// Every part of a turn asks this, not just the top of the loop: a provider
+/// that is slow rather than broken hands the loop one long turn, and a budget
+/// only checked between turns is a budget that provider ignores, which is the
+/// run being killed in the middle of the turn the budget exists to avoid.
+///
+/// A deadline is a number on `budget_clock`, so it is read there and nowhere
+/// else: an instant taken from one clock and compared against the other is
+/// two unrelated origins, and the difference between them is however long the
+/// machine has been asleep.
 const Budget = struct {
-    /// Nanoseconds on the awake clock, or null when no budget was set.
+    /// Nanoseconds on `budget_clock`, or null when no budget was set.
     deadline_ns: ?i96 = null,
 
     fn of(started_ns: i96, seconds: ?u64) Budget {
@@ -1178,7 +1194,7 @@ const Budget = struct {
 
     fn expired(self: Budget, io: Io) bool {
         const d = self.deadline_ns orelse return false;
-        return Io.Timestamp.now(io, .awake).nanoseconds >= d;
+        return Io.Timestamp.now(io, budget_clock).nanoseconds >= d;
     }
 
     /// Milliseconds left on the budget, or null when there is no budget. Zero
@@ -1192,7 +1208,7 @@ const Budget = struct {
     /// caller can wait out is as good an answer as the exact figure.
     fn remainingMs(self: Budget, io: Io) ?u64 {
         const d = self.deadline_ns orelse return null;
-        const now = Io.Timestamp.now(io, .awake).nanoseconds;
+        const now = Io.Timestamp.now(io, budget_clock).nanoseconds;
         if (now >= d) return 0;
         return std.math.cast(u64, @divTrunc(d - now, std.time.ns_per_ms)) orelse std.math.maxInt(u64);
     }
@@ -1330,7 +1346,7 @@ fn run(
     msgs: *std.ArrayList(u8),
     tool_env: *const std.process.Environ.Map,
 ) !TurnEnd {
-    const started = Io.Timestamp.now(io, .awake).nanoseconds;
+    const started = Io.Timestamp.now(io, budget_clock).nanoseconds;
     const budget = Budget.of(started, opts.budget_s);
     var session: ?session_mod.Session = session_mod.open(io, arena, opts.session_dir, opts.model);
     defer session_mod.close(io, &session);
@@ -1486,7 +1502,7 @@ fn runTurn(
     progress: *Progress,
 ) !TurnEnd {
     const body = try buildBody(arena, opts, msgs.items);
-    const asked = Io.Timestamp.now(io, .awake).nanoseconds;
+    const asked = Io.Timestamp.now(io, budget_clock).nanoseconds;
     // A turn the budget cut off is not a turn: half a tool call's arguments is
     // not a tool call, so nothing of it is appended and the run ends here with
     // the reason already on stderr.
@@ -1498,7 +1514,7 @@ fn runTurn(
     // The model time is taken here, before the tool calls `finishTurn` runs:
     // the record says how long the model generated, and a gap that spans the
     // tools would report a rate for a generation that was never continuous.
-    const model_ms = session_mod.elapsedMs(io, asked);
+    const model_ms = session_mod.elapsedMs(io, budget_clock, asked);
     // The record is written before the tools run, not after them. A turn that
     // builds or tests holds the log for as long as the tools do, and a monitor
     // following a run is told it is still going while the answer to the last
@@ -2851,8 +2867,12 @@ fn backoffMs(attempt: u32) u64 {
     return @min(retry_backoff_base_ms *| (@as(u64, 1) << shift), max_backoff_ms);
 }
 
+/// The wait a backoff or a `Retry-After` asks for. It sleeps on
+/// `budget_clock` because the budget is what the wait was measured against,
+/// and a wait that ignores the suspend the budget counted would be longer than
+/// the run's own accounting says it is.
 fn waitMs(io: Io, ms: u64) !void {
-    try io.sleep(.{ .nanoseconds = ms *| std.time.ns_per_ms }, .awake);
+    try io.sleep(.{ .nanoseconds = ms *| std.time.ns_per_ms }, budget_clock);
 }
 
 /// The longest `Retry-After` this run will sit out. A provider asking for an
@@ -4586,7 +4606,7 @@ test "only a call that changes the tree counts as an edit" {
 
 test "a tool timeout is cut to what is left of the budget" {
     const io = std.testing.io;
-    const now = Io.Timestamp.now(io, .awake).nanoseconds;
+    const now = Io.Timestamp.now(io, budget_clock).nanoseconds;
 
     // No budget: every tool keeps the timeout it asked for, so there is no
     // ceiling to hand one.
@@ -5144,7 +5164,7 @@ test "a budget too large to count in milliseconds is a ceiling, not a trap" {
     // minute taken at the clock this test reads has its 60,000 milliseconds
     // left, less whatever the run between the two readings spent on the
     // assertion itself.
-    const now = Io.Timestamp.now(std.testing.io, .awake).nanoseconds;
+    const now = Io.Timestamp.now(std.testing.io, budget_clock).nanoseconds;
     const left = Budget.of(now, 60).remainingMs(std.testing.io).?;
     try std.testing.expect(left > 59_000 and left <= 60_000);
 }
@@ -5222,13 +5242,34 @@ fn retryAfterDateHead(buf: []u8, seconds: i64) []const u8 {
     }) catch unreachable;
 }
 
+// The run's ceiling is a promise about wall time, and the clock it is measured
+// on is the one that keeps running while the machine is away. `.awake` stops
+// for a suspend, so on a laptop closed for the night the whole budget is still
+// in hand at the resume and the spend it exists to cap is the spend after it.
+// `.boot` is that clock plus the suspend, which is why it reads ahead of
+// `.awake` and never behind it, and why it is still the answer rather than the
+// wall clock: a clock an NTP step can move is not a ceiling.
+test "the budget is measured on a clock that keeps counting through a suspend" {
+    const io = std.testing.io;
+    const awake = Io.Timestamp.now(io, .awake).nanoseconds;
+    const boot = Io.Timestamp.now(io, budget_clock).nanoseconds;
+    try std.testing.expect(boot >= awake);
+
+    // A deadline stamped on the run's clock and read on it is a deadline; the
+    // same two operations on the wall clock are not, and this is the shape
+    // every `Budget` in the run is built from.
+    const budget = Budget.of(Io.Timestamp.now(io, budget_clock).nanoseconds, 60);
+    try std.testing.expect(!budget.expired(io));
+    try std.testing.expect(budget.remainingMs(io).? <= 60_000);
+}
+
 // The budget is a deadline, not a turn counter. Checked only at the top of the
 // loop, a provider that is slow rather than broken hands the run one long turn
 // and the budget is never asked again, which is the run being killed in the
 // middle of the turn the budget exists to avoid.
 test "the time budget is a deadline the turn itself is held to" {
     const io = std.testing.io;
-    const now = Io.Timestamp.now(io, .awake).nanoseconds;
+    const now = Io.Timestamp.now(io, budget_clock).nanoseconds;
 
     // No budget set is a budget that never runs out, at any point in a turn.
     const none = Budget.of(now, null);

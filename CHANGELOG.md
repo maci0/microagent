@@ -74,6 +74,20 @@ release, and `microagent update` moves you to it.
   exited 2. The walk counts `--print`, in the `--print=value` spelling as well as the
   separate one, so both answer the same on every command line.
 
+- `--budget` is a ceiling in wall time, including the time the machine spends asleep. It
+  was measured on the monotonic clock, which stops for a suspend, so a laptop closed for
+  the night woke with the whole budget still in hand and spent all of it on a fresh
+  provider bill, which is the outcome the ceiling exists to prevent. The budget and the
+  backoff waits it bounds are now measured on the boot clock, which keeps counting
+  through a suspend on both Linux and macOS and is just as monotonic, so an NTP step
+  still cannot move a deadline. A tool's own timeout stays on the monotonic clock: a
+  child that was not running has spent none of its own.
+
+- A session record written on a machine whose clock reads before 1970 carries the epoch
+  rather than a negative timestamp. `logStamp` already clamped the reading for the log's
+  own name; the record's `ts` did not, so a monitor ordered the store by a stamp that
+  sorts below every record it holds and read as a run fifty-six years old.
+
 - A session log on a machine whose clock reads before 1970 is pruned like any other. The
   log's name is the wall clock's nanosecond stamp, and a negative one spelled a name
   beginning with `-`, which the pruner does not parse as a name it wrote: the log was
