@@ -13,8 +13,8 @@ The binary is found at $MICROAGENT_BINARY, else next to this file as
 `zig build -Dtarget=x86_64-linux-musl -Doptimize=ReleaseFast`).
 
 The model provider key comes from the host environment ($MICROAGENT_API_KEY,
-else $OPENROUTER_API_KEY) and is passed to the container process only, never
-baked into the image.
+else $OPENROUTER_API_KEY, $OPENAI_API_KEY or $DEEPSEEK_API_KEY) and is passed to
+the container process only, never baked into the image.
 """
 
 from __future__ import annotations
@@ -77,8 +77,8 @@ def api_key() -> str:
         if value:
             return value
     raise RuntimeError(
-        "no model provider key in the host environment: set MICROAGENT_API_KEY "
-        "or OPENROUTER_API_KEY before running harbor"
+        "no model provider key in the host environment: set MICROAGENT_API_KEY, "
+        "OPENROUTER_API_KEY, OPENAI_API_KEY or DEEPSEEK_API_KEY before running harbor"
     )
 
 

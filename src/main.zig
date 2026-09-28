@@ -1304,7 +1304,7 @@ fn streamChat(
         // run its budget and stop there, not a caller's whole review timeout.
         if (budget.expired(io)) {
             net.note(io, arena, "microagent: the time budget ran out after {d} byte(s) of content and {d} tool call(s) from {s}; the turn is discarded\n", .{
-                result.content.items.len, calls.items.len, url,
+                result.content.items.len, calls.items.len, shown_url,
             });
             return error.BudgetExhausted;
         }
@@ -1362,7 +1362,7 @@ fn streamChat(
     // generation as the review's result.
     if (std.mem.eql(u8, result.finish_reason, "length"))
         net.note(io, arena, "microagent: the response from {s} hit the generation ceiling (max_tokens {d}) after {d} byte(s) of content and {d} tool call(s); the turn is incomplete\n", .{
-            url, opts.max_tokens, result.content.items.len, calls.items.len,
+            shown_url, opts.max_tokens, result.content.items.len, calls.items.len,
         });
     if (result.content.items.len > 0) try out_buf.append(gpa, '\n');
     flushOut(io, &out_buf);

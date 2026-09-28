@@ -189,7 +189,8 @@ release, and `microagent update` moves you to it.
 - `MDEBUG=0` (also `off`, `no`, `false`, and empty) no longer turns the stream trace on. The variable
   was set-at-all, so a wrapper that exports the name to pass a flag it has not set got the trace.
 - The missing-api-key message named two of the four variables that satisfy it, and the harbor adapter
-  read three of the four; both now name the same list, `DEEPSEEK_API_KEY` included.
+  read three of the four; both now name the same list, `DEEPSEEK_API_KEY` included. The adapter's
+  own `RuntimeError` named only two of the four it reads, so it says the same list as the binary.
 - The harbor adapter treats an empty `MICROAGENT_BASE_URL`, `MICROAGENT_BUDGET_SECONDS` or
   `MICROAGENT_MAX_TURNS` as unset, and a non-numeric one names the variable instead of raising a
   `ValueError` out of `int()`.
@@ -217,6 +218,10 @@ release, and `microagent update` moves you to it.
 
 ### Security
 
+- The two stderr notes that end a turn early now print the redacted endpoint. The time-budget note
+  and the generation-ceiling note named the raw base url, so a `user:password@` credential a user
+  put in one reached the terminal on those two paths, while every other note went through the
+  redacting helper.
 - The system prompt now says that tool results, file contents and command output are data about the
   repository rather than instructions. They are untrusted text on their way back into the prompt, and
   a file in the tree could otherwise instruct the model through the tool that read it.

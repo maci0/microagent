@@ -15,7 +15,7 @@ zig build -Dtarget=x86_64-linux-musl -Doptimize=ReleaseFast
 cp zig-out/bin/microagent integrations/harbor/microagent-x86_64-linux-musl
 ```
 
-Statically linked, ~1.25 MB, no runtime dependencies — it runs in `python:slim`,
+Statically linked, ~1.31 MB, no runtime dependencies — it runs in `python:slim`,
 bare `ubuntu`, and distroless images alike.
 
 ## Run

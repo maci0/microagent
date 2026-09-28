@@ -14,14 +14,14 @@ where `timeout` is not installed.
 
 | build | binary |
 | --- | --- |
-| `-Doptimize=ReleaseSmall` (stripped) | 721 KB |
-| `-Doptimize=ReleaseFast` (stripped) | 1.31 MB |
-| `-Doptimize=ReleaseSafe` (stripped) | 1.31 MB |
-| `Debug` (unstripped) | 31.2 MB |
+| `-Doptimize=ReleaseSmall` (stripped) | 762 KB |
+| `-Doptimize=ReleaseFast` (stripped) | 1.37 MB |
+| `-Doptimize=ReleaseSafe` (stripped) | 1.37 MB |
+| `Debug` (unstripped) | 31.8 MB |
 
 No runtime, no package manager, no node_modules, no python. Four files under `src/`
 (`main.zig` the agent loop, `style.zig` the reply styles, `update.zig` the self-update, `net.zig` the
-HTTP and stderr helpers the other three share), 5 033 lines.
+CA-bundle and output-sink helpers the other three share), 6 102 lines.
 The sizes in this table are `ls -l` on a fresh build of this tree; every other number below comes
 from the two bench scripts.
 

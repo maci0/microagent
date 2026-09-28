@@ -3,7 +3,7 @@
 A tiny coding agent in Zig, built to be driven by [gauntlet](https://github.com/maci0/gauntlet)
 loops. One binary, one loop, OpenAI-compatible APIs only.
 
-- **Small.** ~720 KB stripped (`-Doptimize=ReleaseSmall`), no runtime, no node, no python.
+- **Small.** ~760 KB stripped (`-Doptimize=ReleaseSmall`), no runtime, no node, no python.
 - **Fast.** ~2.5 ms to start, so a gauntlet loop spends its time in the model, not the harness.
 - **No features you did not ask for.** No subagents, no plugins, no MCP, no TUI. Streaming chat
   completions, seven tools, done.
@@ -15,7 +15,7 @@ dependencies, no services, no runtime.
 
 ```sh
 zig build -Doptimize=ReleaseFast      # zig-out/bin/microagent
-zig build -Doptimize=ReleaseSmall     # smallest binary, ~720 KB
+zig build -Doptimize=ReleaseSmall     # smallest binary, ~760 KB
 zig build test                        # unit tests
 ```
 
@@ -44,6 +44,8 @@ export MICROAGENT_MODEL=deepseek/deepseek-v4-flash
 
 microagent -p "fix the failing test and run it"
 ```
+
+The flags, abridged; `microagent --help` is the full text.
 
 ```
 -p, --print <prompt>   task to run (also accepted as a bare argument)
@@ -80,7 +82,7 @@ reply style (env, or the TOML config at MICROAGENT_CONFIG, default
                          (default full)
 
 subcommand:
-  update [-c|--check] [--repo owner/name]
+  update [--check] [--repo owner/name]
                          replace this binary with the latest GitHub
                          release after verifying its .sha256 sidecar
                          (--check only reports; GITHUB_TOKEN lifts the
@@ -139,7 +141,8 @@ configuration surface, so the file is read as `key = "value"` lines rather than 
 parser.
 
 - **`caveman`** compresses the prose the agent writes back: `off`, `lite`, `full`, `ultra`, plus the
-  three `wenyan-*` levels that write the reply in classical Chinese. Default `ultra` — a coding
+  three `wenyan-*` levels that write the reply in classical Chinese (a bare `wenyan` is
+  `wenyan-full`). Default `ultra` — a coding
   agent is judged on the diff, and every paragraph about it is re-sent on every later turn.
   Technical terms, code, commands, paths and exact error strings are never compressed, a negation is
   never dropped, and security warnings stay in plain English.
@@ -179,11 +182,15 @@ pollutes the agent's answer. Control characters in a path or command are written
 stays one line whatever the model sent.
 
 `cached_tokens` is the part of the prompt the provider served from its prompt cache. The whole
-conversation is re-sent every turn, byte for byte: messages are only ever appended, and the system
-prompt and tool schema never change, so the prefix stays cacheable and a turn pays full price only
-for what it just added. Watch the counter on a multi-turn run — it should climb with the
-conversation. It is read from whichever of `prompt_tokens_details.cached_tokens`,
-`prompt_cache_hit_tokens` or `cache_read_input_tokens` the endpoint sends.
+conversation is re-sent every turn, byte for byte: no message is ever dropped, reordered or
+re-spelled, and the system prompt and tool schema never change, so the prefix stays cacheable and a
+turn pays full price only for what it just added. The one exception is compaction, which past 400 KB
+of conversation replaces the content of the oldest large tool results with a
+`[earlier tool output elided: N bytes]` marker and leaves everything ahead of the first one
+untouched, so a long run stops re-sending files it has already acted on. Watch the counter on a
+multi-turn run — it should climb with the conversation, and dip at the turn a compaction lands on.
+It is read from whichever of `prompt_tokens_details.cached_tokens`, `prompt_cache_hit_tokens` or
+`cache_read_input_tokens` the endpoint sends.
 
 ### Session log
 
