@@ -1116,6 +1116,140 @@ fn fuzzLineSplit(_: void, smith: *std.testing.Smith) !void {
     }
 }
 
+// The response head a `Retry-After` is read out of, and the shapes that decide
+// which line of it is the header. `std.testing.fuzz` runs this corpus through
+// the harness on every `zig build test`, and through the fuzzer's mutations when
+// the test binary is built in fuzz mode. The head both network paths read: the
+// two header forms RFC 9110 defines, the spellings a gateway sends them in, a
+// header name carrying its own whitespace, the same name twice, the name
+// arriving after the blank line that ends the head, and a value that is neither
+// a count nor a date.
+const retry_after_corpus = [_][]const u8{
+    "",
+    "\r\n",
+    "\r\n\r\n",
+    "HTTP/1.1 429 Too Many Requests\r\n\r\n",
+    "HTTP/1.1 429 Too Many Requests\r\nretry-after: 30\r\n\r\n",
+    "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 30\r\n\r\n",
+    "HTTP/1.1 429 Too Many Requests\r\nRETRY-AFTER:30\r\n\r\n",
+    "HTTP/1.1 429 Too Many Requests\r\nretry-after:0\r\n\r\n",
+    "HTTP/1.1 429 Too Many Requests\r\nretry-after : 30\r\n\r\n",
+    "HTTP/1.1 429 Too Many Requests\r\nretry-after:\t30\t\r\n\r\n",
+    // The first one is the one read, so a gateway that sends two does not get
+    // the second one's wait.
+    "HTTP/1.1 429 Too Many Requests\r\nretry-after: 5\r\nretry-after: 900\r\n\r\n",
+    // A name that only contains the header, and one it is a prefix of.
+    "HTTP/1.1 429 Too Many Requests\r\nx-retry-after: 30\r\n\r\n",
+    "HTTP/1.1 429 Too Many Requests\r\nretry-after-extended: 30\r\n\r\n",
+    // The blank line ends the head, so a body carrying the name is not a header.
+    "HTTP/1.1 429 Too Many Requests\r\ncontent-length: 2\r\n\r\nretry-after: 30",
+    "HTTP/1.1 429 Too Many Requests\r\n\r\nretry-after: 0",
+    "retry-after: 30",
+    "retry-after: 30\r\n",
+    "HTTP/1.1 429 Too Many Requests\r\nretry-after: Wed, 21 Oct 2026 07:28:00 GMT\r\n\r\n",
+    "HTTP/1.1 429 Too Many Requests\r\nretry-after: Sun, 06 Nov 1994 08:49:37 GMT\r\n\r\n",
+    "HTTP/1.1 429 Too Many Requests\r\nretry-after: 99999999999\r\n\r\n",
+    "HTTP/1.1 429 Too Many Requests\r\nretry-after: 99999999999999999999999\r\n\r\n",
+    "HTTP/1.1 429 Too Many Requests\r\nretry-after: -1\r\n\r\n",
+    "HTTP/1.1 429 Too Many Requests\r\nretry-after: +30\r\n\r\n",
+    "HTTP/1.1 429 Too Many Requests\r\nretry-after: 1.5\r\n\r\n",
+    "HTTP/1.1 429 Too Many Requests\r\nretry-after: soon\r\n\r\n",
+    "HTTP/1.1 429 Too Many Requests\r\nretry-after:\r\n\r\n",
+    "HTTP/1.1 429 Too Many Requests\r\nretry-after:   \r\n\r\n",
+    "HTTP/1.1 429 Too Many Requests\r\nnocolon\r\nretry-after: 30\r\n\r\n",
+    "HTTP/1.1 429 Too Many Requests\r\n: 30\r\n\r\n",
+    "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 30\r\nContent-Type: text/html\r\n\r\n",
+    // A lone LF between the lines is not the framing RFC 9110 spells, so the
+    // head is one line and there is no header on it.
+    "HTTP/1.1 429 Too Many Requests\nretry-after: 30\n\n",
+    "HTTP/1.1 429 Too Many Requests\rretry-after: 30\r\r",
+    "HTTP/1.1 429 Too Many Requests\r\nretry-after: \x00\x001\r\n\r\n",
+    "HTTP/1.1 429 Too Many Requests\r\nretry-after: 30\x00\r\n\r\n",
+    "HTTP/1.1 429 Too Many Requests\r\nretry-after: 30\r\n\n\r\n",
+    "HTTP/1.1 429 Too Many Requests\r\nretry-after: Wed, 21 Oct 2026 07:28:00 GMT\r\nretry-after: 5\r\n\r\n",
+};
+
+test "a fuzzed Retry-After head waits for the header it names, and never past the cap" {
+    try std.testing.fuzz({}, fuzzRetryAfter, .{ .corpus = &retry_after_corpus });
+
+    // The corpus has to reach both answers, or the assertions below never fire:
+    // a counted wait and a head with no header on it.
+    try std.testing.expectEqual(@as(?u64, 30_000), retryAfterMs("HTTP/1.1 429\r\nretry-after: 30\r\n\r\n", 0));
+    try std.testing.expectEqual(@as(?u64, null), retryAfterMs("HTTP/1.1 429\r\ncontent-length: 0\r\n\r\n", 0));
+}
+
+fn fuzzRetryAfter(_: void, smith: *std.testing.Smith) !void {
+    var scratch: [4 * 1024]u8 = undefined;
+    const head: []const u8 = if (smith.in) |seed| seed else scratch[0..smith.slice(&scratch)];
+    // The clock is the caller's, and both forms of the header are measured
+    // against it, so it is a second set of the fuzzer's bytes rather than a
+    // constant: a date and a clock either side of each other is the pair that
+    // decides whether the wait is the difference or the ceiling.
+    const now: i64 = if (smith.in) |_|
+        1_700_000_000
+    else clock: {
+        var now_bytes: [8]u8 = undefined;
+        if (smith.slice(&now_bytes) < 8) break :clock 0;
+        break :clock @bitCast(std.mem.readInt(u64, &now_bytes, .little));
+    };
+
+    const got = retryAfterMs(head, now);
+
+    // A value off the wire sets a deadline, so it is bounded by the same cap
+    // every caller's own ceiling is: a header naming a wait past it is the cap,
+    // and one naming a wait before the clock is zero rather than a wrap.
+    if (got) |ms| try std.testing.expect(ms <= max_retry_after_ms);
+
+    // The blank line ends the head. Whatever a body spells after it is not a
+    // header, so a response that names the wait in its body alone is a head with
+    // no header on it: reading one there is a deadline a server's error page
+    // chose, which is the one input here that arrives without being asked for.
+    if (std.mem.indexOf(u8, head, "\r\n\r\n")) |end| {
+        try std.testing.expectEqual(
+            retryAfterMs(head[0..end], now),
+            got,
+        );
+    }
+
+    // A header with no colon is a line and not a header, and the name is
+    // compared whole, so a line that merely ends in the name is not this one.
+    // Both are decided by finding the header the same way the reader does, and
+    // a reader that disagreed with its own rule about where a header ends is a
+    // reader that reads a body or a different name.
+    if (firstRetryAfterLine(head)) |value| {
+        // What the first header names is what the caller waits for, and no
+        // later header changes it.
+        if (std.fmt.parseInt(u64, value, 10)) |seconds| {
+            try std.testing.expectEqual(@min(seconds *| std.time.ms_per_s, max_retry_after_ms), got);
+        } else |_| {}
+    } else {
+        try std.testing.expectEqual(@as(?u64, null), got);
+    }
+}
+
+/// The value of the first `Retry-After` header on the head, read by a scan that
+/// does not share the reader's shape: the reader splits the head on its line
+/// endings and drops the first segment, and this one walks the bytes to the
+/// first blank line and reads the name off each line. Two readings of one
+/// header block, so a framing rule either of them gets wrong is a disagreement
+/// rather than a value that is wrong in both halves at once.
+fn firstRetryAfterLine(head: []const u8) ?[]const u8 {
+    var rest = head;
+    // The status line is the first line and names no header, so the scan starts
+    // after it and a head that is nothing but one line has no header on it.
+    const status_end = std.mem.indexOf(u8, rest, "\r\n") orelse return null;
+    rest = rest[status_end + 2 ..];
+    while (std.mem.indexOf(u8, rest, "\r\n")) |at| {
+        const line = rest[0..at];
+        rest = rest[at + 2 ..];
+        if (line.len == 0) return null;
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, line[0..colon], " \t"), "retry-after")) continue;
+        return std.mem.trim(u8, line[colon + 1 ..], " \t");
+    }
+    return null;
+}
+
 /// Days from 1970-01-01 to the date the header spells, counted the long way.
 ///
 /// `daysFromCivil` reaches the number through the closed form that shifts the

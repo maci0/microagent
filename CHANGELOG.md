@@ -48,6 +48,19 @@ release, and `microagent update` moves you to it.
   carries a `--hash=sha256`. The file is installed with `--require-hashes`, so a
   pin added without one fails the lint job on pip's own message, which names
   neither the pin nor the linter that asked for it, and only in CI.
+- A fuzz harness for the `Retry-After` response head, over the whole head rather
+  than only the date its value can spell. The framing rules decide what a
+  deadline is set from, and nothing asserted them: a header read out of a body
+  past the blank line, a second `Retry-After` overriding the first, and a wait
+  past the cap all reach the same call. The harness reads the head a second way
+  and holds the two to each other, so a framing rule either gets wrong is a
+  disagreement rather than a value that is wrong in both halves at once.
+- A fuzz harness for the runner search over a `bash` call's arguments. The
+  arguments are the raw text the provider streamed, and the window the search
+  slides over them had a whole-string reference in the tree that only nineteen
+  hand-picked examples ever asked. A window answering differently from that
+  reference is a verification turn gained or lost on a run that edited the tree
+  and named no runner, so the two now run against the same bytes.
 
 ### Changed
 

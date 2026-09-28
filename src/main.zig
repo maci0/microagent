@@ -4892,6 +4892,152 @@ test "only a bash call that names a runner counts as verification" {
     }
 }
 
+// The arguments of a `bash` call, and the shapes that decide whether the run
+// they belong to counts as having tested itself. `std.testing.fuzz` runs this
+// corpus through the harness on every `zig build test`, and through the fuzzer's
+// mutations when the test binary is built in fuzz mode. Every byte here is the
+// provider's: the arguments are the raw text it streamed, so a name is matched
+// against whatever the model wrote rather than against a command anybody typed.
+// The corpus is the hand-picked list above grown to what a run really receives:
+// each name in the table bare and inside a JSON call, a name with words on
+// either side pushing the window past it, one word short of a name and one past
+// it, a name split across the JSON punctuation, the same name twice, and the
+// argument text that is not a call at all.
+const test_run_corpus = [_][]const u8{
+    "",
+    " ",
+    "\t\r\n",
+    "{}",
+    "{\"command\":\"\"}",
+    "{\"command\":\"ls\"}",
+    "{\"command\":\"ls tests/\"}",
+    "{\"command\":\"cat pytest_output.log\"}",
+    "{\"command\":\"grep -rn 'cargo test' src/\"}",
+    "{\"command\":\"sed -i s/tox/pox/ tox.ini\"}",
+    "pytest",
+    "cargo test",
+    "cargo tests",
+    "test cargo",
+    "zig build test",
+    "zig build tests",
+    "build zig test",
+    "manage.py test",
+    "manage.py tests",
+    "gradle test --info",
+    "dotnet test -c Release",
+    "{\"command\":\"cargo test\"}",
+    "{\"command\":\"cargo test --all -- --nocapture\"}",
+    "{\"command\":\"zig build test --summary all\"}",
+    "{\"command\":\"uv run pytest -q\"}",
+    "{\"command\":\"python -m pytest tests/\"}",
+    "{\"command\":\"npm test && npm run build\"}",
+    "{\"command\":\"cd src && cargo test --all\"}",
+    "{\"command\":\"ls; cargo test; ls\"}",
+    "{\"command\":\"a b cargo c d test e f\"}",
+    "{\"command\":\"x y z zig build test p q r\"}",
+    "{\"command\":\"x y z mvn test p q r\"}",
+    "{\"command\":\"x y z gradle test p q r\"}",
+    "{\"command\":\"x y z bazel test p q r\"}",
+    "{\"command\":\"x y z swift test p q r\"}",
+    "{\"command\":\"x y z mix test p q r\"}",
+    "{\"command\":\"x y z dotnet test p q r\"}",
+    // The name split across the JSON punctuation rather than a space, which is
+    // how a streamed argument actually arrives.
+    "{\"command\":\"cargo\",\"other\":\"test\"}",
+    "{\"command\":\"zig\",\"other\":\"build\",\"third\":\"test\"}",
+    "{\"command\":\"manage.py\",\"other\":\"test\"}",
+    "{\"command\":\"cargo test\"}{\"command\":\"cargo test\"}",
+    "{\"command\":\"cargo test\",\"cwd\":\"src\"}",
+    "{\"path\":\"tests/test_thing.py\"}",
+    "{\"pattern\":\"fn main\",\"lang\":\"zig\"}",
+    "{\"command\":\"cargo test\"}\n{\"command\":\"ls\"}",
+    "{\"command\":\"\\u0000cargo test\"}",
+    "{\"command\":\"cargo test\\u0000\"}",
+    "{\"command\":\"CARGO TEST\"}",
+    "{\"command\":\"Cargo test\"}",
+    "{\"command\":\"cargo  test\"}",
+    "{\"command\":\"\\tcargo\\ntest\\r\"}",
+    "{\"command\":\"caf\\u00e9 cargo test \\u65e5\\u8a00\"}",
+    "{\"command\":\"" ++ "a" ** 500 ++ " cargo test\"}",
+    "{\"command\":\"" ++ "a" ** 500 ++ "\"}",
+    "{\"command\":\"\\ud83d\\ude80 test\"}",
+    "{\"command\":\"\\xff\\xfe cargo test\"}",
+};
+
+test "a fuzzed bash call is a test run to both the window and the whole-string search" {
+    try std.testing.fuzz({}, fuzzTestRun, .{ .corpus = &test_run_corpus });
+
+    // The corpus has to reach both answers, or the equality above is never
+    // disagreed with: a command naming a runner is a test run, and one naming
+    // none is not.
+    try std.testing.expect(isTestRun("bash", "{\"command\":\"cargo test\"}"));
+    try std.testing.expect(!isTestRun("bash", "{\"command\":\"cargo tests\"}"));
+}
+
+fn fuzzTestRun(_: void, smith: *std.testing.Smith) !void {
+    var scratch: [8 * 1024]u8 = undefined;
+    const args: []const u8 = if (smith.in) |seed| seed else scratch[0..smith.slice(&scratch)];
+
+    // The window `finishTurn` slides over the argument words and the
+    // whole-string search below are two answers to one question, and they
+    // answering differently is a verification turn gained or lost: a run that
+    // edited the tree and never named a runner is the one this predicate asks
+    // for a turn it did not get. The reference is the whole-string search, so
+    // the window is what the fuzzer holds to it.
+    const windowed = isTestRun("bash", args);
+    try std.testing.expectEqual(bruteForceTestRun(args), windowed);
+
+    // Only a `bash` call is one. The same bytes under a read or a search named
+    // nothing that was run, and counting it would verify a run that did not
+    // happen.
+    for ([_][]const u8{ "read", "search", "edit", "git", "write", "" }) |name|
+        try std.testing.expect(!isTestRun(name, args));
+
+    // What separates one word of the argument from the next is the set below,
+    // and the arguments arrive as raw JSON where a name is often split by its
+    // own punctuation. Every name in the table, spelled with each of those
+    // characters in place of its spaces, is that runner to both searches: a
+    // separator dropped from the set is a runner this run never recognizes, and
+    // no hand-picked seed finds that on its own.
+    var any_matched = false;
+    for (test_runners) |runner| {
+        for (tool_word_separators) |separator| {
+            var spelled: [max_runner_spelling]u8 = undefined;
+            const n = replaceSpaces(runner, separator, &spelled);
+            const windowed_spell = isTestRun("bash", spelled[0..n]);
+            try std.testing.expectEqual(bruteForceTestRun(spelled[0..n]), windowed_spell);
+            if (windowed_spell) any_matched = true;
+        }
+    }
+    // Every name in the table, spelled with every separator in place of its
+    // spaces, is a test run. A separator dropped from the set leaves the names
+    // that use it unrecognized, and the two searches agree on that, so nothing
+    // above would have said so.
+    if (!any_matched) return error.TestUnexpectedResult;
+}
+
+/// The longest a name in `test_runners` is, so the harness spells one over a
+/// stack buffer rather than an allocation it has to free. Counted out of the
+/// table rather than guessed, the way `test_runner_max_words` is: a name added
+/// to the table that is longer than this is written past the buffer.
+const max_runner_spelling = blk: {
+    var n: usize = 0;
+    @setEvalBranchQuota(10_000);
+    for (test_runners) |runner| n = @max(n, runner.len);
+    break :blk n;
+};
+
+/// `text` with every space replaced by `separator`, which is what the
+/// tokenizer sees when a name arrives split by the argument's own punctuation.
+fn replaceSpaces(text: []const u8, separator: u8, buf: []u8) usize {
+    var n: usize = 0;
+    for (text) |c| {
+        buf[n] = if (c == ' ') separator else c;
+        n += 1;
+    }
+    return n;
+}
+
 /// The runner search `isTestRun` answers, written as it was before the window:
 /// every name searched for by tokenizing the whole argument string again. Kept
 /// as the reference the windowed version is asserted against, because the two
