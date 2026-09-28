@@ -9,6 +9,7 @@ const std = @import("std");
 const Io = std.Io;
 
 const build_options = @import("build_options");
+const style_mod = @import("style.zig");
 const update_mod = @import("update.zig");
 
 const version = build_options.version;
@@ -22,6 +23,8 @@ const max_tool_output = 24 * 1024;
 /// task reached 1.7M cumulative input tokens that way.
 const conversation_soft_limit = 400 * 1024;
 const max_turns_default = 100;
+/// Parallel tool calls accepted from one response; higher indices are dropped.
+const max_tool_calls = 64;
 
 const system_prompt =
     "You are microagent, a coding agent working on the repository in the current directory.\n" ++
@@ -206,7 +209,13 @@ pub fn main(init: std.process.Init) !void {
     var msgs: std.ArrayList(u8) = .empty;
     defer msgs.deinit(gpa);
     try msgs.appendSlice(gpa, "[");
-    try appendMessage(gpa, &msgs, "system", system_prompt);
+    const style = loadStyle(io, init, init.arena.allocator());
+    const reply_style = try style.ruleset(init.arena.allocator());
+    const prompt = if (reply_style.len == 0)
+        system_prompt
+    else
+        try std.fmt.allocPrint(init.arena.allocator(), "{s}\n\n{s}", .{ system_prompt, reply_style });
+    try appendMessage(gpa, &msgs, "system", prompt);
     try appendMessage(gpa, &msgs, "user", opts.prompt);
 
     const reason = run(&client, io, gpa, init.arena.allocator(), opts, &msgs) catch |err| {
@@ -245,6 +254,14 @@ const help_text =
     \\                         medium, high, or none to disable (env MICROAGENT_REASONING_EFFORT)
     \\  -h, --help             this text
     \\  -V, --version          version
+    \\
+    \\reply style (env, or the TOML config at MICROAGENT_CONFIG, default
+    \\~/.microagent/config.toml with the keys "caveman" and "ponytail"):
+    \\  MICROAGENT_CAVEMAN     how terse the reply is: off, lite, full, ultra,
+    \\                         wenyan-lite, wenyan-full, wenyan-ultra
+    \\                         (default ultra)
+    \\  MICROAGENT_PONYTAIL    how lazy the code is: off, lite, full, ultra
+    \\                         (default full)
     \\
     \\subcommand:
     \\  update [--check] [--repo owner/name]
@@ -302,6 +319,32 @@ fn readSecret(init: std.process.Init, name: []const u8) ?[]const u8 {
     const path = std.fmt.allocPrint(init.arena.allocator(), "{s}/.secrets/{s}", .{ home, name }) catch return null;
     const raw = std.Io.Dir.cwd().readFileAlloc(init.io, path, init.arena.allocator(), .limited(4096)) catch return null;
     return std.mem.trim(u8, raw, " \t\r\n");
+}
+
+/// The reply-style levels for this run, from the TOML config at
+/// MICROAGENT_CONFIG or `$HOME/.microagent/config.toml`, then the
+/// MICROAGENT_CAVEMAN / MICROAGENT_PONYTAIL overrides, then the built-in
+/// defaults. A missing file, an unreadable one, or an unknown key costs the run
+/// nothing: the levels that were understood still apply.
+fn loadStyle(io: Io, init: std.process.Init, arena: std.mem.Allocator) style_mod.Style {
+    var style: style_mod.Style = .{};
+    if (init.environ_map.get("MICROAGENT_CAVEMAN")) |v| {
+        if (style_mod.parseCaveman(v)) |level| style.caveman = level;
+    }
+    if (init.environ_map.get("MICROAGENT_PONYTAIL")) |v| {
+        if (style_mod.parsePonytail(v)) |level| style.ponytail = level;
+    }
+
+    const path = init.environ_map.get("MICROAGENT_CONFIG") orelse blk: {
+        const home = init.environ_map.get("HOME") orelse return style;
+        break :blk std.fmt.allocPrint(arena, "{s}/.microagent/config.toml", .{home}) catch return style;
+    };
+    if (path.len == 0) return style;
+    const abs = std.fs.path.resolve(arena, &.{path}) catch path;
+    const text = std.Io.Dir.cwd().readFileAlloc(io, abs, arena, .limited(64 * 1024)) catch return style;
+    if (style.applyToml(text)) |key|
+        announce(io, arena, "microagent: config {s}: '{s}' is not a level; keeping the default\n", .{ path, key });
+    return style;
 }
 
 /// The agent loop. Returns the number of chat completions made.
@@ -635,7 +678,10 @@ fn applyFrame(
     if (delta.object.get("tool_calls")) |tcs| if (tcs == .array) {
         for (tcs.array.items) |tc| {
             if (tc != .object) continue;
-            const idx: usize = @intCast(@max(0, num(tc.object.get("index"))));
+            const idx: usize = @intCast(num(tc.object.get("index")));
+            // The index sizes `calls`, so a provider-sent index is capped
+            // before it can ask for billions of empty slots.
+            if (idx >= max_tool_calls) continue;
             while (calls.items.len <= idx) try calls.append(arena, .{
                 .id = try arena.dupe(u8, ""),
                 .name = try arena.dupe(u8, ""),
@@ -661,6 +707,9 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     const path = str(args.get("path"));
     const rev = str(args.get("rev"));
     const limit: usize = if (args.get("limit")) |v| @intCast(num(v)) else 400;
+    // A rev such as `--output=FILE` would turn a read into a write.
+    if (rev) |r| if (std.mem.startsWith(u8, r, "-"))
+        return std.fmt.allocPrint(arena, "error: rev must not start with '-'", .{});
 
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(arena, &.{ "git", "--no-pager" });
@@ -668,7 +717,7 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
         try argv.appendSlice(arena, &.{ "status", "--short", "--branch" });
     } else if (std.mem.eql(u8, cmd, "diff")) {
         try argv.appendSlice(arena, &.{ "diff", "--no-color" });
-        if (rev) |r| try argv.appendSlice(arena, &.{ r, "--" });
+        if (rev) |r| try argv.append(arena, r);
     } else if (std.mem.eql(u8, cmd, "log")) {
         try argv.appendSlice(arena, &.{ "log", "--oneline", "--no-color", "-n", "30" });
     } else if (std.mem.eql(u8, cmd, "show")) {
@@ -680,6 +729,8 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     } else {
         return std.fmt.allocPrint(arena, "error: unknown git cmd '{s}'", .{cmd});
     }
+    // `--` keeps a path from being read as an option.
+    try argv.append(arena, "--");
     if (path) |p| try argv.append(arena, p);
 
     const res = std.process.run(arena, io, .{
@@ -991,7 +1042,7 @@ fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(arena, &.{ "ast-grep", "run", "--pattern", pattern, "--lang", lang });
     if (rewrite) |r| try argv.appendSlice(arena, &.{ "--rewrite", r, "--update-all" });
-    try argv.append(arena, path);
+    try argv.appendSlice(arena, &.{ "--", path });
 
     const res = std.process.run(arena, io, .{
         .argv = argv.items,
@@ -1067,7 +1118,7 @@ fn num(v: ?std.json.Value) u64 {
     const value = v orelse return 0;
     return switch (value) {
         .integer => |n| if (n > 0) @intCast(n) else 0,
-        .float => |f| if (f > 0) @intFromFloat(f) else 0,
+        .float => |f| std.math.lossyCast(u64, f),
         .number_string => |s| std.fmt.parseInt(u64, s, 10) catch 0,
         else => 0,
     };
@@ -1100,7 +1151,7 @@ fn waitFor(io: Io, attempt: u32) !void {
 
 /// A monotonic duration for `Io.Timeout`, from milliseconds.
 fn durationMs(ms: u64) Io.Timeout {
-    return .{ .duration = .{ .raw = .{ .nanoseconds = @intCast(ms * std.time.ns_per_ms) }, .clock = .awake } };
+    return .{ .duration = .{ .raw = .{ .nanoseconds = ms *| std.time.ns_per_ms }, .clock = .awake } };
 }
 
 fn clamp(s: []const u8, max: usize) []const u8 {
@@ -1108,8 +1159,10 @@ fn clamp(s: []const u8, max: usize) []const u8 {
 }
 
 // A file's tests are collected only when the root file's test block imports
-// it, so the `update` subcommand's tests are pulled in here.
+// it, so the `update` subcommand's tests and the style levels' tests are
+// pulled in here.
 test {
+    _ = style_mod;
     _ = update_mod;
 }
 
@@ -1453,4 +1506,34 @@ var debug_enabled: bool = false;
 /// Cheap env-gated trace, for debugging a stuck stream.
 fn debugOn() bool {
     return debug_enabled;
+}
+
+test "git tool refuses a rev that git would read as an option" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var args: std.json.ObjectMap = .empty;
+    try args.put(arena, "cmd", .{ .string = "diff" });
+    try args.put(arena, "rev", .{ .string = "--output=pwned" });
+    const out = try toolGit(std.testing.io, arena, args);
+    try std.testing.expectEqualStrings("error: rev must not start with '-'", out);
+}
+
+test "out-of-range numbers from the model saturate instead of trapping" {
+    try std.testing.expectEqual(std.math.maxInt(u64), num(.{ .float = 1e30 }));
+    try std.testing.expectEqual(@as(u64, 0), num(.{ .float = -5 }));
+    try std.testing.expectEqual(@as(u64, 0), num(.{ .float = std.math.nan(f64) }));
+    _ = durationMs(std.math.maxInt(u64));
+}
+
+test "a tool call index past the cap is dropped, not allocated" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var result: ChatResult = .{};
+    var calls: std.ArrayList(ToolCall) = .empty;
+    var out_buf: std.ArrayList(u8) = .empty;
+    const payload = "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":4000000000,\"function\":{\"name\":\"bash\"}}]}}]}";
+    try applyFrame(arena, arena, payload, &result, &calls, &out_buf);
+    try std.testing.expectEqual(@as(usize, 0), calls.items.len);
 }

@@ -50,6 +50,39 @@ Any OpenAI-compatible endpoint works: OpenRouter, DeepSeek, OpenAI, vLLM, LiteLL
 `deepseek/deepseek-v4-flash` and `stealth/space-bunny-alpha` (OpenRouter) were used to verify it
 end to end; see [BENCHMARK.md](BENCHMARK.md).
 
+### Reply style
+
+Two prompt-level knobs, set in one TOML file so a gauntlet loop, a container run and a laptop all
+start the same way. Neither touches the tools or the request shape: both are text appended to the
+system prompt, and the conversation is still the plain OpenAI message array.
+
+```toml
+caveman  = "ultra"   # how terse the reply is
+ponytail = "full"    # how lazy the code is
+```
+
+The keys may also sit under a `[style]` table, and `#` comments are fine. That is the whole
+configuration surface, so the file is read as `key = "value"` lines rather than with a full TOML
+parser.
+
+- **`caveman`** compresses the prose the agent writes back: `off`, `lite`, `full`, `ultra`, plus the
+  three `wenyan-*` levels that write the reply in classical Chinese. Default `ultra` — a coding
+  agent is judged on the diff, and every paragraph about it is re-sent on every later turn.
+  Technical terms, code, commands, paths and exact error strings are never compressed, a negation is
+  never dropped, and security warnings stay in plain English.
+- **`ponytail`** biases what the agent builds rather than how it talks: `off`, `lite`, `full`,
+  `ultra`. Reuse a helper the repository already has before writing a new one, the standard library
+  and native platform features before a dependency, and the smallest diff that fixes the root cause
+  rather than the symptom. Default `full`: a harness that writes fifty lines where five would do is
+  the thing this project exists to avoid. Never at the cost of input validation at a trust boundary,
+  error handling that prevents data loss, security, accessibility, or anything the task asks for.
+
+The file is `MICROAGENT_CONFIG`, else `~/.microagent/config.toml`; a missing or unreadable file just
+means the defaults. `MICROAGENT_CAVEMAN` and `MICROAGENT_PONYTAIL` set a level without touching the
+file, and an unrecognized level is reported on stderr with that key's default kept. With
+`caveman = "off"` and `ponytail = "off"`, the system prompt is exactly the one the harness sent
+before styles existed.
+
 ### Output contract
 
 stdout carries the model's own text, one JSON usage line per response, and nothing else:
