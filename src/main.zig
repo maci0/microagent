@@ -879,13 +879,13 @@ fn streamChat(
             if (waitBeforeRetry(io, attempt, @errorName(err))) continue;
             return err;
         };
-        if (debugOn()) std.debug.print("[mdebug] request sent, body={d} bytes\n", .{body.len});
+        if (debug_enabled) std.debug.print("[mdebug] request sent, body={d} bytes\n", .{body.len});
 
         var response = open.receiveHead(&redirect_buffer) catch |err| {
             if (waitBeforeRetry(io, attempt, @errorName(err))) continue;
             return err;
         };
-        if (debugOn()) std.debug.print("[mdebug] head status={d} enc={s}\n", .{ @intFromEnum(response.head.status), @tagName(response.head.content_encoding) });
+        if (debug_enabled) std.debug.print("[mdebug] head status={d} enc={s}\n", .{ @intFromEnum(response.head.status), @tagName(response.head.content_encoding) });
         if (response.head.status != .ok) {
             if (retryableStatus(response.head.status) and attempt < max_attempts) {
                 try waitFor(io, attempt);
@@ -1540,21 +1540,16 @@ fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     if (count == 0) return std.fmt.allocPrint(arena, "error: old_string not found in {s}", .{path});
     if (count > 1 and !all) return std.fmt.allocPrint(arena, "error: old_string occurs {d} times in {s}; add context or set replace_all", .{ count, path });
 
+    // The checks above leave either every occurrence replaced or, without
+    // `all`, exactly one to replace, and one match is the loop below run once.
     var buf: std.ArrayList(u8) = .empty;
-    if (all) {
-        var rest = raw;
-        while (std.mem.indexOf(u8, rest, old)) |at| {
-            try buf.appendSlice(arena, rest[0..at]);
-            try buf.appendSlice(arena, new);
-            rest = rest[at + old.len ..];
-        }
-        try buf.appendSlice(arena, rest);
-    } else {
-        const at = std.mem.indexOf(u8, raw, old).?;
-        try buf.appendSlice(arena, raw[0..at]);
+    var rest = raw;
+    while (std.mem.indexOf(u8, rest, old)) |at| {
+        try buf.appendSlice(arena, rest[0..at]);
         try buf.appendSlice(arena, new);
-        try buf.appendSlice(arena, raw[at + old.len ..]);
+        rest = rest[at + old.len ..];
     }
+    try buf.appendSlice(arena, rest);
     std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = buf.items }) catch |err|
         return std.fmt.allocPrint(arena, "error: cannot write {s}: {s}", .{ path, @errorName(err) });
     return std.fmt.allocPrint(arena, "replaced {d} occurrence(s) in {s}", .{ count, path });
@@ -2314,8 +2309,9 @@ test "tool output truncation keeps whole lines" {
     try std.testing.expectEqualStrings("solo\n", try firstLines(arena, "solo\n", 1));
 }
 
-/// A conversation past the compaction limit, in the bytes the agent appends:
-/// the system and user messages, then `count` tool results of `blob` each.
+/// The system and user messages a run starts from, in the bytes the agent
+/// appends. `appendToolResults` follows it with the tool results that push a
+/// conversation past the compaction limit.
 fn conversationHeader(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), system: []const u8) !void {
     try msgs.appendSlice(gpa, "[");
     try appendMessage(gpa, msgs, "system", system);
@@ -2525,12 +2521,9 @@ test "one bad style value does not cost the run the levels it did understand" {
     try std.testing.expectEqual(style_mod.CavemanLevel.lite, from_file.caveman);
 }
 
+/// Cheap env-gated trace, for debugging a stuck stream. Set once from MDEBUG
+/// before any turn runs.
 var debug_enabled: bool = false;
-
-/// Cheap env-gated trace, for debugging a stuck stream.
-fn debugOn() bool {
-    return debug_enabled;
-}
 
 test "git tool refuses a rev that git would read as an option" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -2945,6 +2938,44 @@ test "the trace switch is on only for a value that says so" {
     try std.testing.expect(debugEnabled(&env));
     try env.put("MDEBUG", "on");
     try std.testing.expect(debugEnabled(&env));
+}
+
+// The edit tool rewrites a file the model named, and the one-match case has to
+// come out the same whether or not `replace_all` was asked for: the count
+// checks above refuse an ambiguous match, so both paths have exactly the
+// occurrences they are going to replace. The tool resolves paths against the
+// process directory, so the test runs from the temp directory it edits.
+test "edit replaces one match, or every match when asked" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_path = cwd_buf[0..try tmp.dir.realPath(std.testing.io, &cwd_buf)];
+    const orig = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, ".", arena);
+    try std.process.setCurrentPath(std.testing.io, tmp_path);
+    defer std.process.setCurrentPath(std.testing.io, orig) catch {};
+
+    var args: std.json.ObjectMap = .empty;
+    try args.put(arena, "path", .{ .string = "a.txt" });
+    try args.put(arena, "old_string", .{ .string = "x" });
+    try args.put(arena, "new_string", .{ .string = "y" });
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.txt", .data = "a x b" });
+    try std.testing.expectEqualStrings("replaced 1 occurrence(s) in a.txt", try toolEdit(std.testing.io, arena, args));
+    try std.testing.expectEqualStrings("a y b", try tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
+
+    // An ambiguous match is refused rather than guessed at, so the file the
+    // model was shown is still the file on disk.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.txt", .data = "x and x" });
+    try std.testing.expect(std.mem.startsWith(u8, try toolEdit(std.testing.io, arena, args), "error: old_string occurs 2 times"));
+    try std.testing.expectEqualStrings("x and x", try tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
+
+    try args.put(arena, "replace_all", .{ .bool = true });
+    try std.testing.expectEqualStrings("replaced 2 occurrence(s) in a.txt", try toolEdit(std.testing.io, arena, args));
+    try std.testing.expectEqualStrings("y and y", try tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
 }
 
 // A tool call must take its whole process tree down with it. The command

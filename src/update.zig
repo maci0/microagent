@@ -77,7 +77,7 @@ pub fn compareVersions(running: []const u8, tag: []const u8) std.math.Order {
 /// `major.minor.patch` with a missing component read as 0, or null when a
 /// component is not a plain number.
 fn parseTriple(release: []const u8) ?[3]u64 {
-    const v = if (std.mem.startsWith(u8, release, "v")) release[1..] else release;
+    const v = bareVersion(release);
     var out = [3]u64{ 0, 0, 0 };
     var it = std.mem.splitScalar(u8, v, '.');
     var n: usize = 0;
@@ -392,65 +392,6 @@ fn fail(io: std.Io, comptime fmt: []const u8, args: anytype) u8 {
     return 1;
 }
 
-/// An `Allocating` writer that refuses to hold more than `limit` bytes.
-///
-/// The size has to be capped while the body streams in, not after: `fetch`
-/// hands every byte to the writer before it returns, so a check afterwards
-/// bounds only the error message, not what a hostile or malfunctioning
-/// response endpoint can take out of the machine's memory.
-const CappedBody = struct {
-    inner: std.Io.Writer.Allocating,
-    limit: usize,
-    writer: std.Io.Writer,
-
-    const vtable: std.Io.Writer.VTable = .{ .drain = drain, .rebase = rebase };
-
-    fn init(allocator: std.mem.Allocator, limit: usize) !CappedBody {
-        var self: CappedBody = .{
-            .inner = try std.Io.Writer.Allocating.initCapacity(allocator, @min(limit, 64 * 1024)),
-            .limit = limit,
-            .writer = undefined,
-        };
-        self.writer = .{ .vtable = &vtable, .buffer = &.{} };
-        return self;
-    }
-
-    fn deinit(self: *CappedBody) void {
-        self.inner.deinit();
-    }
-
-    fn written(self: *CappedBody) []const u8 {
-        return self.inner.written();
-    }
-
-    fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-        std.debug.assert(data.len != 0);
-        const self: *CappedBody = @fieldParentPtr("writer", w);
-        const pattern = data[data.len - 1];
-        // The last element is written `splat` times in total, or dropped when
-        // splat is zero, so the byte count to check against the cap follows
-        // that rather than counting the pattern once more.
-        const extra = pattern.len *| (splat -| 1);
-        const counted = if (splat == 0) 0 -% pattern.len else extra;
-        var total = self.inner.written().len;
-        for (data) |bytes| total = std.math.add(usize, total, bytes.len) catch return error.WriteFailed;
-        total = std.math.add(usize, total, counted) catch return error.WriteFailed;
-        if (total > self.limit) return error.WriteFailed;
-
-        const start = self.inner.written().len;
-        for (data[0..if (splat == 0) data.len - 1 else data.len]) |bytes|
-            try self.inner.writer.writeAll(bytes);
-        for (0..splat -| 1) |_| try self.inner.writer.writeAll(pattern);
-        return self.inner.written().len - start;
-    }
-
-    fn rebase(w: *std.Io.Writer, preserve: usize, capacity: usize) std.Io.Writer.Error!void {
-        _ = preserve;
-        const self: *CappedBody = @fieldParentPtr("writer", w);
-        self.inner.ensureUnusedCapacity(capacity) catch return error.WriteFailed;
-    }
-};
-
 /// One GET, body capped at `max_size` while it streams. `client` is shared
 /// across the three fetches a run makes so the CA store is loaded once. On an
 /// HTTP error `status_out` carries the code, which is the difference between
@@ -599,7 +540,10 @@ pub fn run(
 
     var client: std.http.Client = .{ .allocator = gpa, .io = io };
     defer client.deinit();
-    loadCaBundle(&client, io, gpa, arena, env);
+    // The agent run's CA-bundle escape hatch: an image that ships no
+    // ca-certificates can still reach GitHub by naming a PEM file.
+    const ca_path = net.caBundlePath(env);
+    if (ca_path.len != 0) net.loadCaBundle(&client, io, gpa, ca_path, arena);
 
     const bearer = githubBearer(arena, env);
     var status: std.http.Status = .ok;
@@ -698,31 +642,7 @@ fn unknownArgument(io: std.Io, arg: []const u8) u8 {
     return updateUsageError(io, "unknown or incomplete argument '{s}'", .{arg});
 }
 
-/// The same CA-bundle escape hatch the agent run has: an image that ships no
-/// ca-certificates can still reach GitHub by naming a PEM file. An empty path
-/// is the no-bundle case and `net.loadCaBundle` returns on it.
-fn loadCaBundle(
-    client: *std.http.Client,
-    io: std.Io,
-    gpa: std.mem.Allocator,
-    arena: std.mem.Allocator,
-    env: *std.process.Environ.Map,
-) void {
-    net.loadCaBundle(client, io, gpa, net.caBundlePath(env), arena);
-}
-
 // ── Tests ───────────────────────────────────────────────────────────────────
-
-test "update: a response body over the cap is refused while it streams, not after" {
-    const gpa = std.testing.allocator;
-    var body = try CappedBody.init(gpa, 8);
-    defer body.deinit();
-    try body.writer.writeAll("12345678");
-    try std.testing.expectEqualStrings("12345678", body.written());
-    // The ninth byte is the one that does not fit, and it never lands.
-    try std.testing.expectError(error.WriteFailed, body.writer.writeAll("9"));
-    try std.testing.expectEqualStrings("12345678", body.written());
-}
 
 const abc_sha = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 const asset_base = "microagent-v0.1.0-x86_64-linux-musl";
