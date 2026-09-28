@@ -69,6 +69,21 @@ release, and `microagent update` moves you to it.
   hand-picked examples ever asked. A window answering differently from that
   reference is a verification turn gained or lost on a run that edited the tree
   and named no runner, so the two now run against the same bytes.
+- A fuzz harness for the credentials name rules, over a model's own path and
+  command arguments. `isCredentialPath` walks every component of a path the
+  model wrote and `credentialInCommand` splits a `bash` command into words, and
+  both decide the one thing whose failure sends a key to the provider. The
+  harness holds the walk to a component the name rules refuse, so a path with
+  no credential component in it is never turned down, and reads the same path
+  with trailing separators and in another case, which are the two spellings
+  the walk is documented to treat as one file. The word a refusal names is the
+  command's first, not one later in the line.
+- A fuzz harness for an ast-grep rewrite's own re-run check, over the pattern
+  and the replacement the model wrote together. The refusal reads a pattern for
+  the literal text a match is anchored on, and a rewrite that still carries it
+  is applied again on the next run, one wrapper deeper each time, to every match
+  in the tree. The harness holds the literal text to a fixed point, and holds
+  every applied rewrite clear of all three shapes the refusal exists for.
 
 ### Changed
 

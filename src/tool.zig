@@ -764,8 +764,32 @@ fn requestedTimeoutMs(v: ?std.json.Value) ?u64 {
 /// "$f"`) is not caught here. Catching that needs a shell parser, and the
 /// guarantee that matters most, that the run's own key never reaches a child's
 /// environment, is structural rather than textual.
+///
+/// The characters a command is split on, spelled once so the walk above and
+/// the harness that fuzzes it walk the same words.
+const command_word_separators = " \t\n\"'`$&;<>|()[]{}*?!#\\";
+
+/// True when one component of `path` is refused by the name rules above, which
+/// is what `isCredentialPath` answers after its own walk has trimmed the
+/// trailing separators and skipped `.` and `..`. The fuzzer's harness spells
+/// the walk out rather than calling the walk, so a component the walk never
+/// reaches and a rule it never applies both show up as a disagreement.
+fn componentNamesCredential(path: []const u8) bool {
+    var component: ?[]const u8 = std.mem.trimEnd(u8, path, &path_sep);
+    while (component) |c| {
+        const name = std.fs.path.basename(c);
+        if (name.len != 0 and !std.mem.eql(u8, name, ".") and !std.mem.eql(u8, name, "..")) {
+            for (credential_dirs) |dir| {
+                if (name.len == dir.len and std.ascii.eqlIgnoreCase(name, dir)) return true;
+            }
+            if (isCredentialName(name)) return true;
+        }
+        component = std.fs.path.dirname(c);
+    }
+    return false;
+}
 fn credentialInCommand(command: []const u8) ?[]const u8 {
-    var words = std.mem.tokenizeAny(u8, command, " \t\n\"'`$&;<>|()[]{}*?!#\\");
+    var words = std.mem.tokenizeAny(u8, command, command_word_separators);
     while (words.next()) |word| {
         const leaf = std.fs.path.basename(word);
         if (std.mem.indexOfScalar(u8, word, std.fs.path.sep) == null and std.mem.indexOfScalar(u8, leaf, '.') == null) continue;
@@ -2741,6 +2765,117 @@ test "read refuses a credentials file and leaves every other path alone" {
     }
 }
 
+// The bytes a tool's path and command arguments carry are the model's, and the
+// model chose them out of files in the tree, so a path walk over them is a walk
+// over untrusted text: the separators, the `.` and `..` components, the case,
+// and every spelling of a credential name a repository can commit. It is also
+// the one decision in the binary whose failure sends a key to the provider, so
+// the walk is fuzzed for the answer rather than left to a table of examples.
+// `std.testing.fuzz` runs this corpus on every `zig build test`, and through
+// the fuzzer's mutations when the test binary is built in fuzz mode.
+//
+// The corpus is the spellings the rules name, the ones they have to leave
+// alone, and the shapes a walk can trip on: empty, a separator alone, a
+// trailing separator, `.` and `..` as components, a name only its case
+// distinguishes, an extension on something that is not a leaf, a Unicode
+// homoglyph, and paths deep enough that the walk is long.
+const credential_path_corpus = [_][]const u8{
+    "",
+    ".",
+    "..",
+    "/",
+    "//",
+    "src/main.zig",
+    "README.md",
+    "certs/server.crt",
+    "keys/id_ed25519.pub",
+    "chain.pem.example",
+    "src/environment.zig",
+    ".env",
+    ".env.local",
+    ".envrc",
+    ".env.example",
+    "production.env",
+    ".ENV",
+    ".Netrc",
+    "ID_RSA",
+    "certs/tls.KEY",
+    ".secrets/openrouter",
+    ".SSH/config",
+    ".ssh/",
+    "./.env",
+    "../.env",
+    "a/../.env",
+    "deploy/.env/prod",
+    "certs/server.pem/notes",
+    "backend/.env/",
+    "certs/server.pem//",
+    "home/u/.aws/credentials/db.ini",
+    "cat .env",
+    "cat \"$PWD\"/.env",
+    "head -n 2 .env.production; cat ~/.ssh/id_ed25519",
+    "git show HEAD -- .env",
+    "rg identity src",
+    "echo '\u{202e}gnp.exe'",
+    "\u{ff0e}env",
+    ".env\u{0301}",
+    "a" ** 200,
+    ("dir/" ** 32) ++ ".env",
+    ("../" ** 32) ++ "x",
+};
+
+test "a fuzzed path is refused exactly when one of its components names a credential" {
+    try std.testing.fuzz({}, fuzzCredentialPath, .{ .corpus = &credential_path_corpus });
+}
+
+fn fuzzCredentialPath(_: void, smith: *std.testing.Smith) !void {
+    const gpa = std.testing.allocator;
+    var scratch: [8 * 1024]u8 = undefined;
+    const text: []const u8 = if (smith.in) |seed| seed else scratch[0..smith.slice(&scratch)];
+
+    // The refusal is grounded: it is a component the name rules refuse, not
+    // the path as a whole, so a path with no such component is never turned
+    // down whatever else it spells.
+    const refused = isCredentialPath(text);
+    try std.testing.expectEqual(componentNamesCredential(text), refused);
+
+    // A trailing separator names the same file, and the walk trims it rather
+    // than reading the empty leaf that is left, so one path and the same path
+    // spelled with separators after it are one answer.
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const arena = state.allocator();
+    for ([_][]const u8{ "", "/", "//", "///" }) |tail| {
+        const padded = try std.mem.concat(arena, u8, &.{ text, tail });
+        try std.testing.expectEqual(refused, isCredentialPath(padded));
+        try std.testing.expectEqual(refused, componentNamesCredential(padded));
+    }
+
+    // The name rules are case-insensitive because a macOS or Windows filesystem
+    // resolves `.ENV` to the same bytes `.env` is. So the answer cannot move
+    // when only the case of the bytes moves, which is the property that keeps
+    // the rule from being a rule only on the filesystem that spells it exactly.
+    const lowered = try arena.dupe(u8, text);
+    for (lowered) |*c| c.* = std.ascii.toLower(c.*);
+    try std.testing.expectEqual(refused, isCredentialPath(lowered));
+
+    // The same bytes read as a `bash` command. The word a refusal names is
+    // one the tokenizer produced, and it is the first such word, so the file
+    // the model is told about is the one the command asks for first.
+    if (credentialInCommand(text)) |word| {
+        try std.testing.expect(isCredentialPath(word));
+        const leaf = std.fs.path.basename(word);
+        try std.testing.expect(std.mem.indexOfScalar(u8, word, path_sep[0]) != null or std.mem.indexOfScalar(u8, leaf, '.') != null);
+        var words = std.mem.tokenizeAny(u8, text, command_word_separators);
+        while (words.next()) |earlier| {
+            if (std.mem.eql(u8, earlier, word)) break;
+            const earlier_leaf = std.fs.path.basename(earlier);
+            if (std.mem.indexOfScalar(u8, earlier, path_sep[0]) == null and std.mem.indexOfScalar(u8, earlier_leaf, '.') == null) continue;
+            try std.testing.expect(!isCredentialPath(earlier));
+        }
+    }
+}
+
 // The refusal names the file, so a model that asked for it knows which one was
 // turned down, and it says what to do instead rather than leaving a bare error
 // that reads as a broken tool.
@@ -3649,6 +3784,102 @@ test "an ast rewrite whose output still matches its pattern is refused" {
     try std.testing.expectEqualStrings("a", (try patternSkeleton(arena, "a$b")).?);
     try std.testing.expectEqualStrings("()", (try patternSkeleton(arena, "($A)")).?);
     try std.testing.expect((try patternSkeleton(arena, "$A $B")) == null);
+}
+
+// A pattern and its replacement are both the model's, and an ast-grep rewrite
+// that matches its own output is applied again on the next run, one wrapper
+// deeper each time, to every match in the tree. So the pattern is read for the
+// literal text a match is anchored on, and that read is over bytes the model
+// wrote: the `$` that starts a metavariable and the `$` that is punctuation,
+// the whitespace trimmed off either end, and a pattern that is metavariables
+// alone. `std.testing.fuzz` runs this corpus on every `zig build test`, and
+// through the fuzzer's mutations when the test binary is built in fuzz mode.
+//
+// The corpus is the shapes the rule names: a pattern and a replacement that
+// agree, one that wraps, one that renames, a pattern of metavariables alone, a
+// skeleton too short to anchor on, `$` at the end and `$` before a
+// non-identifier, a replacement carrying a skeleton of its own, and the
+// whitespace the trim removes.
+const ast_rewrite_corpus = [_][]const u8{
+    "",
+    "\n",
+    "foo($A)\nfoo($A)",
+    "foo($A)\nbar($A)",
+    "return $X\nreturn [$X]",
+    "return $X\nraise ValueError($X)",
+    "return $X\nreturn\n",
+    "$A\n[$A]",
+    "$$A\n[$A]",
+    "$1\n[$1]",
+    "_$A_1\n[$_A_1]",
+    "$_\n$_",
+    "($A)\n($A) == ($A)",
+    "($A)\n($A) + ($A)",
+    "a$\na$",
+    "a$b\nab",
+    "$b\nb",
+    "  foo($A)  \n  foo($B)  ",
+    "\tprint($A)\n\tlog($A)\n",
+    "kw($A, $B)\nkw($B, $A)",
+    "foo\nfoo",
+    "foo\n",
+    "\nfoo",
+    "fn $NAME() {}\nfn $NAME() -> void {}",
+    "return $X\nreturn [$X] // $X\n",
+    "日$X\n日[$X]",
+    "foo($A)" ** 8,
+    "$A$B$C\n[$A$B$C]",
+};
+
+test "a fuzzed ast rewrite is applied only where a second run cannot match it again" {
+    try std.testing.fuzz({}, fuzzAstRewrite, .{ .corpus = &ast_rewrite_corpus });
+}
+
+fn fuzzAstRewrite(_: void, smith: *std.testing.Smith) !void {
+    const gpa = std.testing.allocator;
+    var scratch: [8 * 1024]u8 = undefined;
+    const text: []const u8 = if (smith.in) |seed| seed else scratch[0..smith.slice(&scratch)];
+
+    // The pattern is the first line and the replacement is the rest, the way
+    // the two arrive as two arguments. A pattern carrying a newline is not a
+    // pattern a caller writes, so the split costs nothing the fuzzer needs.
+    const split = std.mem.indexOfScalar(u8, text, '\n') orelse text.len;
+    const pattern = text[0..split];
+    const rewrite = if (split == text.len) "" else text[split + 1 ..];
+
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    const skeleton = try patternSkeleton(arena, pattern);
+    if (skeleton) |literal| {
+        // The literal text is the pattern with the metavariables cut out, so
+        // it is no longer than the pattern and carries none: a `$` that
+        // survived is punctuation the language spelled, never a name after it.
+        try std.testing.expect(literal.len <= pattern.len);
+        for (literal, 0..) |c, i| {
+            if (c != '$' or i + 1 == literal.len) continue;
+            try std.testing.expect(!(std.ascii.isAlphabetic(literal[i + 1]) or literal[i + 1] == '_'));
+        }
+        // Taking the literal text of the literal text changes nothing, so the
+        // anchor a refusal reads the replacement against is the one a second
+        // run would compute from it.
+        try std.testing.expectEqualStrings(literal, (try patternSkeleton(arena, literal)).?);
+    }
+
+    // A rewrite that is applied has to survive all three of the shapes the
+    // refusal exists for, and none of them is a judgement the harness can make
+    // on the message: a no-op, a pattern of metavariables alone, and a
+    // replacement the pattern is still anchored on.
+    if (try astRewriteRefusal(arena, pattern, rewrite) == null) {
+        try std.testing.expect(!std.mem.eql(u8, pattern, rewrite));
+        try std.testing.expect(skeleton != null);
+        if (skeleton) |literal| {
+            if (literal.len >= ast_skeleton_min) {
+                try std.testing.expect(std.mem.indexOf(u8, rewrite, literal) == null);
+            }
+        }
+    }
 }
 
 // The refusal above, through the tool the model actually calls, and before the
