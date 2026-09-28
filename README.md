@@ -31,7 +31,7 @@ make check                             # fmt --check, the linters, and the tests
 `make check` is exactly what [CI](.github/workflows/ci.yml) runs on a push, on
 the Zig version `build.zig.zon` names, so run it before pushing. It needs
 `shellcheck`, `ruff` and `yamllint` on `PATH` for the bench, Harbor and
-workflow sources; `zig fmt` covers the Zig and needs nothing else.
+`.github` sources; `zig fmt` covers the Zig and needs nothing else.
 
 ## Use
 

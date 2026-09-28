@@ -21,12 +21,14 @@ make lint                   # shellcheck, ruff and yamllint on their own
 ```
 
 `make check` is the whole gate: it is the same `zig fmt --check`, the same
-`ruff check` and `yamllint`, and the same `zig build test` that
+`ruff check`, `ruff format --check` and `yamllint`, and the same `zig build test` that
 [.github/workflows/ci.yml](.github/workflows/ci.yml) runs, on the same Zig
 version. `make help` lists every target. Source is formatted with `zig fmt`;
-`make fmt` applies it. The three linters cover what `zig fmt` cannot: the bench
+`make fmt` applies it, and `ruff format` does the same for the Harbor adapter.
+The three linters cover what `zig fmt` cannot: the bench
 shell, the Harbor adapter under `integrations/harbor` (rules in
-[ruff.toml](ruff.toml)) and the workflows (rules in [.yamllint](.yamllint)).
+[ruff.toml](ruff.toml)) and the workflows and actions under `.github` (rules in
+[.yamllint](.yamllint)).
 
 ## Tests
 

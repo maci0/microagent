@@ -16,10 +16,15 @@ release, and `microagent update` moves you to it.
 
 - The bench shell, the Harbor adapter and the workflows are linted. `make check` now runs
   `shellcheck` over `bench/*.sh` and `bench/tasks/*/*.sh`, `ruff check` over
-  `integrations/harbor` (rules in `ruff.toml`) and `yamllint` over `.github/workflows`
+  `integrations/harbor` (rules in `ruff.toml`) and `yamllint` over `.github`
   (rules in `.yamllint`), and CI runs all three as their own blocking job. A defect in
   the bench scripts or the adapter is a wrong benchmark result rather than a failing
   test, so nothing caught it before.
+- The Harbor adapter is formatter-checked: `make lint-python` and CI now run
+  `ruff format --check` beside `ruff check`, and the two files are formatted to match.
+  `ruff` also runs the security, naming, builtin-shadowing, logging and import
+  convention groups, which the tree already passed. `yamllint` covers
+  `.github/actions/setup-zig/action.yml` as well as the workflows.
 - `THREAT_MODEL.md`: the attack surface as a whole, entry points, trust boundaries, assets,
   the threats on each boundary, the controls the code implements and the gaps it does not
   cover, each with a file reference.

@@ -75,10 +75,10 @@ jobs:
       - name: the shell scripts parse and are shellcheck-clean
         run: make lint-shell
 
-      - name: the Harbor adapter is ruff-clean
+      - name: the Harbor adapter is ruff-clean and ruff-formatted
         run: make lint-python
 
-      - name: the workflows are yamllint-clean
+      - name: the workflows and actions are yamllint-clean
         run: make lint-yaml
 
   release-assets:

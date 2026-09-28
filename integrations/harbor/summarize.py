@@ -49,8 +49,7 @@ def main() -> int:
     job = Path(sys.argv[1])
     result = json.loads((job / "result.json").read_text())
     stats = result.get("stats", {})
-    print(f"{job.name}: {stats.get('n_completed_trials', 0)} trials, "
-          f"{stats.get('n_errored_trials', 0)} errored")
+    print(f"{job.name}: {stats.get('n_completed_trials', 0)} trials, {stats.get('n_errored_trials', 0)} errored")
     print(f"in={stats.get('n_input_tokens')} out={stats.get('n_output_tokens')} tokens")
 
     rows = []

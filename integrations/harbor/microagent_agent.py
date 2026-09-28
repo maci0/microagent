@@ -137,10 +137,7 @@ class Microagent(BaseAgent):
             timeout_sec=120,
         )
         if result.return_code != 0:
-            raise RuntimeError(
-                f"microagent did not run in the container: "
-                f"{result.stdout or ''}{result.stderr or ''}"
-            )
+            raise RuntimeError(f"microagent did not run in the container: {result.stdout or ''}{result.stderr or ''}")
         self.logger.info("microagent ready: %s", (result.stdout or "").strip())
 
     async def run(
