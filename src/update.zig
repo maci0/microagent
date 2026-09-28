@@ -562,6 +562,14 @@ const fetch_retry_max_ms: u64 = 30_000;
 /// Says the retry is coming and waits for it. False means the wait could not be
 /// taken, and the caller must surface its error rather than send the next
 /// request at once: a wait that did not happen is not a backoff.
+///
+/// The wait is the shared schedule, and there is no `Retry-After` on it: this
+/// fetches through `Client.fetch`, which hands back the status and nothing of
+/// the head, so the header is not reachable from here. Reading it means moving
+/// this loop onto `Client.request`, which is a change to the fetch and the
+/// capped writer under it, not a change to this wait. `net.retryAfterMs` is
+/// the reader to use when that happens, so the arithmetic is not written a
+/// second time then.
 fn waitBeforeFetchRetry(io: std.Io, arena: std.mem.Allocator, url: []const u8, attempt: u32, err: anyerror) bool {
     const wait = net.retryBackoffMs(attempt, fetch_retry_max_ms);
     net.writeErr(io, retryLine(arena, url, err, wait, attempt));

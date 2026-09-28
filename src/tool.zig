@@ -305,28 +305,25 @@ pub const git_default_limit: usize = 400;
 /// limit of zero is one line rather than the whole output, and a limit a 32-bit
 /// `usize` cannot hold is every line rather than a trap.
 fn gitLineLimit(args: std.json.ObjectMap) usize {
-    const v = args.get("limit") orelse return git_default_limit;
-    const n = countArg(v) orelse return git_default_limit;
-    return @max(1, std.math.cast(usize, n) orelse std.math.maxInt(usize));
+    return lineCount(args.get("limit"), git_default_limit);
 }
 
 /// A count the model sent, or null when it sent something that is not one.
 ///
-/// `chat.num` answers 0 for every value it cannot read as a number, which is
-/// the right answer for a token counter that starts at zero and the wrong one
-/// for a line count: a `limit` of `"3"` became a limit of zero, so the call
-/// returned an empty result and the model read it as a file with nothing in
-/// it. A number spelled as a string is a number a model meant, so it is read
-/// as one; a value that is neither is the model's mistake to be told about by
-/// the default rather than answered with the wrong lines.
-fn countArg(v: ?std.json.Value) ?u64 {
-    const value = v orelse return null;
-    return switch (value) {
-        .integer => |n| if (n > 0) @intCast(n) else 0,
-        .float => |f| std.math.lossyCast(u64, f),
-        .number_string, .string => |s| std.fmt.parseInt(u64, s, 10) catch null,
-        else => null,
-    };
+/// `chat.countArg` is the one reader of a count for the whole tree, so this is
+/// a name the tools say rather than a second spelling of the same switch.
+const countArg = chat.countArg;
+
+/// A line count the model sent, at least one. A count of zero is one line
+/// rather than no lines: a `limit` of `"3"` read as a limit of zero once, and
+/// the call came back empty and the model read that as a file with nothing in
+/// it. A count a 32-bit `usize` cannot hold is every line rather than a trap.
+///
+/// `read`, `git` and this module's other line counts all answer through here,
+/// so the same number cannot be read as three different ceilings.
+fn lineCount(v: ?std.json.Value, default: usize) usize {
+    const n = countArg(v) orelse return default;
+    return @max(1, std.math.cast(usize, n) orelse std.math.maxInt(usize));
 }
 
 /// The largest count handed to `git log -n`. Its own argument parser refuses a
@@ -927,13 +924,10 @@ fn toolRead(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]const
             return readFailed(arena, path, err);
 
     // Both counts are ceilings, so zero is one line rather than no lines, for
-    // the reason `gitLineLimit` gives: a `limit` of `"3"` read as a limit of
-    // zero once, and the call came back empty and the model read that as a file
-    // with nothing in it. The same rule on the read side, the same answer. An
-    // offset past the end of the file is a count too, and the cap the cast can
-    // reach is a line no file here has.
-    const offset: usize = @max(1, std.math.cast(usize, countArg(args.get("offset")) orelse 1) orelse std.math.maxInt(usize));
-    const limit: usize = @max(1, std.math.cast(usize, countArg(args.get("limit")) orelse std.math.maxInt(u64)) orelse std.math.maxInt(usize));
+    // the reason `lineCount` gives. An offset past the end of the file is a
+    // count too, and the cap the cast can reach is a line no file here has.
+    const offset: usize = lineCount(args.get("offset"), 1);
+    const limit: usize = lineCount(args.get("limit"), std.math.maxInt(usize));
     return readLines(io, arena, path, offset, limit);
 }
 

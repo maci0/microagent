@@ -1871,9 +1871,22 @@ fn streamChat(
                 // each retry is a second billable
                 // refusal. The header wins where it is a number this run is
                 // willing to wait, and the schedule stands where it is not.
-                const asked = retryAfterMs(io, response.head.bytes);
+                const asked = net.retryAfterMs(response.head.bytes, net.nowSeconds(io));
                 const wait = asked orelse net.retryBackoffMs(attempt, max_backoff_ms);
-                if (budget.canAffordWait(io, wait)) {
+                // Three outcomes, each with its own reason. They are spelled
+                // out rather than as a block with a `break` out of it, because
+                // the break landed on the budget note below and reported a
+                // cause that was not the one that had just been given.
+                if (!budget.canAffordWait(io, wait)) {
+                    // The provider asked for longer than this run has left.
+                    // Waiting the full ask would put the run to sleep inside
+                    // the caller's timeout, and retrying early is the second
+                    // billable refusal the header was meant to prevent, so the
+                    // turn is given up here with the reason below.
+                    net.note(io, arena, "microagent: {s} answered HTTP {d} asking for {d}ms, which is past what is left of this run's budget; the turn is given up\n", .{
+                        shown_url, @intFromEnum(response.head.status), wait,
+                    });
+                } else {
                     net.note(io, arena, "microagent: {s} answered HTTP {d}, retrying in {d}ms (attempt {d}/{d})\n", .{
                         shown_url, @intFromEnum(response.head.status), wait, attempt + 1, max_attempts,
                     });
@@ -1881,26 +1894,16 @@ fn streamChat(
                     // failed is not a sleep, and continuing would answer a
                     // provider that asked for a pause with an immediate second
                     // request, which is the refusal the header was meant to
-                    // prevent. Falling out of the block is what gives the turn
-                    // up, with the reason on stderr.
-                    waited: {
-                        waitMs(io, wait) catch |wait_err| {
-                            net.note(io, arena, "microagent: the {d}ms wait {s} asked for could not be taken ({s}); the turn is given up rather than retried at once\n", .{
-                                wait, shown_url, @errorName(wait_err),
-                            });
-                            break :waited;
-                        };
+                    // prevent. The turn is given up instead, with this reason
+                    // on stderr and the status below still reported.
+                    if (waitMs(io, wait)) |_| {
                         continue;
+                    } else |wait_err| {
+                        net.note(io, arena, "microagent: the {d}ms wait {s} asked for could not be taken ({s}); the turn is given up rather than retried at once\n", .{
+                            wait, shown_url, @errorName(wait_err),
+                        });
                     }
                 }
-                // The provider asked for longer than this run has left. Waiting
-                // the full ask would put the run to sleep inside the caller's
-                // timeout, and retrying early is the second billable refusal the
-                // header was meant to prevent, so the turn is given up here with
-                // the reason below.
-                net.note(io, arena, "microagent: {s} answered HTTP {d} asking for {d}ms, which is past what is left of this run's budget; the turn is given up\n", .{
-                    shown_url, @intFromEnum(response.head.status), wait,
-                });
             }
             var err_transfer: [8 * 1024]u8 = undefined;
             const err_reader = response.reader(&err_transfer);
@@ -3033,62 +3036,6 @@ fn waitBeforeRetry(io: Io, arena: std.mem.Allocator, url: []const u8, attempt: u
 /// the run's own accounting says it is.
 fn waitMs(io: Io, ms: u64) !void {
     try io.sleep(.{ .nanoseconds = ms *| std.time.ns_per_ms }, budget_clock);
-}
-
-/// The longest `Retry-After` this run will sit out. A provider asking for an
-/// hour is not a provider to wait an hour for, and the schedule behind it
-/// bounds the wait instead.
-const max_retry_after_ms: u64 = 120_000;
-
-/// The wait a `Retry-After` asks for, in milliseconds, or null when the header
-/// is absent or is not one this run can read. A value past
-/// `max_retry_after_ms` is clamped to it rather than refused, so the run sits
-/// out the cap instead of falling back to a schedule shorter than the one that
-/// was asked for.
-///
-/// Both forms RFC 9110 defines are read, because a provider chooses which to
-/// send and the run has a clock to check the second one against. A header this
-/// cannot read falls back to the backoff schedule rather than being guessed at.
-fn retryAfterMs(io: Io, head_bytes: []const u8) ?u64 {
-    var lines = std.mem.splitSequence(u8, head_bytes, "\r\n");
-    _ = lines.next(); // the status line
-    while (lines.next()) |line| {
-        if (line.len == 0) break;
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
-        if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, line[0..colon], " \t"), "retry-after")) continue;
-        return retryAfterValueMs(io, std.mem.trim(u8, line[colon + 1 ..], " \t"));
-    }
-    return null;
-}
-
-/// One `Retry-After` value, in milliseconds: either a count of seconds or an
-/// instant the count is measured to.
-///
-/// The date form is not the exotic one. A CDN or gateway computing a deadline
-/// against its own clock sends it, and reading it as a number fails: the value
-/// is not a count at all, so the run falls back to a 1 s and 2 s schedule and
-/// comes back while the provider is still refusing, once per step. Every one of
-/// those refusals is a second billable one, which is the whole thing the header
-/// is for.
-///
-/// A date already past is zero rather than null: the wait it names has elapsed,
-/// and the backoff schedule would add to it.
-fn retryAfterValueMs(io: Io, raw: []const u8) ?u64 {
-    if (std.fmt.parseInt(u64, raw, 10)) |seconds| {
-        // Saturating, so a count too large for milliseconds is the ceiling
-        // rather than an unreadable header. The count is unbounded in RFC 9110
-        // and a sender's is not always sane (`retry-after: 99999999999` is a
-        // gateway that divided milliseconds by the wrong constant); reading
-        // that as unreadable drops the run onto the 1 s and 2 s backoff, so
-        // it comes back while the provider is still refusing, which is the
-        // failure the header exists to prevent.
-        return @min(seconds *| std.time.ms_per_s, max_retry_after_ms);
-    } else |_| {}
-    const target = net.httpDateEpochSeconds(raw) orelse return null;
-    const now = @divTrunc(Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s);
-    const left = target - now;
-    if (left <= 0) return 0;
-    return @min(@as(u64, @intCast(left)) *| std.time.ms_per_s, max_retry_after_ms);
 }
 
 // A file's tests are collected only when the root file's test block imports
@@ -5447,7 +5394,7 @@ test "a wait the budget cannot cover is not taken" {
     // nobody put a ceiling on. This is the two-minute ask and the run's own
     // schedule, and both are taken exactly as before.
     const unbounded: Budget = .{};
-    try std.testing.expect(unbounded.canAffordWait(std.testing.io, max_retry_after_ms));
+    try std.testing.expect(unbounded.canAffordWait(std.testing.io, net.max_retry_after_ms));
     try std.testing.expect(unbounded.canAffordWait(std.testing.io, net.retryBackoffMs(2, max_backoff_ms)));
 
     // Spent: nothing is affordable, not even a millisecond, so no attempt is
@@ -5455,7 +5402,7 @@ test "a wait the budget cannot cover is not taken" {
     const spent: Budget = .{ .deadline_ns = 0 };
     try std.testing.expect(!spent.canAffordWait(std.testing.io, 1));
     try std.testing.expect(!spent.canAffordWait(std.testing.io, net.retryBackoffMs(0, max_backoff_ms)));
-    try std.testing.expect(!spent.canAffordWait(std.testing.io, max_retry_after_ms));
+    try std.testing.expect(!spent.canAffordWait(std.testing.io, net.max_retry_after_ms));
 }
 
 test "a budget too large to count in milliseconds is a ceiling, not a trap" {
@@ -5480,62 +5427,67 @@ test "a budget too large to count in milliseconds is a ceiling, not a trap" {
 }
 
 test "a Retry-After header sets the wait, and only a wait worth taking" {
+    // The seconds form is a count, so the clock is not read for it; it is passed
+    // anyway because the reader takes one reading for both forms.
+    const now = net.nowSeconds(std.testing.io);
     const head =
         "HTTP/1.1 429 Too Many Requests\r\n" ++
         "content-type: application/json\r\n" ++
         "retry-after: 30\r\n" ++
         "content-length: 0\r\n\r\n";
-    try std.testing.expectEqual(@as(?u64, 30_000), retryAfterMs(std.testing.io, head));
+    try std.testing.expectEqual(@as(?u64, 30_000), net.retryAfterMs(head, now));
 
     // The header's name is case-insensitive, and the value carries the spaces
     // a real server puts around it.
     const sloppy = "HTTP/1.1 503 Service Unavailable\r\nRetry-After:   7  \r\n\r\n";
-    try std.testing.expectEqual(@as(?u64, 7000), retryAfterMs(std.testing.io, sloppy));
+    try std.testing.expectEqual(@as(?u64, 7000), net.retryAfterMs(sloppy, now));
 
     // A wait longer than this run will sit out falls back to the schedule
     // rather than stalling the turn for an hour.
     const forever = "HTTP/1.1 429 Too Many Requests\r\nretry-after: 3600\r\n\r\n";
-    try std.testing.expectEqual(@as(?u64, max_retry_after_ms), retryAfterMs(std.testing.io, forever));
+    try std.testing.expectEqual(@as(?u64, net.max_retry_after_ms), net.retryAfterMs(forever, now));
 
     // Absent, and the forms this run cannot read, are all the backoff's
     // business rather than a guess.
-    try std.testing.expectEqual(@as(?u64, null), retryAfterMs(std.testing.io, "HTTP/1.1 429 Too Many Requests\r\ncontent-length: 0\r\n\r\n"));
-    try std.testing.expectEqual(@as(?u64, null), retryAfterMs(std.testing.io, "HTTP/1.1 429 Too Many Requests\r\nretry-after: soon\r\n\r\n"));
+    try std.testing.expectEqual(@as(?u64, null), net.retryAfterMs("HTTP/1.1 429 Too Many Requests\r\ncontent-length: 0\r\n\r\n", now));
+    try std.testing.expectEqual(@as(?u64, null), net.retryAfterMs("HTTP/1.1 429 Too Many Requests\r\nretry-after: soon\r\n\r\n", now));
 
     // A count past what the multiply holds is still a count, so it is the
     // ceiling rather than an unreadable header: the run sits the ceiling out
     // rather than coming back on the 1 s backoff while the provider is still
     // refusing, and no wrap turns it into a short wait.
-    try std.testing.expectEqual(@as(?u64, max_retry_after_ms), retryAfterMs(std.testing.io, "HTTP/1.1 429 Too Many Requests\r\nretry-after: 99999999999\r\n\r\n"));
+    try std.testing.expectEqual(@as(?u64, net.max_retry_after_ms), net.retryAfterMs("HTTP/1.1 429 Too Many Requests\r\nretry-after: 99999999999\r\n\r\n", now));
     // A count that is not a number a sender can mean at all, digits or not a
     // delay-seconds, is the one value the backoff's business.
-    try std.testing.expectEqual(@as(?u64, null), retryAfterMs(std.testing.io, "HTTP/1.1 429 Too Many Requests\r\nretry-after: 99999999999999999999\r\n\r\n"));
+    try std.testing.expectEqual(@as(?u64, null), net.retryAfterMs("HTTP/1.1 429 Too Many Requests\r\nretry-after: 99999999999999999999\r\n\r\n", now));
 }
 
 test "a Retry-After date becomes a wait, read against the clock it names" {
     // The value the header carries becomes a wait: a deadline thirty seconds
     // out is thirty seconds, and one the run read late is what is left of it.
+    // The reading is taken once and handed to both, so the header and the
+    // arithmetic are checked against one clock rather than two.
+    const now = net.nowSeconds(std.testing.io);
     var head: [160]u8 = undefined;
-    const thirty_ms = retryAfterMs(std.testing.io, retryAfterDateHead(&head, 30)).?;
+    const thirty_ms = net.retryAfterMs(retryAfterDateHead(&head, now, 30), now).?;
     try std.testing.expect(thirty_ms >= 29_000 and thirty_ms <= 30_000);
 
     // A deadline already past is a wait of zero rather than the backoff
     // schedule: the wait it names has elapsed, and adding to it is how a run
     // comes back early and is refused again.
-    try std.testing.expectEqual(@as(?u64, 0), retryAfterMs(std.testing.io, retryAfterDateHead(&head, -5)));
+    try std.testing.expectEqual(@as(?u64, 0), net.retryAfterMs(retryAfterDateHead(&head, now, -5), now));
 
     // A deadline further out than this run will sit out is the ceiling, on
     // either form.
-    try std.testing.expectEqual(@as(?u64, max_retry_after_ms), retryAfterMs(std.testing.io, retryAfterDateHead(&head, 3600)));
+    try std.testing.expectEqual(@as(?u64, net.max_retry_after_ms), net.retryAfterMs(retryAfterDateHead(&head, now, 3600), now));
 }
 
 /// A 429 head whose `Retry-After` is an IMF-fixdate naming an instant
-/// `seconds` from now, written into `buf` by the caller. The calendar fields
+/// `seconds` after `now`, written into `buf` by the caller. The calendar fields
 /// come from the epoch arithmetic in the standard library, so the header the
 /// test builds is one the parser has to agree with rather than one spelled the
 /// same way twice.
-fn retryAfterDateHead(buf: []u8, seconds: i64) []const u8 {
-    const now: i64 = @intCast(@divTrunc(Io.Clock.real.now(std.testing.io).nanoseconds, std.time.ns_per_s));
+fn retryAfterDateHead(buf: []u8, now: i64, seconds: i64) []const u8 {
     const target = now + seconds;
     const seconds_in = std.time.epoch.EpochSeconds{ .secs = @intCast(target) };
     const day = seconds_in.getEpochDay().calculateYearDay();

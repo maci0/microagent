@@ -223,12 +223,17 @@ fn isStyleTable(line: []const u8) bool {
 /// off"` arrives here as the unterminated value `"lite ` and is reported as a
 /// level this build does not have.
 fn unquote(raw: []const u8) []const u8 {
-    const bare = raw[0 .. std.mem.indexOfScalar(u8, raw, '#') orelse raw.len];
-    if (bare.len < 2) return bare;
-    const quote = bare[0];
-    if (quote != '"' and quote != '\'') return bare;
-    const end = std.mem.indexOfScalarPos(u8, bare, 1, quote) orelse return bare;
-    return bare[1..end];
+    if (raw.len < 2) return raw;
+    const quote = raw[0];
+    if (quote == '"' or quote == '\'') {
+        // The closing quote is looked for before any comment is, because a `#`
+        // between the quotes is text. Cutting the line at the first `#` read
+        // `caveman = "wen#yan"` as the value `"wen`, which names no level, so
+        // the run kept the default and said the file's own value was not one.
+        const end = std.mem.indexOfScalarPos(u8, raw, 1, quote) orelse return raw;
+        return raw[1..end];
+    }
+    return raw[0 .. std.mem.indexOfScalar(u8, raw, '#') orelse raw.len];
 }
 
 /// A level named case- and whitespace-insensitively, or null when the value is
@@ -448,6 +453,26 @@ test "a comment trails a key, a value and a table header" {
     try std.testing.expectEqual(CavemanLevel.ultra, other.caveman);
     try std.testing.expect(other.applyToml("[style] junk\ncaveman = \"off\"\n") == null);
     try std.testing.expectEqual(CavemanLevel.ultra, other.caveman);
+}
+
+// A `#` between the quotes is text, so the closing quote is found before any
+// comment is cut. Cutting at the first `#` instead left the opening quote
+// glued to the front of the value, which named no level, so the run kept its
+// default and told the operator the file's own value was not one.
+test "a hash inside a quoted value is text, not a comment" {
+    try std.testing.expectEqualStrings("lite # off", unquote("\"lite # off\""));
+    try std.testing.expectEqualStrings("lite", unquote("\"lite\" # a comment"));
+    // A single-quoted value is a quoted value too.
+    try std.testing.expectEqualStrings("lite # off", unquote("'lite # off'"));
+    // A bare value still stops at a `#`, which is how a trailing comment is
+    // kept out of it. The space before it is the caller's to trim.
+    try std.testing.expectEqualStrings("lite ", unquote("lite # a comment"));
+    // An unterminated quote has no closing quote to stop at, so the line stands
+    // as written rather than being cut at a `#` it may legitimately carry.
+    try std.testing.expectEqualStrings("\"lite # off", unquote("\"lite # off"));
+    // Too short to carry a quote at all.
+    try std.testing.expectEqualStrings("l", unquote("l"));
+    try std.testing.expectEqualStrings("", unquote(""));
 }
 
 test "a config an editor saved with a byte order mark reads the same" {

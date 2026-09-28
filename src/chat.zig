@@ -374,19 +374,33 @@ pub fn str(v: ?std.json.Value) ?[]const u8 {
     };
 }
 
+/// A count a JSON value spells, or null when it spells no count at all. This is
+/// the one reader of a count the tree shares: `num` answers zero for what it
+/// cannot read, the usage folding has to answer null instead, and the model-
+/// supplied counts want null as well, and three copies of this switch drifted
+/// into disagreeing about whether `" 5 "` is five.
+///
+/// A number spelled as a string is a number a provider or a model meant, so it
+/// is read as one, and the whitespace around it is part of the spelling rather
+/// than part of the number. A value of some other JSON type is a count nobody
+/// sent.
+pub fn countArg(v: ?std.json.Value) ?u64 {
+    const value = v orelse return null;
+    return switch (value) {
+        .integer => |n| if (n > 0) @intCast(n) else 0,
+        .float => |f| std.math.lossyCast(u64, f),
+        .number_string, .string => |s| std.fmt.parseInt(u64, std.mem.trim(u8, s, " \t\r\n"), 10) catch null,
+        else => null,
+    };
+}
+
 /// A count as a `u64`: an integer, a float (truncated, and clamped at both
 /// ends), or a number spelled as a string or `number_string`. A bool, a
 /// container, a null and an absent field are all 0, which is the right answer
 /// for a counter that starts at zero and the wrong one for folding a frame into
 /// a total.
 pub fn num(v: ?std.json.Value) u64 {
-    const value = v orelse return 0;
-    return switch (value) {
-        .integer => |n| if (n > 0) @intCast(n) else 0,
-        .float => |f| std.math.lossyCast(u64, f),
-        .number_string, .string => |s| std.fmt.parseInt(u64, s, 10) catch 0,
-        else => 0,
-    };
+    return countArg(v) orelse 0;
 }
 
 /// A count a frame carried, or null when the frame left it out. `num` answers 0
@@ -409,15 +423,25 @@ pub fn num(v: ?std.json.Value) u64 {
 /// why.
 pub fn maybeNum(v: ?std.json.Value, unparsable: ?*usize) ?u64 {
     const value = v orelse return null;
-    if (value == .null) return null;
     switch (value) {
-        .string, .number_string => |s| {
-            return std.fmt.parseInt(u64, std.mem.trim(u8, s, " \t\r\n"), 10) catch {
-                if (unparsable) |n| n.* += 1;
-                return null;
-            };
+        .string, .number_string => {
+            if (countArg(value)) |n| return n;
+            if (unparsable) |n| n.* += 1;
+            return null;
         },
-        else => return num(v),
+        // A count below zero is a count nobody sent, not a count of zero:
+        // `countArg` answers zero for it because a line count that clamps to
+        // zero is one line, and folding that zero into a usage total erases
+        // what an earlier frame billed. `usage.total` is what
+        // `spendCeilingReached` reads, so a run that had already spent its
+        // budget read zero and never stopped.
+        .integer => |n| return if (n >= 0) @intCast(n) else null,
+        // A declared field the provider omitted parses as JSON `null` rather
+        // than as an absent optional, so both are null here. So is a boolean,
+        // an array or an object: a frame carrying one of those under a count's
+        // name carried no count, and reading it as zero is a bill that comes up
+        // short with nothing on the operator's screen to say why.
+        else => return countArg(value),
     }
 }
 
@@ -1125,6 +1149,46 @@ test "a count that is absent, null or not a number is left to the caller" {
     try std.testing.expectEqual(@as(usize, 2), unparsable);
     // A null counter is the "nobody is counting" case, and it must not trap.
     try std.testing.expectEqual(@as(?u64, null), maybeNum(.{ .string = "many" }, null));
+}
+
+// A count below zero, and a count spelled as a boolean or a container, are the
+// case the whole function exists for: each of them used to read as a real zero
+// and be folded over what an earlier frame had already billed, and
+// `usage.total` is what the spend ceiling is checked against, so a run that had
+// spent its budget read zero and kept going.
+test "a usage count that is not a count is absent, not zero" {
+    var unparsable: usize = 0;
+    var items: std.json.Array = .init(std.testing.allocator);
+    defer items.deinit();
+
+    // None of these is a number, so none of them is a count, and none of them
+    // is a mis-spelled one either: the counter stays where it was.
+    try std.testing.expectEqual(@as(?u64, null), maybeNum(.{ .bool = true }, &unparsable));
+    try std.testing.expectEqual(@as(?u64, null), maybeNum(.{ .array = items }, &unparsable));
+    try std.testing.expectEqual(@as(?u64, null), maybeNum(.{ .integer = -1 }, &unparsable));
+    try std.testing.expectEqual(@as(usize, 0), unparsable);
+
+    // A count of zero is a count, and is folded in like any other.
+    try std.testing.expectEqual(@as(?u64, 0), maybeNum(.{ .integer = 0 }, &unparsable));
+    // The saturated float `num` is documented to answer stays a real number
+    // here, so a provider quoting a huge count does not erase the total.
+    try std.testing.expectEqual(@as(?u64, std.math.maxInt(u64)), maybeNum(.{ .float = 1e30 }, &unparsable));
+}
+
+// The three readers of a count answer differently on purpose, and agree on
+// everything else: each of them had its own copy of the switch, and the copies
+// disagreed about whether `" 5 "` was five.
+test "every reader of a count reads a quoted number the same way" {
+    const quoted: std.json.Value = .{ .string = " 5 \r\n" };
+    try std.testing.expectEqual(@as(u64, 5), num(quoted));
+    try std.testing.expectEqual(@as(?u64, 5), countArg(quoted));
+    try std.testing.expectEqual(@as(?u64, 5), maybeNum(quoted, null));
+    // A quoted number that is not one is null for the two that can say so, and
+    // zero for the one that answers a total.
+    const unquoted: std.json.Value = .{ .string = "many" };
+    try std.testing.expectEqual(@as(u64, 0), num(unquoted));
+    try std.testing.expectEqual(@as(?u64, null), countArg(unquoted));
+    try std.testing.expectEqual(@as(?u64, null), maybeNum(unquoted, null));
 }
 
 // `str` backs every tool argument read, and a non-string there is a call that

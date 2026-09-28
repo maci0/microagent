@@ -315,6 +315,74 @@ pub fn retryableStatus(status: std.http.Status) bool {
     };
 }
 
+/// The longest `Retry-After` either network path will sit out. A provider asking
+/// for an hour is not a provider to wait an hour for, and the backoff schedule
+/// behind it bounds the wait instead.
+pub const max_retry_after_ms: u64 = 120_000;
+
+/// The wait a `Retry-After` asks for, in milliseconds, or null when the header
+/// is absent or is not one that can be read. A value past
+/// `max_retry_after_ms` is clamped to it rather than refused, so the caller sits
+/// out the cap instead of falling back to a schedule shorter than the one that
+/// was asked for.
+///
+/// Both forms RFC 9110 defines are read, because a server chooses which to send
+/// and the caller has a clock to check the second one against. `now_seconds` is
+/// the caller's own reading, passed in rather than taken from a clock here, so
+/// the date form is checked against the same time the caller's deadline is.
+///
+/// This lives here rather than beside the agent run's retry loop, because it is
+/// a value off the wire and nothing about it is policy: the agent run and
+/// `microagent update` retry the same statuses on the same schedule, and a
+/// second copy of the calendar is a second set of century rules. `update`
+/// reaches it only once its fetch is moved off `Client.fetch`, which returns
+/// the status and not the head; `update`'s own comment says so.
+pub fn retryAfterMs(head_bytes: []const u8, now_seconds: i64) ?u64 {
+    var lines = std.mem.splitSequence(u8, head_bytes, "\r\n");
+    _ = lines.next(); // the status line
+    while (lines.next()) |line| {
+        if (line.len == 0) break;
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, line[0..colon], " \t"), "retry-after")) continue;
+        return retryAfterValueMs(std.mem.trim(u8, line[colon + 1 ..], " \t"), now_seconds);
+    }
+    return null;
+}
+
+/// One `Retry-After` value, in milliseconds: either a count of seconds or an
+/// instant the count is measured to.
+///
+/// The date form is not the exotic one. A CDN or gateway computing a deadline
+/// against its own clock sends it, and reading it as a number fails: the value
+/// is not a count at all, so the caller falls back to a 1 s, 2 s, 4 s schedule
+/// and comes back while the server is still refusing, once per step.
+///
+/// A date already past is zero rather than null: the wait it names has elapsed,
+/// and the backoff schedule would add to it.
+fn retryAfterValueMs(raw: []const u8, now_seconds: i64) ?u64 {
+    if (std.fmt.parseInt(u64, raw, 10)) |seconds| {
+        // Saturating, so a count too large for milliseconds is the ceiling
+        // rather than an unreadable header. The count is unbounded in RFC 9110
+        // and a sender's is not always sane (`retry-after: 99999999999` is a
+        // gateway that divided milliseconds by the wrong constant); reading
+        // that as unreadable drops the caller onto the 1 s, 2 s, 4 s backoff, so
+        // it comes back while the server is still refusing, which is the
+        // failure the header exists to prevent.
+        return @min(seconds *| std.time.ms_per_s, max_retry_after_ms);
+    } else |_| {}
+    const target = httpDateEpochSeconds(raw) orelse return null;
+    const left = target - now_seconds;
+    if (left <= 0) return 0;
+    return @min(@as(u64, @intCast(left)) *| std.time.ms_per_s, max_retry_after_ms);
+}
+
+/// The caller's own clock in seconds, the form `retryAfterMs` reads a date
+/// against.
+pub fn nowSeconds(io: Io) i64 {
+    const ns = Io.Clock.real.now(io).nanoseconds;
+    return @intCast(@divTrunc(ns, std.time.ns_per_s));
+}
+
 /// Whether a transport failure is worth another attempt. The set is the
 /// failures a second connection can answer: the name did not resolve, the
 /// route to it is down, the connection was refused, reset or dropped, the TLS
