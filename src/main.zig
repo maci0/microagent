@@ -1169,7 +1169,12 @@ fn run(
         // `.wants_tools` keeps the loop going, and `.cut_off` is the budget
         // ending the run mid-turn, so neither is a finished run.
         switch (try runTurn(client, io, turn_arena, gpa, opts, msgs, &session, &usage, budget, tool_env, &progress)) {
-            .wants_tools, .cut_off => |end| return end,
+            // The tool results are already appended, so the next request
+            // carries them and the loop asks again. Returning here ended the
+            // run on the first turn that asked for a tool, which is every turn
+            // of a run that does any work.
+            .wants_tools => continue,
+            .cut_off => return .cut_off,
             // The model stopped asking for tools. If it changed the tree
             // without ever running a test, ask for that once rather than
             // accepting the answer: a fix nobody ran is the failure mode this
