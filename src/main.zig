@@ -176,7 +176,7 @@ pub fn main(init: std.process.Init) !void {
     opts.ca_bundle = net.caBundlePath(init.environ_map);
     if (envValue(init.environ_map, "MICROAGENT_BUDGET_SECONDS")) |v| {
         var env_buf: [256]u8 = undefined;
-        if (budgetSeconds(&env_buf, "MICROAGENT_BUDGET_SECONDS", v, &opts.budget_s)) |m| return configError(io, "{s}", .{m});
+        if (budgetSeconds(&env_buf, "MICROAGENT_BUDGET_SECONDS", v, &opts.budget_s)) |m| configError(io, "{s}", .{m});
     }
     opts.session_dir = sessionDir(init);
 
@@ -2857,8 +2857,7 @@ fn conversationHeader(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), system: 
 /// agent appends. `appendToolResults` follows it with the tool results that
 /// push a conversation past the compaction limit.
 fn openConversation(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), system: []const u8, user: []const u8) !void {
-    try msgs.appendSlice(gpa, "[");
-    try appendMessage(gpa, msgs, "system", system);
+    try conversationHeader(gpa, msgs, system);
     try appendMessage(gpa, msgs, "user", user);
 }
 

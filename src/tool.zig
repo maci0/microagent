@@ -88,7 +88,6 @@ const ToolChild = struct {
     }
 };
 
-/// Runs a tool subprocess and reaps it with everything it started.
 /// A key file under `$HOME/.secrets`, read whole and trimmed. A secret is one
 /// key, not a document, so it is read under a cap of its own rather than the
 /// one `read` uses for source.
@@ -99,6 +98,7 @@ pub fn readSecret(init: std.process.Init, name: []const u8) ?[]const u8 {
     return std.mem.trim(u8, raw, " \t\r\n");
 }
 
+/// Runs a tool subprocess and reaps it with everything it started.
 pub fn runToolProcess(
     io: Io,
     arena: std.mem.Allocator,
@@ -1616,10 +1616,23 @@ test "a tool call is timed out by the clock, not by how long it stayed quiet" {
     const spent = Io.Timestamp.now(io, .awake).nanoseconds - started;
     // The deadline is what ended both calls, so neither returned before it:
     // an error raised on the way in is a different fault wearing this one's
-    // name, and a lower bound is what tells the two apart.
-    try std.testing.expect(after_capped >= budget_ms * std.time.ns_per_ms);
-    try std.testing.expect(spent >= 2 * budget_ms * std.time.ns_per_ms);
+    // name, and a lower bound is what tells the two apart. The bound carries a
+    // slack because a wait the runtime ends on a timer and a clock read taken
+    // around it do not agree to the nanosecond, and a loaded host is where they
+    // disagree most. The slack is a small fraction of the budget and well under
+    // the tenth of a second between the script's writes, so a call that came
+    // back on a re-armed read still fails the bound it is meant to catch.
+    const slack_ns = budget_ms * std.time.ns_per_ms / deadline_slack_percent;
+    try std.testing.expect(after_capped + slack_ns >= budget_ms * std.time.ns_per_ms);
+    try std.testing.expect(spent + 2 * slack_ns >= 2 * budget_ms * std.time.ns_per_ms);
 }
+
+/// How far short of its budget a call may come back and still be said to have
+/// run to its deadline, as a percentage of that budget. The wait that ends a
+/// call is a timer, and the clock read that measures it is a separate one, so
+/// the two are not equal to the nanosecond; ten percent is far above that skew
+/// and far below the read interval a re-armed timeout would come back on.
+const deadline_slack_percent: u64 = 10;
 
 // `bash` goes through the capped runner, not the search runner, and it is the
 // tool that starts builds, so it carries the same process-group kill: a command

@@ -32,6 +32,16 @@ argv_for() {
 	printf '%s "%s"' "$(harness_argv "$1")" "\$PROMPT"
 }
 
+# A run that never reached the agent: the row is the same shape whatever the
+# task setup failed on, so it is written in one place. The result names the
+# step so a reader of results.jsonl can tell a broken task from a broken agent.
+# Uses the current $agent, $task and $results.
+record_error_row() {
+	printf '%-10s %-14s %8s %10s %8s  %s\n' "$agent" "$task" - - - "$1"
+	printf '{"agent":"%s","task":"%s","wall_s":null,"tokens":null,"lines":"n/a","result":"%s"}\n' \
+		"$agent" "$task" "$1" >>"$results"
+}
+
 printf '%-10s %-14s %8s %10s %8s  %s\n' agent task wall_s tokens lines result
 printf '%s\n' "--------------------------------------------------------------------------"
 
@@ -56,15 +66,11 @@ for agent in $agents; do
 		# setup, and append that as a real measurement to results.jsonl, so
 		# the row is written as an error instead.
 		if ! ( cd "$work" && sh "$task_dir/setup.sh" ) >"$work_root/$task.setup.log" 2>&1; then
-			printf '%-10s %-14s %8s %10s %8s  %s\n' "$agent" "$task" - - - setup-error
-			printf '{"agent":"%s","task":"%s","wall_s":null,"tokens":null,"lines":"n/a","result":"setup-error"}\n' \
-				"$agent" "$task" >>"$results"
+			record_error_row setup-error
 			continue
 		fi
 		if ! ( cd "$work" && git init -q && git add -A && git -c user.email=b@b -c user.name=b commit -qm base ) >/dev/null 2>&1; then
-			printf '%-10s %-14s %8s %10s %8s  %s\n' "$agent" "$task" - - - commit-error
-			printf '{"agent":"%s","task":"%s","wall_s":null,"tokens":null,"lines":"n/a","result":"commit-error"}\n' \
-				"$agent" "$task" >>"$results"
+			record_error_row commit-error
 			continue
 		fi
 

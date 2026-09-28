@@ -216,10 +216,12 @@ pub fn checksumMatches(asset: []const u8, sidecar: []const u8, basename: []const
     const hex = line[0..64];
     if (!std.mem.eql(u8, line[64..66], "  ")) return false;
     if (!std.mem.eql(u8, line[66..], basename)) return false;
-    for (hex) |c| if (!std.ascii.isHex(c)) return false;
     var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(asset, &digest, .{});
     const got = std.fmt.bytesToHex(digest, .lower);
+    // The comparison is the hex check: a byte that is not a hex digit cannot
+    // lower-case to one, so a sidecar spelling a non-hex character is refused
+    // here without a separate pass over it.
     for (hex, 0..) |c, i| {
         if (std.ascii.toLower(c) != got[i]) return false;
     }
@@ -674,8 +676,7 @@ fn runChecked(
     defer client.deinit();
     // The agent run's CA-bundle escape hatch: an image that ships no
     // ca-certificates can still reach GitHub by naming a PEM file.
-    const ca_path = net.caBundlePath(env);
-    if (ca_path.len != 0) net.loadCaBundle(&client, io, gpa, ca_path, arena);
+    net.loadCaBundle(&client, io, gpa, net.caBundlePath(env), arena);
 
     const bearer = githubBearer(arena, env);
     var status: std.http.Status = .ok;
