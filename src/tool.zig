@@ -651,7 +651,9 @@ fn readLines(io: Io, arena: std.mem.Allocator, path: []const u8, offset: usize, 
     }
     // Out of cap rather than out of file, which is what a whole-file read of
     // the same file reports, so one file over the cap reads the same whichever
-    // way the model asked for it.
+    // way the model asked for it. `readFileAlloc` refuses at the cap as well
+    // as past it, so a file of exactly `max_read_bytes` is refused on both
+    // paths and the boundary is the same one.
     if (consumed == max_read_bytes) return readFailed(arena, path, error.StreamTooLong);
     if (rest.items.len > 0 and line + 1 >= offset and taken < limit) {
         try buf.appendSlice(arena, rest.items);
@@ -1086,6 +1088,28 @@ test "a ranged read of a file over the cap is refused like a whole-file read" {
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "under.txt", .data = under.items });
     const under_path = try std.fs.path.join(arena, &.{ dir_buf[0..try tmp.dir.realPath(std.testing.io, &dir_buf)], "under.txt" });
     try std.testing.expectEqual(max_read_bytes - 1, (try readLines(std.testing.io, arena, under_path, 1, 5)).len);
+
+    // The boundary itself, where the two paths have to agree: the cap is
+    // "reached or over", so a file of exactly `max_read_bytes` bytes is
+    // refused by the whole-file read and by the ranged one alike. A cap of
+    // `max_read_bytes + 1` on one path and `max_read_bytes` on the other would
+    // refuse the same file under two names, and the model's next move would be
+    // a smaller `limit` that does not help.
+    var exact: std.ArrayList(u8) = .empty;
+    try exact.appendNTimes(arena, 'x', max_read_bytes);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "exact.txt", .data = exact.items });
+    const exact_path = try std.fs.path.join(arena, &.{ dir_buf[0..try tmp.dir.realPath(std.testing.io, &dir_buf)], "exact.txt" });
+    try std.testing.expectEqualStrings(
+        try std.fmt.allocPrint(arena, "error: cannot read {s}: StreamTooLong", .{exact_path}),
+        try readLines(std.testing.io, arena, exact_path, 1, 5),
+    );
+
+    var exact_args: std.json.ObjectMap = .empty;
+    try exact_args.put(arena, "path", .{ .string = exact_path });
+    try std.testing.expectEqualStrings(
+        try std.fmt.allocPrint(arena, "error: cannot read {s}: StreamTooLong", .{exact_path}),
+        try toolRead(std.testing.io, arena, exact_args),
+    );
 }
 
 // The scan cursor is what keeps a ranged read of a minified bundle or a base64
