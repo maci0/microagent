@@ -1440,6 +1440,12 @@ const test_runners = [_][]const u8{
     "gradle test", "mvn test",       "bazel test", "swift test",     "mix test",
 };
 
+/// What separates one word of a tool call's arguments from the next. The JSON
+/// punctuation is in the set because the arguments arrive as the raw text the
+/// provider streamed, where `"command":"cargo test"` is one string with a key
+/// glued to the front of the first word.
+const tool_word_separators = " \t\r\n\"{},:";
+
 /// True when a single tool call's arguments name a test runner. It reads the
 /// call's own arguments, not the whole conversation: a `read` of a test file,
 /// or the issue text mentioning pytest, is not a test run, and judging by the
@@ -1447,7 +1453,47 @@ const test_runners = [_][]const u8{
 fn isTestRun(call_name: []const u8, args: []const u8) bool {
     if (!std.mem.eql(u8, call_name, "bash")) return false;
     for (test_runners) |runner| {
-        if (std.mem.indexOf(u8, args, runner) != null) return true;
+        if (namesWords(args, runner)) return true;
+    }
+    return false;
+}
+
+/// Whether every word of `needle` appears in `haystack` as consecutive
+/// whitespace-separated words.
+///
+/// A substring is not the question the flag is asking. The model reads
+/// `pytest_output.log`, greps a comment for the words `cargo test`, or edits
+/// `build/tox.ini`, and a substring match called each of those a test run, which
+/// set `tested` on a run that changed the tree and never ran anything. The
+/// verification turn is there to catch an untested edit, so a match that is too
+/// eager takes away the thing that would have found the mistake.
+///
+/// The shell is not parsed, so `sh -c pytest`, `$(cargo test)` and a runner
+/// behind a variable still match only where the words stand as they are typed.
+/// That errs toward missing a run, which costs one extra verification turn.
+///
+/// The haystack is the call's raw argument JSON, so the JSON punctuation cuts
+/// words too: `{"command":"cargo test"}` glues the key to the first word, and
+/// a runner welded to `{"command":"` is the one command this has to see.
+fn namesWords(haystack: []const u8, needle: []const u8) bool {
+    var words = std.mem.tokenizeAny(u8, haystack, tool_word_separators);
+    while (words.next()) |word| {
+        var ahead = words;
+        var wanted = std.mem.tokenizeAny(u8, needle, tool_word_separators);
+        const head = wanted.next() orelse return false;
+        if (!std.mem.eql(u8, word, head)) continue;
+        var matched = true;
+        while (wanted.next()) |want| {
+            const got = ahead.next() orelse {
+                matched = false;
+                break;
+            };
+            if (!std.mem.eql(u8, got, want)) {
+                matched = false;
+                break;
+            }
+        }
+        if (matched) return true;
     }
     return false;
 }
@@ -1704,7 +1750,7 @@ fn streamChat(
         };
         if (debug_enabled) std.debug.print("[mdebug] head status={d} enc={s}\n", .{ @intFromEnum(response.head.status), @tagName(response.head.content_encoding) });
         if (response.head.status != .ok) {
-            if (retryableStatus(response.head.status) and attempt < max_attempts) {
+            if (net.retryableStatus(response.head.status) and attempt < max_attempts) {
                 // A rate limit carries the wait the provider wants, and its own
                 // backoff is the wrong one to spend: this run's schedule is 1 s,
                 // 2 s, 4 s, and a provider that says "come back in 30" is still
@@ -1712,7 +1758,7 @@ fn streamChat(
                 // refusal. The header wins where it is a number this run is
                 // willing to wait, and the schedule stands where it is not.
                 const asked = retryAfterMs(io, response.head.bytes);
-                const wait = asked orelse backoffMs(attempt);
+                const wait = asked orelse net.retryBackoffMs(attempt, max_backoff_ms);
                 if (budget.affordableWaitMs(io, wait)) |affordable| {
                     net.note(io, arena, "microagent: {s} answered HTTP {d}, retrying in {d}ms (attempt {d}/{d})\n", .{
                         shown_url, @intFromEnum(response.head.status), affordable, attempt + 1, max_attempts,
@@ -2763,20 +2809,10 @@ fn appendMessage(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), role: []const
 }
 
 const max_attempts: u32 = 3;
-const retry_backoff_base_ms: u64 = 1000;
+/// The ceiling on the wait between attempts. The base and the doubling count
+/// are the shared ones in `net`; only the cap is this run's, and `update`
+/// names a shorter one for a fetch with nobody waiting on it.
 const max_backoff_ms: u64 = 60_000;
-/// Enough doublings to reach the cap; the cap is what bounds the wait.
-const max_backoff_shift: u32 = 6;
-
-/// Statuses worth another attempt: the provider is busy, not the request wrong.
-/// A provider that answered has not generated the completion, so the turn
-/// behind this request is unbilled and sending it again costs nothing twice.
-fn retryableStatus(status: std.http.Status) bool {
-    return switch (@intFromEnum(status)) {
-        408, 409, 425, 429 => true,
-        else => @intFromEnum(status) >= 500,
-    };
-}
 
 /// How far one attempt got with the request before it failed.
 const request_stage = enum {
@@ -2799,30 +2835,12 @@ const request_stage = enum {
 /// An idempotency key would settle it, and the OpenAI-shaped completions API
 /// this speaks takes none, so the request cannot be made safe to send twice.
 ///
-/// The error decides the rest. The set is the failures a second connection can
-/// answer: the name did not resolve, the connection was refused or reset, the
-/// TLS handshake did not complete. A failed allocation repeats, and everything
-/// else the client can name is a decision it or the URL already made, so three
-/// attempts separated by a backoff only delay the same refusal. `update` draws
-/// the line the same way, for the same reason.
+/// Past that the error decides, and the set of them is the shared one: the
+/// failures a second connection can answer, where nothing this run or the URL
+/// got wrong is among them.
 fn worthAnotherAttempt(stage: request_stage, err: anyerror) bool {
     if (stage == .head) return false;
-    return switch (err) {
-        error.TemporaryNameServerFailure,
-        error.NameServerFailure,
-        error.UnknownHostName,
-        error.HostLacksNetworkAddresses,
-        error.NetworkDown,
-        error.ConnectionRefused,
-        error.ConnectionResetByPeer,
-        error.ConnectionAborted,
-        error.BrokenPipe,
-        error.ConnectionTimedOut,
-        error.Timeout,
-        error.TlsInitializationFailed,
-        => true,
-        else => false,
-    };
+    return net.transientTransportError(err);
 }
 
 /// Names the endpoint and the step that failed, then sleeps before the next
@@ -2835,9 +2853,9 @@ fn worthAnotherAttempt(stage: request_stage, err: anyerror) bool {
 /// `streamChat` gives.
 fn waitBeforeRetry(io: Io, arena: std.mem.Allocator, url: []const u8, attempt: u32, what: []const u8, err: anyerror, budget: Budget) bool {
     if (attempt >= max_attempts) return false;
-    const wait = budget.affordableWaitMs(io, backoffMs(attempt)) orelse {
+    const wait = budget.affordableWaitMs(io, net.retryBackoffMs(attempt, max_backoff_ms)) orelse {
         net.note(io, arena, "microagent: {s} {s} failed ({s}), and the {d}ms before another attempt would pass the run's budget; this one is the last\n", .{
-            what, url, @errorName(err), backoffMs(attempt),
+            what, url, @errorName(err), net.retryBackoffMs(attempt, max_backoff_ms),
         });
         return false;
     };
@@ -2855,16 +2873,6 @@ fn waitBeforeRetry(io: Io, arena: std.mem.Allocator, url: []const u8, attempt: u
         return false;
     };
     return true;
-}
-
-/// Backoff before the next attempt: 1 s, 2 s, 4 s, capped. Saturating, because
-/// the shift and the multiply both overflow long before a u32 attempt counter
-/// does, and a checked build panicking where a release build wraps is not a
-/// property to want in a sleep.
-fn backoffMs(attempt: u32) u64 {
-    if (attempt == 0) return retry_backoff_base_ms;
-    const shift: u6 = @intCast(@min(attempt - 1, max_backoff_shift));
-    return @min(retry_backoff_base_ms *| (@as(u64, 1) << shift), max_backoff_ms);
 }
 
 /// The wait a backoff or a `Retry-After` asks for. It sleeps on
@@ -4580,6 +4588,20 @@ test "only a bash call that names a runner counts as verification" {
     try std.testing.expect(!isTestRun("read", "{\"path\":\"tests/test_thing.py\"}"));
     try std.testing.expect(!isTestRun("bash", "{\"command\":\"ls tests/\"}"));
     try std.testing.expect(!isTestRun("search", "{\"pattern\":\"pytest\"}"));
+
+    // A name inside a longer word is not a runner either: a substring match
+    // read each of these as a test run, which told the loop an untested edit had
+    // been tested and took away the verification turn that would have caught
+    // it. The words have to stand as they are typed.
+    try std.testing.expect(!isTestRun("bash", "{\"command\":\"cat pytest_output.log\"}"));
+    try std.testing.expect(!isTestRun("bash", "{\"command\":\"grep -rn 'cargo test' src/\"}"));
+    try std.testing.expect(!isTestRun("bash", "{\"command\":\"sed -i s/tox/pox/ tox.ini\"}"));
+    try std.testing.expect(!isTestRun("bash", "{\"command\":\"cargo testfoo\"}"));
+    try std.testing.expect(!isTestRun("bash", "{\"command\":\"zig build test-fast\"}"));
+
+    // The same words on their own still are, whatever surrounds them.
+    try std.testing.expect(isTestRun("bash", "{\"command\":\"cd src && cargo test --all\"}"));
+    try std.testing.expect(isTestRun("bash", "{\"command\":\"uv run pytest -q\"}"));
 }
 
 test "only a call that changes the tree counts as an edit" {
@@ -4658,12 +4680,12 @@ test "reasoning effort is only sent when asked for" {
 }
 
 test "only weather-shaped statuses are retried" {
-    try std.testing.expect(retryableStatus(.too_many_requests));
-    try std.testing.expect(retryableStatus(.bad_gateway));
-    try std.testing.expect(retryableStatus(.service_unavailable));
-    try std.testing.expect(!retryableStatus(.bad_request));
-    try std.testing.expect(!retryableStatus(.unauthorized));
-    try std.testing.expect(!retryableStatus(.not_found));
+    try std.testing.expect(net.retryableStatus(.too_many_requests));
+    try std.testing.expect(net.retryableStatus(.bad_gateway));
+    try std.testing.expect(net.retryableStatus(.service_unavailable));
+    try std.testing.expect(!net.retryableStatus(.bad_request));
+    try std.testing.expect(!net.retryableStatus(.unauthorized));
+    try std.testing.expect(!net.retryableStatus(.not_found));
 }
 
 // The provider reading a whole request is the point at which the turn behind
@@ -5082,11 +5104,11 @@ test "a saturated token count does not overflow the run total" {
 }
 
 test "backoff doubles, caps, and never overflows an attempt counter" {
-    try std.testing.expectEqual(@as(u64, 1000), backoffMs(0));
-    try std.testing.expectEqual(@as(u64, 1000), backoffMs(1));
-    try std.testing.expectEqual(@as(u64, 2000), backoffMs(2));
-    try std.testing.expectEqual(@as(u64, 4000), backoffMs(3));
-    try std.testing.expectEqual(max_backoff_ms, backoffMs(1000));
+    try std.testing.expectEqual(@as(u64, 1000), net.retryBackoffMs(0, max_backoff_ms));
+    try std.testing.expectEqual(@as(u64, 1000), net.retryBackoffMs(1, max_backoff_ms));
+    try std.testing.expectEqual(@as(u64, 2000), net.retryBackoffMs(2, max_backoff_ms));
+    try std.testing.expectEqual(@as(u64, 4000), net.retryBackoffMs(3, max_backoff_ms));
+    try std.testing.expectEqual(max_backoff_ms, net.retryBackoffMs(1000, max_backoff_ms));
 }
 
 // Retaining a turn's peak is a speed choice; retaining an unbounded one is a
@@ -5138,13 +5160,13 @@ test "a wait the budget cannot cover is not taken" {
     // schedule, and both are taken exactly as before.
     const unbounded: Budget = .{};
     try std.testing.expectEqual(@as(?u64, max_retry_after_ms), unbounded.affordableWaitMs(std.testing.io, max_retry_after_ms));
-    try std.testing.expectEqual(@as(?u64, backoffMs(2)), unbounded.affordableWaitMs(std.testing.io, backoffMs(2)));
+    try std.testing.expectEqual(@as(?u64, net.retryBackoffMs(2, max_backoff_ms)), unbounded.affordableWaitMs(std.testing.io, net.retryBackoffMs(2, max_backoff_ms)));
 
     // Spent: nothing is affordable, not even a millisecond, so no attempt is
     // made and the run ends with the reason already on stderr.
     const spent: Budget = .{ .deadline_ns = 0 };
     try std.testing.expectEqual(@as(?u64, null), spent.affordableWaitMs(std.testing.io, 1));
-    try std.testing.expectEqual(@as(?u64, null), spent.affordableWaitMs(std.testing.io, backoffMs(0)));
+    try std.testing.expectEqual(@as(?u64, null), spent.affordableWaitMs(std.testing.io, net.retryBackoffMs(0, max_backoff_ms)));
     try std.testing.expectEqual(@as(?u64, null), spent.affordableWaitMs(std.testing.io, max_retry_after_ms));
 }
 

@@ -514,14 +514,14 @@ fn fetchInto(
             .response_writer = &capped.writer,
         }) catch |err| {
             if (capped.over) return error.PayloadTooLarge;
-            if (!transient(err) or attempt >= max_fetch_attempts) return err;
+            if (!net.transientTransportError(err) or attempt >= max_fetch_attempts) return err;
             if (!waitBeforeFetchRetry(io, arena, url, attempt, err)) return err;
             capped.reset();
             continue;
         };
         status_out.* = result.status;
         if (@intFromEnum(result.status) < 400) return;
-        if (!retryableStatus(result.status) or attempt >= max_fetch_attempts) return error.HttpStatus;
+        if (!net.retryableStatus(result.status) or attempt >= max_fetch_attempts) return error.HttpStatus;
         if (!waitBeforeFetchRetry(io, arena, url, attempt, error.HttpStatus)) return error.HttpStatus;
         capped.reset();
     }
@@ -530,54 +530,19 @@ fn fetchInto(
 /// Attempts one fetch makes before the error is the caller's. Three, with the
 /// schedule below, is the same budget the agent's own request loop spends.
 const max_fetch_attempts: u32 = 3;
-/// The wait before the first retry, doubled per attempt and capped at 30 s. A
-/// provider that is briefly busy is the case this covers, and the base and the
-/// number of doublings are the ones the agent run uses for the same failure,
-/// whose own cap is 60 s.
-const fetch_retry_base_ms: u64 = 1000;
+/// The ceiling on the wait between attempts: 30 s, half the run's own cap. A
+/// provider that is briefly busy is the case this covers, and a person waiting
+/// on `microagent update` has less patience for it than a run already in
+/// progress. The base and the doubling count behind it are the shared ones in
+/// `net`, with the agent run, so the two schedules can only differ where they
+/// are meant to.
 const fetch_retry_max_ms: u64 = 30_000;
-
-/// Whether a transport failure is worth another attempt. The set is the
-/// failures a second connection can answer: the name did not resolve or the
-/// route to it is down, the connection was refused or reset or dropped, the
-/// TLS handshake did not complete. A body past the cap and a failed allocation
-/// are not here, and neither is anything this program got wrong: `OutOfMemory`
-/// repeats, and every other error the fetch can name is a decision the client
-/// or the URL already made.
-fn transient(err: anyerror) bool {
-    return switch (err) {
-        error.TemporaryNameServerFailure,
-        error.NameServerFailure,
-        error.UnknownHostName,
-        error.HostLacksNetworkAddresses,
-        error.NetworkDown,
-        error.ConnectionRefused,
-        error.ConnectionResetByPeer,
-        error.ConnectionAborted,
-        error.BrokenPipe,
-        error.ConnectionTimedOut,
-        error.Timeout,
-        error.TlsInitializationFailed,
-        => true,
-        else => false,
-    };
-}
-
-/// Statuses that say the provider is busy rather than that the request was
-/// wrong. A 404 names a release or an asset that is not published, and asking
-/// again for the same name changes nothing.
-fn retryableStatus(status: std.http.Status) bool {
-    return switch (@intFromEnum(status)) {
-        408, 425, 429 => true,
-        else => @intFromEnum(status) >= 500,
-    };
-}
 
 /// Says the retry is coming and waits for it. False means the wait could not be
 /// taken, and the caller must surface its error rather than send the next
 /// request at once: a wait that did not happen is not a backoff.
 fn waitBeforeFetchRetry(io: std.Io, arena: std.mem.Allocator, url: []const u8, attempt: u32, err: anyerror) bool {
-    const wait = fetchRetryBackoffMs(attempt);
+    const wait = net.retryBackoffMs(attempt, fetch_retry_max_ms);
     net.note(io, arena, "microagent update: {s} failed ({s}), retrying in {d}ms (attempt {d}/{d})\n", .{
         url, @errorName(err), wait, attempt + 1, max_fetch_attempts,
     });
@@ -588,11 +553,6 @@ fn waitBeforeFetchRetry(io: std.Io, arena: std.mem.Allocator, url: []const u8, a
         return false;
     };
     return true;
-}
-
-fn fetchRetryBackoffMs(attempt: u32) u64 {
-    const shift: u6 = @intCast(@min(attempt -| 1, 6));
-    return @min(fetch_retry_base_ms *| (@as(u64, 1) << shift), fetch_retry_max_ms);
 }
 
 /// One GET, body capped at `max_size` while it streams, copied into `arena`.
@@ -1052,27 +1012,27 @@ fn copyOf(io: std.Io, dir: std.Io.Dir) ![]u8 {
 // allocation that failed fails again. Retrying any of those spends the
 // operator's time to arrive at the same answer.
 test "update: only a transient failure or a busy provider is retried" {
-    try std.testing.expect(transient(error.UnknownHostName));
-    try std.testing.expect(transient(error.ConnectionRefused));
-    try std.testing.expect(transient(error.ConnectionResetByPeer));
-    try std.testing.expect(transient(error.TemporaryNameServerFailure));
-    try std.testing.expect(transient(error.TlsInitializationFailed));
+    try std.testing.expect(net.transientTransportError(error.UnknownHostName));
+    try std.testing.expect(net.transientTransportError(error.ConnectionRefused));
+    try std.testing.expect(net.transientTransportError(error.ConnectionResetByPeer));
+    try std.testing.expect(net.transientTransportError(error.TemporaryNameServerFailure));
+    try std.testing.expect(net.transientTransportError(error.TlsInitializationFailed));
 
-    try std.testing.expect(!transient(error.OutOfMemory));
-    try std.testing.expect(!transient(error.PayloadTooLarge));
-    try std.testing.expect(!transient(error.HttpStatus));
-    try std.testing.expect(!transient(error.UntrustedUrl));
-    try std.testing.expect(!transient(error.ChecksumMismatch));
+    try std.testing.expect(!net.transientTransportError(error.OutOfMemory));
+    try std.testing.expect(!net.transientTransportError(error.PayloadTooLarge));
+    try std.testing.expect(!net.transientTransportError(error.HttpStatus));
+    try std.testing.expect(!net.transientTransportError(error.UntrustedUrl));
+    try std.testing.expect(!net.transientTransportError(error.ChecksumMismatch));
 
-    try std.testing.expect(retryableStatus(.internal_server_error));
-    try std.testing.expect(retryableStatus(.service_unavailable));
-    try std.testing.expect(retryableStatus(.too_many_requests));
-    try std.testing.expect(retryableStatus(.request_timeout));
+    try std.testing.expect(net.retryableStatus(.internal_server_error));
+    try std.testing.expect(net.retryableStatus(.service_unavailable));
+    try std.testing.expect(net.retryableStatus(.too_many_requests));
+    try std.testing.expect(net.retryableStatus(.request_timeout));
 
     // A name that is not published is a 404 whichever way it is asked for.
-    try std.testing.expect(!retryableStatus(.not_found));
-    try std.testing.expect(!retryableStatus(.unauthorized));
-    try std.testing.expect(!retryableStatus(.forbidden));
+    try std.testing.expect(!net.retryableStatus(.not_found));
+    try std.testing.expect(!net.retryableStatus(.unauthorized));
+    try std.testing.expect(!net.retryableStatus(.forbidden));
 }
 
 // The body a retry writes into still holds the bytes the failed attempt read.
@@ -1101,11 +1061,11 @@ test "update: a retried fetch starts from an empty body" {
 // The schedule is 1s, 2s, 4s, capped, and it does not overflow on an attempt
 // counter that has run away.
 test "update: the fetch backoff doubles, caps, and never overflows" {
-    try std.testing.expectEqual(@as(u64, 1000), fetchRetryBackoffMs(1));
-    try std.testing.expectEqual(@as(u64, 2000), fetchRetryBackoffMs(2));
-    try std.testing.expectEqual(@as(u64, 4000), fetchRetryBackoffMs(3));
-    try std.testing.expectEqual(fetch_retry_max_ms, fetchRetryBackoffMs(30));
-    try std.testing.expectEqual(fetch_retry_max_ms, fetchRetryBackoffMs(std.math.maxInt(u32)));
+    try std.testing.expectEqual(@as(u64, 1000), net.retryBackoffMs(1, fetch_retry_max_ms));
+    try std.testing.expectEqual(@as(u64, 2000), net.retryBackoffMs(2, fetch_retry_max_ms));
+    try std.testing.expectEqual(@as(u64, 4000), net.retryBackoffMs(3, fetch_retry_max_ms));
+    try std.testing.expectEqual(fetch_retry_max_ms, net.retryBackoffMs(30, fetch_retry_max_ms));
+    try std.testing.expectEqual(fetch_retry_max_ms, net.retryBackoffMs(std.math.maxInt(u32), fetch_retry_max_ms));
 }
 
 test "update: a v-prefixed tag equals the running version exactly" {

@@ -3,8 +3,9 @@
 //! deadline, the two output sinks (stderr for notes and stdout for the
 //! answers a caller parses), the path a write through a symlink really lands on,
 //! the two budgets a value read out of the environment or off the wire is held
-//! to, the line framing a streamed body is cut on, and the reading of an HTTP
-//! date off the wire, which is wire format rather than any one caller's policy.
+//! to, the line framing a streamed body is cut on, the retry policy both
+//! network paths answer with, and the reading of an HTTP date off the wire,
+//! which is wire format rather than any one caller's policy.
 //!
 //! A leaf module over the other leaf: it imports `chat` and nothing else, so
 //! the agent run, the session log and `update` can each use it without
@@ -281,6 +282,67 @@ test "the line splitter resumes where the last call stopped, and does not skip a
 /// here rather than at each call site.
 pub fn durationMs(ms: u64) Io.Timeout {
     return .{ .duration = .{ .raw = .{ .nanoseconds = ms *| std.time.ns_per_ms }, .clock = .awake } };
+}
+
+/// The retry schedule both network paths use: the wait before the first retry,
+/// doubled per attempt. The doubling count and the base are shared, the cap is
+/// the caller's because the two waits are not the same promise (the run's is
+/// sixty seconds, `update`'s thirty), and a policy spelled twice is a policy
+/// that has already drifted once.
+pub const retry_backoff_base_ms: u64 = 1000;
+/// Enough doublings to reach any cap in use; the cap is what bounds the wait.
+pub const retry_backoff_shift: u32 = 6;
+
+/// The wait before attempt `attempt + 1`. Saturating, because the shift and
+/// the multiply both overflow long before a u32 attempt counter does, and a
+/// checked build panicking where a release build wraps is not a property to
+/// want in a sleep. `attempt` counts attempts already made, so 0 and 1 both
+/// wait the base.
+pub fn retryBackoffMs(attempt: u32, max_wait_ms: u64) u64 {
+    const shift: u6 = @intCast(@min(attempt -| 1, retry_backoff_shift));
+    return @min(retry_backoff_base_ms *| (@as(u64, 1) << shift), max_wait_ms);
+}
+
+/// Statuses worth another attempt: the server is busy, not the request wrong.
+/// A 409 is in the set because that is how the OpenAI-shaped providers spell
+/// "this turn is already being worked on"; a GET that draws one is no more
+/// wrong than the POST that does. 404 is not: it names something that is not
+/// published, and asking again for the same name changes nothing.
+pub fn retryableStatus(status: std.http.Status) bool {
+    return switch (@intFromEnum(status)) {
+        408, 409, 425, 429 => true,
+        else => @intFromEnum(status) >= 500,
+    };
+}
+
+/// Whether a transport failure is worth another attempt. The set is the
+/// failures a second connection can answer: the name did not resolve, the
+/// route to it is down, the connection was refused, reset or dropped, the TLS
+/// handshake did not complete. A failed allocation repeats, and everything
+/// else the client can name is a decision it or the URL already made, so three
+/// attempts separated by a backoff only delay the same refusal.
+///
+/// What a request had already put on the wire is the caller's question, not
+/// this one's: the run declines to resend a turn the provider may have billed
+/// (`worthAnotherAttempt` there), which `update` has no reason to ask since
+/// every request here is a GET with no body worth generating from.
+pub fn transientTransportError(err: anyerror) bool {
+    return switch (err) {
+        error.TemporaryNameServerFailure,
+        error.NameServerFailure,
+        error.UnknownHostName,
+        error.HostLacksNetworkAddresses,
+        error.NetworkDown,
+        error.ConnectionRefused,
+        error.ConnectionResetByPeer,
+        error.ConnectionAborted,
+        error.BrokenPipe,
+        error.ConnectionTimedOut,
+        error.Timeout,
+        error.TlsInitializationFailed,
+        => true,
+        else => false,
+    };
 }
 
 /// The month names in the order `daysInMonth` counts them, and the form a

@@ -92,9 +92,9 @@ const session_name_attempts = 8;
 /// The mode a session log is created with, and the mode its directory is
 /// created with when the run is the one that made the directory.
 ///
-/// A log is the run's transcript: the prompts, the tool arguments and every
-/// byte a tool read out of the tree, which is exactly the material the tools
-/// themselves refuse to hand the provider. The default file mode is
+/// A log is a run's own account of itself: the directory it worked in, the
+/// model it was charged to, and what every response cost, which on a shared
+/// machine is not the business of every other account. The default file mode is
 /// 0o666 less the umask, so on the 0o022 an ordinary account carries, a log
 /// lands world-readable under `$HOME`, and every other account and every other
 /// process on the machine can read the last 200 runs. The directory is the
@@ -806,10 +806,10 @@ test "a store named relative to the working directory is pruned where it is" {
     try std.testing.expectEqual(max_session_logs, try countRelativeSessionLogs(io, arena, relative));
 }
 
-// The mode a log and the directory holding it are created with. The log is the
-// run's transcript, so what a mode that leaves the file readable to every
-// other account on the machine gives away is everything the tools went to the
-// trouble of not printing. The mode is asserted through the real `open` and
+// The mode a log and the directory holding it are created with. What a mode
+// that leaves the file readable to every other account on the machine gives
+// away is the whole account of the last 200 runs: where each worked and what
+// each was charged for. The mode is asserted through the real `open` and
 // `createSessionLog`, because a mode named in a test and not applied is a test
 // that passes on a code that never had it.
 test "a session log is readable by its owner alone" {
