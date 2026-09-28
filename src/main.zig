@@ -748,7 +748,7 @@ fn resolveKey(io: Io, init: std.process.Init, given: []const u8) Key {
         ".secrets",
         "openrouter",
     }) catch return .{ .value = "", .source = "none" };
-    if (tool_mod.readSecret(init, fallback)) |v| {
+    if (tool_mod.readSecret(io, init.arena.allocator(), fallback)) |v| {
         if (v.len != 0) return .{ .value = v, .source = fallback };
         net.note(io, init.arena.allocator(), "microagent: {s} is empty; no key in it\n", .{fallback});
     }

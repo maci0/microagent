@@ -187,6 +187,19 @@ release, and `microagent update` moves you to it.
   than held, so a call whose arguments were cut arrived as
   `error: tool arguments are not valid JSON` and the run blamed the model for a
   truncation nothing had reported.
+- A UTF-8 byte order mark ahead of a file's content is dropped where this program
+  reads a file on the operator's behalf: the style config and the key file. The
+  mark is invisible in the editor that writes it, so nothing on the way in looked
+  like a mistake. A config carrying one named a key spelled `﻿caveman`, matched
+  nothing, and left the level at its default while reporting an unknown key the
+  operator never wrote; a key file carrying one sent U+FEFF to the provider as the
+  first byte of the key.
+- Text quoted back in a diagnostic escapes the C1 control range (U+0080..U+009F)
+  as well as C0 and DEL. A terminal acts on U+009B (CSI) exactly as it does on
+  ESC `[`, and UTF-8 spells that range as `C2 80..9F`, which is above the test
+  that caught C0. The tool module's `terminalSafe` already escaped it; a config
+  key, a flag or a repo name quoted through `chat.safeText` reached the same
+  screen with the sequence intact.
 - The README's benchmark commands lead with `make bench` and `make overhead`, the
   two targets that build `zig-out/bin/microagent` and put it on `PATH` for the run.
   The bare `bench/*.sh` form it documented first is the one that skips every

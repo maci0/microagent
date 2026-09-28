@@ -243,10 +243,32 @@ pub fn clamp(s: []const u8, max: usize) []const u8 {
 
 const hex_digits = "0123456789abcdef";
 
+/// The UTF-8 byte order mark, which is not text: it says what the encoding is
+/// and belongs to no value. Editors on Windows, and older ones elsewhere, write
+/// it at the head of a file they save as UTF-8, so a config or a key file
+/// arrives with it whether or not anybody asked for one.
+pub const bom = "\u{feff}";
+
+/// `text` without a leading byte order mark, and unchanged when there is none.
+/// Every text file this program reads on the operator's behalf goes through
+/// here: the mark is invisible in an editor, so a key file carrying one sent a
+/// U+FEFF ahead of the key to the provider, and a config carrying one put the
+/// mark inside its first key, which then matched no key this program knows.
+pub fn stripBom(text: []const u8) []const u8 {
+    return if (std.mem.startsWith(u8, text, bom)) text[bom.len..] else text;
+}
+
 /// Text from outside the process, as an operator reads it on one line: at most
-/// `max` bytes, every C0 control and DEL written as `\xNN` so it cannot end the
-/// line or move the cursor, and every byte that is not part of a valid UTF-8
-/// sequence written as U+FFFD so it does not reach the screen as mojibake.
+/// `max` bytes, every C0 control, DEL and C1 control written as `\xNN` so it
+/// cannot end the line or move the cursor, and every byte that is not part of a
+/// valid UTF-8 sequence written as U+FFFD so it does not reach the screen as
+/// mojibake.
+///
+/// The C1 range is escaped as well as C0 because UTF-8 spells it `C2 80..9F`,
+/// which is above the `c < 0x20` test below, and a terminal acts on U+009B
+/// (CSI) exactly as it does on ESC `[`. The tool module's `terminalSafe` has
+/// always escaped it for that reason; a value quoted through here reached the
+/// same screen with the escape sequence intact.
 ///
 /// What the value quotes is not this program's to choose: a config key is a
 /// line a reviewed repository committed and a flag is whatever the caller
@@ -281,6 +303,17 @@ pub fn safeText(arena: std.mem.Allocator, s: []const u8, max: usize) []const u8 
             if (out.items.len + 3 > max) break;
             out.appendSlice(arena, "\u{fffd}") catch break;
             i += 1;
+            continue;
+        }
+        // A C1 control is a valid two-byte sequence, so it arrives here rather
+        // than on the invalid-byte path above, and it is written as the escape
+        // of the code point rather than of the two bytes UTF-8 spells it with.
+        // The lead byte alone does not say C1: C2 80..9F is the range, and C2
+        // A0..BF is U+00A0..U+00BF, which is text and passes through below.
+        if (len == 2 and c == 0xc2 and s[i + 1] <= 0x9f) {
+            if (out.items.len + 4 > max) break;
+            out.appendSlice(arena, &.{ '\\', 'x', hex_digits[s[i + 1] >> 4], hex_digits[s[i + 1] & 0x0f] }) catch break;
+            i += len;
             continue;
         }
         if (out.items.len + len > max) break;
@@ -375,6 +408,26 @@ test "a value quoted back is text the terminal can be shown" {
     // A backslash is the one printable byte the escapes are built from, so one
     // the value already carries is left alone rather than made ambiguous.
     try std.testing.expectEqualStrings("a\\b", safeText(arena, "a\\b", 40));
+    // The C1 controls UTF-8 spells as C2 80..9F. A terminal acts on U+009B (CSI)
+    // as it does on ESC `[`, so the sequence is shown as the escape of the code
+    // point rather than passed through. U+00A0 is the first code point above the
+    // range and is ordinary text, so it passes through as its own two bytes.
+    try std.testing.expectEqualStrings("ls\\x9b31m caf\u{00a0}", safeText(arena, "ls\u{009b}31m caf\u{00a0}", 40));
+}
+
+test "a leading byte order mark is not part of the value it precedes" {
+    // An editor that saves UTF-8 with a BOM writes one ahead of the first byte
+    // of the value, and it is invisible in that editor, so nothing on the way
+    // here looks like an error to strip.
+    try std.testing.expectEqualStrings("caveman = \"lite\"\n", stripBom(bom ++ "caveman = \"lite\"\n"));
+    // A mark anywhere else is content: a file whose second line opens with one
+    // has a first line that is genuinely empty.
+    try std.testing.expectEqualStrings("a\n" ++ bom ++ "b\n", stripBom("a\n" ++ bom ++ "b\n"));
+    try std.testing.expectEqualStrings("", stripBom(""));
+    try std.testing.expectEqualStrings("", stripBom(bom));
+    // A truncated mark is not a mark, and a lone lead byte is still invalid.
+    try std.testing.expectEqualStrings("\xef", stripBom("\xef"));
+    try std.testing.expectEqualStrings("\xff\xfe", stripBom("\xff\xfe"));
 }
 
 test "a quoted value never exceeds its budget" {

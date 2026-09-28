@@ -17,6 +17,7 @@
 //! level the config does not name still gets the compiled-in default.
 
 const std = @import("std");
+const chat = @import("chat.zig");
 
 /// How terse the agent's own prose is. `ultra` is the default: a coding agent
 /// is judged on the diff, and every paragraph about it is paid for on each
@@ -100,10 +101,15 @@ pub const Style = struct {
     /// Only `key = "value"` is understood, at the top level or under `[style]`.
     /// That is the whole config, so it does not need a TOML parser: the rest of
     /// the format (numbers, arrays, dates, nested tables) has nowhere to go.
+    ///
+    /// A leading byte order mark is dropped before the first line is read. An
+    /// editor that saves UTF-8 with one writes it ahead of the first key, and
+    /// a key spelled `\u{feff}caveman` matches nothing here, so the file's own
+    /// first setting was silently ignored and reported as an unknown key.
     pub fn applyToml(self: *Style, text: []const u8) ?Problem {
         var ours = true;
         var unknown: ?Problem = null;
-        var lines = std.mem.splitScalar(u8, text, '\n');
+        var lines = std.mem.splitScalar(u8, chat.stripBom(text), '\n');
         while (lines.next()) |raw| {
             const line = std.mem.trim(u8, raw, " \t\r");
             if (line.len == 0 or line[0] == '#') continue;
@@ -343,6 +349,32 @@ test "the config reads either root or [style] keys, and nothing else" {
     const empty = style.applyToml("caveman =\n").?;
     try std.testing.expectEqualStrings("caveman", empty.key);
     try std.testing.expect(empty.bad_value);
+}
+
+test "a config an editor saved with a byte order mark reads the same" {
+    // The mark sits ahead of the first key and is invisible in the editor that
+    // wrote it, so a file that carries one used to name a key spelled
+    // `﻿caveman`, match nothing, and leave the default in force
+    // with a complaint about a key the operator never wrote.
+    var style: Style = .{};
+    try std.testing.expect(style.applyToml(chat.bom ++ "caveman = \"lite\"\n") == null);
+    try std.testing.expectEqual(CavemanLevel.lite, style.caveman);
+
+    // Before a table header, which is the line it hides the start of.
+    var tabled: Style = .{};
+    try std.testing.expect(tabled.applyToml(chat.bom ++ "[style]\nponytail = \"off\"\n") == null);
+    try std.testing.expectEqual(PonytailLevel.off, tabled.ponytail);
+    try std.testing.expectEqual(CavemanLevel.ultra, tabled.caveman);
+
+    // A mark on a later line belongs to that line's value, not to the file, so
+    // the key ahead of it is still read and the one it hides is still an
+    // unknown key, reported as one.
+    var later: Style = .{};
+    const problem = later.applyToml("caveman = \"off\"\n" ++ chat.bom ++ "ponytail = \"off\"\n");
+    try std.testing.expectEqual(CavemanLevel.off, later.caveman);
+    try std.testing.expectEqual(PonytailLevel.full, later.ponytail);
+    try std.testing.expectEqualStrings(chat.bom ++ "ponytail", problem.?.key);
+    try std.testing.expect(!problem.?.bad_value);
 }
 
 test "the wenyan levels ask for classical Chinese" {
