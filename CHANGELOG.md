@@ -135,6 +135,16 @@ release, and `microagent update` moves you to it.
   behind was the older code. A pre-release is the version released before its
   triple, so it now orders below it. A tag naming no version at all (a fork's
   tag, a branch name) still orders as equal and is installed, as before.
+- The numbers the help text states are the numbers the run uses. `--max-turns`
+  and `--max-tokens` wrote their defaults, and `--budget` wrote the grace its
+  last turn may run past, as prose beside the constants that hold them, so
+  changing a default left the help describing the old one. Each sentence is
+  built from its constant now, and a test asks that it is there. The
+  `--budget` grace is stated in whole minutes, which is the unit a reader
+  deciding whether the budget leaves room for a last edit counts in, and a
+  compile error refuses a grace that is not a whole number of one.
+- `microagent update --repo` is spelled `owner/name` in its flag list, the way
+  every synopsis of it and every message about it already spelled it.
 - The bidi controls and zero-width characters are written out in every value
   quoted for the operator. They are well-formed UTF-8 carrying no C0 or C1
   control, so the escaping every diagnostic already went through passed them,

@@ -735,8 +735,9 @@ const usage_text =
     \\
     \\flags:
     \\  -c, --check            report the latest release and install nothing
-    \\      --repo OWNER/NAME  GitHub repository to track (default maci0/microagent);
-    \\                         --repo=OWNER/NAME also works
+    \\      --repo owner/name  GitHub repository to track (default
+++ " " ++ default_repo ++ ");\n" ++
+    \\                         --repo=owner/name also works
     \\  -h, --help             this text ("update help" too)
     \\  -V, --version          version
     \\
@@ -1079,6 +1080,19 @@ fn updateUsageError(io: std.Io, comptime fmt: []const u8, args: anytype) u8 {
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
+
+test "the usage text names the repository a run without --repo tracks" {
+    // `--repo` is the one flag here with a default, and the default is a
+    // repository name a user types into a URL bar. Written out in this text
+    // and held in `default_repo`, it is two facts that can drift, and the
+    // one that drifts is the one a user only finds out about when the update
+    // they asked for comes from somewhere they did not name. The sentence is
+    // built from the constant, so a fork the release moves to takes the help
+    // with it.
+    const said = "(default " ++ default_repo ++ ")";
+    try std.testing.expect(std.mem.indexOf(u8, usage_text, said) != null);
+    try std.testing.expect(std.mem.indexOf(u8, usage_text, "microagent update [--check] [--repo owner/name]") != null);
+}
 
 const abc_sha = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 const asset_base = "microagent-v0.1.0-x86_64-linux-musl";

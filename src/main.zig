@@ -359,10 +359,10 @@ const help_text =
     \\                         sends an OPENAI_API_KEY or DEEPSEEK_API_KEY to
     \\                         openrouter and says so on stderr
     \\      --max-turns <n>    tool-loop turn ceiling, at least 1
-    \\                         (env MICROAGENT_MAX_TURNS, default 100)
+++ (std.fmt.comptimePrint("\n                         (env MICROAGENT_MAX_TURNS, default {d})\n", .{max_turns_default})) ++
     \\      --max-tokens <n>   max_tokens sent to the provider: the ceiling on
     \\                         one response's generated tokens, at least 1
-    \\                         (env MICROAGENT_MAX_TOKENS, default 65536)
+++ (std.fmt.comptimePrint("\n                         (env MICROAGENT_MAX_TOKENS, default {d})\n", .{default_max_tokens})) ++
     \\      --config <file>    reply-style TOML config (env MICROAGENT_CONFIG,
     \\                         default ~/.microagent/config.toml)
     \\      --ca-bundle <file>
@@ -372,9 +372,9 @@ const help_text =
     \\      --budget <seconds>
     \\                         stop starting turns after this long, and say so.
     \\                         At least 1; leaving it out is what says "no
-    \\                         budget". The last turn it takes may run 5 minutes
-    \\                         past it; a turn cut off there is discarded, not
-    \\                         half-applied
+    \\                         budget". The last turn it takes may run
+++ (std.fmt.comptimePrint("\n                         {d} minutes past it; a turn cut off there is\n", .{final_push_grace_m})) ++
+    \\                         discarded, not half-applied
     \\                         (env MICROAGENT_BUDGET_SECONDS)
     \\      --max-spend-tokens <n>
     \\                         stop starting turns once the run has billed
@@ -539,6 +539,22 @@ test "the help text names the spend alarm the run prints" {
     // with it.
     const said = std.fmt.comptimePrint("once {d}% of it is spent", .{spend_alarm_percent});
     try std.testing.expect(std.mem.indexOf(u8, help_text, said) != null);
+}
+
+test "the help text states the ceilings and the budget grace the run uses" {
+    // Three numbers a caller sizes a run against, and the only place any of
+    // them is written down for a reader is this text. A number written out
+    // here and a number the code uses are two facts that can drift, and the
+    // one that drifts is the one nobody notices: the default is in force until
+    // the reader's second run bills for it. Each sentence is built from the
+    // constant the run reads, so a default that moves takes the sentence with
+    // it and this test fails if one is ever written out by hand again.
+    const turns = std.fmt.comptimePrint("(env MICROAGENT_MAX_TURNS, default {d})", .{max_turns_default});
+    const tokens = std.fmt.comptimePrint("(env MICROAGENT_MAX_TOKENS, default {d})", .{default_max_tokens});
+    const grace = std.fmt.comptimePrint("{d} minutes past it", .{final_push_grace_m});
+    try std.testing.expect(std.mem.indexOf(u8, help_text, turns) != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_text, tokens) != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_text, grace) != null);
 }
 
 /// The value of an environment variable, or null when it is not set or is set
@@ -1361,6 +1377,16 @@ const turn_arena_retain_bytes: usize = 4 * 1024 * 1024;
 /// model has already read into one edit, which is a few tool calls, not a
 /// fresh investigation.
 const final_push_grace_s: u64 = 300;
+
+/// The same grace in whole minutes, which is how the help text states it: a
+/// reader deciding whether `--budget` leaves room for a last edit counts in
+/// minutes, not in a number of seconds. A grace that stopped being a whole
+/// number of minutes would print a fraction of one and read as noise, so the
+/// help takes the value in the unit it can spell.
+const final_push_grace_m: u64 = final_push_grace_s / 60;
+comptime {
+    if (final_push_grace_s % 60 != 0) @compileError("the --budget help states the last turn's grace in whole minutes");
+}
 
 /// The shortest a tool timeout may be cut to, even with the budget spent: a
 /// zero timeout would fail before the tool could even start.
