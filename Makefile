@@ -116,7 +116,7 @@ help:
 	  'check-reproducible    every published target rebuilds byte-identical' \
 	  'checksums             sha256 sidecars for dist/ (after a tagged build)' \
 	  'required-zig-version  the zig version build.zig.zon declares' \
-	  'clean                 remove zig-out and .zig-cache'
+	  'clean                 remove zig-out, .zig-cache, dist and the Harbor musl binary'
 
 # The version build.zig.zon declares. ci.yml and release.yml both refuse a
 # release whose tag and whose binary disagree, and both read it through here so
@@ -574,6 +574,16 @@ check-release:
 # consumer's machine. TAG is the tag the assets were built under, empty for the
 # rehearsal ci.yml builds on every push; the version each binary reports is the
 # one the tag names, or the one build.zig.zon declares when there is no tag.
+#
+# Each asset is read for its object format and its machine, not its name. The
+# magic alone is half the answer: every Mach-O 64 file starts with cffaedfe
+# whatever the CPU, and every ELF with 7f454c46, so a cross build that ignored
+# -Dtarget and produced the host's architecture published under the other
+# target's name and read clean. The machine field is the one that says which:
+# e_machine at offset 18 in an ELF, cputype at offset 4 in a Mach-O, each
+# little-endian. Both are declared per target rather than derived from the
+# suffix, so a target added to RELEASE_TARGETS has to say here what it is
+# before it can be published.
 check-assets:
 	@set -eu; \
 	test -d dist || { echo "no dist/, run 'make release-assets TAG=v0.2.0' first" >&2; exit 2; }; \
@@ -612,12 +622,24 @@ check-assets:
 	  }; \
 	  magic="$$(od -An -tx1 -N4 "$$asset" | tr -d ' \n')"; \
 	  case "$$target" in \
-	    *-linux-musl) want_magic=7f454c46 ;; \
-	    *-macos) want_magic=cffaedfe ;; \
+	    x86_64-linux-musl) want_magic=7f454c46; want_machine=3e00 ;; \
+	    aarch64-linux-musl) want_magic=7f454c46; want_machine=b700 ;; \
+	    x86_64-macos) want_magic=cffaedfe; want_machine=07000001 ;; \
+	    aarch64-macos) want_magic=cffaedfe; want_machine=0c000001 ;; \
 	    *) echo "no expected object format known for $$target, so its asset cannot be checked here" >&2; exit 1 ;; \
 	  esac; \
 	  test "$$magic" = "$$want_magic" || { \
 	    echo "$$asset starts with $${magic:-nothing}, expected $$want_magic" >&2; \
+	    exit 1; \
+	  }; \
+	  case "$$target" in \
+	    *-macos) machine_off=4; machine_len=4 ;; \
+	    *) machine_off=18; machine_len=2 ;; \
+	  esac; \
+	  machine="$$(od -An -tx1 -j "$$machine_off" -N "$$machine_len" "$$asset" | tr -d ' \n')"; \
+	  test "$$machine" = "$$want_machine" || { \
+	    echo "$$asset names machine $${machine:-nothing}, expected $$want_machine for $$target" >&2; \
+	    echo "a cross build that ignored -Dtarget publishes green and fails on a consumer's machine" >&2; \
 	    exit 1; \
 	  }; \
 	done; \
@@ -695,7 +717,11 @@ checksums:
 # same way a timestamp can: a panic message naming the checkout, an embedded
 # file read by absolute name, a link path. The other two builds share this
 # tree's path, so they cannot see that, and the bytes a release publishes
-# would then depend on where the runner put the checkout. The copy lives in a
+# would then depend on where the runner put the checkout. The copy is every
+# tracked file rather than a hand-written list of the ones the build reads
+# today, for the reason ZIG_SOURCES is: a second spelling of the source set is
+# a list that stops naming a file the build has since started reading, and the
+# build it checks is then not the one that ships. The copy lives in a
 # sibling of REPRO_DIR rather than inside it, because build_once empties
 # REPRO_DIR on every call. ci.yml runs this on every push and release.yml runs
 # it on the tag, so a release is never published from a commit that has not
@@ -721,8 +747,10 @@ check-reproducible:
 	  srcdir="$$REPRO_SRC"; \
 	  rm -rf "$$srcdir" "$(REPRO_DIR)"; \
 	  mkdir -p "$$srcdir"; \
-	  cp build.zig build.zig.zon CHANGELOG.md LICENSE "$$srcdir/"; \
-	  cp -R src "$$srcdir/src"; \
+	  git ls-files | while IFS= read -r tracked; do \
+	    mkdir -p "$$srcdir/$$(dirname "$$tracked")" || exit 1; \
+	    cp "$$tracked" "$$srcdir/$$tracked" || exit 1; \
+	  done; \
 	  (cd "$$srcdir" && SOURCE_DATE_EPOCH="$$1" LC_ALL="$$2" TZ="$$3" ZIG_GLOBAL_CACHE_DIR="$(REPRO_DIR)/global" $(ZIG) build \
 	    -Dtarget="$$4" -Doptimize=ReleaseSmall \
 	    --cache-dir "$(REPRO_DIR)/cache" -p "$(REPRO_DIR)/out2"); \
@@ -749,4 +777,4 @@ check-reproducible:
 	rm -rf "$(REPRO_DIR)" "$$REPRO_SRC"
 
 clean:
-	rm -rf zig-out .zig-cache
+	rm -rf zig-out .zig-cache dist $(HARBOR_DIR)/microagent-*-linux-musl $(HARBOR_DIR)/microagent-*-linux-musl.tmp
