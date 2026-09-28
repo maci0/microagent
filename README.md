@@ -146,7 +146,9 @@ is empty is named on stderr rather than passed off as no key at all.
 
 Any OpenAI-compatible endpoint works: OpenRouter, DeepSeek, OpenAI, vLLM, LiteLLM, Z.AI. Both
 `deepseek/deepseek-v4-flash` and `stealth/space-bunny-alpha` (OpenRouter) were used to verify it
-end to end; see [BENCHMARK.md](BENCHMARK.md).
+end to end; see [BENCHMARK.md](BENCHMARK.md). What the harness itself costs per turn, which
+levers were pulled and which were deliberately not, is in
+[PERFORMANCE.md](PERFORMANCE.md).
 
 The api key goes to the base url in an `Authorization` header on every request, so a plain `http://`
 base url is refused before the first one unless the host is loopback (`localhost`, `127.0.0.0/8`,
