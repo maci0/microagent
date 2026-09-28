@@ -1269,11 +1269,16 @@ pub fn atCaptureLimit(captured: Captured) bool {
 /// boundary, and marked when bytes were dropped. Without the marker a
 /// truncated file or a truncated test log is indistinguishable from a complete
 /// one, and the agent reasons about output it never saw.
+///
+/// The first number in the marker is the cap, not the length that survived the
+/// cut: `clamp` backs up to the last whole character, so a result whose
+/// `max_tool_output`-th byte lands inside one keeps up to three bytes fewer, and
+/// naming the shorter length told the model the cut was at a place it was not.
 pub fn toolResult(arena: std.mem.Allocator, output: []const u8) ![]const u8 {
     const kept = chat.clamp(output, max_tool_output);
     if (kept.len == output.len) return kept;
     return std.fmt.allocPrint(arena, "{s}\n... [tool output truncated at {d} of {d} bytes]", .{
-        kept, kept.len, output.len,
+        kept, max_tool_output, output.len,
     });
 }
 
@@ -1808,6 +1813,24 @@ test "a capped tool result says how much was dropped" {
     const cut = try toolResult(arena, big);
     try std.testing.expect(std.mem.startsWith(u8, cut, "x" ** max_tool_output));
     try std.testing.expect(std.mem.endsWith(u8, cut, "truncated at 24576 of 25076 bytes]"));
+}
+
+test "a cut inside a character still names the cap it was cut at" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Filler to put a three-byte character across the cap, so the cut has to
+    // back up past it and the kept length is below the cap it applied.
+    var raw: [max_tool_output + 8]u8 = undefined;
+    @memset(raw[0 .. max_tool_output - 1], 'x');
+    @memcpy(raw[max_tool_output - 1 ..][0..3], "\u{20ac}");
+    raw[max_tool_output + 2] = 'z';
+
+    const cut = try toolResult(arena, &raw);
+    try std.testing.expectEqual(max_tool_output - 1, chat.clamp(&raw, max_tool_output).len);
+    const want = try std.fmt.allocPrint(arena, "truncated at {d} of {d} bytes]", .{ max_tool_output, raw.len });
+    try std.testing.expect(std.mem.endsWith(u8, cut, want));
 }
 
 test "a real tool result over the cap stays a string the body can carry" {
