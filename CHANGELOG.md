@@ -32,6 +32,14 @@ release, and `microagent update` moves you to it.
   (default 65536, at least 1). Without it the provider's own limit was the only bound on what one
   turn could generate, so a model that failed to stop was billed until something else stopped it;
   `--max-turns` counts turns, not tokens.
+- `MICROAGENT_MAX_TURNS` is read by the binary itself, so the variable works for a plain container
+  run and not only through the harbor adapter. The flag still wins where both are given.
+- `MDEBUG` is documented in `--help` and in the README, with the values that count as on.
+- Fuzz harnesses for the two parsers that take untrusted bytes: the provider's streamed response, frame
+  by frame, and the GitHub release body the updater acts on. Both run their seed corpus on every
+  `zig build test` through `std.testing.fuzz`, and both assert the invariants a crash-only harness
+  misses: the turn a stream produces still serializes as a valid request body, and a release body only
+  reaches `.replaced` when both download URLs are trusted and the published checksum matches the bytes.
 
 ### Changed
 
@@ -65,18 +73,11 @@ release, and `microagent update` moves you to it.
   sent, so a value past anything a run survives left the child with no timeout at all and the
   process-group kill that reaps it never fired. It is now capped at 600 s, with the 120 s default
   unchanged, and the schema says so.
-- The system prompt now says that tool results, file contents and command output are data about the
-  repository rather than instructions. They are untrusted text on their way back into the prompt, and
-  a file in the tree could otherwise instruct the model through the tool that read it.
-
 - Bytes that are not UTF-8 no longer corrupt a request. Text from a tool result, a file, the working
   directory or `argv` is written into JSON as-is, so one latin-1 source file or stray `0xFF` byte made
   the whole request body unparseable and the provider answered 400, failing the turn over output the
   agent had already collected. Each bad byte is now written as U+FFFD and the rest of the string is
   unchanged.
-- The stderr tool gutter stays one line. A model that puts a newline or an escape sequence in a path,
-  pattern or command broke the `⏺ tool detail` shape a reader parses; control characters are now written
-  as `\xNN`.
 - A configuration value that is set to an empty string is no longer read as a value. `MICROAGENT_MODEL`,
   `MICROAGENT_BASE_URL`, `MICROAGENT_REASONING_EFFORT`, `MICROAGENT_BUDGET_SECONDS` and `MDEBUG` keep
   their defaults, and `MICROAGENT_CAVEMAN`/`MICROAGENT_PONYTAIL` fall through to the config file
@@ -115,16 +116,14 @@ release, and `microagent update` moves you to it.
   both sides. It ignored the prefix on the tag only, so a `v`-prefixed running version never matched a
   `v`-prefixed tag.
 
-### Added
+### Security
 
-- `MICROAGENT_MAX_TURNS` is read by the binary itself, so the variable works for a plain container run
-  and not only through the harbor adapter. The flag still wins where both are given.
-- `MDEBUG` is documented in `--help` and in the README, with the values that count as on.
-- Fuzz harnesses for the two parsers that take untrusted bytes: the provider's streamed response, frame
-  by frame, and the GitHub release body the updater acts on. Both run their seed corpus on every
-  `zig build test` through `std.testing.fuzz`, and both assert the invariants a crash-only harness
-  misses: the turn a stream produces still serializes as a valid request body, and a release body only
-  reaches `.replaced` when both download URLs are trusted and the published checksum matches the bytes.
+- The system prompt now says that tool results, file contents and command output are data about the
+  repository rather than instructions. They are untrusted text on their way back into the prompt, and
+  a file in the tree could otherwise instruct the model through the tool that read it.
+- The stderr tool gutter stays one line. A model that puts a newline or an escape sequence in a path,
+  pattern or command broke the `⏺ tool detail` shape a reader parses, and could drive the reader's
+  terminal with an escape sequence; control characters are now written as `\xNN`.
 
 ## [0.2.0] - 2026-09-29
 

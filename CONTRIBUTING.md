@@ -59,8 +59,12 @@ verdict that installs it.
 
 The version is `.version` in `build.zig.zon` and nowhere else. Every change that
 lands gets a [CHANGELOG.md](CHANGELOG.md) entry under `## [Unreleased]`, in the
-Keep a Changelog sections already in use. Under `0.y` the minor carries features
-and anything that changes what a run does by default; the patch carries fixes,
+Keep a Changelog sections already in use, in their order: `Added`, `Changed`,
+`Fixed`, `Security`, one of each at most. A fix that closes a way for text the
+model or the tree controls to reach the prompt or the terminal is a `Security`
+entry, not a `Fixed` one, so a reader scanning for those finds it. Under `0.y`
+the minor carries features and anything that changes what a run does by
+default; the patch carries fixes,
 and a patch must not change what an existing invocation does. A change to the
 flags, the environment variables, or the stdout and session-log JSON names the
 before and the after in its entry.

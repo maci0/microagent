@@ -65,6 +65,26 @@ jobs:
           # The host-arch asset must be the binary this tag names.
           got="$("./dist/microagent-${GITHUB_REF_NAME}-x86_64-linux-musl" --version)"
           test "$got" = "microagent ${GITHUB_REF_NAME#v}"
+          # Every asset is one a consumer's `update` will pick by triple, and only
+          # the host one can be run here, so the other three are checked by the
+          # format their target names. A cross build that produced the wrong
+          # object, or an empty one, used to publish and fail on a user's
+          # machine instead of here.
+          check_format() {
+            local asset="$1" want="$2" got
+            got="$(od -An -tx1 -N4 "$asset" | tr -d ' \n')"
+            if [ "$got" != "$want" ]; then
+              echo "${asset} starts with ${got:-nothing}, expected ${want}" >&2
+              exit 1
+            fi
+          }
+          for target in x86_64-linux-musl aarch64-linux-musl x86_64-macos aarch64-macos; do
+            case "$target" in
+              *-linux-musl) magic=7f454c46 ;;
+              *) magic=cffaedfe ;;
+            esac
+            check_format "dist/microagent-${GITHUB_REF_NAME}-${target}" "$magic"
+          done
           ls -l dist
 
       - name: the changelog has an entry for this tag
