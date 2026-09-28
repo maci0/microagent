@@ -145,6 +145,10 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- `integrations/harbor/microagent_agent.py` is formatted the way `ruff format` writes it, so the
+  `ruff format --check` step that `make lint-python` and CI both run passes. The file had drifted
+  from the formatter after the log-formatting change above it, which left `make check` red on a
+  clean checkout of this version.
 - Text quoted back to the operator is now cut, bounded and printable through one helper,
   `chat.safeText`. A config key is whatever bytes a committed `config.toml` line held and a
   `--repo` is whatever the caller typed, and both went to stderr raw: a control character in

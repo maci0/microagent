@@ -209,10 +209,12 @@ class Microagent(BaseAgent):
         # budget equal to the timeout is a run killed mid-turn; a budget far
         # below it is working time thrown away.
         agent_timeout = int_env("MICROAGENT_AGENT_TIMEOUT_SEC", "1500")
-        budget = str(min(
-            int_env("MICROAGENT_BUDGET_SECONDS", DEFAULT_BUDGET_SECONDS),
-            max(60, agent_timeout - FINAL_TURN_ROOM_S),
-        ))
+        budget = str(
+            min(
+                int_env("MICROAGENT_BUDGET_SECONDS", DEFAULT_BUDGET_SECONDS),
+                max(60, agent_timeout - FINAL_TURN_ROOM_S),
+            )
+        )
         reasoning = reasoning_effort()
         command = " ".join(
             shlex.quote(part)
@@ -251,9 +253,7 @@ class Microagent(BaseAgent):
             # stands.
             if "timed out" not in str(error).lower():
                 raise
-            self.logger.warning(
-                "microagent hit the %ss agent timeout; scoring the tree as it stands", agent_timeout
-            )
+            self.logger.warning("microagent hit the %ss agent timeout; scoring the tree as it stands", agent_timeout)
             (self.logs_dir / "microagent-timeout.txt").write_text(str(error), encoding="utf-8")
             return
         # UTF-8 named rather than left to the locale: a host running under
