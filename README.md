@@ -118,6 +118,14 @@ defaults, `MICROAGENT_CA_BUNDLE` falls through to `SSL_CERT_FILE`, and
 Two variables are the exception: `MICROAGENT_CONFIG` and `MICROAGENT_SESSION_DIR`
 read empty as off, so no style file and no session log.
 
+Every variable is trimmed before it is read, and one holding nothing but
+whitespace reads as the empty case above. A wrapper that populates the
+environment from a file exports the newline that file ended with, and that
+newline is a different failure per option: an api key reaches the provider as an
+`Authorization` header carrying a byte a header may not hold, so every request
+is refused, and a base url stops parsing, so the run claims the key would go out
+in the clear about a value that is otherwise fine.
+
 The prompt may also be the last bare argument. That matters for gauntlet: a custom-agent
 definition inserts the model flags immediately after `-p`, so an agent defined as
 `["microagent", "-p", "{prompt}"]` would hand `--model` to `-p`. Define it as

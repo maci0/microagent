@@ -49,18 +49,41 @@ DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 # Keep the agent's own budget under harbor's per-task agent timeout, so
 # microagent stops deliberately instead of being killed mid-turn.
 DEFAULT_BUDGET_SECONDS = "600"
+# The levels the binary accepts for reasoning.effort, kept beside the defaults
+# so a mistyped one is refused before a container is started rather than inside
+# one.
+REASONING_EFFORTS = ("minimal", "low", "medium", "high", "none")
 
 
 def binary_path() -> Path:
-    override = os.environ.get("MICROAGENT_BINARY")
+    override = trimmed_env("MICROAGENT_BINARY")
     if override:
         return Path(override).expanduser().resolve()
     return Path(__file__).resolve().parent / BINARY_NAME
 
 
+def trimmed_env(name: str) -> str | None:
+    """A host variable with surrounding whitespace removed, or None when it is
+    unset or holds nothing but whitespace. A wrapper that populates the
+    environment from a file exports the newline that file ended with, and a path
+    carrying one names a file nothing holds: the adapter would report a binary
+    or a bundle that is not there rather than the value it was given."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    value = raw.strip()
+    return value or None
+
+
 def host_ca_bundle() -> Path | None:
-    override = os.environ.get("SSL_CERT_FILE")
-    candidates = (override, *HOST_CA_CANDIDATES) if override else HOST_CA_CANDIDATES
+    # The binary's own order (net.caBundlePath): the project's variable first,
+    # then the one the system trust store tooling uses. An operator who set
+    # MICROAGENT_CA_BUNDLE for the run on this host means the same bundle for
+    # the run in the container, and reading only SSL_CERT_FILE would upload the
+    # system store instead and trust the wrong root for a benchmark.
+    candidates = (
+        c for c in (trimmed_env("MICROAGENT_CA_BUNDLE"), *HOST_CA_CANDIDATES, trimmed_env("SSL_CERT_FILE")) if c
+    )
     for candidate in candidates:
         path = Path(candidate)
         if path.is_file():
@@ -73,7 +96,7 @@ def host_ca_bundle() -> Path | None:
 
 def api_key() -> str:
     for name in ("MICROAGENT_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY"):
-        value = os.environ.get(name)
+        value = trimmed_env(name)
         if value:
             return value
     raise RuntimeError(
@@ -88,13 +111,27 @@ def int_env(name: str, default: str, minimum: int = 1) -> int:
     ValueError from int() with no indication of which knob it was. A knob the
     binary reads as a ceiling is refused here too, so a mistyped value stops
     the run before a container is started rather than inside one."""
-    raw = os.environ.get(name) or default
+    raw = trimmed_env(name) or default
     try:
         value = int(raw)
     except ValueError:
         raise RuntimeError(f"{name} must be a whole number, got {raw!r}") from None
     if value < minimum:
         raise RuntimeError(f"{name} must be at least {minimum}, got {raw!r}")
+    return value
+
+
+def reasoning_effort() -> str | None:
+    """The provider's reasoning.effort, checked here for the reason the numeric
+    knobs are: the binary refuses a level it does not have, and refusing it
+    there costs a container start and an upload before the reason is printed.
+    A level that is not one is named here, while the operator is looking at the
+    command line rather than at a container's stderr."""
+    value = trimmed_env("MICROAGENT_REASONING_EFFORT")
+    if not value:
+        return None
+    if value not in REASONING_EFFORTS:
+        raise RuntimeError(f"MICROAGENT_REASONING_EFFORT must be one of {', '.join(REASONING_EFFORTS)}, got {value!r}")
     return value
 
 
@@ -117,7 +154,7 @@ class Microagent(BaseAgent):
         return "microagent"
 
     def version(self) -> str | None:
-        return os.environ.get("MICROAGENT_VERSION")
+        return trimmed_env("MICROAGENT_VERSION")
 
     async def setup(self, environment: BaseEnvironment) -> None:
         source = binary_path()
@@ -162,9 +199,11 @@ class Microagent(BaseAgent):
         context: AgentContext,
     ) -> None:
         model = normalize_model(self.model_name)
-        # The budget is a ceiling the binary reads too, so it is checked here
-        # rather than handed over as a string the container refuses.
+        # The budget and the level are both read by the binary, so both are
+        # checked here rather than handed over as strings the container refuses
+        # after an upload and a container start.
         budget = str(int_env("MICROAGENT_BUDGET_SECONDS", DEFAULT_BUDGET_SECONDS))
+        reasoning = reasoning_effort()
         command = " ".join(
             shlex.quote(part)
             for part in (
@@ -180,11 +219,10 @@ class Microagent(BaseAgent):
         )
         env = {
             "MICROAGENT_API_KEY": api_key(),
-            "MICROAGENT_BASE_URL": os.environ.get("MICROAGENT_BASE_URL") or DEFAULT_BASE_URL,
+            "MICROAGENT_BASE_URL": trimmed_env("MICROAGENT_BASE_URL") or DEFAULT_BASE_URL,
         }
         if getattr(self, "_ca_uploaded", False):
             env["MICROAGENT_CA_BUNDLE"] = REMOTE_CA_PATH
-        reasoning = os.environ.get("MICROAGENT_REASONING_EFFORT")
         if reasoning:
             env["MICROAGENT_REASONING_EFFORT"] = reasoning
 

@@ -358,14 +358,28 @@ fn die(io: Io, comptime fallback: []const u8, comptime fmt: []const u8, args: an
 }
 
 /// The value of an environment variable, or null when it is not set or is set
-/// to an empty string. A wrapper that builds its own environment exports the
-/// name with nothing behind it, and an empty string read as a value sends
+/// to nothing but whitespace. A wrapper that builds its own environment exports
+/// the name with nothing behind it, and an empty string read as a value sends
 /// `"model": ""` to the provider and loses the default; every other variable
 /// here already treats empty as unset.
+///
+/// Surrounding whitespace is trimmed here rather than in each reader, because
+/// a wrapper that populates the environment from a file carries the newline the
+/// file ended with, and that newline is a different failure per option: an API
+/// key arrives as an `Authorization` header carrying a byte a header may not
+/// hold, so every request is refused; a base url fails to parse, so the run
+/// stops claiming the key would go out in the clear, which is a security
+/// warning about a value that is otherwise fine. The ceilings and the levels
+/// trim for themselves at the point of parsing, `githubBearer` trims for the
+/// same reason, and a key file is read trimmed; this makes the environment
+/// itself the one place the whitespace is removed.
 fn envValue(env: *const std.process.Environ.Map, name: []const u8) ?[]const u8 {
-    const v = env.get(name) orelse return null;
+    const v = std.mem.trim(u8, env.get(name) orelse return null, env_surrounding);
     return if (v.len == 0) null else v;
 }
+
+/// What a wrapper reading a file leaves around a value it exported.
+const env_surrounding = " \t\r\n";
 
 /// The debugging switch, on unless the variable is set to something that reads
 /// as off. Set-at-all was the old reading, which turned the trace on for a
@@ -760,7 +774,8 @@ const StyleSource = struct { path: ?[]const u8, named: bool };
 /// rather than the whole `Init`, so the precedence is testable without one.
 fn styleConfigPath(env: *const std.process.Environ.Map, arena: std.mem.Allocator, config: []const u8) StyleSource {
     if (config.len > 0) return .{ .path = std.fs.path.resolve(arena, &.{config}) catch config, .named = true };
-    if (env.get("MICROAGENT_CONFIG")) |path| {
+    if (env.get("MICROAGENT_CONFIG")) |raw| {
+        const path = std.mem.trim(u8, raw, env_surrounding);
         if (path.len == 0) return .{ .path = null, .named = false };
         return .{ .path = std.fs.path.resolve(arena, &.{path}) catch path, .named = true };
     }
@@ -959,9 +974,12 @@ fn runTurn(
 
 /// Where the session log goes: MICROAGENT_SESSION_DIR, else a directory beside
 /// the other per-run state under $HOME. An empty value turns the log off, and
-/// so does a home that is not there.
+/// so does a home that is not there. The variable is read rather than through
+/// `envValue` because an empty one means off here instead of falling through,
+/// but it is trimmed the same way: a path with a trailing newline is not the
+/// directory the caller named, and the run would quietly keep no log at all.
 fn sessionDir(init: std.process.Init) []const u8 {
-    if (init.environ_map.get("MICROAGENT_SESSION_DIR")) |v| return v;
+    if (init.environ_map.get("MICROAGENT_SESSION_DIR")) |v| return std.mem.trim(u8, v, env_surrounding);
     const home = init.environ_map.get("HOME") orelse return "";
     return std.fs.path.join(init.arena.allocator(), &.{ home, ".microagent", "sessions" }) catch "";
 }
@@ -3751,6 +3769,19 @@ test "an environment variable set to nothing is not a value" {
     // has --model to say so with.
     try env.put("MICROAGENT_MODEL", "gpt-5");
     try std.testing.expectEqualStrings("gpt-5", envValue(&env, "MICROAGENT_MODEL").?);
+
+    // A wrapper that populates the environment from a file leaves the newline
+    // that file ended with, and each option fails differently on it: an api
+    // key becomes a header carrying a byte a header may not hold, a base url
+    // stops parsing and the run claims the key would go out in the clear.
+    try env.put("MICROAGENT_MODEL", " gpt-5\n");
+    try std.testing.expectEqualStrings("gpt-5", envValue(&env, "MICROAGENT_MODEL").?);
+    try env.put("MICROAGENT_BASE_URL", "\thttps://example.test/v1\r\n");
+    try std.testing.expectEqualStrings("https://example.test/v1", envValue(&env, "MICROAGENT_BASE_URL").?);
+
+    // Whitespace alone is the empty case, not a value.
+    try env.put("MICROAGENT_MODEL", " \t\r\n");
+    try std.testing.expect(envValue(&env, "MICROAGENT_MODEL") == null);
 }
 
 test "a style config that cannot be read is reported, a missing one is not" {
@@ -3802,6 +3833,16 @@ test "the style config path follows flag, then variable, then home" {
     // An empty variable is the documented way to turn the file off, and the
     // home below it must not answer it.
     try env.put("MICROAGENT_CONFIG", "");
+    try std.testing.expect(styleConfigPath(&env, arena, "").path == null);
+
+    // A path exported from a file carries that file's newline, and a path with
+    // one is a file nothing holds: the run would report on a config the caller
+    // never wrote and fall back to the built-in levels.
+    try env.put("MICROAGENT_CONFIG", "/from/env.toml\n");
+    try std.testing.expectEqualStrings("/from/env.toml", styleConfigPath(&env, arena, "").path.?);
+
+    // Whitespace alone is the empty case: the file is off, as it is for "".
+    try env.put("MICROAGENT_CONFIG", "  \n");
     try std.testing.expect(styleConfigPath(&env, arena, "").path == null);
 
     // With neither, the home is where the file is looked for, and it is not

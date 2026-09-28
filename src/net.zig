@@ -58,10 +58,17 @@ pub fn note(io: Io, arena: std.mem.Allocator, comptime fmt: []const u8, args: an
 
 /// Where a CA bundle is named, for the agent run and for `update` alike: the
 /// project's own variable first, then the one the system trust store tooling
-/// already uses. Empty means no bundle was named.
+/// already uses. Empty means no bundle was named, and so does a value that is
+/// nothing but whitespace, which is not a path any filesystem holds.
 pub fn caBundlePath(env: *const std.process.Environ.Map) []const u8 {
-    if (env.get("MICROAGENT_CA_BUNDLE")) |v| if (v.len > 0) return v;
-    if (env.get("SSL_CERT_FILE")) |v| if (v.len > 0) return v;
+    if (env.get("MICROAGENT_CA_BUNDLE")) |v| {
+        const p = std.mem.trim(u8, v, " \t\r\n");
+        if (p.len > 0) return p;
+    }
+    if (env.get("SSL_CERT_FILE")) |v| {
+        const p = std.mem.trim(u8, v, " \t\r\n");
+        if (p.len > 0) return p;
+    }
     return "";
 }
 
@@ -118,6 +125,13 @@ test "the CA bundle comes from the project's variable first, then the system one
 
     // An empty value is not a bundle named; the next one in the chain answers.
     try env.put("MICROAGENT_CA_BUNDLE", "");
+    try std.testing.expectEqualStrings("/etc/ssl/certs/ca-certificates.crt", caBundlePath(&env));
+
+    // A wrapper that exports a path read from a file carries the newline that
+    // file ended with, and a path with one is a file no filesystem holds.
+    try env.put("MICROAGENT_CA_BUNDLE", "/tmp/bundle.pem\n");
+    try std.testing.expectEqualStrings("/tmp/bundle.pem", caBundlePath(&env));
+    try env.put("MICROAGENT_CA_BUNDLE", "  ");
     try std.testing.expectEqualStrings("/etc/ssl/certs/ca-certificates.crt", caBundlePath(&env));
 }
 
