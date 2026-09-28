@@ -1207,7 +1207,14 @@ fn waitBounded(
                     .raw = .{ .nanoseconds = @min(left.raw.nanoseconds, wait_poll_interval.raw.nanoseconds) },
                     .clock = .awake,
                 };
-                slice.sleep(self.io) catch return;
+                // A poll that cannot sleep falls out to the signal below rather
+                // than back out of this task. Returning here left the wait task
+                // blocked in `child.wait` for as long as the child chose to run,
+                // which is the unbounded wait the deadline exists to remove: a
+                // command that closed its pipes and slept would have held the
+                // whole run past its tool timeout, and the reap in `runCapped`
+                // never fired because this call had not returned.
+                slice.sleep(self.io) catch break;
             }
             // A child that already exited needs no signal, and one that has
             // not is what this task exists to bound. The group goes rather than
