@@ -163,12 +163,24 @@ const ChatResult = struct {
 
     /// The response outlives the turn's arena, so what a turn keeps is
     /// allocated here and released with the turn rather than at process exit.
+    /// The name and the id of a call are as much of the response as its
+    /// arguments are, so they go with them.
     fn deinit(self: *ChatResult, gpa: std.mem.Allocator) void {
-        for (self.calls.items) |*call| call.args.deinit(gpa);
-        self.calls.deinit(gpa);
+        deinitCalls(gpa, &self.calls);
         self.content.deinit(gpa);
     }
 };
+
+/// Releases the strings and the argument buffers a list of calls owns. A slot
+/// the frame parser filled to reach a later index holds nothing to release.
+fn deinitCalls(gpa: std.mem.Allocator, calls: *std.ArrayList(ToolCall)) void {
+    for (calls.items) |*call| {
+        if (call.id.len != 0) gpa.free(call.id);
+        if (call.name.len != 0) gpa.free(call.name);
+        call.args.deinit(gpa);
+    }
+    calls.deinit(gpa);
+}
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
@@ -195,7 +207,7 @@ pub fn main(init: std.process.Init) !void {
     if (envValue(init.environ_map, "MICROAGENT_MAX_TOKENS")) |v| opts.max_tokens = tokenCeiling(io, "MICROAGENT_MAX_TOKENS", v);
     opts.ca_bundle = net.caBundlePath(init.environ_map);
     if (envValue(init.environ_map, "MICROAGENT_BUDGET_SECONDS")) |v|
-        opts.budget_s = std.fmt.parseInt(u64, v, 10) catch
+        opts.budget_s = std.fmt.parseInt(u64, std.mem.trim(u8, v, " \t\r\n"), 10) catch
             return configError(io, "MICROAGENT_BUDGET_SECONDS must be a number of seconds, got '{s}'", .{v});
     opts.session_dir = sessionDir(init);
 
@@ -466,7 +478,7 @@ fn parseArgs(io: Io, buf: []u8, argv: []const []const u8, opts: *Options) ?[]con
         } else if (std.mem.eql(u8, name, "--budget")) {
             const v = joined orelse flagValue(argv, i) orelse return "--budget needs a number of seconds";
             if (v.len == 0) return "--budget needs a number of seconds";
-            opts.budget_s = std.fmt.parseInt(u64, v, 10) catch
+            opts.budget_s = std.fmt.parseInt(u64, std.mem.trim(u8, v, " \t\r\n"), 10) catch
                 return std.fmt.bufPrint(buf, "--budget must be a number of seconds, got '{s}'", .{v}) catch "bad --budget";
             if (joined == null) i += 1;
         } else if (std.mem.eql(u8, name, "--max-turns")) {
@@ -675,8 +687,12 @@ fn runTurn(
     const asked = Io.Timestamp.now(io, .awake).nanoseconds;
     var result = try streamChat(client, io, gpa, arena, opts, body);
     defer result.deinit(gpa);
+    // The model time is taken here, before the tool calls `finishTurn` runs:
+    // the record says how long the model generated, and a gap that spans the
+    // tools would report a rate for a generation that was never continuous.
+    const model_ms = elapsedMs(io, asked);
     try finishTurn(io, arena, gpa, msgs, &result, usage);
-    writeSessionRecord(io, arena, session, elapsedMs(io, asked), &result);
+    writeSessionRecord(io, arena, session, model_ms, &result);
     return result.calls.items.len != 0;
 }
 
@@ -943,10 +959,7 @@ fn streamChat(
     var result: ChatResult = .{};
     errdefer result.deinit(gpa);
     var calls: std.ArrayList(ToolCall) = .empty;
-    errdefer {
-        for (calls.items) |*call| call.args.deinit(gpa);
-        calls.deinit(gpa);
-    }
+    errdefer deinitCalls(gpa, &calls);
 
     // Frames are parsed in a scratch arena reset after each one, so a long
     // stream costs the size of its largest frame, not the sum of all of them.
@@ -1018,7 +1031,7 @@ fn streamChat(
     if (result.content.items.len > 0) try out_buf.append(gpa, '\n');
     flushOut(io, &out_buf);
     result.calls = calls;
-    dropNamelessCalls(&result.calls);
+    dropNamelessCalls(gpa, &result.calls);
     return result;
 }
 
@@ -1047,10 +1060,14 @@ fn truncatedNotice(
 /// `unknown tool ''` and it goes back to the provider as an assistant message
 /// carrying a function with no name, which the next request rejects. The gap is
 /// dropped here rather than sent on.
-fn dropNamelessCalls(calls: *std.ArrayList(ToolCall)) void {
+fn dropNamelessCalls(gpa: std.mem.Allocator, calls: *std.ArrayList(ToolCall)) void {
     var kept: usize = 0;
     for (calls.items) |*call| {
-        if (call.name.len == 0) continue;
+        if (call.name.len == 0) {
+            if (call.id.len != 0) gpa.free(call.id);
+            call.args.deinit(gpa);
+            continue;
+        }
         calls.items[kept] = call.*;
         kept += 1;
     }
@@ -1127,13 +1144,16 @@ fn applyFrame(
             // the previous copy is released rather than left behind.
             if (str(tc.object.get("id"))) |v| {
                 const owned = try gpa.dupe(u8, v);
-                gpa.free(call.id);
+                // A slot this frame's index walk filled holds the placeholder
+                // rather than a copy, and the placeholder is not the
+                // allocator's to hand back.
+                if (call.id.len != 0) gpa.free(call.id);
                 call.id = owned;
             }
             if (tc.object.get("function")) |f| if (f == .object) {
                 if (str(f.object.get("name"))) |v| {
                     const owned = try gpa.dupe(u8, v);
-                    gpa.free(call.name);
+                    if (call.name.len != 0) gpa.free(call.name);
                     call.name = owned;
                 }
                 if (str(f.object.get("arguments"))) |v| {
@@ -1813,11 +1833,19 @@ fn runCapped(
 ) !Captured {
     var child = try std.process.spawn(io, .{
         .argv = argv,
+        // Its own group, like every other tool subprocess: a command that
+        // backgrounds work, or times out holding its pipes open, must not
+        // leave a build tree running behind the call.
+        .pgid = 0,
         .stdin = .ignore,
         .stdout = .pipe,
         .stderr = .pipe,
     });
-    defer child.kill(io);
+    const pgid: ?std.posix.pid_t = if (builtin.os.tag == .windows) null else @intCast(child.id.?);
+    defer {
+        if (pgid) |group| signalGroup(group);
+        child.kill(io);
+    }
 
     const files = [2]Io.File{ child.stdout.?, child.stderr.? };
     var chunks: [2][capture_chunk]u8 = undefined;
@@ -2763,12 +2791,12 @@ test "a gap in the tool-call indexes leaves no nameless call behind" {
     try applyFrame(arena, arena, payload, &result, &calls, &out_buf, &unparsable);
     try std.testing.expectEqual(@as(usize, 3), calls.items.len);
 
-    dropNamelessCalls(&calls);
+    dropNamelessCalls(arena, &calls);
     try std.testing.expectEqual(@as(usize, 1), calls.items.len);
     try std.testing.expectEqualStrings("read", calls.items[0].name);
 
     // A response whose calls are all named is untouched.
-    dropNamelessCalls(&calls);
+    dropNamelessCalls(arena, &calls);
     try std.testing.expectEqual(@as(usize, 1), calls.items.len);
 }
 
@@ -3144,4 +3172,64 @@ test "a tool call reports the exit status of the command it ran" {
     try std.testing.expectEqualStrings("out", res.stdout);
     try std.testing.expectEqualStrings("err", res.stderr);
     try std.testing.expectEqual(@as(u8, 3), res.term.exited);
+}
+
+// `bash` goes through the capped runner, not the search runner, and it is the
+// tool that starts builds, so it carries the same process-group kill: a command
+// that backgrounds work and then outruns its deadline took the whole tree with
+// it only where the search tools already did.
+test "a bash call that times out leaves no process of its own behind" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const pid_path = try std.fs.path.join(arena, &.{ path_buf[0..n], "bash_grandchild.pid" });
+    const script = try std.fmt.allocPrint(arena,
+        \\sh -c 'echo $$ > {s}; sleep 30' &
+        \\sleep 30
+    , .{pid_path});
+
+    try std.testing.expectError(error.Timeout, runCapped(io, arena, &.{ "/bin/sh", "-c", script }, 4096, durationMs(300)));
+
+    const raw = tmp.dir.readFileAlloc(io, "bash_grandchild.pid", arena, .limited(64)) catch return error.GrandchildNotReported;
+    const pid = try std.fmt.parseInt(std.posix.pid_t, std.mem.trim(u8, raw, " \t\r\n"), 10);
+    var attempt: usize = 0;
+    while (attempt < 50) : (attempt += 1) {
+        std.posix.kill(pid, .CONT) catch return;
+        try io.sleep(.{ .nanoseconds = 20 * std.time.ns_per_ms }, .awake);
+    }
+    std.debug.print("bash grandchild {d} survived the tool call\n", .{pid});
+    return error.GrandchildSurvived;
+}
+
+// The name and the id of a streamed tool call are copies the run allocator
+// owns, so releasing the response has to release them with its other buffers.
+test "a response releases the copies it made of a tool call" {
+    const gpa = std.testing.allocator;
+    // The scratch arena is the one the stream loop resets after every frame;
+    // the run allocator is the one the copies outlive.
+    var scratch_state = std.heap.ArenaAllocator.init(gpa);
+    defer scratch_state.deinit();
+
+    var result: ChatResult = .{};
+    var calls: std.ArrayList(ToolCall) = .empty;
+    var out_buf: std.ArrayList(u8) = .empty;
+    var unparsable: usize = 0;
+    const payload = "{\"choices\":[{\"delta\":{\"tool_calls\":[" ++
+        "{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"a\\\"}\"}}" ++
+        "]}}]}";
+    try applyFrame(scratch_state.allocator(), gpa, payload, &result, &calls, &out_buf, &unparsable);
+    result.calls = calls;
+    try std.testing.expectEqualStrings("call_1", result.calls.items[0].id);
+    try std.testing.expectEqualStrings("read", result.calls.items[0].name);
+
+    // The testing allocator reports the copies the response kept past deinit.
+    result.deinit(gpa);
 }

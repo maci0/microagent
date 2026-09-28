@@ -45,6 +45,22 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- `elapsed_ms` in a session record is the model's time again. It was measured after the turn's tool
+  calls had run, so it reported a gap that included them, and a monitor dividing a response's tokens
+  by it got a rate for a generation that was never continuous. It is now taken when the completion
+  stream ends, before the tools run.
+- A `bash` call now takes its process tree down with it. `bash` runs through the capped runner,
+  which spawned the child in the caller's process group and so killed only the shell: a command
+  that backgrounded work, or ran past its deadline holding the pipes open, left the rest of the tree
+  running. It is now its own group leader, and the group is signalled on every exit path, the way
+  the search and git tools already were.
+- A streamed tool call's name and id are released with the rest of the response. They are copies
+  the run allocator owns, and only the argument buffer was handed back, so a long run leaked two
+  small strings per call.
+- `--budget` and `MICROAGENT_BUDGET_SECONDS` take a value with surrounding whitespace, as
+  `--max-turns` and `MICROAGENT_MAX_TURNS` already did. `export MICROAGENT_BUDGET_SECONDS="$(cat f)"`
+  kept a trailing newline and was refused where the other ceilings were not.
+
 - A `bash` call can no longer run without a deadline. `timeout_ms` is model output and was taken as
   sent, so a value past anything a run survives left the child with no timeout at all and the
   process-group kill that reaps it never fired. It is now capped at 600 s, with the 120 s default
