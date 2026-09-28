@@ -20,14 +20,16 @@ instruction counter will show you.
 
 ## Where the work goes
 
-Measured with `perf stat -e instructions`, median of three, net of a baseline binary:
+Measured with `perf stat -e instructions`, median of three, net of a baseline binary. The per-frame,
+compaction, body and ranged-read rows are the ones `bench/instructions.baseline` gates, so a row here
+that moves is a gate that moved with it:
 
 | path | instructions | per unit |
 | --- | --- | --- |
 | process start, arg parse (`--version`) | 476,025 | — |
 | everything before the first request is sent | 1,303,779 | — |
 | a streamed content frame (47 B) | — | 4,101 |
-| a streamed tool-argument frame | — | 7,791 |
+| a streamed tool-argument frame | — | 9,253 |
 | compaction of a 1 MB conversation | 44,046,577 | one call |
 | building the request body | — | 113,949 |
 | a ranged read of a 512 KB line | 7,543,588 | one call |
@@ -42,7 +44,7 @@ path, and nothing per turn beyond one session-log write and one stdout write per
 
 | | before | after | why |
 | --- | --- | --- | --- |
-| un-cacheable request bytes | 3,431 B/turn | **2 B/turn** | the tool schemas were written after `messages`, so they fell outside the cacheable prefix every turn |
+| un-cacheable request bytes | 3,592 B/turn | **2 B/turn** | the tool schemas were written after `messages`, so they fell outside the cacheable prefix every turn |
 | streamed frame parse | 7,204 instr | **4,101 instr** | declared shapes instead of a `std.json.Value` tree, with the generic parse kept behind them |
 | ranged read of a long line | quadratic | **linear** | each 8 KB read re-searched and re-copied the whole accumulated buffer |
 | a retry wait past the budget | up to 6 min asleep | **refused** | `--budget` was defeated by the `Retry-After` path |
@@ -78,7 +80,7 @@ categories generalise past this repository:
 
 | class | why a profiler misses it | example |
 | --- | --- | --- |
-| wire bytes | no instruction is spent on them | 3.4 KB of tool schema re-read every turn |
+| wire bytes | no instruction is spent on them | 3.5 KB of tool schema re-read every turn |
 | waiting | the cost is sleep | a 429 sat the run out for six minutes inside `--budget` |
 | resident memory | instruction counts do not carry it | 48 MB retained after one large response |
 | fallback paths | the primary path works | `date +%s` standing in for a monotonic clock |

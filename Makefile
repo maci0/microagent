@@ -134,7 +134,7 @@ release-targets:
 build:
 	$(ZIG) build -Doptimize=$(OPT)
 
-# Smallest binary that still runs the same code (~760 KB).
+# Smallest binary that still runs the same code (~840 KB).
 small:
 	$(ZIG) build -Doptimize=ReleaseSmall
 

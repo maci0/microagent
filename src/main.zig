@@ -11,7 +11,9 @@
 //! deadlines, the CA bundle) and `chat` (the value types a turn is made of and
 //! its JSON writer) are leaves, `tool` and `session` sit on them (every tool
 //! call is reached by model-supplied text, and the per-run log is written from a
-//! finished response), and `style` and `update` are the two subcommands.
+//! finished response), and `style` (the reply-style levels the system prompt is
+//! built from) and `update` (the one subcommand, `microagent update`) sit on
+//! those.
 
 const std = @import("std");
 const Io = std.Io;
@@ -1437,7 +1439,7 @@ fn incompleteAnswer(arena: std.mem.Allocator, result: *const chat_mod.ChatResult
 }
 
 /// Everything in a request body that is not the conversation: the tool schema
-/// is 3.0 KB, and the rest is the model, the token ceiling and the keys. A
+/// is 3.5 KB, and the rest is the model, the token ceiling and the keys. A
 /// reservation rather than a bound, and the buffer still grows if it does not
 /// cover the body, which a long model name would do.
 const body_scaffolding_bytes = tools_json.len + 1024;

@@ -14,16 +14,16 @@ where `timeout` is not installed.
 
 | build | binary |
 | --- | --- |
-| `-Doptimize=ReleaseSmall` (stripped) | 0.76 MB |
-| `-Doptimize=ReleaseFast` (stripped) | 1.41 MB |
-| `-Doptimize=ReleaseSafe` (stripped) | 1.39 MB |
-| `Debug` (unstripped) | 31.97 MB |
+| `-Doptimize=ReleaseSmall` (stripped) | 0.84 MB |
+| `-Doptimize=ReleaseFast` (stripped) | 1.54 MB |
+| `-Doptimize=ReleaseSafe` (stripped) | 1.49 MB |
+| `Debug` (unstripped) | 33.75 MB |
 
 No runtime, no package manager, no node_modules, no python. Seven files under `src/`
 (`main.zig` the agent loop and its wiring, `tool.zig` the tools and the process runner, `chat.zig`
 the value types a turn is made of, `session.zig` the per-run log, `style.zig` the reply styles,
 `update.zig` the self-update, and `net.zig` the sinks, deadlines and CA bundle the rest share),
-10 613 lines.
+13 225 lines.
 The sizes in this table are `ls -l` on a fresh build of this tree; every other number below comes
 from the two bench scripts.
 
@@ -77,17 +77,18 @@ Prompt caching keys on the exact byte prefix of a request, so a turn's body has
 to be the previous turn's body plus the new messages. That only holds while
 nothing constant sits *behind* the growing array.
 
-The tool schemas used to be written after `messages`. They are 3,348 bytes for
-nine tools, and behind the conversation they fell outside the cacheable prefix
-on every turn of every run, so the provider re-read them each time:
+The tool schemas used to be written after `messages`. They are 3,590 bytes for
+the seven tools this binary advertises, and behind the conversation they fell
+outside the cacheable prefix on every turn of every run, so the provider
+re-read them each time:
 
 | | un-cacheable tail per turn |
 | --- | --- |
-| tool schemas written after `messages` | 3,431 bytes (~857 tokens) |
+| tool schemas written after `messages` | 3,592 bytes (~900 tokens) |
 | written before, as now | **2 bytes** |
 
-Three kilobytes and change per turn, for the whole conversation. Over a
-100-turn review that is 0.34 MB of prefill the provider was being asked to do
+Three and a half kilobytes per turn, for the whole conversation. Over a
+100-turn review that is 0.36 MB of prefill the provider was being asked to do
 again for no reason, and it was invisible to every counter in this file, because
 `cached_tokens` counts what was reused and never says what was not.
 
@@ -98,21 +99,25 @@ the conversation.
 
 ## Harness prompt overhead
 
-First request of a run, from the usage line microagent prints:
-
-Measured on this tree, in bytes, which is what the request is made of:
+The first request of a run, in bytes, which is what the request is made of.
+Every row is derived from the tree (the prompt and schema constants, and the
+style block the defaults produce), so it can be re-derived without paying for a
+run:
 
 | | bytes |
 | --- | --- |
-| system prompt | 1,505 |
+| system prompt | 1,685 |
 | reply style (caveman ultra, ponytail full) | 1,616 |
-| **everything a request carries besides the conversation** | **3,460** |
-| of which the nine tool schemas | 3,348 |
+| the seven tool schemas | 3,590 |
+| the rest of the body: model, stream flags, `max_tokens`, JSON scaffolding | 133 |
+| **everything a request carries besides the conversation** | **7,024** |
 
-That 3,460 is the entire fixed cost of a request and it is almost entirely the
-tool schemas, which is the price of nine tools and the price of the harness
-being a harness. It is re-sent every turn and cached from the second turn on,
-so it is a prefix cost rather than a per-turn one -- see
+That 7,024 is the entire fixed cost of a request, and the schemas are just over
+half of it: the price of seven tools plus a system prompt and a style block,
+which is the price of the harness being a harness. A `--reasoning-effort` adds
+the `reasoning` member to the last row, nothing here. It is re-sent every turn
+and cached from the second turn on, so it is a prefix cost rather than a
+per-turn one -- see
 [Un-cacheable request bytes](#un-cacheable-request-bytes) for the part that is
 not.
 
@@ -449,7 +454,7 @@ is worth knowing what those bytes are.
 took, that is 72-143 KB per request (the range is the turn count, which the
 benchmark does not keep), against a `conversation_soft_limit` of 400 KB. So on
 a benchmark of this shape the limit does not fire: the conversation never gets
-near it, and the fixed 3,460 bytes a request carries is under 3% of one. The
+near it, and the fixed 7,024 bytes a request carries is under 6% of one. The
 prompt is evidence the agent accumulated, not the fixed harness cost and not
 compaction.
 

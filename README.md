@@ -3,7 +3,7 @@
 A tiny coding agent in Zig, built to be driven by [gauntlet](https://github.com/maci0/gauntlet)
 loops. One binary, one loop, OpenAI-compatible APIs only.
 
-- **Small.** ~760 KB stripped (`-Doptimize=ReleaseSmall`), no runtime, no node, no python.
+- **Small.** ~840 KB stripped (`-Doptimize=ReleaseSmall`), no runtime, no node, no python.
 - **Fast.** ~2.5 ms to start, so a gauntlet loop spends its time in the model, not the harness.
 - **No features you did not ask for.** No subagents, no plugins, no MCP, no TUI. Streaming chat
   completions, seven tools, done.
@@ -16,7 +16,7 @@ no runtime.
 
 ```sh
 zig build -Doptimize=ReleaseFast      # zig-out/bin/microagent
-zig build -Doptimize=ReleaseSmall     # smallest binary, ~760 KB
+zig build -Doptimize=ReleaseSmall     # smallest binary, ~840 KB
 zig build test                        # unit tests
 ```
 
