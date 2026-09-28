@@ -1,0 +1,25 @@
+# Installs the minimum Zig version declared as `.minimum_zig_version` in
+# build.zig.zon. Every job uses this rather than repeating the extraction, so
+# the version a release asset is published from is the version CI validated
+# rather than whatever setup-zig happens to default to.
+name: setup-zig
+description: install the Zig version build.zig.zon declares as its minimum
+
+runs:
+  using: composite
+  steps:
+    - name: read the minimum zig version
+      id: zig
+      shell: bash
+      run: |
+        set -euo pipefail
+        version="$(sed -n 's/^[[:space:]]*\.minimum_zig_version = "\([^"]*\)".*/\1/p' build.zig.zon)"
+        if [ -z "$version" ]; then
+          echo "build.zig.zon has no .minimum_zig_version to install" >&2
+          exit 1
+        fi
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+
+    - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+      with:
+        zig-version: ${{ steps.zig.outputs.version }}

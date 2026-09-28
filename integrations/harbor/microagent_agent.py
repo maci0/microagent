@@ -117,9 +117,10 @@ class Microagent(BaseAgent):
         bundle = host_ca_bundle()
         self._ca_uploaded = False
         if bundle is not None:
-            # Written through the shell rather than upload_file: docker cp only
-            # lands files whose parent directory already exists, and a minimal
-            # image may have no /usr/local/share. base64 keeps the PEM intact.
+            # A verified copy rather than a link: docker cp would land the host
+            # symlink itself, and the container would have a dangling path where
+            # a PEM should be. The upload lands under /usr/local/bin, which a
+            # minimal image has, so no directory has to be created first.
             await environment.upload_file(source_path=bundle, target_path=REMOTE_CA_PATH)
             check = await environment.exec(
                 command=f"test -s {REMOTE_CA_PATH} && wc -c < {REMOTE_CA_PATH}",

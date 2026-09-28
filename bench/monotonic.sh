@@ -1,4 +1,5 @@
 # Monotonic nanoseconds, as a sourced shell function. Not meant to be run.
+# shellcheck shell=sh
 #
 # POSIX sh has no monotonic clock, so these scripts reached for `date +%s`,
 # which reads a clock NTP and an admin can step. A step inside a run makes

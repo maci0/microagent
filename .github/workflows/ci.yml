@@ -33,20 +33,7 @@ jobs:
           persist-credentials: false
 
       # The toolchain version is declared once, in build.zig.zon.
-      - name: read the minimum zig version
-        id: zig
-        run: |
-          set -euo pipefail
-          version="$(sed -n 's/^[[:space:]]*\.minimum_zig_version = "\([^"]*\)".*/\1/p' build.zig.zon)"
-          if [ -z "$version" ]; then
-            echo "build.zig.zon has no .minimum_zig_version to install" >&2
-            exit 1
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-
-      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
-        with:
-          zig-version: ${{ steps.zig.outputs.version }}
+      - uses: ./.github/actions/setup-zig
 
       - name: format is clean
         run: zig fmt --check src build.zig
@@ -76,20 +63,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: read the minimum zig version
-        id: zig
-        run: |
-          set -euo pipefail
-          version="$(sed -n 's/^[[:space:]]*\.minimum_zig_version = "\([^"]*\)".*/\1/p' build.zig.zon)"
-          if [ -z "$version" ]; then
-            echo "build.zig.zon has no .minimum_zig_version to install" >&2
-            exit 1
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-
-      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
-        with:
-          zig-version: ${{ steps.zig.outputs.version }}
+      - uses: ./.github/actions/setup-zig
 
       - name: build every published target
         run: |

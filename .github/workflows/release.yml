@@ -4,7 +4,8 @@
 # build.zig.zon, so an asset can never be published under a version the binary
 # does not report, and it only runs when CHANGELOG.md has an entry for that
 # version, so the release notes a consumer reads are the ones written for them
-# rather than a list of commit subjects.
+# rather than a list of commit subjects. A tag push matches no branch filter,
+# so ci.yml has not run on this tree: the job repeats the gate itself.
 #
 # Zig cross-compiles every target here, so one Linux runner builds the macOS
 # binaries too; nothing links libc, so no target needs its own runner.
@@ -31,24 +32,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Pinned to the same declared version ci.yml builds with, so a release
-      # asset is produced by the toolchain the tests passed on. setup-zig's
-      # default is the latest release, which would silently let a tag build
-      # with a different compiler than the one the gate verified.
-      - name: read the minimum zig version
-        id: zig
-        run: |
-          set -euo pipefail
-          version="$(sed -n 's/^[[:space:]]*\.minimum_zig_version = "\([^"]*\)".*/\1/p' build.zig.zon)"
-          if [ -z "$version" ]; then
-            echo "build.zig.zon has no .minimum_zig_version to install" >&2
-            exit 1
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-
-      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
-        with:
-          zig-version: ${{ steps.zig.outputs.version }}
+      # The toolchain version is declared once, in build.zig.zon.
+      - uses: ./.github/actions/setup-zig
 
       - name: tag names the build.zig.zon version
         run: |
@@ -58,6 +43,14 @@ jobs:
             echo "tag ${GITHUB_REF_NAME} does not name build.zig.zon version v${version}" >&2
             exit 1
           fi
+
+      # A tag push does not match ci.yml's branch filter, so nothing else has
+      # run the gate on this tree by the time these assets are published.
+      - name: format is clean
+        run: zig fmt --check src build.zig
+
+      - name: unit tests pass
+        run: zig build test --summary all
 
       - name: build and checksum the release assets
         run: |

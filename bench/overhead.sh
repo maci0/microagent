@@ -11,7 +11,6 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bench/portable.sh"
 agents=${*:-microagent claude gemini codex crush grok kimi opencode cursor-agent clanker dsh}
 prompt="Reply with exactly: pong"
-tmp=${TMPDIR:-/tmp}
 
 printf '%-14s %10s %10s %10s\n' agent startup_ms wall_s tokens
 printf '%s\n' "----------------------------------------------"
