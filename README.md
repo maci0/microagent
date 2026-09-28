@@ -28,13 +28,15 @@ make help                              # every target
 make test                              # the whole suite
 make test-one FILTER="usage counters"  # one test, by name substring
 make check                             # the CI gate: fmt --check, linters, tests, ReleaseSmall build
+make preflight                         # name any tool the gate needs that is not on PATH
 ```
 
 `make check` is what [CI](.github/workflows/ci.yml) runs on a push, on
 the Zig version `build.zig.zon` names, so run it before pushing. Besides Zig it
 needs `shellcheck`, `ruff` and `yamllint` on `PATH` for the bench, Harbor and
-`.github` sources; `make lint-versions` names the pinned `ruff` and `yamllint`
-the gate runs. `zig fmt` covers the Zig and needs nothing else.
+`.github` sources; `make preflight` names whichever is missing, and
+`make lint-versions` names the pinned `ruff` and `yamllint` the gate runs.
+`zig fmt` covers the Zig and needs nothing else.
 
 ## Use
 

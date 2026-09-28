@@ -15,9 +15,13 @@ make small      # the ReleaseSmall binary
 ```
 
 `make check`, the gate, also needs `shellcheck`, `ruff` and `yamllint` on
-`PATH`. `ruff` and `yamllint` are format- and rule-sensitive, so they are
-pinned in the [Makefile](Makefile) and `make lint-versions` says so by name
-when a local install differs from the one CI runs:
+`PATH`. `make preflight` names any of the four it wants that is missing, with
+the command that installs it, and `make check` runs it first, so a clean clone
+missing a linter says which one instead of stopping at
+`make: ruff: No such file or directory`. `ruff` and `yamllint` are format- and
+rule-sensitive, so they are pinned in the [Makefile](Makefile) and
+`make lint-versions` says so by name when a local install differs from the one
+CI runs:
 
 ```sh
 uv tool install ruff@0.16.4
@@ -45,6 +49,7 @@ lint-versions` fails when a version there and one in the Makefile drift apart.
 ```sh
 make check                  # the gate: zig fmt --check, the linters, the tests, an optimized build
 make test-one FILTER="..."  # one test, while you are mid-edit
+make preflight              # name any tool check and lint need that is not on PATH
 make lint                   # shellcheck, ruff and yamllint on their own
 ```
 

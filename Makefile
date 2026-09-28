@@ -15,7 +15,7 @@ BIN := zig-out/bin/microagent
 export LC_ALL := C
 export TZ := UTC
 
-.PHONY: default help version build small musl test test-one fmt fmt-python lint lint-versions zig-version lint-shell lint-python lint-yaml check bench overhead install release-assets checksums clean
+.PHONY: default help preflight version build small musl test test-one fmt fmt-python lint lint-versions zig-version lint-shell lint-python lint-yaml check bench overhead install release-assets checksums clean
 
 # The targets `microagent update` asks for, in the names release.yml publishes.
 # ci.yml rehearses the same list on every push and release.yml publishes it, so
@@ -39,6 +39,34 @@ YAMLLINT_VERSION := 1.38.0
 default: build
 .PHONY: default
 
+# A tool the gate needs but the clone does not carry otherwise surfaces where
+# it is first reached: `make: ruff: No such file or directory` for the Harbor
+# lint, `command not found` for shellcheck, and each only after the format
+# check and the test suite have already spent their time. This names every one
+# that is absent, with the command that installs it, before any of that runs.
+# The versions are the ones the rest of this file pins, so a tool that is
+# present but wrong is still `lint-versions` to catch.
+PREFLIGHT_TOOLS := $(ZIG) shellcheck ruff yamllint
+preflight:
+	@set -eu; bad=0; \
+	for tool in $(PREFLIGHT_TOOLS); do \
+	  command -v "$$tool" >/dev/null 2>&1 && continue; \
+	  bad=1; \
+	  case "$$tool" in \
+	    zig) \
+	      echo "$$tool is not on PATH: install the version build.zig.zon names as .minimum_zig_version, from https://ziglang.org/download/" >&2 ;; \
+	    shellcheck) \
+	      echo "$$tool is not on PATH: a system package, 'apt-get install -y shellcheck', or 'brew install shellcheck'" >&2 ;; \
+	    ruff) \
+	      echo "$$tool is not on PATH: 'uv tool install ruff@$(RUFF_VERSION)'" >&2 ;; \
+	    yamllint) \
+	      echo "$$tool is not on PATH: 'uv tool install yamllint==$(YAMLLINT_VERSION)'" >&2 ;; \
+	    *) \
+	      echo "$$tool is not on PATH" >&2 ;; \
+	  esac; \
+	done; \
+	test "$$bad" -eq 0
+
 # `make check` is what CI runs; run it before pushing.
 help:
 	@printf '%s\n' \
@@ -49,8 +77,9 @@ help:
 	  'version               the version build.zig.zon declares' \
 	  'test                  the whole unit test suite' \
 	  'test-one FILTER=...   only tests whose name contains FILTER' \
+	  'preflight             name every tool check and lint need that is not on PATH' \
 	  'fmt                   rewrite src, build.zig and the Harbor adapter in format style' \
-	  'check                 zig-version, fmt --check, the linters, the tests, an optimized build' \
+	  'check                 preflight, zig-version, fmt --check, the linters, the tests, an optimized build' \
 	  'lint                  shellcheck, ruff, and yamllint over the non-Zig sources' \
 	  'lint-versions         check ruff and yamllint against the versions the gate runs' \
 	  'zig-version           check the local zig against the version the release is built with' \
@@ -83,8 +112,16 @@ musl:
 test:
 	$(ZIG) build test --summary all
 
+# The Zig sources the test names are read out of, for `test-one`.
+ZIG_SOURCES := $(wildcard src/*.zig)
+
 test-one:
 	@test -n "$(FILTER)" || { printf 'usage: make test-one FILTER=<test name substring>\n' >&2; exit 2; }
+	@grep -h -o -E '^test "[^"]+"' $(ZIG_SOURCES) | grep -F -q -- "$(FILTER)" || { \
+	  printf 'no test declared in src/ is named like "%s"\n' "$(FILTER)" >&2; \
+	  printf 'the run below would report success without running a test; list the names with:\n' >&2; \
+	  printf "  grep -h -o -E '^test \"[^\"]+\"' $(ZIG_SOURCES)\n" >&2; \
+	  exit 2; }
 	$(ZIG) build test -Dtest-filter="$(FILTER)" --summary all
 
 fmt:
@@ -148,6 +185,7 @@ lint-yaml:
 # job's cross builds are the one part CI does that this does not: they are
 # minutes of work, and `make release-assets` runs them.
 check:
+	$(MAKE) preflight
 	$(MAKE) zig-version
 	$(ZIG) fmt --check src build.zig
 	$(MAKE) lint

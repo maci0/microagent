@@ -123,6 +123,15 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- `make preflight` names every tool the gate needs that a clean clone does not carry, with the
+  command that installs it, and `make check` runs it before the format check and the suite. A
+  clone without `shellcheck`, `ruff` or `yamllint` otherwise stopped at `make: ruff: No such
+  file or directory` or `shellcheck: command not found`, after spending the gate's time on
+  everything that did work.
+- `make test-one` refuses a filter that matches no declared test name instead of running zero
+  tests. `zig build test -Dtest-filter=...` reports `1/1 tests passed` for a filter that matches
+  nothing, so a mistyped filter was a green run of no tests; the recipe now names the filter
+  that matched nothing and prints the command that lists the names.
 - `bench/run.sh` and `bench/gauntlet.sh` skip a harness that is not on `PATH`, naming it on
   stderr, as `bench/overhead.sh` already did. They invoked each harness by bare name, so a first
   run on a machine without the binary built every task against an empty tree and appended a
