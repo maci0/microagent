@@ -485,7 +485,7 @@ fn run(
     msgs: *std.ArrayList(u8),
 ) !void {
     const started = Io.Timestamp.now(io, .awake).nanoseconds;
-    const session = openSession(io, gpa, arena, opts);
+    const session = openSession(io, arena, opts);
     defer closeSession(io, session);
     // What one turn allocates from the wire down -- the request body (a full
     // copy of the conversation), the streamed content, the tool results --
@@ -580,13 +580,15 @@ fn createSessionLog(io: Io, arena: std.mem.Allocator, session_dir: []const u8, s
     return null;
 }
 
-fn openSession(io: Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, opts: Options) ?Session {
+fn openSession(io: Io, arena: std.mem.Allocator, opts: Options) ?Session {
     if (opts.session_dir.len == 0) return null;
     // Every record names the directory it ran in. That is what attributes the
     // record to one review: the store is machine-wide, and a monitor skips a
     // record that names no directory rather than billing it to whichever
-    // watcher happens to read the store.
-    const cwd = std.Io.Dir.cwd().realPathFileAlloc(io, ".", gpa) catch return null;
+    // watcher happens to read the store. It comes from the run arena because a
+    // directory that is resolved and then not used, by a log that could not be
+    // opened, has no owner to free it.
+    const cwd = std.Io.Dir.cwd().realPathFileAlloc(io, ".", arena) catch return null;
     std.Io.Dir.cwd().createDirPath(io, opts.session_dir) catch return null;
     const stamp = Io.Clock.real.now(io).nanoseconds;
     const file = createSessionLog(io, arena, opts.session_dir, stamp) orelse return null;
@@ -754,8 +756,16 @@ fn streamChat(
     var pending: std.ArrayList(u8) = .empty;
     var chunk: [8 * 1024]u8 = undefined;
     var done = false;
+    var unparsable: usize = 0;
     while (!done) {
-        const n = reader.readSliceShort(&chunk) catch return error.StreamFailed;
+        // A read that fails mid-stream is a dropped connection, not an end of
+        // response. The cause is named before it propagates, because by the
+        // time the run's error line is written the only record of what arrived
+        // is this one.
+        const n = reader.readSliceShort(&chunk) catch |err| {
+            net.note(io, arena, "microagent: reading the completion stream from {s} failed after {d} byte(s) of content and {d} tool call(s): {s}\n", .{ url, result.content.items.len, calls.items.len, @errorName(err) });
+            return err;
+        };
         if (n == 0) break;
         try pending.appendSlice(arena, chunk[0..n]);
 
@@ -771,7 +781,7 @@ fn streamChat(
                 done = true;
                 break;
             }
-            try applyFrame(frame_arena, arena, payload, &result, &calls, &out_buf);
+            try applyFrame(frame_arena, arena, payload, &result, &calls, &out_buf, &unparsable);
             _ = frame_arena_state.reset(.retain_capacity);
         }
         // Drop what was consumed, so a long stream does not keep every frame.
@@ -783,10 +793,40 @@ fn streamChat(
         flushOut(io, &out_buf);
     }
 
+    if (unparsable > 0)
+        net.note(io, arena, "microagent: {d} frame(s) of the completion stream from {s} were not JSON and their content is not in this turn\n", .{ unparsable, url });
+    // The provider closes a finished stream with a `[DONE]` frame. A stream
+    // that ends without one was cut off partway, and the truncated turn below
+    // would otherwise be appended as a complete answer: a turn that lost its
+    // tail, tool calls and all, reads as one the model finished on purpose.
+    if (truncatedNotice(arena, url, done, result.content.items.len, calls.items.len)) |notice| {
+        net.note(io, arena, "{s}\n", .{notice});
+        return error.StreamTruncated;
+    }
     if (result.content.items.len > 0) try out_buf.append(arena, '\n');
     flushOut(io, &out_buf);
     result.calls = calls;
     return result;
+}
+
+/// Why a stream that ended without `[DONE]` is not a finished turn, in the
+/// words the operator reads. Null once the terminator has arrived, whatever the
+/// turn holds. Separated from the stream loop so the rule is testable without
+/// a provider on the other end of a socket.
+fn truncatedNotice(
+    arena: std.mem.Allocator,
+    url: []const u8,
+    done: bool,
+    content_len: usize,
+    calls_len: usize,
+) ?[]const u8 {
+    if (done) return null;
+    return std.fmt.allocPrint(
+        arena,
+        "microagent: the completion stream from {s} ended without [DONE] after {d} byte(s) of " ++
+            "content and {d} tool call(s); the turn is not complete",
+        .{ url, content_len, calls_len },
+    ) catch "microagent: the completion stream ended without [DONE]; the turn is not complete";
 }
 
 /// Folds one SSE payload into the response being built.
@@ -794,6 +834,11 @@ fn streamChat(
 /// `scratch` is reset by the caller after every frame, so nothing parsed out of
 /// it may survive: strings that do are copied into `arena`, which lives for the
 /// whole run.
+///
+/// `unparsable` counts the frames that were not JSON. A frame the parser cannot
+/// read holds content and tool-call arguments the turn will not have, so it is
+/// counted and the caller says so; dropping it without a count leaves a
+/// response that is short and looks complete.
 fn applyFrame(
     scratch: std.mem.Allocator,
     arena: std.mem.Allocator,
@@ -801,10 +846,17 @@ fn applyFrame(
     result: *ChatResult,
     calls: *std.ArrayList(ToolCall),
     out_buf: *std.ArrayList(u8),
+    unparsable: *usize,
 ) !void {
-    const parsed = std.json.parseFromSlice(std.json.Value, scratch, payload, .{}) catch return;
+    const parsed = std.json.parseFromSlice(std.json.Value, scratch, payload, .{}) catch {
+        unparsable.* += 1;
+        return;
+    };
     const root = parsed.value;
-    if (root != .object) return;
+    if (root != .object) {
+        unparsable.* += 1;
+        return;
+    }
 
     if (root.object.get("usage")) |u| if (u == .object) {
         result.prompt_tokens = num(u.object.get("prompt_tokens"));
@@ -1669,6 +1721,7 @@ const FrameSink = struct {
     result: ChatResult = .{},
     calls: std.ArrayList(ToolCall) = .empty,
     out_buf: std.ArrayList(u8) = .empty,
+    unparsable: usize = 0,
 
     fn init(allocator: std.mem.Allocator) FrameSink {
         return .{
@@ -1688,7 +1741,7 @@ const FrameSink = struct {
     }
 
     fn feed(self: *FrameSink, payload: []const u8) !void {
-        try applyFrame(self.scratch.allocator(), self.run.allocator(), payload, &self.result, &self.calls, &self.out_buf);
+        try applyFrame(self.scratch.allocator(), self.run.allocator(), payload, &self.result, &self.calls, &self.out_buf, &self.unparsable);
         _ = self.scratch.reset(.retain_capacity);
     }
 };
@@ -1749,6 +1802,7 @@ test "streamed argument fragments cost linear arena bytes" {
     var result: ChatResult = .{};
     var calls: std.ArrayList(ToolCall) = .empty;
     var out_buf: std.ArrayList(u8) = .empty;
+    var unparsable: usize = 0;
 
     const fragments: usize = 2000;
     var i: usize = 0;
@@ -1758,9 +1812,10 @@ test "streamed argument fragments cost linear arena bytes" {
             u8,
             &.{ "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"", "0123456789abcdef", "\"}}]}}]}" },
         );
-        try applyFrame(frame_state.allocator(), run_state.allocator(), frame, &result, &calls, &out_buf);
+        try applyFrame(frame_state.allocator(), run_state.allocator(), frame, &result, &calls, &out_buf, &unparsable);
         _ = frame_state.reset(.retain_capacity);
     }
+    try std.testing.expectEqual(@as(usize, 0), unparsable);
 
     const total = fragments * 16;
     try std.testing.expectEqual(total, calls.items[0].args.items.len);
@@ -1988,6 +2043,48 @@ test "only weather-shaped statuses are retried" {
     try std.testing.expect(!retryableStatus(.bad_request));
     try std.testing.expect(!retryableStatus(.unauthorized));
     try std.testing.expect(!retryableStatus(.not_found));
+}
+
+// A stream that ends without the provider's terminator is a dropped
+// connection, not a finished answer. Appending the partial turn as complete is
+// how a truncated response silently becomes the run's result, so the notice is
+// what the run refuses on, and it has to say what did arrive.
+test "a stream that ends without [DONE] is reported, not taken for finished" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    try std.testing.expect(truncatedNotice(arena, "http://x/v1/chat/completions", true, 0, 0) == null);
+
+    const cut = truncatedNotice(arena, "http://x/v1/chat/completions", false, 42, 1).?;
+    try std.testing.expect(std.mem.indexOf(u8, cut, "http://x/v1/chat/completions") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cut, "without [DONE]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cut, "42 byte(s) of content") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cut, "1 tool call(s)") != null);
+
+    // Nothing arrived at all: still a cut, and still named.
+    const empty = truncatedNotice(arena, "http://x/v1/chat/completions", false, 0, 0).?;
+    try std.testing.expect(std.mem.indexOf(u8, empty, "0 byte(s) of content") != null);
+}
+
+// A frame the parser cannot read holds text and tool-call arguments the turn
+// will not carry. Dropping it silently leaves a short response that looks like
+// a complete one, so the count is what the run reports.
+test "a frame the parser cannot read is counted, not dropped in silence" {
+    var sink = FrameSink.init(std.testing.allocator);
+    defer sink.deinit();
+
+    try sink.feed("{\"choices\":[{\"delta\":{\"content\":\"kept\"}}]}");
+    try std.testing.expectEqual(@as(usize, 0), sink.unparsable);
+
+    try sink.feed("this is not json");
+    try sink.feed("[1,2,3]");
+    try sink.feed("{\"choices\":[{\"delta\":{\"content\":\"also kept\"}}]}");
+
+    try std.testing.expectEqual(@as(usize, 2), sink.unparsable);
+    // The frames around the bad ones still landed, so the turn is short rather
+    // than empty: only the count says how much is missing.
+    try std.testing.expectEqualStrings("keptalso kept", sink.result.content.items);
 }
 
 test "token counters read the OpenAI and OpenRouter spellings" {

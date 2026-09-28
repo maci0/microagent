@@ -268,7 +268,13 @@ pub fn formatInstalled(buf: []u8, tag: []const u8, path: []const u8) ![]const u8
 }
 
 pub fn parseRelease(arena: std.mem.Allocator, body: []const u8) !Release {
-    const parsed = std.json.parseFromSliceLeaky(std.json.Value, arena, body, .{}) catch return error.MalformedRelease;
+    // Only a body that is not the documented shape is a malformed release.
+    // Running out of memory is the machine, not the payload, and reporting it
+    // as a bad response sends the operator to GitHub for the wrong thing.
+    const parsed = std.json.parseFromSliceLeaky(std.json.Value, arena, body, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.MalformedRelease,
+    };
     const obj = switch (parsed) {
         .object => |o| o,
         else => return error.MalformedRelease,
@@ -352,16 +358,19 @@ const Capped = struct {
         var total: usize = 0;
         // The last slice of `data` is the one `splat` repeats, so it is not
         // also written in the loop below.
+        // A run-length expanded slice can ask for more bytes than a usize
+        // holds, and `total` is only a report of what drain wrote. Saturating
+        // keeps a hostile body from turning the cap check into a panic.
         for (data[0..data.len -| 1]) |part| {
             try self.body.writer.writeAll(part);
-            total += part.len;
+            total +|= part.len;
         }
         if (data.len != 0) {
             const part = data[data.len - 1];
             const reps = @max(splat, 1);
             var one = [_][]const u8{part};
             try self.body.writer.writeSplatAll(&one, reps);
-            total += part.len * reps;
+            total +|= part.len *| reps;
         }
         if (self.body.written().len > self.limit) {
             self.over = true;
@@ -540,9 +549,10 @@ pub fn run(
         if (err == error.HttpStatus) return fail(io, "GitHub returned HTTP {d} for {s}{s}", .{
             @intFromEnum(status), repo, statusHint(status),
         });
-        return fail(io, "could not reach GitHub ({s})", .{@errorName(err)});
+        return fail(io, "could not reach {s} ({s})", .{ api, @errorName(err) });
     };
-    const rel = parseRelease(arena, body) catch return fail(io, "the latest release could not be read", .{});
+    const rel = parseRelease(arena, body) catch |err|
+        return fail(io, "the latest release from {s} could not be read ({s})", .{ api, @errorName(err) });
     const page = releasePageLine(rel.page) catch
         return fail(io, "refusing to install unverified binary", .{});
 
@@ -590,10 +600,12 @@ pub fn run(
         return fail(io, "refusing to install unverified binary", .{});
     }
 
+    // The URL the response named is unbounded, and these lines print into a
+    // fixed buffer, so the asset name is what identifies the download.
     const asset = fetchBody(&client, gpa, arena, a_url, bearer, max_asset_bytes, &status) catch |err|
         return fail(io, "could not download {s} ({s}); the binary was not replaced", .{ asset_name, @errorName(err) });
     const sidecar = fetchBody(&client, gpa, arena, s_url, bearer, max_sidecar_bytes, &status) catch |err|
-        return fail(io, "could not download the checksum sidecar ({s}); the binary was not replaced", .{@errorName(err)});
+        return fail(io, "could not download the checksum sidecar for {s} ({s}); the binary was not replaced", .{ asset_name, @errorName(err) });
 
     const decision = decide(.{
         .running = version,
@@ -789,6 +801,34 @@ test "update: fixture release picks the named asset" {
     try std.testing.expect(trustedGithubUrl(url));
     try std.testing.expect(assetUrl(rel, "microagent-v0.1.0-no-such") == null);
     try std.testing.expect(!trustedGithubUrl(assetUrl(rel, "microagent-v0.1.0-aarch64-macos").?));
+}
+
+// The two ways a release body can fail to parse are told apart, because the
+// operator sent to fix them are different: a body that is not the documented
+// shape is GitHub's or a proxy's, and running out of memory is this machine's.
+test "update: a malformed body and a failed allocation are not the same error" {
+    const alloc = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+
+    try std.testing.expectError(
+        error.MalformedRelease,
+        parseRelease(arena_state.allocator(), "not json at all"),
+    );
+    try std.testing.expectError(
+        error.MalformedRelease,
+        parseRelease(arena_state.allocator(), "[]"),
+    );
+    try std.testing.expectError(
+        error.MalformedRelease,
+        parseRelease(arena_state.allocator(), "{\"tag_name\":\"v1\",\"html_url\":\"x\",\"assets\":3}"),
+    );
+
+    var failing: std.testing.FailingAllocator = .init(alloc, .{ .fail_index = 0 });
+    try std.testing.expectError(
+        error.OutOfMemory,
+        parseRelease(failing.allocator(), "{\"tag_name\":\"v1\"}"),
+    );
 }
 
 test "update: comparison and install lines use the release wording" {
