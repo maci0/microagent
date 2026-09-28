@@ -14,15 +14,16 @@ where `timeout` is not installed.
 
 | build | binary |
 | --- | --- |
-| `-Doptimize=ReleaseSmall` (stripped) | 768 KB |
-| `-Doptimize=ReleaseFast` (stripped) | 1.38 MB |
-| `-Doptimize=ReleaseSafe` (stripped) | 1.38 MB |
-| `Debug` (unstripped) | 31.8 MB |
+| `-Doptimize=ReleaseSmall` (stripped) | 0.76 MB |
+| `-Doptimize=ReleaseFast` (stripped) | 1.41 MB |
+| `-Doptimize=ReleaseSafe` (stripped) | 1.39 MB |
+| `Debug` (unstripped) | 31.97 MB |
 
-No runtime, no package manager, no node_modules, no python. Six files under `src/`
+No runtime, no package manager, no node_modules, no python. Seven files under `src/`
 (`main.zig` the agent loop and its wiring, `tool.zig` the tools and the process runner, `chat.zig`
-the value types a turn is made of, `style.zig` the reply styles, `update.zig` the self-update, and
-`net.zig` the sinks, deadlines and CA bundle the rest share), 7 570 lines.
+the value types a turn is made of, `session.zig` the per-run log, `style.zig` the reply styles,
+`update.zig` the self-update, and `net.zig` the sinks, deadlines and CA bundle the rest share),
+10 423 lines.
 The sizes in this table are `ls -l` on a fresh build of this tree; every other number below comes
 from the two bench scripts.
 
@@ -99,14 +100,27 @@ the conversation.
 
 First request of a run, from the usage line microagent prints:
 
-| | tokens |
-| --- | --- |
-| system prompt + tool schemas + one-line user prompt (six of the seven tools) | **933** |
+Measured on this tree, in bytes, which is what the request is made of:
 
-That is the entire fixed cost of the harness, measured rather than estimated. It was measured before
-the `git` tool existed, so today's prompt is slightly larger; the point is the order of magnitude,
-not the last hundred tokens. Competitor CLIs in
-one-shot mode did not report a comparable number on this machine, so none is claimed for them.
+| | bytes |
+| --- | --- |
+| system prompt | 1,505 |
+| reply style (caveman ultra, ponytail full) | 1,616 |
+| **everything a request carries besides the conversation** | **3,460** |
+| of which the nine tool schemas | 3,348 |
+
+That 3,460 is the entire fixed cost of a request and it is almost entirely the
+tool schemas, which is the price of nine tools and the price of the harness
+being a harness. It is re-sent every turn and cached from the second turn on,
+so it is a prefix cost rather than a per-turn one -- see
+[Un-cacheable request bytes](#un-cacheable-request-bytes) for the part that is
+not.
+
+An earlier figure here was 933 tokens for six of the seven tools, measured from
+a run's usage line. It was honest when written and is now two tools out of date;
+the bytes above replace it because they can be re-derived from the tree rather
+than from a run that has to be paid for. Competitor CLIs in one-shot mode did
+not report a comparable number on this machine, so none is claimed for them.
 
 ## Conversation growth and the prompt cache
 
