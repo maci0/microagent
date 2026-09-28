@@ -40,6 +40,11 @@ lint.select = [
     "SLF",  # private member access
     "SLOT", # __slots__ on subclasses
     "T10",  # leftover debugger calls
+    "ASYNC", # async correctness: blocking a loop, a stray task group
+    "ERA",   # commented-out code, which is never deleted and always misread
+    "FA",    # `__future__` imports, so an annotation cannot be a runtime error
+    "FIX",   # modernizations pyupgrade's UP does not cover
+    "FURB",  # ruff's own rewrites of the same code
 ]
 
 lint.ignore = [

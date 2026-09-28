@@ -2,8 +2,11 @@ extends: default
 
 rules:
   # Workflow steps are long shell blocks; a comment column at 80 would wrap
-  # every explanation line in them.
-  line-length: disable
+  # every explanation line in them. A cap is still worth having, so a pasted
+  # block or a generated matrix cannot grow a line no reviewer can read: the
+  # longest one here is 123, so 160 leaves the current files alone.
+  line-length:
+    max: 160
   document-start: disable
   # `on:` is the GitHub Actions key, not a boolean.
   truthy:
