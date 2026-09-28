@@ -3898,7 +3898,7 @@ test "an atomic write keeps the mode the destination already had" {
 
     try tmp.dir.writeFile(io, .{ .sub_path = "secret", .data = "old" });
     try tmp.dir.setFilePermissions(io, "secret", Io.File.Permissions.fromMode(0o600), .{});
-    try tool_mod.writeFileAtomic(io, tmp.dir, arena, "secret", "new");
+    try tool_mod.writeFileAtomic(io, tmp.dir, "secret", "new");
 
     try std.testing.expectEqualStrings("new", try tmp.dir.readFileAlloc(io, "secret", arena, .limited(64)));
     const stat = try tmp.dir.statFile(io, "secret", .{});
@@ -3906,7 +3906,7 @@ test "an atomic write keeps the mode the destination already had" {
 
     // A file that is not there yet is created with the default mode, so the
     // helper does not need a caller to say what a new file should be.
-    try tool_mod.writeFileAtomic(io, tmp.dir, arena, "fresh", "content");
+    try tool_mod.writeFileAtomic(io, tmp.dir, "fresh", "content");
     try std.testing.expectEqualStrings("content", try tmp.dir.readFileAlloc(io, "fresh", arena, .limited(64)));
 }
 
@@ -3926,7 +3926,7 @@ test "an atomic write follows a symlink to the file it names" {
 
     try tmp.dir.writeFile(io, .{ .sub_path = "real", .data = "old" });
     try tmp.dir.symLink(io, "real", "link", .{});
-    try tool_mod.writeFileAtomic(io, tmp.dir, arena, "link", "new");
+    try tool_mod.writeFileAtomic(io, tmp.dir, "link", "new");
 
     try std.testing.expectEqualStrings("new", try tmp.dir.readFileAlloc(io, "real", arena, .limited(64)));
     // The link is still a link: a run that resolves paths from the repository

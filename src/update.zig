@@ -251,17 +251,7 @@ pub fn replaceVerified(
     if (decision != .replaced) return error.Refused;
     var link_buf: [std.fs.max_path_bytes]u8 = undefined;
     var joined_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
-    const target: []const u8 = if (dir.readLink(io, dest_name, &link_buf)) |n| blk: {
-        const link = link_buf[0..n];
-        if (std.fs.path.isAbsolute(link)) break :blk link;
-        // A relative link is read against the directory holding the link, not
-        // against the process's working directory.
-        const dir_end = std.fs.path.dirname(dest_name) orelse break :blk link;
-        break :blk std.fmt.bufPrint(&joined_buf, "{s}{c}{s}", .{ dir_end, std.fs.path.sep, link }) catch break :blk link;
-    } else |err| switch (err) {
-        error.NotLink, error.FileNotFound => dest_name,
-        else => return err,
-    };
+    const target = try net.resolveSymlinkTarget(io, dir, dest_name, &link_buf, &joined_buf);
 
     var af = try dir.createFileAtomic(io, target, .{ .replace = true, .make_path = true, .permissions = exec_mode });
     defer af.deinit(io);

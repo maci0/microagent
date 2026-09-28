@@ -16,6 +16,9 @@
 # Each row is a test whose body is that path and little else. The baseline row
 # is the same binary with no test selected, and every other row is reported net
 # of it, so what is left is the path rather than process start.
+#
+# Linux only, unlike the other bench scripts: the counter it reports is read
+# from `perf stat`, and macOS has no equivalent that counts instructions.
 set -u
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -28,20 +31,24 @@ runs=${RUNS:-3}
 tolerance=${TOLERANCE:-10}
 
 command -v perf >/dev/null 2>&1 || {
-	printf '%s\n' "bench/instructions.sh: perf is not installed; nothing to measure" >&2
+	# Unlike the other bench scripts, this one is Linux only: retired
+	# instructions are read from `perf stat`, and no BSD or macOS equivalent
+	# reports a hardware event counter. Say which platform rather than leaving
+	# a macOS contributor to install something that will never be there.
+	printf '%s\n' "bench/instructions.sh: this measurement needs Linux perf, which macOS does not ship; nothing to measure" >&2
 	exit 2
 }
 
 # Row name, test filter, units the row's work is done in. Per-unit numbers stay
 # comparable when a test grows.
 # The baseline is measured once, before this loop, so it is not a row.
-cat >/tmp/.instructions-rows.$$ <<'ROWS'
+cat >"${TMPDIR:-/tmp}/.instructions-rows.$$" <<'ROWS'
 stream content frame|main.test.a long stream costs|20000
 stream tool-arg frame|main.test.streamed argument fragments|2000
 compaction of a 1 MB conversation|main.test.compaction elides|1
 build the request body 40 times|main.test.one request body|40
 ROWS
-rows=/tmp/.instructions-rows.$$
+rows=${TMPDIR:-/tmp}/.instructions-rows.$$
 trap 'rm -f "$rows"' EXIT
 
 export ZIG_GLOBAL_CACHE_DIR="${ZIG_GLOBAL_CACHE_DIR:-$root/.zig-cache/global}"

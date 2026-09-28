@@ -582,7 +582,7 @@ fn toolWrite(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     // so, as `"content": ""`.
     const content = chat.str(args.get("content")) orelse
         return std.fmt.allocPrint(arena, "error: missing content", .{});
-    writeFileAtomic(io, std.Io.Dir.cwd(), arena, path, content) catch |err|
+    writeFileAtomic(io, std.Io.Dir.cwd(), path, content) catch |err|
         return std.fmt.allocPrint(arena, "error: cannot write {s}: {s}", .{ path, @errorName(err) });
     return std.fmt.allocPrint(arena, "wrote {d} bytes to {s}", .{ content.len, path });
 }
@@ -591,27 +591,6 @@ fn toolWrite(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
 /// nine `rwx` ones. A rename carries the temporary file's mode to the
 /// destination, so this is what decides what a rewritten file comes back as.
 pub const permission_bits: std.posix.mode_t = 0o7777;
-
-/// The file `path` names once a symlink is followed, which is the file opening
-/// `path` would have written to and the only one a rename may replace. The
-/// link's own bytes land in `buf`, which belongs to the caller because the
-/// answer is a slice of it.
-fn resolveWriteTarget(
-    io: Io,
-    dir: std.Io.Dir,
-    arena: std.mem.Allocator,
-    path: []const u8,
-    buf: []u8,
-) ![]const u8 {
-    const n = dir.readLink(io, path, buf) catch |err| switch (err) {
-        error.NotLink, error.FileNotFound => return path,
-        else => |e| return e,
-    };
-    const link = buf[0..n];
-    if (link.len == 0 or link[0] == '/') return link;
-    const dir_end = std.mem.findScalarLast(u8, path, '/') orelse return link;
-    return std.fmt.allocPrint(arena, "{s}/{s}", .{ path[0..dir_end], link });
-}
 
 /// Writes `bytes` over `path` so a write that does not finish cannot leave half
 /// a file where a whole one was.
@@ -626,13 +605,14 @@ fn resolveWriteTarget(
 /// the one place that did not.
 ///
 /// A rename replaces the name it is given, so a symlink would become a regular
-/// file and the tree would gain one, so the link is followed first. The mode
-/// the destination already has is carried over, because the rename brings the
-/// temporary file's mode with it and a 0o600 file that comes back 0o644 is a
-/// change the run was never asked to make.
-pub fn writeFileAtomic(io: Io, dir: std.Io.Dir, arena: std.mem.Allocator, path: []const u8, bytes: []const u8) !void {
+/// file and the tree would gain one, so the link is followed first, through the
+/// same resolver `update` uses. The mode the destination already has is carried
+/// over, because the rename brings the temporary file's mode with it and a
+/// 0o600 file that comes back 0o644 is a change the run was never asked to make.
+pub fn writeFileAtomic(io: Io, dir: std.Io.Dir, path: []const u8, bytes: []const u8) !void {
     var link_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const target = try resolveWriteTarget(io, dir, arena, path, &link_buf);
+    var join_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
+    const target = try net.resolveSymlinkTarget(io, dir, path, &link_buf, &join_buf);
     // Only the permission bits: the stat also carries the file type, and a
     // create mode is a permission set.
     const permissions: Io.File.Permissions = if (dir.statFile(io, target, .{})) |stat|
@@ -675,7 +655,7 @@ fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
         rest = rest[at + old.len ..];
     }
     try buf.appendSlice(arena, rest);
-    writeFileAtomic(io, std.Io.Dir.cwd(), arena, path, buf.items) catch |err|
+    writeFileAtomic(io, std.Io.Dir.cwd(), path, buf.items) catch |err|
         return std.fmt.allocPrint(arena, "error: cannot write {s}: {s}", .{ path, @errorName(err) });
     return std.fmt.allocPrint(arena, "replaced {d} occurrence(s) in {s}", .{ count, path });
 }

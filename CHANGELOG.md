@@ -124,6 +124,14 @@ release, and `microagent update` moves you to it.
   feature or a changed default could ship as `0.2.1` under a number that promises it did not.
 - `microagent --help` carries three worked invocations, and its subcommand line spells the flag
   the way `microagent update --help` does (`update [--check]`, not `update [-c|--check]`).
+- The file a write lands on when the path is a symlink is resolved once, in `net.zig`, and shared
+  by the `write` and `edit` tools and by `microagent update`. The two copies answered the same
+  question differently: the tools' copy spelled the join as a hardcoded `/` and read the
+  link's directory by scanning for one, where `update` went through `std.fs.path` and used
+  `std.fs.path.sep`. Nothing changed for a run, but a path separator reached for as a literal
+  is the one thing in a path that is not portable, and there is now one implementation of the
+  answer to check. `writeFileAtomic` takes no allocator as a result: the two scratch buffers
+  it needs are stack, so the arena a caller passed for nothing is gone.
 
 ### Fixed
 
@@ -136,6 +144,10 @@ release, and `microagent update` moves you to it.
   tests. `zig build test -Dtest-filter=...` reports `1/1 tests passed` for a filter that matches
   nothing, so a mistyped filter was a green run of no tests; the recipe now names the filter
   that matched nothing and prints the command that lists the names.
+- `bench/instructions.sh` keeps its scratch file under `${TMPDIR:-/tmp}` like the other bench
+  scripts, instead of a hardcoded `/tmp`. It is the one script that cannot run on macOS at all,
+  since `perf stat` is what reports the counter, and its refusal to run now says that rather
+  than reporting a missing tool on a platform that will never ship one.
 - `bench/run.sh` and `bench/gauntlet.sh` skip a harness that is not on `PATH`, naming it on
   stderr, as `bench/overhead.sh` already did. They invoked each harness by bare name, so a first
   run on a machine without the binary built every task against an empty tree and appended a
