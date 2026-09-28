@@ -995,6 +995,19 @@ const Budget = struct {
     }
 };
 
+/// How much of a turn's peak the run keeps for the next one.
+///
+/// Resetting with the capacity retained is what keeps a turn from asking the
+/// allocator again on every turn, and an ordinary turn is a couple of
+/// megabytes, so nothing is given back for it. The ceiling matters for the turn
+/// that is not ordinary: a response at `max_response_bytes` is held twice over,
+/// once as the turn's record and once as the buffer handed to stdout, and
+/// retaining that leaves 48 MB resident for the rest of the run to serve turns
+/// that need a few. Four megabytes is comfortably above an ordinary turn and
+/// far below the ceiling, so a big turn re-allocates once and a normal one
+/// never notices.
+const turn_arena_retain_bytes: usize = 4 * 1024 * 1024;
+
 /// How long the final turn may run past the budget. It exists to turn what the
 /// model has already read into one edit, which is a few tool calls, not a
 /// fresh investigation.
@@ -1031,7 +1044,7 @@ fn run(
     var usage: chat_mod.Usage = .{};
     var compaction_floor: usize = 0;
     while (turn < opts.max_turns) : (turn += 1) {
-        _ = turn_state.reset(.retain_capacity);
+        _ = turn_state.reset(.{ .retain_with_limit = turn_arena_retain_bytes });
         if (budget.expired(io)) {
             // Stop in the middle of the work, or stop after one last push
             // that is told to edit? A review that ran out of time with
@@ -3571,6 +3584,36 @@ test "backoff doubles, caps, and never overflows an attempt counter" {
 //
 // The two ends only, because std.testing.io's clock does not advance and a
 // deadline between them is arithmetic that needs a real one.
+// Retaining a turn's peak is a speed choice; retaining an unbounded one is a
+// memory choice nobody made. A turn at the response ceiling would hold 48 MB
+// for the rest of the run to serve turns that need a few megabytes, and the
+// reset is the only place that can give it back.
+test "a turn that outgrows the retained size gives the memory back" {
+    var base_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer base_state.deinit();
+    const base = base_state.allocator();
+
+    // An ordinary turn keeps everything it used: the limit is above it, so the
+    // reset is the one it always was.
+    var ordinary = std.heap.ArenaAllocator.init(base);
+    defer ordinary.deinit();
+    const peak = try ordinary.allocator().alloc(u8, 256 * 1024);
+    std.mem.doNotOptimizeAway(peak.ptr);
+    const ordinary_peak = ordinary.queryCapacity();
+    _ = ordinary.reset(.{ .retain_with_limit = turn_arena_retain_bytes });
+    try std.testing.expectEqual(ordinary_peak, ordinary.queryCapacity());
+
+    // A turn at the response ceiling does not: 32 MB in, and what stays behind
+    // is the limit rather than the whole thing.
+    var huge = std.heap.ArenaAllocator.init(base);
+    defer huge.deinit();
+    const big = try huge.allocator().alloc(u8, 2 * turn_arena_retain_bytes);
+    std.mem.doNotOptimizeAway(big.ptr);
+    try std.testing.expect(huge.queryCapacity() > turn_arena_retain_bytes);
+    _ = huge.reset(.{ .retain_with_limit = turn_arena_retain_bytes });
+    try std.testing.expect(huge.queryCapacity() <= turn_arena_retain_bytes);
+}
+
 test "a wait the budget cannot cover is not taken" {
     // No budget: every wait is affordable, which is the behaviour for a run
     // nobody put a ceiling on. This is the two-minute ask and the run's own
