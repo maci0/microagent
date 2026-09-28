@@ -37,6 +37,19 @@ const max_bash_timeout_ms: u64 = 600_000;
 /// What `bash` runs under when the model sends no `timeout_ms`.
 const default_bash_timeout_ms: u64 = 120_000;
 
+/// A tool deadline cut down to what is left of the run's time budget.
+///
+/// Without it the budget is a promise the tools do not keep: a `bash` call
+/// with a two-minute timeout starts happily at second 779 of a 780-second
+/// budget and the caller kills the run mid-command, which is what the budget
+/// exists to prevent. `ceiling_ms` is null when the run set no budget, and the
+/// floor is the caller's: it never hands a tool a zero timeout, which would
+/// fail before the tool could even start.
+fn boundedMs(wanted_ms: u64, ceiling_ms: ?u64) u64 {
+    const ceiling = ceiling_ms orelse return wanted_ms;
+    return @min(wanted_ms, ceiling);
+}
+
 /// A tool subprocess in its own process group, and the reap that every tool
 /// owes its call.
 ///
@@ -166,8 +179,8 @@ pub fn forwardInterruptsToToolGroup() void {
 /// A tool that delegates to a binary already on PATH: the caller builds the
 /// argv, and the failure text, the empty result and the two output streams are
 /// handled the same way for each of them.
-fn runSearchTool(io: Io, arena: std.mem.Allocator, argv: []const []const u8, what: []const u8) ![]u8 {
-    const res = runToolProcess(io, arena, argv, max_tool_output * 4, tool_stderr_limit, net.durationMs(tool_timeout_ms)) catch |err|
+fn runSearchTool(io: Io, arena: std.mem.Allocator, argv: []const []const u8, what: []const u8, ceiling_ms: ?u64) ![]u8 {
+    const res = runToolProcess(io, arena, argv, max_tool_output * 4, tool_stderr_limit, net.durationMs(boundedMs(tool_timeout_ms, ceiling_ms))) catch |err|
         return std.fmt.allocPrint(arena, "error: {s} failed: {s}", .{ what, @errorName(err) });
     if (res.stdout.len > 0) return res.stdout;
     if (res.stderr.len > 0) return res.stderr;
@@ -188,7 +201,7 @@ fn gitLineLimit(args: std.json.ObjectMap) usize {
 
 /// Read-only git, with the subcommands fixed here rather than assembled by the
 /// model. Deterministic, no shell quoting, and the output is capped.
-fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
+fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64) ![]u8 {
     const cmd = chat.str(args.get("cmd")) orelse return std.fmt.allocPrint(arena, "error: missing cmd", .{});
     const path = chat.str(args.get("path"));
     const rev = chat.str(args.get("rev"));
@@ -205,7 +218,10 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
         try argv.appendSlice(arena, &.{ "diff", "--no-color" });
         if (rev) |r| try argv.append(arena, r);
     } else if (std.mem.eql(u8, cmd, "log")) {
-        try argv.appendSlice(arena, &.{ "log", "--oneline", "--no-color", "-n", "30" });
+        // git counts the lines the model asked for, so a `limit` above the
+        // 400-line default is honored rather than silently cut to 30.
+        try argv.appendSlice(arena, &.{ "log", "--oneline", "--no-color", "-n" });
+        try argv.append(arena, try std.fmt.allocPrint(arena, "{d}", .{limit}));
     } else if (std.mem.eql(u8, cmd, "show")) {
         try argv.appendSlice(arena, &.{ "show", "--no-color", "--stat", "--patch" });
         try argv.append(arena, rev orelse "HEAD");
@@ -219,7 +235,7 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     try argv.append(arena, "--");
     if (path) |p| try argv.append(arena, p);
 
-    const res = runToolProcess(io, arena, argv.items, max_tool_output * 4, tool_stderr_limit, net.durationMs(tool_timeout_ms)) catch |err|
+    const res = runToolProcess(io, arena, argv.items, max_tool_output * 4, tool_stderr_limit, net.durationMs(boundedMs(tool_timeout_ms, ceiling_ms))) catch |err|
         return std.fmt.allocPrint(arena, "error: git {s} failed: {s}", .{ cmd, @errorName(err) });
     const text = if (res.stdout.len > 0) res.stdout else res.stderr;
     if (text.len == 0) return std.fmt.allocPrint(arena, "(git {s}: no output)", .{cmd});
@@ -243,7 +259,7 @@ fn firstLines(arena: std.mem.Allocator, text: []const u8, limit: usize) ![]u8 {
     return std.fmt.allocPrint(arena, "{s}... [output truncated at {d} lines]", .{ text[0..end], limit });
 }
 
-pub fn runTool(io: Io, arena: std.mem.Allocator, call: chat.ToolCall) ![]u8 {
+pub fn runTool(io: Io, arena: std.mem.Allocator, call: chat.ToolCall, ceiling_ms: ?u64) ![]u8 {
     const parsed = std.json.parseFromSlice(std.json.Value, arena, call.args.items, .{}) catch
         return std.fmt.allocPrint(arena, "error: tool arguments are not valid JSON", .{});
     const args = switch (parsed.value) {
@@ -252,13 +268,13 @@ pub fn runTool(io: Io, arena: std.mem.Allocator, call: chat.ToolCall) ![]u8 {
     };
 
     noteToolCall(io, arena, call.name, args);
-    if (std.mem.eql(u8, call.name, "bash")) return toolBash(io, arena, args);
+    if (std.mem.eql(u8, call.name, "bash")) return toolBash(io, arena, args, ceiling_ms);
     if (std.mem.eql(u8, call.name, "read")) return toolRead(io, arena, args);
     if (std.mem.eql(u8, call.name, "write")) return toolWrite(io, arena, args);
     if (std.mem.eql(u8, call.name, "edit")) return toolEdit(io, arena, args);
-    if (std.mem.eql(u8, call.name, "search")) return toolSearch(io, arena, args);
-    if (std.mem.eql(u8, call.name, "ast")) return toolAst(io, arena, args);
-    if (std.mem.eql(u8, call.name, "git")) return toolGit(io, arena, args);
+    if (std.mem.eql(u8, call.name, "search")) return toolSearch(io, arena, args, ceiling_ms);
+    if (std.mem.eql(u8, call.name, "ast")) return toolAst(io, arena, args, ceiling_ms);
+    if (std.mem.eql(u8, call.name, "git")) return toolGit(io, arena, args, ceiling_ms);
     return std.fmt.allocPrint(arena, "error: unknown tool '{s}'", .{call.name});
 }
 
@@ -338,13 +354,13 @@ pub fn terminalSafe(arena: std.mem.Allocator, s: []const u8) []const u8 {
 /// tool's own default when it asked for nothing, and never past the ceiling.
 /// Separated from the tool so the rule is testable without waiting out a
 /// timeout that is ten minutes long.
-fn bashTimeoutMs(requested: ?u64) u64 {
-    return @min(requested orelse default_bash_timeout_ms, max_bash_timeout_ms);
+fn bashTimeoutMs(requested: ?u64, ceiling_ms: ?u64) u64 {
+    return boundedMs(@min(requested orelse default_bash_timeout_ms, max_bash_timeout_ms), ceiling_ms);
 }
 
-fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
+fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64) ![]u8 {
     const command = chat.str(args.get("command")) orelse return std.fmt.allocPrint(arena, "error: missing command", .{});
-    const timeout_ms: u64 = bashTimeoutMs(if (args.get("timeout_ms")) |v| chat.num(v) else null);
+    const timeout_ms: u64 = bashTimeoutMs(if (args.get("timeout_ms")) |v| chat.num(v) else null, ceiling_ms);
     const capture_limit = max_tool_output * 4;
     const res = runCapped(io, arena, &.{ "/bin/sh", "-c", command }, capture_limit, net.durationMs(timeout_ms)) catch |err| switch (err) {
         error.Timeout => return std.fmt.allocPrint(arena, "error: command timed out after {d}ms", .{timeout_ms}),
@@ -384,11 +400,12 @@ const credential_names = [_][]const u8{
     ".pypirc",     ".git-credentials", ".htpasswd", "credentials",
     "id_rsa",      "id_dsa",           "id_ecdsa",  "id_ed25519",
     "id_ecdsa_sk", "id_ed25519_sk",    "identity",  ".dockercfg",
+    ".my.cnf",
 };
 
 /// Extensions only a key or a keystore carries. A `.crt` is not one: it is the
 /// public half, and refusing it would break reading a bundle someone committed.
-const credential_extensions = [_][]const u8{ ".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".ppk", ".asc" };
+const credential_extensions = [_][]const u8{ ".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".ppk", ".kdbx", ".asc" };
 
 fn isCredentialName(name: []const u8) bool {
     // Case-insensitively: a macOS or Windows filesystem resolves `.ENV` and
@@ -416,8 +433,9 @@ fn isCredentialPath(path: []const u8) bool {
     // Every component, not just the leaf: `~/.secrets/openrouter` is named by a
     // directory the path only passes through. dirname and basename are the
     // target's own separator, so the walk is right on the platforms this ships
-    // to and needs no second spelling.
-    var component: ?[]const u8 = path;
+    // to and needs no second spelling. A trailing separator is trimmed first,
+    // or the leaf basename comes back empty and the name goes unchecked.
+    var component: ?[]const u8 = std.mem.trimEnd(u8, path, "/");
     while (component) |c| {
         const name = std.fs.path.basename(c);
         if (name.len != 0 and !std.mem.eql(u8, name, ".") and !std.mem.eql(u8, name, "..")) {
@@ -427,7 +445,7 @@ fn isCredentialPath(path: []const u8) bool {
         }
         component = std.fs.path.dirname(c);
     }
-    return isCredentialName(std.fs.path.basename(path));
+    return isCredentialName(std.fs.path.basename(std.mem.trimEnd(u8, path, "/")));
 }
 
 /// What `read` returns instead of a credential. It names the file, so a model
@@ -531,7 +549,13 @@ fn readLines(io: Io, arena: std.mem.Allocator, path: []const u8, offset: usize, 
 
 fn toolWrite(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     const path = chat.str(args.get("path")) orelse return std.fmt.allocPrint(arena, "error: missing path", .{});
-    const content = chat.str(args.get("content")) orelse "";
+    // A call that names a path and no content is a call the model got cut
+    // short on, not one asking for an empty file: a `write` is the one tool
+    // result a run cannot undo, and emptying a source file is worse than
+    // reporting the missing argument. A model that means an empty file says
+    // so, as `"content": ""`.
+    const content = chat.str(args.get("content")) orelse
+        return std.fmt.allocPrint(arena, "error: missing content", .{});
     writeFileAtomic(io, std.Io.Dir.cwd(), arena, path, content) catch |err|
         return std.fmt.allocPrint(arena, "error: cannot write {s}: {s}", .{ path, @errorName(err) });
     return std.fmt.allocPrint(arena, "wrote {d} bytes to {s}", .{ content.len, path });
@@ -630,7 +654,7 @@ fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     return std.fmt.allocPrint(arena, "replaced {d} occurrence(s) in {s}", .{ count, path });
 }
 
-fn toolSearch(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
+fn toolSearch(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64) ![]u8 {
     const pattern = chat.str(args.get("pattern")) orelse return std.fmt.allocPrint(arena, "error: missing pattern", .{});
     const path = chat.str(args.get("path")) orelse ".";
     const glob = chat.str(args.get("glob"));
@@ -640,13 +664,13 @@ fn toolSearch(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 
         try argv.appendSlice(arena, &.{ "--glob", g });
     }
     try argv.appendSlice(arena, &.{ "--", pattern, path });
-    return runSearchTool(io, arena, argv.items, "ripgrep");
+    return runSearchTool(io, arena, argv.items, "ripgrep", ceiling_ms);
 }
 
 /// Structural search/rewrite through ast-grep. `rewrite` set means the change
 /// is applied to every match (`--update-all`), so the next turn reads the
 /// result back rather than trusting the tool's summary.
-fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
+fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64) ![]u8 {
     const pattern = chat.str(args.get("pattern")) orelse return std.fmt.allocPrint(arena, "error: missing pattern", .{});
     const lang = chat.str(args.get("lang")) orelse return std.fmt.allocPrint(arena, "error: missing lang", .{});
     const path = chat.str(args.get("path")) orelse ".";
@@ -657,7 +681,7 @@ fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     if (rewrite) |r| try argv.appendSlice(arena, &.{ "--rewrite", r, "--update-all" });
     try argv.appendSlice(arena, &.{ "--", path });
 
-    return runSearchTool(io, arena, argv.items, "ast-grep");
+    return runSearchTool(io, arena, argv.items, "ast-grep", ceiling_ms);
 }
 
 /// Bytes read from a child pipe per operation. Both pipes are drained in one
@@ -778,7 +802,7 @@ pub fn dispatch(arena: std.mem.Allocator, name: []const u8, args: []const u8) ![
         .name = try arena.dupe(u8, name),
     };
     try call.args.appendSlice(arena, args);
-    return runTool(std.testing.io, arena, call);
+    return runTool(std.testing.io, arena, call, null);
 }
 
 /// The line range a `read` with `offset` and `limit` returns: every line in
@@ -951,7 +975,7 @@ test "a real tool result over the cap stays a string the body can carry" {
     // Five bytes per line, so the cap does not land on a character boundary: a
     // plain cut here leaves half an e-acute in the string.
     try args.put(arena, "command", .{ .string = "i=0; while [ $i -lt 5000 ]; do printf '\\303\\251a\\303\\251'; i=$((i+1)); done" });
-    const output = try toolBash(std.testing.io, arena, args);
+    const output = try toolBash(std.testing.io, arena, args, null);
     try std.testing.expect(output.len > max_tool_output);
 
     const result = try toolResult(arena, output);
@@ -968,12 +992,99 @@ test "a model cannot ask bash for a timeout past the ceiling" {
     // `timeout_ms` is model output. Taken as sent, a value past anything a run
     // survives leaves the child with no deadline at all, so the deadline the
     // tool is built on is the ceiling rather than the number asked for.
-    try std.testing.expectEqual(max_bash_timeout_ms, bashTimeoutMs(@intCast(std.math.maxInt(u64))));
-    try std.testing.expectEqual(max_bash_timeout_ms, bashTimeoutMs(max_bash_timeout_ms + 1));
+    try std.testing.expectEqual(max_bash_timeout_ms, bashTimeoutMs(@intCast(std.math.maxInt(u64)), null));
+    try std.testing.expectEqual(max_bash_timeout_ms, bashTimeoutMs(max_bash_timeout_ms + 1, null));
     // Inside the ceiling it is what was asked for, and an absent one is the
     // tool's own default rather than the ceiling.
-    try std.testing.expectEqual(@as(u64, 1000), bashTimeoutMs(1000));
-    try std.testing.expectEqual(default_bash_timeout_ms, bashTimeoutMs(null));
+    try std.testing.expectEqual(@as(u64, 1000), bashTimeoutMs(1000, null));
+    try std.testing.expectEqual(default_bash_timeout_ms, bashTimeoutMs(null, null));
+    // What is left of the run's budget bounds the deadline, so a call that
+    // starts near the end cannot outlast it. The ceiling never raises a
+    // deadline the tool asked for for itself.
+    try std.testing.expectEqual(@as(u64, 30_000), bashTimeoutMs(600_000, 30_000));
+    try std.testing.expectEqual(@as(u64, 1000), bashTimeoutMs(1000, 30_000));
+    try std.testing.expectEqual(@as(u64, 600_000), bashTimeoutMs(max_bash_timeout_ms, 900_000));
+    // A search tool is held to its own 60 s the same way.
+    try std.testing.expectEqual(@as(u64, 30_000), boundedMs(tool_timeout_ms, 30_000));
+    try std.testing.expectEqual(tool_timeout_ms, boundedMs(tool_timeout_ms, null));
+}
+
+test "read refuses a secret file and says so, and reads the rest" {
+    for ([_][]const u8{
+        ".env",
+        "./.env",
+        "config/.env",
+        "/home/u/app/.env.production",
+        ".secrets/openrouter",
+        "/home/u/.secrets/openrouter",
+        "deploy/server.pem",
+        "id_ed25519",
+        ".netrc",
+        "certs/tls.key",
+        "certs/tls.key/",
+        "home/u/.my.cnf",
+    }) |path| {
+        if (!isCredentialPath(path)) {
+            std.debug.print("read would have leaked {s}\n", .{path});
+            return error.TestUnexpectedResult;
+        }
+    }
+
+    // The published half of a key pair is ordinary work, and a file that merely
+    // contains the letters "key" is a source file. `.env.example` is not on
+    // this list: a template committed with a real value in it is exactly the
+    // file the name rule must not wave through, so it is refused with the rest.
+    for ([_][]const u8{ "src/main.zig", "README.md", "cert.crt", "id_ed25519.pub", "monkey.zig" }) |path|
+        try std.testing.expect(!isCredentialPath(path));
+}
+
+test "a read of a secret file returns the refusal, not the key" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = ".env", .data = "API_KEY=sk-do-not-send" });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const path = try std.fmt.allocPrint(arena, "{s}/.env", .{path_buf[0..n]});
+
+    var args: std.json.ObjectMap = .empty;
+    try args.put(arena, "path", .{ .string = path });
+    const out = try toolRead(io, arena, args);
+    try std.testing.expect(std.mem.indexOf(u8, out, "sk-do-not-send") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "credentials file") != null);
+}
+
+test "a write with no content is refused rather than emptying the file" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "keep me" });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const path = try std.fmt.allocPrint(arena, "{s}/a.txt", .{path_buf[0..n]});
+
+    var args: std.json.ObjectMap = .empty;
+    try args.put(arena, "path", .{ .string = path });
+    try std.testing.expectEqualStrings("error: missing content", try toolWrite(io, arena, args));
+    try std.testing.expectEqualStrings("keep me", try tmp.dir.readFileAlloc(io, "a.txt", arena, .limited(64)));
+
+    // A model that means an empty file says so, and gets one.
+    try args.put(arena, "content", .{ .string = "" });
+    try std.testing.expect(std.mem.startsWith(u8, try toolWrite(io, arena, args), "wrote 0 bytes to "));
+    try std.testing.expectEqualStrings("", try tmp.dir.readFileAlloc(io, "a.txt", arena, .limited(64)));
 }
 
 test "a tool argument cannot repaint the operator's terminal" {
@@ -1097,7 +1208,7 @@ test "git tool refuses a rev that git would read as an option" {
     var args: std.json.ObjectMap = .empty;
     try args.put(arena, "cmd", .{ .string = "diff" });
     try args.put(arena, "rev", .{ .string = "--output=pwned" });
-    const out = try toolGit(std.testing.io, arena, args);
+    const out = try toolGit(std.testing.io, arena, args, null);
     try std.testing.expectEqualStrings("error: rev must not start with '-'", out);
 }
 
@@ -1134,7 +1245,7 @@ test "git tool refuses a missing or unknown subcommand" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     {
-        const out = try toolGit(std.testing.io, arena, .empty);
+        const out = try toolGit(std.testing.io, arena, .empty, null);
         try std.testing.expectEqualStrings("error: missing cmd", out);
     }
     {
@@ -1144,7 +1255,7 @@ test "git tool refuses a missing or unknown subcommand" {
         try args.put(arena, "cmd", .{ .string = "push" });
         try std.testing.expectEqualStrings(
             "error: unknown git cmd 'push'",
-            try toolGit(std.testing.io, arena, args),
+            try toolGit(std.testing.io, arena, args, null),
         );
     }
 }

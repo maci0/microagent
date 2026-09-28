@@ -803,17 +803,24 @@ const Budget = struct {
         return @intCast(@divTrunc(d - now, std.time.ns_per_ms));
     }
 
+    /// The ceiling a tool's own deadline may not pass, or null when the run
+    /// set no budget. The floor stops a nearly-spent budget from handing a tool
+    /// a zero timeout, which fails instantly and reads as a broken tool rather
+    /// than a spent budget.
+    fn toolCeilingMs(self: Budget, io: Io) ?u64 {
+        const left = self.remainingMs(io) orelse return null;
+        return @max(left, tool_timeout_floor_ms);
+    }
+
     /// A tool's own timeout, cut down to what is left of the budget.
     ///
     /// Without this the budget is a promise the tools do not keep: a bash call
     /// with a two-minute timeout starts happily at second 779 of a 780-second
     /// budget and the caller kills the run mid-command, which is what the budget
-    /// exists to prevent. The floor stops a nearly-spent budget from handing a
-    /// tool a zero timeout, which fails instantly and reads as a broken tool
-    /// rather than a spent budget.
+    /// exists to prevent.
     fn toolTimeoutMs(self: Budget, io: Io, wanted_ms: u64) u64 {
-        const left = self.remainingMs(io) orelse return wanted_ms;
-        return @min(wanted_ms, @max(left, tool_timeout_floor_ms));
+        const cap = self.toolCeilingMs(io) orelse return wanted_ms;
+        return @min(wanted_ms, cap);
     }
 
     /// The same budget with `seconds` more to run. The final push is the one
@@ -1794,6 +1801,10 @@ fn finishTurn(
     try msgs.appendSlice(gpa, ",");
     try msgs.appendSlice(gpa, try assistantMessage(arena, result));
 
+    // Read once for the whole turn: every call in it starts at the same point
+    // on the budget, and a call that runs long is the reason the next one is
+    // shorter, not a reason to re-read the clock for each of them.
+    const ceiling_ms = budget.toolCeilingMs(io);
     for (result.calls.items) |call| {
         // A call the budget will not pay for still gets a tool message. An
         // assistant turn that names calls the conversation never answers is one
@@ -1802,7 +1813,7 @@ fn finishTurn(
         const output = if (budget.expired(io))
             try std.fmt.allocPrint(arena, "error: not run, the run's time budget is exhausted", .{})
         else
-            tool_mod.runTool(io, arena, call) catch |err|
+            tool_mod.runTool(io, arena, call, ceiling_ms) catch |err|
                 // A tool that fails outright (rather than reporting its own
                 // failure as text) is named here, so a result reading
                 // `error: OutOfMemory` says which of the calls ran out.
