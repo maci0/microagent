@@ -1117,6 +1117,10 @@ fn applyFrame(
         }
         if (result.cached_tokens == 0) result.cached_tokens = num(u.object.get("prompt_cache_hit_tokens"));
         if (result.cached_tokens == 0) result.cached_tokens = num(u.object.get("cache_read_input_tokens"));
+        // Not every provider sends the total, and a reader that divides tokens
+        // by elapsed time reads a missing field as a run that cost nothing.
+        if (result.total_tokens == 0)
+            result.total_tokens = result.prompt_tokens +| result.completion_tokens;
     };
     const choices = root.object.get("choices") orelse return;
     if (choices != .array or choices.array.items.len == 0) return;
@@ -1551,7 +1555,7 @@ fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     }
     // Output the model acts on is cut at the cap, so say so rather than letting
     // a half-read build log or diff read as the whole one.
-    if (atCaptureLimit(res, capture_limit)) {
+    if (atCaptureLimit(res)) {
         if (buf.items.len > 0) try buf.appendSlice(arena, "\n");
         try buf.appendSlice(arena, "[output truncated at the tool's cap]");
     }
@@ -1815,6 +1819,10 @@ const Captured = struct {
     stdout: []u8,
     stderr: []u8,
     term: std.process.Child.Term,
+    /// Per stream, a byte arrived after the cap was full. A capture that ends
+    /// exactly on the cap dropped nothing, and a reader told otherwise reads a
+    /// complete log as a cut-off one.
+    dropped: [2]bool,
 };
 
 /// Runs `argv` and keeps the first `limit` bytes of each stream.
@@ -1862,6 +1870,7 @@ fn runCapped(
 
     var draining: usize = files.len;
     var read_err: ?anyerror = null;
+    var dropped: [2]bool = .{ false, false };
     while (draining > 0) {
         try batch.awaitConcurrent(io, timeout);
         while (batch.next()) |completion| {
@@ -1875,6 +1884,7 @@ fn runCapped(
             };
             if (n > 0) {
                 const taken = @min(n, limit -| out[i].items.len);
+                if (taken < n) dropped[i] = true;
                 if (taken > 0) try out[i].appendSlice(arena, chunks[i][0..taken]);
             }
             // A read may legitimately return zero bytes without ending the
@@ -1889,13 +1899,13 @@ fn runCapped(
 
     const term = try child.wait(io);
     if (read_err) |err| return err;
-    return .{ .stdout = out[0].items, .stderr = out[1].items, .term = term };
+    return .{ .stdout = out[0].items, .stderr = out[1].items, .term = term, .dropped = dropped };
 }
 
-/// True when a stream filled the cap, so the captured bytes are the beginning of
-/// the output and not all of it.
-fn atCaptureLimit(captured: Captured, limit: usize) bool {
-    return captured.stdout.len == limit or captured.stderr.len == limit;
+/// True when a stream filled the cap with bytes still arriving, so the captured
+/// bytes are the beginning of the output and not all of it.
+fn atCaptureLimit(captured: Captured) bool {
+    return captured.dropped[0] or captured.dropped[1];
 }
 
 /// The first `max` bytes, cut on a UTF-8 codepoint boundary. Both callers feed
@@ -2330,6 +2340,27 @@ test "usage counters land on the result" {
     try std.testing.expectEqual(@as(u64, 0), sink.result.cached_tokens);
 }
 
+// A provider that sends prompt and completion but no total leaves the run
+// total at zero, and the max a reader takes over successive usage lines stays
+// zero for the whole run.
+test "a missing total is added up from the two counters that are there" {
+    var sink = FrameSink.init(std.testing.allocator);
+    defer sink.deinit();
+
+    try sink.feed("{\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":910,\"completion_tokens\":18}}");
+    try std.testing.expectEqual(@as(u64, 910), sink.result.prompt_tokens);
+    try std.testing.expectEqual(@as(u64, 928), sink.result.total_tokens);
+}
+
+// A total the provider did send is its own number and is not overwritten.
+test "a sent total is left as it is" {
+    var sink = FrameSink.init(std.testing.allocator);
+    defer sink.deinit();
+
+    try sink.feed("{\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":22,\"total_tokens\":99}}");
+    try std.testing.expectEqual(@as(u64, 99), sink.result.total_tokens);
+}
+
 // The cache counter is what turns "we probably reuse the prefix" into a number
 // a benchmark can read, so all three provider spellings have to land on it.
 test "cached prompt tokens read every provider spelling" {
@@ -2743,7 +2774,7 @@ test "a child that outruns the capture cap keeps its first bytes instead of fail
         "/bin/sh", "-c", "head -c 200000 /dev/zero | tr '\\0' 'a'",
     }, cap, durationMs(30_000));
     try std.testing.expectEqual(cap, noisy.stdout.len);
-    try std.testing.expect(atCaptureLimit(noisy, cap));
+    try std.testing.expect(atCaptureLimit(noisy));
     try std.testing.expectEqualStrings("a" ** 8, noisy.stdout[0..8]);
     // The child still ran to its own end, so the status is the command's.
     switch (noisy.term) {
@@ -2756,7 +2787,21 @@ test "a child that outruns the capture cap keeps its first bytes instead of fail
     }, cap, durationMs(30_000));
     try std.testing.expectEqualStrings("hi\n", quiet.stdout);
     try std.testing.expectEqualStrings("bye\n", quiet.stderr);
-    try std.testing.expect(!atCaptureLimit(quiet, cap));
+    try std.testing.expect(!atCaptureLimit(quiet));
+}
+
+// Output that lands exactly on the cap was not cut short, and saying it was
+// makes the model reason about a log it actually has in full.
+test "output ending exactly on the cap is not reported as truncated" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const cap: usize = 4096;
+
+    const exact = try runCapped(std.testing.io, arena_state.allocator(), &.{
+        "/bin/sh", "-c", "head -c 4096 /dev/zero | tr '\\0' 'a'",
+    }, cap, durationMs(30_000));
+    try std.testing.expectEqual(cap, exact.stdout.len);
+    try std.testing.expect(!atCaptureLimit(exact));
 }
 
 test "both pipes past the cap drain together, so the child never wedges" {
