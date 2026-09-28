@@ -15,7 +15,7 @@ BIN := zig-out/bin/microagent
 export LC_ALL := C
 export TZ := UTC
 
-.PHONY: default help preflight version build small musl test test-one watch fmt fmt-python lint lint-versions lint-lock zig-version required-zig-version release-targets check-targets check-reproducible lint-shell lint-python lint-yaml check bench overhead install release-assets checksums clean
+.PHONY: default help preflight version build small musl test test-one watch fmt fmt-python lint lint-versions lint-lock zig-version required-zig-version release-targets check-targets check-reproducible lint-shell lint-python lint-yaml check bench instructions overhead install release-assets checksums clean
 
 # The targets `microagent update` asks for, in the names release.yml publishes.
 # ci.yml rehearses the same list on every push and release.yml publishes it, so
@@ -98,6 +98,7 @@ help:
 	  'lint-lock             check the Harbor requirements.txt pins are the ones requirements.lock has' \
 	  'zig-version           check the local zig against the version the release is built with' \
 	  'bench AGENTS=...      three coding tasks through each harness' \
+	  'instructions [CHECK=--check]  retired instructions per unit of work, per path' \
 	  'overhead              startup and first-request cost per harness' \
 	  'install               install the binary into ~/.local/bin' \
 	  'release-assets        cross-build every published target into dist/' \
@@ -315,6 +316,16 @@ BIN_DIR := $(dir $(abspath $(BIN)))
 #   make bench AGENTS="microagent kimi"
 bench: build
 	PATH="$(BIN_DIR):$$PATH" sh bench/run.sh $(or $(AGENTS),microagent)
+
+# Retired instructions per unit of work, per path a run walks. Not in `check`:
+# it needs Linux `perf`, and a gate that cannot measure on a macOS laptop or a
+# runner with the counters off is a gate that fails for reasons unrelated to
+# the code. `CHECK=--check` compares each row against bench/instructions.baseline
+# and exits 1 when a row leaves its band, 2 when it cannot be measured. The
+# script builds its own test binaries, so the build a fresh clone owes it is
+# here rather than as a reminder in the error it would otherwise print.
+instructions: build
+	sh bench/instructions.sh $(CHECK)
 
 # Startup latency and first-request cost per installed harness.
 overhead: build

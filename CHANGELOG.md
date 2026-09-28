@@ -14,6 +14,12 @@ release, and `microagent update` moves you to it.
 
 ### Added
 
+- `make instructions`, wrapping `bench/instructions.sh`, so the retired-instructions
+  gate CONTRIBUTING.md documents is a target rather than a line in the prose:
+  `make instructions` prints the table and `make instructions CHECK=--check`
+  compares each row against `bench/instructions.baseline`. It builds first, since
+  the script reads the test build's `options.zig` and stops with a reminder when
+  there is none.
 - `make watch` reruns the unit test suite on every source change, and
   `make watch FILTER=...` narrows it to the tests whose name contains the
   substring, the way `make test-one` narrows one run. It wraps
