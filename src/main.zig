@@ -67,6 +67,12 @@ const max_tool_calls = 64;
 /// each is a gigabyte the run never asked for. A turn that reaches it is
 /// reported on stderr, because the bytes past it are dropped rather than held.
 const max_response_bytes = 16 * 1024 * 1024;
+/// Bytes one read of the completion stream asks for. A read lands straight in
+/// the pending buffer, so this is the growth step of that buffer, not a separate
+/// buffer: every byte of every response passed through one copy fewer because of
+/// it, and the frames are split out of `pending` in place.
+const stream_read_chunk: usize = 8 * 1024;
+
 /// Ceiling on one line of the completion stream, the bytes between newlines
 /// that `pending` holds for a frame that has not finished arriving.
 /// `max_response_bytes` bounds what a finished frame may add to the turn, so it
@@ -1196,7 +1202,6 @@ fn streamChat(
     var pending: std.ArrayList(u8) = .empty;
     defer pending.deinit(gpa);
     var scanned: usize = 0;
-    var chunk: [8 * 1024]u8 = undefined;
     var done = false;
     var unparsable: usize = 0;
     while (!done) {
@@ -1209,16 +1214,16 @@ fn streamChat(
             });
             return error.BudgetExhausted;
         }
-        // A read that fails mid-stream is a dropped connection, not an end of
-        // response. The cause is named before it propagates, because by the
-        // time the run's error line is written the only record of what arrived
-        // is this one.
-        const n = reader.readSliceShort(&chunk) catch |err| {
+        // Straight into the pending buffer, rather than into a stack chunk that
+        // is appended after it: every byte of every completion passed through
+        // that copy, and the line split below works on `pending` itself.
+        try pending.ensureUnusedCapacity(gpa, stream_read_chunk);
+        const n = reader.readSliceShort(pending.unusedCapacitySlice()) catch |err| {
             net.note(io, arena, "microagent: reading the completion stream from {s} failed after {d} byte(s) of content and {d} tool call(s): {s}\n", .{ shown_url, result.content.items.len, calls.items.len, @errorName(err) });
             return err;
         };
         if (n == 0) break;
-        try pending.appendSlice(gpa, chunk[0..n]);
+        pending.items.len += n;
         // A line that has not ended by now is not one this turn can carry, and
         // the buffer below only shrinks on a newline, so the run says so and
         // ends the turn rather than growing with the rest of the stream.

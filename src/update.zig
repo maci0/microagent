@@ -415,33 +415,23 @@ fn fail(io: std.Io, comptime fmt: []const u8, args: anytype) u8 {
     return 1;
 }
 
-/// One GET, body capped at `max_size` while it streams. `client` is shared
-/// across the three fetches a run makes so the CA store is loaded once. On an
-/// HTTP error `status_out` carries the code, which is the difference between
-/// "no release yet" and "rate limit".
-///
-/// The body is copied into `arena` and the buffer it arrived in is released on
-/// the way out. The arena copy is the one that has to outlive this call, and an
-/// arena frees its most recent allocation, so the buffer cannot be the arena's
-/// own and then released.
-fn fetchBody(
+/// One GET, body capped at `max_size` while it streams, into `capped`. The
+/// fetch itself, with the headers and the two status cases every caller wants
+/// the same answer to. `client` is shared across the three fetches a run makes
+/// so the CA store is loaded once. On an HTTP error `status_out` carries the
+/// code, which is the difference between "no release yet" and "rate limit".
+fn fetchInto(
     client: *std.http.Client,
-    gpa: std.mem.Allocator,
-    arena: std.mem.Allocator,
+    capped: *Capped,
     url: []const u8,
     bearer: ?[]const u8,
-    max_size: usize,
     status_out: *std.http.Status,
-) ![]const u8 {
+) !void {
     var priv_buf: [1]std.http.Header = undefined;
     const priv_headers: []const std.http.Header = if (bearer) |b| blk: {
         priv_buf[0] = .{ .name = "Authorization", .value = b };
         break :blk priv_buf[0..1];
     } else &.{};
-
-    var capped: Capped = undefined;
-    try capped.start(gpa, max_size);
-    defer capped.body.deinit();
 
     const result = client.fetch(.{
         .location = .{ .url = url },
@@ -454,8 +444,62 @@ fn fetchBody(
     };
     status_out.* = result.status;
     if (@intFromEnum(result.status) >= 400) return error.HttpStatus;
+}
 
+/// One GET, body capped at `max_size` while it streams, copied into `arena`.
+///
+/// The body is copied and the buffer it arrived in is released on the way out.
+/// The arena copy is the one that has to outlive this call, and an arena frees
+/// its most recent allocation, so the buffer cannot be the arena's own and then
+/// released. For the two small bodies (`fetchAsset` is the exception) that copy
+/// is a few kilobytes; the asset goes through `fetchAsset` instead, which keeps
+/// the buffer it arrived in rather than paying for a second copy of a binary.
+fn fetchBody(
+    client: *std.http.Client,
+    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    url: []const u8,
+    bearer: ?[]const u8,
+    max_size: usize,
+    status_out: *std.http.Status,
+) ![]const u8 {
+    var capped: Capped = undefined;
+    try capped.start(gpa, max_size);
+    defer capped.body.deinit();
+    try fetchInto(client, &capped, url, bearer, status_out);
     return try arena.dupe(u8, capped.body.written());
+}
+
+/// A body the caller owns and releases, for a body too large to copy.
+///
+/// The asset is the whole released binary, up to `max_asset_bytes` of it, and
+/// `fetchBody` copies every byte of that into the arena before the buffer it
+/// arrived in is freed: two copies of a megabyte-scale binary resident at once,
+/// and a second pass over the bytes for nothing. This hands the buffer over
+/// instead, so the fetch writes each byte into the allocation the caller frees.
+pub const Fetched = struct {
+    bytes: []u8,
+    gpa: std.mem.Allocator,
+
+    pub fn deinit(self: *Fetched) void {
+        if (self.bytes.len != 0) self.gpa.free(self.bytes);
+        self.* = undefined;
+    }
+};
+
+fn fetchAsset(
+    client: *std.http.Client,
+    gpa: std.mem.Allocator,
+    url: []const u8,
+    bearer: ?[]const u8,
+    max_size: usize,
+    status_out: *std.http.Status,
+) !Fetched {
+    var capped: Capped = undefined;
+    try capped.start(gpa, max_size);
+    errdefer capped.body.deinit();
+    try fetchInto(client, &capped, url, bearer, status_out);
+    return .{ .bytes = try capped.body.toOwnedSlice(), .gpa = gpa };
 }
 
 /// The path is resolved by the caller so a failure to replace it can name the
@@ -744,8 +788,9 @@ fn runChecked(
 
     // The URL the response named is unbounded, and these lines print into a
     // fixed buffer, so the asset name is what identifies the download.
-    const asset = fetchBody(&client, gpa, arena, a_url, bearerFor(a_url, bearer), max_asset_bytes, &status) catch |err|
+    var asset = fetchAsset(&client, gpa, a_url, bearer, max_asset_bytes, &status) catch |err|
         return downloadFailure(io, asset_name, status, err);
+    defer asset.deinit();
     var side_what_buf: [320]u8 = undefined;
     const side_what = std.fmt.bufPrint(&side_what_buf, "the checksum sidecar for {s}", .{asset_name}) catch asset_name;
     const sidecar = fetchBody(&client, gpa, arena, s_url, bearerFor(s_url, bearer), max_sidecar_bytes, &status) catch |err|
@@ -755,7 +800,7 @@ fn runChecked(
         .running = version,
         .tag = rel.tag,
         .asset_url = a_url,
-        .asset = asset,
+        .asset = asset.bytes,
         .sidecar_url = s_url,
         .sidecar = sidecar,
         .basename = asset_name,
@@ -771,7 +816,7 @@ fn runChecked(
 
     const exe = std.process.executablePathAlloc(io, arena) catch |err|
         return fail(io, "could not locate the running binary ({s})", .{@errorName(err)});
-    replaceExecutable(io, exe, asset) catch |err|
+    replaceExecutable(io, exe, asset.bytes) catch |err|
         return fail(io, "could not replace {s} ({s}); the binary was not replaced", .{ exe, @errorName(err) });
     const installed = formatInstalled(&line_buf, rel.tag, exe) catch
         return fail(io, "could not format the install line", .{});

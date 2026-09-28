@@ -642,7 +642,6 @@ fn readLines(io: Io, arena: std.mem.Allocator, path: []const u8, offset: usize, 
     // The bytes of a line the last read cut in half, moved to the front each
     // time a new one lands behind them.
     var rest: std.ArrayList(u8) = .empty;
-    var chunk: [read_chunk]u8 = undefined;
     var line: usize = 0;
     var taken: usize = 0;
     var start: usize = 0;
@@ -657,7 +656,12 @@ fn readLines(io: Io, arena: std.mem.Allocator, path: []const u8, offset: usize, 
     var consumed: usize = 0;
     while (consumed < max_read_bytes) {
         const want = @min(read_chunk, max_read_bytes - consumed);
-        const n = r.readSliceShort(chunk[0..want]) catch |err| switch (err) {
+        // Straight into the buffer the line is assembled from, rather than into
+        // a stack chunk that is copied in after it: a read of a four-megabyte
+        // artifact moved every one of those bytes twice to hold them, once for
+        // the read and once for the append.
+        try rest.ensureUnusedCapacity(arena, want);
+        const n = r.readSliceShort(rest.unusedCapacitySlice()[0..want]) catch |err| switch (err) {
             // The generic `ReadFailed` names no cause; the reader kept the one
             // that does, and a directory the model named is worth saying.
             error.ReadFailed => return readFailed(arena, path, file_reader.err orelse error.ReadFailed),
@@ -665,7 +669,7 @@ fn readLines(io: Io, arena: std.mem.Allocator, path: []const u8, offset: usize, 
         };
         if (n == 0) break;
         consumed += n;
-        try rest.appendSlice(arena, chunk[0..n]);
+        rest.items.len += n;
         // The scan resumes where the last one stopped, not where the buffer
         // starts: the bytes between `start` and there were searched on an
         // earlier read and held no newline, so the line in hand still runs from
