@@ -177,6 +177,15 @@ release, and `microagent update` moves you to it.
   inside an `||` chain, and `dirname` of an empty word is `.`, a directory, so
   the run went on to ask the compiler for `--zig-lib-dir .`. The std_dir reading
   is checked before it is used and the script exits 2 naming the path.
+- One turn's tool results stop adding to the conversation at 256 KB. `max_tool_output`
+  bounds a single result and `max_tool_calls` bounds how many one response may ask for,
+  and nothing bounded the product: 64 calls at 24 KB each is a 1.5 MB request, nearly
+  four times the 400 KB compaction exists to hold the conversation down, and it was
+  billed before the next turn elided any of it. Compaction runs at the top of a turn,
+  so the turn that filled the conversation was the one with no bound. Every call still
+  runs and still gets a tool message, so the next request pairs them as before; past
+  the ceiling a result is replaced with a `[tool output not carried: ...]` marker, and
+  the system prompt names it the way it names the elision marker's.
 - `microagent update` no longer installs a pre-release over a newer build. A tag
   with a `-rc1` suffix was not a version the ordering could read, so it ordered
   as equal to everything and past the guard that stops a downgrade: a build on

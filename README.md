@@ -251,7 +251,10 @@ of conversation replaces the content of the oldest large tool results with a
 untouched, so a long run stops re-sending files it has already acted on. The marker is this program
 writing into a tool message, so the system prompt names it as such and tells the model to run the
 tool again if it needs what the result said, rather than reading it as output the tool produced.
-Watch the counter on a
+One turn's tool results stop at 256 KB, which 64 calls at the 24 KB per-result cap would
+pass four times over: past it a result is replaced with a `[tool output not carried: ...]`
+marker, the call itself still ran, and the model is told the output is gone rather than
+left to read an empty result as a tool that found nothing. Watch the counter on a
 multi-turn run — it should climb with the conversation, and dip at the turn a compaction lands on.
 It is read from whichever of `prompt_tokens_details.cached_tokens`, `prompt_cache_hit_tokens` or
 `cache_read_input_tokens` the endpoint sends.

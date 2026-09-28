@@ -60,6 +60,23 @@ const elision_marker = "[earlier tool output elided: {d} bytes]";
 /// runs when every result this run has is a small one and the limit above
 /// elides nothing at all.
 const min_marker_bytes = "[earlier tool output elided: 0 bytes]".len;
+/// Ceiling on what one turn's tool results may add to the conversation.
+/// `max_tool_output` bounds one result and `max_tool_calls` bounds how many one
+/// response may ask for, and their product is 1.5 MB, nearly four times
+/// `conversation_soft_limit`: a response asking for 64 large reads sends a
+/// request four times the size the compaction above exists to hold down, and
+/// that request is billed before the turn after it elides anything. Compaction
+/// runs at the top of a turn, so nothing bounds the turn that filled it. The
+/// calls still run and still get a tool message, so the pairing the next
+/// request needs is intact and no call is silently unanswered; what stops is
+/// the output being carried forward, past the first result that does not fit.
+const max_turn_tool_output: usize = 256 * 1024;
+/// The marker that replaces a tool result past the ceiling above. It is the
+/// run's own doing, not the tool's, and says so: a tool that printed nothing
+/// and a tool whose output the run declined to carry are different facts, and
+/// the model is the one deciding what to do next. The system prompt names it,
+/// the way it names the marker compaction writes.
+const turn_output_capped_marker = "[tool output not carried: this turn's tool results reached their ceiling]";
 const max_turns_default = 100;
 /// The exit status for a run that stopped at a ceiling rather than finishing:
 /// `--max-turns`, or a budget that ended the last turn. Distinct from 0 (the
@@ -141,7 +158,10 @@ const system_prompt =
     "A tool result reading `[earlier tool output elided: N bytes]` is this run's own " ++
     "compaction, not what the tool printed: the bytes it stands for are no longer in the " ++
     "conversation, and the tool did not return a marker. Run it again if you need what it " ++
-    "said, and do not report the result you are looking at as the whole of it.";
+    "said, and do not report the result you are looking at as the whole of it. A tool result " ++
+    "reading `[tool output not carried: ...]` is the same run's per-turn ceiling: that call " ++
+    "ran and its output was dropped, so the tool printed nothing you can read. Run it again " ++
+    "on its own rather than assuming the work was done.";
 
 const tools_json =
     \\[
@@ -2960,6 +2980,9 @@ fn finishTurn(
     try msgs.appendSlice(gpa, ",");
     try msgs.appendSlice(gpa, try assistantMessage(arena, result));
 
+    var carried: usize = 0;
+    var capped = false;
+    var capped_said = false;
     for (result.calls.items) |call| {
         // Both flags only ever go false to true, so once one is set nothing
         // later in the turn can change it, and the check that would record it
@@ -2994,7 +3017,16 @@ fn finishTurn(
         // is the ordinary one, so the reservation is the result's own size
         // under that ceiling: a turn of two dozen `git status` calls otherwise
         // reserves the whole cap for each of them.
-        const result_bytes = try tool_mod.toolResult(arena, output);
+        //
+        // The turn's own ceiling is a second one, and it is the one a
+        // 64-call response hits: the calls all run, and what a result costs is
+        // carried forward to every later turn, so past the ceiling the call
+        // keeps its place in the conversation and loses its output.
+        const result_bytes = carriedToolResult(try tool_mod.toolResult(arena, output), &carried, &capped);
+        if (capped and !capped_said) {
+            capped_said = true;
+            net.note(io, arena, "microagent: this turn's tool results reached the {d} byte ceiling ({d} carried so far); every later result in the same turn is a marker, the calls themselves still ran, and the model is told which\n", .{ max_turn_tool_output, carried });
+        }
         var tool_msg = chat_mod.JsonBuf.initCapacity(arena, @min(tool_result_message_bytes, result_bytes.len + tool_result_message_scaffolding_bytes));
         try tool_msg.writer().writeAll(",{\"role\":\"tool\",\"tool_call_id\":");
         try chat_mod.writeJsonString(tool_msg.writer(), call.id);
@@ -3004,6 +3036,28 @@ fn finishTurn(
         try msgs.appendSlice(gpa, tool_msg.items());
     }
     try logUsage(io, arena, usage, result);
+}
+
+/// What one call's result is carried into the conversation as: the result
+/// itself while the turn has room for it, and `turn_output_capped_marker` once
+/// it does not. A result that does not fit whole is not carried partly: half a
+/// file read is not evidence of anything, and the marker says the output is
+/// gone where a truncated one would read as the whole of it.
+///
+/// `carried` is what this turn's results have added so far and `capped`
+/// whether the marker has been written, both handed back so the caller can
+/// name the ceiling once for the turn instead of once per call past it.
+fn carriedToolResult(
+    result: []const u8,
+    carried: *usize,
+    capped: *bool,
+) []const u8 {
+    if (carried.* +| result.len <= max_turn_tool_output) {
+        carried.* += result.len;
+        return result;
+    }
+    capped.* = true;
+    return turn_output_capped_marker;
 }
 
 /// The assistant turn as the request body spells it. Plain content when the
@@ -4599,6 +4653,46 @@ fn appendToolResults(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), count: us
         msg.list.deinit(gpa);
     }
     try msgs.append(gpa, ']');
+}
+
+// A response may ask for `max_tool_calls` results of `max_tool_output` each, and
+// compaction only runs at the top of a turn, so the turn that fills the
+// conversation is the one nothing bounds. Every result past the turn's ceiling
+// is a marker: the call keeps its place in the conversation, so the next
+// request still pairs every `tool_call_id`, and its output is gone.
+test "a turn's tool results stop at the turn's ceiling and every call still answers" {
+    var carried: usize = 0;
+    var capped = false;
+    // A full-size result, which is what a `read` of a large file returns.
+    const full = try std.testing.allocator.alloc(u8, tool_mod.max_tool_output);
+    defer std.testing.allocator.free(full);
+    @memset(full, 'x');
+
+    var messages: usize = 0;
+    var markers: usize = 0;
+    // More calls than fit, so the ceiling is reached inside this loop and the
+    // rest of the turn is markers.
+    for (0..max_tool_calls + 1) |_| {
+        const carried_bytes = carriedToolResult(full, &carried, &capped);
+        if (std.mem.eql(u8, carried_bytes, turn_output_capped_marker)) {
+            markers += 1;
+        } else {
+            try std.testing.expectEqualStrings(full, carried_bytes);
+        }
+        messages += 1;
+    }
+    try std.testing.expect(capped);
+    try std.testing.expect(markers > 0);
+    // Every call still has a result to write, which is what keeps the pairing
+    // the next request rejects without.
+    try std.testing.expectEqual(@as(usize, max_tool_calls + 1), messages);
+    try std.testing.expect(carried <= max_turn_tool_output);
+    // A result that still fits the turn's remaining room is carried, so a turn
+    // of many small results never meets the ceiling, and the total stays under
+    // it either way.
+    const after = carriedToolResult("small", &carried, &capped);
+    try std.testing.expectEqualStrings("small", after);
+    try std.testing.expect(carried <= max_turn_tool_output);
 }
 
 // The second compaction pass replaces results down to `min_marker_bytes`, which
