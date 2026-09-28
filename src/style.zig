@@ -30,17 +30,37 @@ pub const CavemanLevel = enum {
     wenyan_full,
     wenyan_ultra,
 
+    /// The spelling that goes in the config file and in the injected header,
+    /// paired with the level it names. The one place a level's spelling is
+    /// written: `name` and `parseCaveman` both read it, so a level cannot be
+    /// added to the enum and forgotten by one of them.
+    const levels = [_]struct { name: []const u8, level: CavemanLevel }{
+        .{ .name = "off", .level = .off },
+        .{ .name = "lite", .level = .lite },
+        .{ .name = "full", .level = .full },
+        .{ .name = "ultra", .level = .ultra },
+        .{ .name = "wenyan-lite", .level = .wenyan_lite },
+        .{ .name = "wenyan-full", .level = .wenyan_full },
+        .{ .name = "wenyan-ultra", .level = .wenyan_ultra },
+    };
+
+    // Every level the enum has, spelled, exactly once. A count alone would
+    // still let a duplicated level stand in for a missing one.
+    comptime {
+        if (levels.len != @typeInfo(CavemanLevel).@"enum".fields.len)
+            @compileError("every CavemanLevel needs an entry in `levels`");
+        for (levels, 0..) |row, i| {
+            for (levels, 0..) |other, j| {
+                if (i != j and row.level == other.level)
+                    @compileError("a CavemanLevel is listed twice in `levels`");
+            }
+        }
+    }
+
     /// The spelling that goes in the config file and in the injected header.
     pub fn name(self: CavemanLevel) []const u8 {
-        return switch (self) {
-            .off => "off",
-            .lite => "lite",
-            .full => "full",
-            .ultra => "ultra",
-            .wenyan_lite => "wenyan-lite",
-            .wenyan_full => "wenyan-full",
-            .wenyan_ultra => "wenyan-ultra",
-        };
+        for (levels) |row| if (row.level == self) return row.name;
+        unreachable; // the comptime check above rules this out
     }
 };
 
@@ -52,13 +72,29 @@ pub const PonytailLevel = enum {
     full,
     ultra,
 
+    /// The spelling the config file and the injected header use, paired with
+    /// the level it names. One source for both, as `CavemanLevel.levels` is.
+    const levels = [_]struct { name: []const u8, level: PonytailLevel }{
+        .{ .name = "off", .level = .off },
+        .{ .name = "lite", .level = .lite },
+        .{ .name = "full", .level = .full },
+        .{ .name = "ultra", .level = .ultra },
+    };
+
+    comptime {
+        if (levels.len != @typeInfo(PonytailLevel).@"enum".fields.len)
+            @compileError("every PonytailLevel needs an entry in `levels`");
+        for (levels, 0..) |row, i| {
+            for (levels, 0..) |other, j| {
+                if (i != j and row.level == other.level)
+                    @compileError("a PonytailLevel is listed twice in `levels`");
+            }
+        }
+    }
+
     pub fn name(self: PonytailLevel) []const u8 {
-        return switch (self) {
-            .off => "off",
-            .lite => "lite",
-            .full => "full",
-            .ultra => "ultra",
-        };
+        for (levels) |row| if (row.level == self) return row.name;
+        unreachable; // the comptime check above rules this out
     }
 };
 
@@ -165,23 +201,18 @@ fn unquote(raw: []const u8) []const u8 {
 /// `wenyan-full`.
 pub fn parseCaveman(value: []const u8) ?CavemanLevel {
     const v = std.mem.trim(u8, value, " \t\r\n");
-    if (std.ascii.eqlIgnoreCase(v, "off")) return .off;
-    if (std.ascii.eqlIgnoreCase(v, "lite")) return .lite;
-    if (std.ascii.eqlIgnoreCase(v, "full")) return .full;
-    if (std.ascii.eqlIgnoreCase(v, "ultra")) return .ultra;
-    if (std.ascii.eqlIgnoreCase(v, "wenyan-lite")) return .wenyan_lite;
-    if (std.ascii.eqlIgnoreCase(v, "wenyan-full")) return .wenyan_full;
-    if (std.ascii.eqlIgnoreCase(v, "wenyan-ultra")) return .wenyan_ultra;
+    for (CavemanLevel.levels) |row| {
+        if (std.ascii.eqlIgnoreCase(v, row.name)) return row.level;
+    }
     if (std.ascii.eqlIgnoreCase(v, "wenyan")) return .wenyan_full;
     return null;
 }
 
 pub fn parsePonytail(value: []const u8) ?PonytailLevel {
     const v = std.mem.trim(u8, value, " \t\r\n");
-    if (std.ascii.eqlIgnoreCase(v, "off")) return .off;
-    if (std.ascii.eqlIgnoreCase(v, "lite")) return .lite;
-    if (std.ascii.eqlIgnoreCase(v, "full")) return .full;
-    if (std.ascii.eqlIgnoreCase(v, "ultra")) return .ultra;
+    for (PonytailLevel.levels) |row| {
+        if (std.ascii.eqlIgnoreCase(v, row.name)) return row.level;
+    }
     return null;
 }
 
@@ -289,6 +320,18 @@ test "levels parse from every spelling the config may use" {
     try std.testing.expect(parseCaveman("brief") == null);
     try std.testing.expectEqual(PonytailLevel.full, parsePonytail("full").?);
     try std.testing.expect(parsePonytail("review") == null);
+}
+
+// The spelling a level is written with is the one the config parser has to
+// accept and the injected header has to name. Round-tripping every level is
+// what keeps the table and the two readers from drifting apart.
+test "every level round-trips through the spelling it is written with" {
+    for (std.enums.values(CavemanLevel)) |level| {
+        try std.testing.expectEqual(level, parseCaveman(level.name()).?);
+    }
+    for (std.enums.values(PonytailLevel)) |level| {
+        try std.testing.expectEqual(level, parsePonytail(level.name()).?);
+    }
 }
 
 test "the config sets levels and leaves absent or bad keys alone" {

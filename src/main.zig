@@ -47,6 +47,16 @@ const max_tool_calls = 64;
 const max_response_bytes = 16 * 1024 * 1024;
 /// The reply-style config is a handful of keys; a bigger file is not one.
 const max_config_bytes: usize = 64 * 1024;
+/// Ceiling on a file `read` returns whole. A source file is kilobytes, so the
+/// cap is what keeps one `read` of a multi-gigabyte artifact out of the
+/// conversation.
+const max_read_bytes: usize = 4 * 1024 * 1024;
+/// `edit` reads the file it rewrites, so it holds the larger of the two.
+const max_edit_bytes: usize = 8 * 1024 * 1024;
+/// A secret file is one key, not a document.
+const max_secret_bytes: usize = 4096;
+/// A provider's error body is a diagnostic, not a payload.
+const max_error_body_bytes: usize = 16 * 1024;
 
 const system_prompt =
     "You are microagent, a coding agent working on the repository in the current directory.\n" ++
@@ -625,7 +635,7 @@ const key_vars = [_][]const u8{ "MICROAGENT_API_KEY", "OPENAI_API_KEY", "OPENROU
 fn readSecret(init: std.process.Init, name: []const u8) ?[]const u8 {
     const home = init.environ_map.get("HOME") orelse return null;
     const path = std.fmt.allocPrint(init.arena.allocator(), "{s}/.secrets/{s}", .{ home, name }) catch return null;
-    const raw = std.Io.Dir.cwd().readFileAlloc(init.io, path, init.arena.allocator(), .limited(4096)) catch return null;
+    const raw = std.Io.Dir.cwd().readFileAlloc(init.io, path, init.arena.allocator(), .limited(max_secret_bytes)) catch return null;
     return std.mem.trim(u8, raw, " \t\r\n");
 }
 
@@ -1136,7 +1146,7 @@ fn streamChat(
             }
             var err_transfer: [8 * 1024]u8 = undefined;
             const err_reader = response.reader(&err_transfer);
-            const err_body = err_reader.allocRemaining(arena, .limited(16 * 1024)) catch "";
+            const err_body = err_reader.allocRemaining(arena, .limited(max_error_body_bytes)) catch "";
             const msg = try std.fmt.allocPrint(arena, "http {d}: {s}\n", .{
                 @intFromEnum(response.head.status),
                 terminalSafe(arena, err_body),
@@ -1549,39 +1559,62 @@ const max_bash_timeout_ms: u64 = 600_000;
 /// What `bash` runs under when the model sends no `timeout_ms`.
 const default_bash_timeout_ms: u64 = 120_000;
 
-/// Runs a tool subprocess and reaps it with everything it started.
+/// A tool subprocess in its own process group, and the reap that every tool
+/// owes its call.
 ///
 /// `std.process.run` signals only the process it spawned, so a tool call that
 /// timed out, or that hit an output cap, left the rest of its process tree
 /// running: the shell died, the build it had launched kept compiling, and the
-/// next turn inherited whatever those orphans held. This puts the child in its
-/// own process group and signals the group, so the tree goes with the call.
+/// next turn inherited whatever those orphans held. Every tool subprocess is
+/// therefore its own group leader, so the group signal stays the caller's to
+/// send. One place spells that, because a runner that spawned without it is a
+/// runner that leaks a process tree.
+const ToolChild = struct {
+    child: std.process.Child,
+    pgid: ?std.posix.pid_t,
+
+    fn spawn(io: Io, argv: []const []const u8) !ToolChild {
+        const child = try std.process.spawn(io, .{
+            .argv = argv,
+            .pgid = 0, // its own group leader, so the group signal stays ours
+            .stdin = .ignore,
+            .stdout = .pipe,
+            .stderr = .pipe,
+        });
+        return .{
+            .child = child,
+            .pgid = if (builtin.os.tag == .windows) null else @intCast(child.id.?),
+        };
+    }
+
+    /// Signals the whole group and then reaps the direct child, so a timeout
+    /// leaves neither an orphan nor a zombie. A child already reaped by `wait`
+    /// is a no-op here, and its group still gets the signal: a command that
+    /// backgrounded work and exited must not outlive the call.
+    fn reap(self: *ToolChild, io: Io) void {
+        if (self.pgid) |group| signalGroup(group);
+        self.child.kill(io);
+    }
+};
+
+/// Runs a tool subprocess and reaps it with everything it started.
 fn runToolProcess(
-    arena: std.mem.Allocator,
     io: Io,
+    arena: std.mem.Allocator,
     argv: []const []const u8,
     stdout_limit: usize,
     stderr_limit: usize,
     timeout: Io.Timeout,
 ) !std.process.RunResult {
-    var child = try std.process.spawn(io, .{
-        .argv = argv,
-        .pgid = 0, // its own group leader, so the group signal stays ours
-        .stdin = .ignore,
-        .stdout = .pipe,
-        .stderr = .pipe,
-    });
-    // Every exit path signals the whole group and then reaps the direct child,
-    // so a timeout leaves neither an orphan nor a zombie. A child already
-    // reaped by `wait` is a no-op here, and its group still gets the signal:
-    // a command that backgrounded work and exited must not outlive the call.
-    const pgid: ?std.posix.pid_t = if (builtin.os.tag == .windows) null else @intCast(child.id.?);
+    var spawned = try ToolChild.spawn(io, argv);
+    // The group is published while the call runs, so an interrupt reaches it,
+    // and cleared on the way out, so a later signal does not hit a dead group.
+    watchToolGroup(spawned.pgid);
     defer {
         watchToolGroup(null);
-        if (pgid) |group| signalGroup(group);
-        child.kill(io);
+        spawned.reap(io);
     }
-    watchToolGroup(pgid);
+    const child = &spawned.child;
 
     var multi_buffer: Io.File.MultiReader.Buffer(2) = undefined;
     var multi: Io.File.MultiReader = undefined;
@@ -1646,15 +1679,14 @@ fn forwardInterruptsToToolGroup() void {
 /// argv, and the failure text, the empty result and the two output streams are
 /// handled the same way for each of them.
 fn runSearchTool(io: Io, arena: std.mem.Allocator, argv: []const []const u8, what: []const u8) ![]u8 {
-    const res = runToolProcess(arena, io, argv, max_tool_output * 4, tool_stderr_limit, durationMs(tool_timeout_ms)) catch |err|
+    const res = runToolProcess(io, arena, argv, max_tool_output * 4, tool_stderr_limit, durationMs(tool_timeout_ms)) catch |err|
         return std.fmt.allocPrint(arena, "error: {s} failed: {s}", .{ what, @errorName(err) });
     if (res.stdout.len > 0) return res.stdout;
     if (res.stderr.len > 0) return res.stderr;
     return std.fmt.allocPrint(arena, "(no matches)", .{});
 }
 
-/// Read-only git, with the subcommands fixed here rather than assembled by the
-/// model. Deterministic, no shell quoting, and the output is capped: a raw
+/// Lines of git output a call keeps when the model asks for no limit: a raw
 /// `git log` in a big repository is thousands of lines of context nobody reads.
 const git_default_limit: usize = 400;
 
@@ -1666,6 +1698,8 @@ fn gitLineLimit(args: std.json.ObjectMap) usize {
     return @max(1, numCount(v));
 }
 
+/// Read-only git, with the subcommands fixed here rather than assembled by the
+/// model. Deterministic, no shell quoting, and the output is capped.
 fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     const cmd = str(args.get("cmd")) orelse return std.fmt.allocPrint(arena, "error: missing cmd", .{});
     const path = str(args.get("path"));
@@ -1697,7 +1731,7 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     try argv.append(arena, "--");
     if (path) |p| try argv.append(arena, p);
 
-    const res = runToolProcess(arena, io, argv.items, max_tool_output * 4, tool_stderr_limit, durationMs(tool_timeout_ms)) catch |err|
+    const res = runToolProcess(io, arena, argv.items, max_tool_output * 4, tool_stderr_limit, durationMs(tool_timeout_ms)) catch |err|
         return std.fmt.allocPrint(arena, "error: git {s} failed: {s}", .{ cmd, @errorName(err) });
     const text = if (res.stdout.len > 0) res.stdout else res.stderr;
     if (text.len == 0) return std.fmt.allocPrint(arena, "(git {s}: no output)", .{cmd});
@@ -2029,7 +2063,7 @@ fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
 
 fn toolRead(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     const path = str(args.get("path")) orelse return std.fmt.allocPrint(arena, "error: missing path", .{});
-    const raw = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(4 * 1024 * 1024)) catch |err|
+    const raw = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_read_bytes)) catch |err|
         return std.fmt.allocPrint(arena, "error: cannot read {s}: {s}", .{ path, @errorName(err) });
     if (!args.contains("offset") and !args.contains("limit")) return raw;
 
@@ -2064,7 +2098,7 @@ fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     const new = str(args.get("new_string")) orelse return std.fmt.allocPrint(arena, "error: missing new_string", .{});
     const all = if (args.get("replace_all")) |v| v == .bool and v.bool else false;
 
-    const raw = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(8 * 1024 * 1024)) catch |err|
+    const raw = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_edit_bytes)) catch |err|
         return std.fmt.allocPrint(arena, "error: cannot read {s}: {s}", .{ path, @errorName(err) });
     if (old.len == 0) return std.fmt.allocPrint(arena, "error: old_string is empty", .{});
 
@@ -2315,23 +2349,15 @@ fn runCapped(
     limit: usize,
     timeout: Io.Timeout,
 ) !Captured {
-    var child = try std.process.spawn(io, .{
-        .argv = argv,
-        .pgid = 0, // its own group leader, so the group signal stays ours
-        .stdin = .ignore,
-        .stdout = .pipe,
-        .stderr = .pipe,
-    });
-    // Every exit path signals the whole group and then reaps the direct child,
-    // so a timeout leaves neither an orphan nor a zombie. The group is
-    // published while it runs, so Ctrl+C reaches it, and cleared on the way out.
-    const pgid: ?std.posix.pid_t = if (builtin.os.tag == .windows) null else @intCast(child.id.?);
+    var spawned = try ToolChild.spawn(io, argv);
+    // The group is published while the call runs, so an interrupt reaches it,
+    // and cleared on the way out, so a later signal does not hit a dead group.
+    watchToolGroup(spawned.pgid);
     defer {
         watchToolGroup(null);
-        if (pgid) |group| signalGroup(group);
-        child.kill(io);
+        spawned.reap(io);
     }
-    watchToolGroup(pgid);
+    const child = &spawned.child;
 
     const files = [2]Io.File{ child.stdout.?, child.stderr.? };
     var chunks: [2][capture_chunk]u8 = undefined;
@@ -4034,28 +4060,51 @@ test "edit replaces one match, or every match when asked" {
     try std.testing.expectEqualStrings("y and y", try tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
 }
 
-/// The command whose process tree has to come down with it: it backgrounds a
-/// grandchild that outlives the shell, writes that grandchild's pid, and then
-/// runs past the timeout.
-const timeout_script = "sh -c 'echo $$ > {s}; sleep 30' &\nsleep 30";
+/// The two runners a tool subprocess can go through, named so the reaping
+/// check below runs against both with one body.
+const ToolRunner = enum {
+    /// `runToolProcess`, behind the search and git tools.
+    tool_process,
+    /// `runCapped`, behind `bash`.
+    capped,
 
-/// Runs `timeout_script` through one of the two runners that carry the
-/// process-group kill, and fails unless nothing of it is left alive.
-fn expectNoSurvivingGrandchild(io: Io, arena: std.mem.Allocator, runner: enum { tool, bash }) !void {
+    fn call(self: ToolRunner, arena: std.mem.Allocator, io: Io, argv: []const []const u8) anyerror!void {
+        const timeout = durationMs(300);
+        switch (self) {
+            .tool_process => _ = try runToolProcess(io, arena, argv, 4096, 4096, timeout),
+            .capped => _ = try runCapped(io, arena, argv, 4096, timeout),
+        }
+    }
+};
+
+/// Asserts that a runner took its whole process tree down with it. The command
+/// backgrounds a grandchild that outlives the shell, writes that grandchild's
+/// pid, and then runs past the timeout: without the group signal the grandchild
+/// is still alive when the call returns, and every timed-out call leaked one.
+/// `pid_name` names the file the grandchild reports itself in, so the two
+/// runners leave separate marks and the message says which one leaked.
+fn expectNoProcessSurvived(runner: ToolRunner, pid_name: []const u8) !void {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const n = try tmp.dir.realPath(io, &path_buf);
-    const pid_path = try std.fs.path.join(arena, &.{ path_buf[0..n], "grandchild.pid" });
+    const pid_path = try std.fs.path.join(arena, &.{ path_buf[0..n], pid_name });
     // The grandchild holds the pipe open, so the read only ends when the
     // timeout fires, which is the path under test.
-    const script = try std.fmt.allocPrint(arena, timeout_script, .{pid_path});
-    switch (runner) {
-        .tool => try std.testing.expectError(error.Timeout, runToolProcess(arena, io, &.{ "/bin/sh", "-c", script }, 4096, 4096, durationMs(300))),
-        .bash => try std.testing.expectError(error.Timeout, runCapped(io, arena, &.{ "/bin/sh", "-c", script }, 4096, durationMs(300))),
-    }
+    const script = try std.fmt.allocPrint(arena,
+        \\sh -c 'echo $$ > {s}; sleep 30' &
+        \\sleep 30
+    , .{pid_path});
+    try std.testing.expectError(error.Timeout, runner.call(arena, io, &.{ "/bin/sh", "-c", script }));
 
-    const raw = tmp.dir.readFileAlloc(io, "grandchild.pid", arena, .limited(64)) catch return error.GrandchildNotReported;
+    const raw = tmp.dir.readFileAlloc(io, pid_name, arena, .limited(64)) catch return error.GrandchildNotReported;
     const pid = try std.fmt.parseInt(std.posix.pid_t, std.mem.trim(u8, raw, " \t\r\n"), 10);
     // The kill is delivered asynchronously and the orphan is reaped by init
     // afterwards, so "gone" is a short poll rather than an instant check.
@@ -4064,7 +4113,7 @@ fn expectNoSurvivingGrandchild(io: Io, arena: std.mem.Allocator, runner: enum { 
         std.posix.kill(pid, .CONT) catch return;
         try io.sleep(.{ .nanoseconds = 20 * std.time.ns_per_ms }, .awake);
     }
-    std.debug.print("{s} grandchild {d} survived the tool call\n", .{ @tagName(runner), pid });
+    std.debug.print("grandchild {d} survived {s}\n", .{ pid, @tagName(runner) });
     return error.GrandchildSurvived;
 }
 
@@ -4091,7 +4140,7 @@ test "an interrupt during a tool call is forwarded to that call's process group"
         fn go(a: std.mem.Allocator, t: Io) void {
             // The call outlives nothing here: the handler kills its group, so
             // a hung call would hang the suite rather than fail it.
-            _ = runToolProcess(a, t, &.{ "/bin/sh", "-c", "sleep 5" }, 4096, 4096, durationMs(3000)) catch {};
+            _ = runToolProcess(t, a, &.{ "/bin/sh", "-c", "sleep 5" }, 4096, 4096, durationMs(3000)) catch {};
         }
     };
     const thread = try Thread.spawn(.{}, Call.go, .{ arena, io });
@@ -4108,12 +4157,7 @@ test "an interrupt during a tool call is forwarded to that call's process group"
 // signal the grandchild is still alive when the call returns, and every
 // timed-out call leaked one.
 test "a tool call that times out leaves no process of its own behind" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
-
-    try expectNoSurvivingGrandchild(threaded.io(), arena_state.allocator(), .tool);
+    try expectNoProcessSurvived(.tool_process, "grandchild.pid");
 }
 
 // The session store is a per-run directory nothing used to delete from, so a
@@ -4170,7 +4214,7 @@ test "a tool call reports the exit status of the command it ran" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const res = try runToolProcess(arena, std.testing.io, &.{ "/bin/sh", "-c", "printf out; printf err 1>&2; exit 3" }, 4096, 4096, durationMs(10_000));
+    const res = try runToolProcess(std.testing.io, arena, &.{ "/bin/sh", "-c", "printf out; printf err 1>&2; exit 3" }, 4096, 4096, durationMs(10_000));
     try std.testing.expectEqualStrings("out", res.stdout);
     try std.testing.expectEqualStrings("err", res.stderr);
     try std.testing.expectEqual(@as(u8, 3), res.term.exited);
@@ -4181,12 +4225,7 @@ test "a tool call reports the exit status of the command it ran" {
 // that backgrounds work and then outruns its deadline took the whole tree with
 // it only where the search tools already did.
 test "a bash call that times out leaves no process of its own behind" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
-
-    try expectNoSurvivingGrandchild(threaded.io(), arena_state.allocator(), .bash);
+    try expectNoProcessSurvived(.capped, "bash_grandchild.pid");
 }
 
 // The name and the id of a streamed tool call are copies the run allocator

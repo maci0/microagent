@@ -554,6 +554,45 @@ fn decideFromBody(arena: std.mem.Allocator, body: []const u8) !Decision {
     return .{ .rel = rel, .in = in, .verdict = decide(in) };
 }
 
+/// What the subcommand's command line asked for. `--help` and `--version`
+/// stop the parse where they appear, the way the agent's own parse does, and a
+/// bad argument is a result of its own rather than an error the caller has to
+/// tell apart from one.
+const Parsed = union(enum) {
+    run: struct { check_only: bool, repo: ?[]const u8 },
+    help,
+    version,
+    /// A flag that needs a value it did not get, with the sentence to print.
+    bad_flag: []const u8,
+    /// An argument this subcommand does not take, which the message quotes.
+    /// The slice is the caller's, so the message is formatted at the call site.
+    unknown: []const u8,
+};
+
+fn parseArgs(args: []const []const u8) Parsed {
+    var parsed: Parsed = .{ .run = .{ .check_only = false, .repo = null } };
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "help")) {
+            return .help;
+        } else if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-V")) {
+            return .version;
+        } else if (std.mem.eql(u8, arg, "--check") or std.mem.eql(u8, arg, "-c")) {
+            parsed.run.check_only = true;
+        } else if (std.mem.eql(u8, arg, "--repo")) {
+            i += 1;
+            if (i >= args.len) return .{ .bad_flag = "--repo needs an owner/name value" };
+            parsed.run.repo = args[i];
+        } else if (std.mem.startsWith(u8, arg, "--repo=")) {
+            parsed.run.repo = arg["--repo=".len..];
+        } else {
+            return .{ .unknown = arg };
+        }
+    }
+    return parsed;
+}
+
 /// Subcommand entry, called by main with the arguments after `update`.
 /// Returns the process exit code.
 pub fn run(
@@ -563,31 +602,35 @@ pub fn run(
     env: *std.process.Environ.Map,
     args: []const []const u8,
 ) u8 {
-    var check_only = false;
-    var repo_arg: ?[]const u8 = null;
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        const arg = args[i];
-        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "help")) {
+    const parsed = parseArgs(args);
+    switch (parsed) {
+        .help => {
             printUsage(io);
             return 0;
-        } else if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-V")) {
+        },
+        .version => {
             net.writeOut(io, "microagent " ++ version ++ "\n");
             return 0;
-        } else if (std.mem.eql(u8, arg, "--check") or std.mem.eql(u8, arg, "-c")) {
-            check_only = true;
-        } else if (std.mem.eql(u8, arg, "--repo")) {
-            i += 1;
-            if (i >= args.len) return updateUsageError(io, "--repo needs an owner/name value", .{});
-            repo_arg = args[i];
-        } else if (std.mem.startsWith(u8, arg, "--repo=")) {
-            repo_arg = arg["--repo=".len..];
-        } else {
-            return unknownArgument(io, arg);
-        }
+        },
+        .bad_flag => |msg| return updateUsageError(io, "{s}", .{msg}),
+        .unknown => |arg| return updateUsageError(io, "unknown or incomplete argument '{s}'", .{arg}),
+        .run => |opts| {
+            return runChecked(io, gpa, arena, env, opts.check_only, opts.repo orelse default_repo);
+        },
     }
+}
 
-    const repo = repo_arg orelse default_repo;
+/// The update itself, with a command line already read: fetch the release,
+/// report where this build stands against it, and replace the binary only when
+/// the asset it names earns it.
+fn runChecked(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    env: *std.process.Environ.Map,
+    check_only: bool,
+    repo: []const u8,
+) u8 {
     var api_buf: [240]u8 = undefined;
     // A value the flag cannot carry is a usage error, so it prints the reason
     // and the usage text together like every other one.
@@ -698,10 +741,6 @@ fn updateUsageError(io: std.Io, comptime fmt: []const u8, args: anytype) u8 {
     return 2;
 }
 
-fn unknownArgument(io: std.Io, arg: []const u8) u8 {
-    return updateUsageError(io, "unknown or incomplete argument '{s}'", .{arg});
-}
-
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 const abc_sha = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
@@ -784,6 +823,44 @@ test "update: a release page that is not https on a GitHub host is not printed" 
     try std.testing.expect(trustedGithubUrl("https://api.github.com/repos/maci0/microagent/releases/latest"));
     try std.testing.expect(trustedGithubUrl("https://release-assets.githubusercontent.com/microagent"));
     try std.testing.expect(!trustedGithubUrl("https://objects.githubusercontent.com.evil.com/x"));
+}
+
+// The subcommand's command line is the one thing about `run` that can be read
+// without a socket, and it decides whether the run fetches an asset at all.
+test "update: the command line reads in either flag form, and help and version win" {
+    const plain = parseArgs(&.{});
+    try std.testing.expect(!plain.run.check_only);
+    try std.testing.expect(plain.run.repo == null);
+
+    const checked = parseArgs(&.{ "--check", "--repo=you/microagent" }).run;
+    try std.testing.expect(checked.check_only);
+    try std.testing.expectEqualStrings("you/microagent", checked.repo.?);
+
+    const split = parseArgs(&.{ "-c", "--repo", "you/microagent" }).run;
+    try std.testing.expect(split.check_only);
+    try std.testing.expectEqualStrings("you/microagent", split.repo.?);
+
+    switch (parseArgs(&.{ "--check", "--help" })) {
+        .help => {},
+        else => return error.TestUnexpectedResult,
+    }
+    switch (parseArgs(&.{"-V"})) {
+        .version => {},
+        else => return error.TestUnexpectedResult,
+    }
+    // A bare `help` is a word a script reaches for, and the flag is not.
+    switch (parseArgs(&.{"help"})) {
+        .help => {},
+        else => return error.TestUnexpectedResult,
+    }
+    switch (parseArgs(&.{"--repo"})) {
+        .bad_flag => |msg| try std.testing.expectEqualStrings("--repo needs an owner/name value", msg),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (parseArgs(&.{"--nope"})) {
+        .unknown => |arg| try std.testing.expectEqualStrings("--nope", arg),
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "update: --check and an equal version do not fetch an asset" {
