@@ -27,8 +27,9 @@ pub const max_tool_output = 24 * 1024;
 const max_read_bytes: usize = 4 * 1024 * 1024;
 /// `edit` reads the file it rewrites, so it holds the larger of the two.
 const max_edit_bytes: usize = 8 * 1024 * 1024;
-/// A secret file is one key, not a document.
-const max_secret_bytes: usize = 4096;
+/// A secret file is one key, not a document. Public because the diagnostic
+/// `main` writes when a key file trips this cap names the ceiling.
+pub const max_secret_bytes: usize = 4096;
 
 /// The lines a tool appends after the output it captured, kept as constants so
 /// the buffer it assembles is sized from the same text it writes. Each carries
@@ -353,7 +354,7 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
     // what the `path` argument is for, and that one is checked.
     if (rev) |r| if (std.mem.indexOfScalar(u8, r, ':')) |colon| {
         const named = r[colon + 1 ..];
-        if (isCredentialPath(named)) return credentialRefusal(arena, "git", named);
+        if (isCredentialPath(named)) return credentialRefusal(arena, "git", named, false);
         return std.fmt.allocPrint(arena, "error: rev must name a revision, not a file; use the path argument for a file (got '{s}')", .{
             chat.safeText(arena, r, 120),
         });
@@ -366,10 +367,10 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
     // the model named and never a name it did not: the exclusion set this tool
     // relies on does not reach a rev that is a bare file, and the key came
     // back as a tool result either way.
-    if (rev) |r| if (isCredentialPath(r)) return credentialRefusal(arena, "git", r);
+    if (rev) |r| if (isCredentialPath(r)) return credentialRefusal(arena, "git", r, false);
     // `git show <rev> -- .env` prints a committed credentials file as a patch,
     // so the path gets the refusal `read` gives it rather than a git one.
-    if (path) |p| if (isCredentialPath(p)) return credentialRefusal(arena, "git", p);
+    if (path) |p| if (isCredentialPath(p)) return credentialRefusal(arena, "git", p, false);
 
     const argv = gitArgv(arena, cmd, rev, path, limit) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -639,7 +640,7 @@ fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_
     // `git show HEAD -- .env` both come back whole, and a tool result is
     // re-sent to the provider on every later turn. So the same name check runs
     // over the command's own words.
-    if (credentialInCommand(command)) |path| return credentialRefusal(arena, "bash", path);
+    if (credentialInCommand(command)) |path| return credentialRefusal(arena, "bash", path, false);
     const timeout_ms: u64 = bashTimeoutMs(requestedTimeoutMs(args.get("timeout_ms")), ceiling_ms);
     const capture_limit = max_tool_output * 4;
     // A command that runs to its own timeout has usually already said what is
@@ -820,10 +821,19 @@ const path_sep = [_]u8{std.fs.path.sep};
 /// the answer is a decision about the name, not about what opened.
 fn isCredentialPath(path: []const u8) bool {
     // Every component, not just the leaf: `~/.secrets/openrouter` is named by a
-    // directory the path only passes through. dirname and basename are the
-    // target's own separator, so the walk is right on the platforms this ships
-    // to and needs no second spelling. A trailing separator is trimmed first,
-    // or the leaf basename comes back empty and the name goes unchecked.
+    // directory the path only passes through, and `deploy/.env/prod` by a
+    // directory the same exclusion set already hides from `search` and `git`.
+    // dirname and basename are the target's own separator, so the walk is right
+    // on the platforms this ships to and needs no second spelling. A trailing
+    // separator is trimmed first, or the leaf basename comes back empty and the
+    // name goes unchecked.
+    //
+    // The name rules run on every component too, and not only the leaf. None of
+    // the globs in `credential_glob_table` carries a separator, so the backend
+    // that applies them matches a basename at any depth: `!.env` covers
+    // `deploy/.env/prod`, and `!*.pem` covers `deploy/prod.pem/notes`. The
+    // directories are the same walk's other half, and applying one without the
+    // other is a hole in the middle of it.
     var component: ?[]const u8 = std.mem.trimEnd(u8, path, &path_sep);
     while (component) |c| {
         const name = std.fs.path.basename(c);
@@ -831,16 +841,19 @@ fn isCredentialPath(path: []const u8) bool {
             for (credential_dirs) |dir| {
                 if (name.len == dir.len and std.ascii.eqlIgnoreCase(name, dir)) return true;
             }
+            if (isCredentialName(name)) return true;
         }
         component = std.fs.path.dirname(c);
     }
-    return isCredentialName(std.fs.path.basename(std.mem.trimEnd(u8, path, &path_sep)));
+    return false;
 }
 
-/// The tools that change a file rather than report one. The credential refusal
-/// names them because the advice a reading tool gets is wrong for them: there
-/// is no reading of a key file that should be going on, so the answer is the
-/// operator rather than another tool.
+/// The tools that change a file rather than report one, whatever else they can
+/// do. The credential refusal names them because the advice a reading tool
+/// gets is wrong for them: there is no reading of a key file that should be
+/// going on, so the answer is the operator rather than another tool. `ast` is
+/// in neither list on its own, because a search leaves the tree as it found it
+/// and a rewrite does not; the caller says which it was.
 fn isWriting(tool: []const u8) bool {
     return std.mem.eql(u8, tool, "write") or std.mem.eql(u8, tool, "edit");
 }
@@ -848,16 +861,20 @@ fn isWriting(tool: []const u8) bool {
 /// What a tool returns instead of a credential. It names the file, so a model
 /// that asked for it knows which one was refused, and it says what to do
 /// instead, because a bare error reads as a broken tool and gets retried.
-fn credentialRefusal(arena: std.mem.Allocator, tool: []const u8, path: []const u8) error{OutOfMemory}![]const u8 {
+/// `writes` is the caller's answer to "would this call have changed the file",
+/// which the tool's name alone does not always carry.
+fn credentialRefusal(arena: std.mem.Allocator, tool: []const u8, path: []const u8, writes: bool) error{OutOfMemory}![]const u8 {
     // The advice has to be the one that is true for the tool that was refused.
     // The `bash` branch sends the model to the operator because `bash` runs
     // the same name check over its own words: telling a model that `read` just
     // refused to run the command that fetches the bytes walks it into the same
     // refusal one line later. A tool that would have overwritten the file says
     // the same thing, because there is no reading of it anyone should be doing.
+    // `writes` covers `ast --rewrite`, which passes the path to `--update-all`
+    // whatever the globs exclude, and is a write by the only test that matters.
     const advice = if (std.mem.eql(u8, tool, "bash"))
         "`bash` does not read it either. Ask the operator for the value you need rather than printing a key."
-    else if (isWriting(tool))
+    else if (writes or isWriting(tool))
         "No tool rewrites a credentials file. Ask the operator to make that change rather than replacing a key with a guess."
     else
         "Run the command that needs the key through `bash`, and do not print it.";
@@ -871,7 +888,7 @@ fn credentialRefusal(arena: std.mem.Allocator, tool: []const u8, path: []const u
 
 fn toolRead(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]const u8 {
     const path = chat.str(args.get("path")) orelse return std.fmt.allocPrint(arena, "error: missing path", .{});
-    if (isCredentialPath(path)) return try credentialRefusal(arena, "read", path);
+    if (isCredentialPath(path)) return try credentialRefusal(arena, "read", path, false);
     if (!args.contains("offset") and !args.contains("limit"))
         return std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_read_bytes)) catch |err|
             return readFailed(arena, path, err);
@@ -996,7 +1013,7 @@ fn toolWrite(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]cons
     // model that gets the path from a file in the tree and the content from a
     // guess replaces the operator's working key with a placeholder, and the
     // next run of the agent cannot authenticate at all.
-    if (isCredentialPath(path)) return try credentialRefusal(arena, "write", path);
+    if (isCredentialPath(path)) return try credentialRefusal(arena, "write", path, true);
     // A call that names a path and no content is a call the model got cut
     // short on, not one asking for an empty file: a `write` is the one tool
     // result a run cannot undo, and emptying a source file is worse than
@@ -1060,7 +1077,7 @@ fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]const
     // match, and the operator's key is the one file in a tree where a match the
     // model guessed at and a rewrite of the value beside it is damage nobody
     // asked for.
-    if (isCredentialPath(path)) return try credentialRefusal(arena, "edit", path);
+    if (isCredentialPath(path)) return try credentialRefusal(arena, "edit", path, true);
     const old = chat.str(args.get("old_string")) orelse return std.fmt.allocPrint(arena, "error: missing old_string", .{});
     const new = chat.str(args.get("new_string")) orelse return std.fmt.allocPrint(arena, "error: missing new_string", .{});
     const all = if (args.get("replace_all")) |v| v == .bool and v.bool else false;
@@ -1126,7 +1143,7 @@ fn toolSearch(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceilin
     // `{"path": ".env"}` came back with the key's line in it. The name is
     // checked here instead, which is what the globs and this test between them
     // make true.
-    if (isCredentialPath(path)) return try credentialRefusal(arena, "search", path);
+    if (isCredentialPath(path)) return try credentialRefusal(arena, "search", path, false);
     const glob = chat.str(args.get("glob"));
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(arena, &.{ "rg", "--line-number", "--no-heading", "--color", "never", "--max-count", "200", "--glob-case-insensitive" });
@@ -1157,9 +1174,12 @@ fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
     const path = chat.str(args.get("path")) orelse ".";
     // The same hole `search` has: `--globs` filters the walk, and a file named
     // as the path is rewritten whatever they say, which is a key's line in a
-    // match and a keystore in the diff of the turn after.
-    if (isCredentialPath(path)) return try credentialRefusal(arena, "ast", path);
+    // match and a keystore in the diff of the turn after. `rewrite` is read
+    // first because it is what separates the two: a search leaves the file as
+    // it found it, and a rewrite passes it to `--update-all`, so the refusal
+    // for the second is the one that says no tool rewrites a key.
     const rewrite = chat.str(args.get("rewrite"));
+    if (isCredentialPath(path)) return try credentialRefusal(arena, "ast", path, rewrite != null);
     if (rewrite) |r| {
         if (try astRewriteRefusal(arena, pattern, r)) |why| return why;
     }
@@ -2470,6 +2490,16 @@ test "read refuses a credentials file and leaves every other path alone" {
         "home/user/.git-credentials",
         "home/user/.aws/credentials",
         "vault.keystore",
+        // A name at any depth, not only at the leaf. None of the globs in
+        // `credential_globs` carries a separator, so the backend that applies
+        // them matches a basename wherever it sits, and a path the walk
+        // answered about the leaf alone let these through while `search` and
+        // `git` were already refusing them.
+        "deploy/.env/prod",
+        "deploy/.ssh/config",
+        "home/user/.netrc/config",
+        "home/user/.aws/credentials/db.ini",
+        "certs/server.pem/notes",
         // A trailing separator names the same file, and the walk strips it
         // with the target's own separator rather than a literal one, so a
         // target whose separator is not `/` trims it too.
@@ -2507,11 +2537,20 @@ test "the credentials refusal names the file and the way out" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const refused = try credentialRefusal(arena, "read", "/home/someone/.secrets/openrouter");
+    const refused = try credentialRefusal(arena, "read", "/home/someone/.secrets/openrouter", false);
     try std.testing.expect(std.mem.indexOf(u8, refused, "/home/someone/.secrets/openrouter") != null);
     try std.testing.expect(std.mem.indexOf(u8, refused, "bash") != null);
     // Not a single byte of a key is in the message, only the path that names it.
     try std.testing.expect(std.mem.indexOf(u8, refused, "sk-") == null);
+
+    // The same tool name, one argument apart: a search leaves the file alone
+    // and a rewrite passes it to `--update-all`, so the advice cannot be the
+    // one that sends the model to another tool.
+    const search = try credentialRefusal(arena, "ast", "/home/someone/.env", false);
+    const rewritten = try credentialRefusal(arena, "ast", "/home/someone/.env", true);
+    try std.testing.expect(std.mem.indexOf(u8, search, "bash") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rewritten, "rewrites a credentials file") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rewritten, "bash") == null);
 }
 
 // The guard is on the tool the model calls, not only on the predicate, so a

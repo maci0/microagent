@@ -938,7 +938,18 @@ fn resolveKey(io: Io, init: std.process.Init, given: []const u8) Key {
         // as no key, and the difference is the whole of what the caller does
         // next: the first is a permissions problem on a file that holds a
         // working key, the second is a key to go and find.
-        .unreadable => |u| net.note(io, arena, "microagent: {s} could not be read ({s}); it may hold a key this process cannot reach, and no key was taken from it\n", .{ shown_fallback, @errorName(u.reason) }),
+        // `StreamTooLong` is the one failure in this arm that is not about
+        // access, and `readSecret` says the caller names it rather than
+        // reporting a missing key: the file opened and holds something, it is
+        // not shaped like a key, and the operator has to be told which of the
+        // two problems they have.
+        .unreadable => |u| {
+            if (u.reason == error.StreamTooLong) {
+                net.note(io, arena, "microagent: {s} is not a key file: it is larger than the {d} bytes a key may be, and no key was taken from it\n", .{ shown_fallback, tool_mod.max_secret_bytes });
+            } else {
+                net.note(io, arena, "microagent: {s} could not be read ({s}); it may hold a key this process cannot reach, and no key was taken from it\n", .{ shown_fallback, @errorName(u.reason) });
+            }
+        },
         .absent => {},
     }
     return .{ .value = "", .source = "none" };
