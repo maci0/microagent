@@ -2450,7 +2450,6 @@ test "a character split across two reads is written once it is whole" {
         const take = @min(chunk, answer.len - taken);
         try buf.appendSlice(std.testing.allocator, answer[taken..][0..take]);
         taken += take;
-        // What the flush writes, and what it holds for the next read.
         const held = chat_mod.partialTailLen(buf.items);
         try written.appendSlice(std.testing.allocator, buf.items[0 .. buf.items.len - held]);
         dropWritten(&buf, buf.items.len - held);
