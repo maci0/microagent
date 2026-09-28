@@ -2261,15 +2261,20 @@ fn toolRead(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
 
     const offset: usize = @max(1, numCount(args.get("offset")));
     const limit: usize = if (args.get("limit")) |v| numCount(v) else std.math.maxInt(usize);
+    // A file ending in a newline splits into a last empty piece that is not a
+    // line of the file, and counting it is a blank line the model never had.
+    const lines_src = if (raw.len > 0 and raw[raw.len - 1] == '\n') raw[0 .. raw.len - 1] else raw;
     var buf: std.ArrayList(u8) = .empty;
-    var lines = std.mem.splitScalar(u8, raw, '\n');
+    var lines = std.mem.splitScalar(u8, lines_src, '\n');
     var n: usize = 0;
     var taken: usize = 0;
+    var first = true;
     while (lines.next()) |line| : (n += 1) {
         if (n + 1 < offset) continue;
         if (taken >= limit) break;
+        if (!first) try buf.append(arena, '\n');
         try buf.appendSlice(arena, line);
-        try buf.appendSlice(arena, "\n");
+        first = false;
         taken += 1;
     }
     return buf.items;
@@ -2277,7 +2282,10 @@ fn toolRead(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
 
 fn toolWrite(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     const path = str(args.get("path")) orelse return std.fmt.allocPrint(arena, "error: missing path", .{});
-    const content = str(args.get("content")) orelse "";
+    // The schema makes `content` required, and a file written with none is a
+    // file truncated to nothing: a model that left the argument out would lose
+    // what was there and read the empty result back as the answer.
+    const content = str(args.get("content")) orelse return std.fmt.allocPrint(arena, "error: missing content", .{});
     if (std.fs.path.dirname(path)) |dir| std.Io.Dir.cwd().createDirPath(io, dir) catch {};
     std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = content }) catch |err|
         return std.fmt.allocPrint(arena, "error: cannot write {s}: {s}", .{ path, @errorName(err) });
@@ -2782,6 +2790,8 @@ test "the api key is only sent over https, or to a loopback gateway" {
     try std.testing.expect(baseUrlCarriesKey("http://127.0.0.1:1234/v1"));
     try std.testing.expect(baseUrlCarriesKey("http://127.1.2.3/v1"));
     try std.testing.expect(baseUrlCarriesKey("http://[::1]:1234/v1"));
+    // The reserved TLD a name resolves into loopback as well.
+    try std.testing.expect(baseUrlCarriesKey("http://gateway.localhost:1234/v1"));
 
     // Anywhere else, plaintext would put the key on the wire in the clear.
     try std.testing.expect(!baseUrlCarriesKey("http://openrouter.ai/api/v1"));
@@ -2789,6 +2799,13 @@ test "the api key is only sent over https, or to a loopback gateway" {
     // A name that merely starts with the loopback prefix is somebody else's.
     try std.testing.expect(!baseUrlCarriesKey("http://127.evil.com/api/v1"));
     try std.testing.expect(!baseUrlCarriesKey("http://localhost.evil.com/api/v1"));
+    // Nor is one that ends in four numeric octets after a leading 127.
+    try std.testing.expect(!baseUrlCarriesKey("http://127.0.0.1.evil.com/api/v1"));
+    try std.testing.expect(!baseUrlCarriesKey("http://127.0.0.1.1/api/v1"));
+    try std.testing.expect(!baseUrlCarriesKey("http://127.0/api/v1"));
+    // Three octets, or one that is not a number, is not the loopback range.
+    try std.testing.expect(!baseUrlCarriesKey("http://127.0.1/api/v1"));
+    try std.testing.expect(!baseUrlCarriesKey("http://127.0.0.x/api/v1"));
     try std.testing.expect(!baseUrlCarriesKey("http://127.0.0/v1"));
     try std.testing.expect(!baseUrlCarriesKey("http://[::2]:1234/v1"));
     // Anything that is not a url at all carries nothing.
@@ -3036,6 +3053,106 @@ test "a read of a secret file returns the refusal, not the key" {
     const out = try toolRead(io, arena, args);
     try std.testing.expect(std.mem.indexOf(u8, out, "sk-do-not-send") == null);
     try std.testing.expect(std.mem.indexOf(u8, out, "secret file") != null);
+}
+
+// `offset` and `limit` are how a model reads a file it cannot take whole, and
+// a window that is one line off hands back the wrong lines with no way for the
+// model to tell. The window is 1-based and inclusive at both ends, and it
+// returns the lines the file has: a trailing newline is not a blank line.
+test "a read window is the lines it names, and no others" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data = "one\ntwo\nthree\nfour\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "lines.txt", .data = data });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const path = try std.fmt.allocPrint(arena, "{s}/lines.txt", .{path_buf[0..n]});
+
+    var args: std.json.ObjectMap = .empty;
+    try args.put(arena, "path", .{ .string = path });
+    // No window is the file as it is, byte for byte.
+    try std.testing.expectEqualStrings(data, try toolRead(io, arena, args));
+
+    const cases = [_]struct { offset: ?i64, limit: ?i64, want: []const u8 }{
+        .{ .offset = 1, .limit = 1, .want = "one" },
+        .{ .offset = 2, .limit = 2, .want = "two\nthree" },
+        .{ .offset = 4, .limit = null, .want = "four" },
+        .{ .offset = 1, .limit = null, .want = "one\ntwo\nthree\nfour" },
+        .{ .offset = 1, .limit = 99, .want = "one\ntwo\nthree\nfour" },
+        // A zero line count is no lines, and a window past the end is empty.
+        .{ .offset = 1, .limit = 0, .want = "" },
+        .{ .offset = 5, .limit = null, .want = "" },
+        .{ .offset = 99, .limit = 2, .want = "" },
+        // Both edges are clamped into the file's own line numbers, so a zero or
+        // a negative from the model still names a line rather than a position
+        // before the first one.
+        .{ .offset = 0, .limit = 2, .want = "one\ntwo" },
+        .{ .offset = -4, .limit = 1, .want = "one" },
+    };
+    for (cases) |c| {
+        args.clearRetainingCapacity();
+        try args.put(arena, "path", .{ .string = path });
+        if (c.offset) |o| try args.put(arena, "offset", .{ .integer = o });
+        if (c.limit) |l| try args.put(arena, "limit", .{ .integer = l });
+        const got = try toolRead(io, arena, args);
+        if (!std.mem.eql(u8, got, c.want))
+            std.debug.print("offset {?d} limit {?d} gave {s}\n", .{ c.offset, c.limit, got });
+        try std.testing.expectEqualStrings(c.want, got);
+    }
+}
+
+// The write tool is the one that destroys what is there, so what it accepts
+// and what it reports is the whole of its contract: the file lands with the
+// bytes that were sent, its parent directories are created, and an existing
+// file is replaced rather than appended to.
+test "write creates the file, its parents, and reports what it wrote" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const root = path_buf[0..n];
+    // Two levels down, so the parent directories are made rather than assumed.
+    const path = try std.fmt.allocPrint(arena, "{s}/pkg/deep/new.zig", .{root});
+
+    var args: std.json.ObjectMap = .empty;
+    try args.put(arena, "path", .{ .string = path });
+    try args.put(arena, "content", .{ .string = "pub const x = 1;\n" });
+    try std.testing.expectEqualStrings(
+        try std.fmt.allocPrint(arena, "wrote 17 bytes to {s}", .{path}),
+        try toolWrite(io, arena, args),
+    );
+    const wrote = try tmp.dir.readFileAlloc(io, "pkg/deep/new.zig", arena, .limited(64));
+    try std.testing.expectEqualStrings("pub const x = 1;\n", wrote);
+
+    // A second write replaces the file; nothing is appended to the first.
+    try args.put(arena, "content", .{ .string = "y" });
+    try std.testing.expectEqualStrings(
+        try std.fmt.allocPrint(arena, "wrote 1 bytes to {s}", .{path}),
+        try toolWrite(io, arena, args),
+    );
+    const replaced = try tmp.dir.readFileAlloc(io, "pkg/deep/new.zig", arena, .limited(64));
+    try std.testing.expectEqualStrings("y", replaced);
+
+    // An empty file is a file the model asked for, so it is written.
+    try args.put(arena, "content", .{ .string = "" });
+    _ = try toolWrite(io, arena, args);
+    try std.testing.expectEqualStrings("", try tmp.dir.readFileAlloc(io, "pkg/deep/new.zig", arena, .limited(64)));
 }
 
 test "a tool argument cannot repaint the operator's terminal" {
@@ -3847,6 +3964,7 @@ test "each tool refuses a missing required argument" {
         .{ .tool = "bash", .args = "{}", .want = "error: missing command" },
         .{ .tool = "read", .args = "{}", .want = "error: missing path" },
         .{ .tool = "write", .args = "{}", .want = "error: missing path" },
+        .{ .tool = "write", .args = "{\"path\":\"a.zig\"}", .want = "error: missing content" },
         .{ .tool = "edit", .args = "{}", .want = "error: missing path" },
         .{ .tool = "edit", .args = "{\"path\":\"a.zig\"}", .want = "error: missing old_string" },
         .{ .tool = "edit", .args = "{\"path\":\"a.zig\",\"old_string\":\"a\"}", .want = "error: missing new_string" },
@@ -3878,6 +3996,11 @@ test "a tool argument sent as a number is missing, not a value" {
     try std.testing.expectEqualStrings(
         "error: missing command",
         try dispatch(arena, "bash", "{\"command\":null}"),
+    );
+    // A write with no content is a truncation, so it is refused the same way.
+    try std.testing.expectEqualStrings(
+        "error: missing content",
+        try dispatch(arena, "write", "{\"path\":\"a.zig\",\"content\":42}"),
     );
 }
 
@@ -4475,9 +4598,12 @@ fn expectNoProcessSurvived(runner: ToolRunner, pid_name: []const u8) !void {
     const n = try tmp.dir.realPath(io, &path_buf);
     const pid_path = try std.fs.path.join(arena, &.{ path_buf[0..n], pid_name });
     // The grandchild holds the pipe open, so the read only ends when the
-    // timeout fires, which is the path under test.
+    // timeout fires, which is the path under test. `$!` and not `$$`: inside a
+    // nested `sh -c` the latter is still the outer shell's pid, which the
+    // runner kills directly, so the check would pass on a tree that leaked
+    // everything below it.
     const script = try std.fmt.allocPrint(arena,
-        \\sh -c 'echo $$ > {s}; sleep 30' &
+        \\sh -c 'sleep 30 & echo $! > {s}; wait' &
         \\sleep 30
     , .{pid_path});
     try std.testing.expectError(error.Timeout, runner.call(arena, io, &.{ "/bin/sh", "-c", script }));
