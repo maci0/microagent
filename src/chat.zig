@@ -241,6 +241,55 @@ pub fn clamp(s: []const u8, max: usize) []const u8 {
     return s[0..end];
 }
 
+const hex_digits = "0123456789abcdef";
+
+/// Text from outside the process, as an operator reads it on one line: at most
+/// `max` bytes, every C0 control and DEL written as `\xNN` so it cannot end the
+/// line or move the cursor, and every byte that is not part of a valid UTF-8
+/// sequence written as U+FFFD so it does not reach the screen as mojibake.
+///
+/// What the value quotes is not this program's to choose: a config key is a
+/// line a reviewed repository committed and a flag is whatever the caller
+/// typed, so neither is guaranteed to be text. The two other untrusted-byte
+/// paths already normalize, the request body by `writeJsonString` and an
+/// error body by the tool module's `terminalSafe`; this is the third, for the
+/// diagnostics in between.
+///
+/// The result is a prefix of the escaped text, never cut inside a character or
+/// inside an escape, and the budget bounds what comes out rather than what
+/// goes in: a control character costs four bytes, so the same `max` holds fewer
+/// of them.
+pub fn safeText(arena: std.mem.Allocator, s: []const u8, max: usize) []const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    while (i < s.len) {
+        const c = s[i];
+        if (c < 0x20 or c == 0x7f) {
+            if (out.items.len + 4 > max) break;
+            out.appendSlice(arena, &.{ '\\', 'x', hex_digits[c >> 4], hex_digits[c & 0x0f] }) catch break;
+            i += 1;
+            continue;
+        }
+        if (c < 0x80) {
+            if (out.items.len + 1 > max) break;
+            out.append(arena, c) catch break;
+            i += 1;
+            continue;
+        }
+        const len = utf8SequenceLen(s, i);
+        if (len == 0) {
+            if (out.items.len + 3 > max) break;
+            out.appendSlice(arena, "\u{fffd}") catch break;
+            i += 1;
+            continue;
+        }
+        if (out.items.len + len > max) break;
+        out.appendSlice(arena, s[i .. i + len]) catch break;
+        i += len;
+    }
+    return out.items;
+}
+
 test "json string escaping" {
     var buf = JsonBuf.init(std.testing.allocator);
     try writeJsonString(buf.writer(), "a\"b\\c\nd\t\u{7}");
@@ -309,6 +358,49 @@ test "an empty provider string is the shared slice, not a copy this run owns" {
     const owned = try ownString(gpa, "stop");
     defer gpa.free(owned);
     try std.testing.expectEqualStrings("stop", owned);
+}
+
+test "a value quoted back is text the terminal can be shown" {
+    // A config key is whatever bytes the line held, a flag whatever the caller
+    // typed. Both reach a diagnostic, so both are bounded and made printable
+    // here rather than by each caller.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    try std.testing.expectEqualStrings("caf\u{00e9} \u{1f600}", safeText(arena, "caf\u{00e9} \u{1f600}", 40));
+    // The C0 controls a config line or an argument can carry, and an invalid
+    // byte, are neither printed nor dropped.
+    try std.testing.expectEqualStrings("bad\\x00key\\x1b[31m\u{fffd}", safeText(arena, "bad\x00key\x1b[31m\xff", 40));
+    // A backslash is the one printable byte the escapes are built from, so one
+    // the value already carries is left alone rather than made ambiguous.
+    try std.testing.expectEqualStrings("a\\b", safeText(arena, "a\\b", 40));
+}
+
+test "a quoted value never exceeds its budget" {
+    // The budget bounds the bytes that come out, so a line of control
+    // characters cannot be four times the length it was given.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    for ([_][]const u8{ "a\nb\nc\nd\ne\nf\n", "\x01\x02\x03\x04\x05", "日本語" ** 10, "ok\xff\xff\xff" }) |raw| {
+        for (0..raw.len + 1) |max| {
+            const quoted = safeText(arena, raw, max);
+            try std.testing.expect(quoted.len <= max);
+            try std.testing.expect(std.unicode.utf8ValidateSlice(quoted));
+        }
+    }
+    // A character the value did not carry is never cut in half, whatever the
+    // budget: each of these is three or four bytes and the cuts land between
+    // them.
+    const wide = "日本語" ** 10;
+    for (0..wide.len + 1) |max| {
+        const quoted = safeText(arena, wide, max);
+        try std.testing.expect(quoted.len <= max);
+        try std.testing.expect(std.mem.startsWith(u8, wide, quoted));
+        try std.testing.expect(quoted.len % 3 == 0);
+    }
 }
 
 test "clamp keeps short strings intact" {

@@ -145,6 +145,12 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- Text quoted back to the operator is now cut, bounded and printable through one helper,
+  `chat.safeText`. A config key is whatever bytes a committed `config.toml` line held and a
+  `--repo` is whatever the caller typed, and both went to stderr raw: a control character in
+  either moved the operator's cursor and a byte that is not text reached the screen as
+  mojibake, while a key could be the whole 64 KB config cap on one line. The tool gutter keeps
+  the `\xNN` and U+FFFD spelling it had, through the shared helper.
 - `make preflight` names every tool the gate needs that a clean clone does not carry, with the
   command that installs it, and `make check` runs it before the format check and the suite. A
   clone without `shellcheck`, `ruff` or `yamllint` otherwise stopped at `make: ruff: No such

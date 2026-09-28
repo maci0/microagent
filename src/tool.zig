@@ -325,41 +325,16 @@ fn noteToolCall(io: Io, arena: std.mem.Allocator, name: []const u8, args: std.js
         (chat.str(args.get("command")) orelse chat.str(args.get("pattern")) orelse chat.str(args.get("path")) orelse "");
     var buf: std.ArrayList(u8) = .empty;
     buf.appendSlice(arena, "\u{23fa} ") catch return;
-    writeGutterText(arena, &buf, chat.clamp(name, 40)) catch return;
+    // One spelling of "text the operator can be shown", shared with the
+    // diagnostics: cut on a codepoint boundary, controls as `\xNN`, and a byte
+    // that is not text as U+FFFD. A tool argument is whatever the model decided
+    // to send, and the model decides that from files in the tree, so the gutter
+    // line is a boundary like any other.
+    buf.appendSlice(arena, chat.safeText(arena, name, 40)) catch return;
     buf.append(arena, ' ') catch return;
-    writeGutterText(arena, &buf, chat.clamp(detail, 120)) catch return;
+    buf.appendSlice(arena, chat.safeText(arena, detail, 120)) catch return;
     buf.append(arena, '\n') catch return;
     net.writeErr(io, buf.items);
-}
-
-/// The two digits every `\xNN` escape is spelled from.
-const hex_digits = "0123456789abcdef";
-
-/// Gutter text with every C0 control and DEL written as `\xNN`, and bytes that
-/// are not valid UTF-8 written as U+FFFD, so one call stays one line.
-fn writeGutterText(gpa: std.mem.Allocator, buf: *std.ArrayList(u8), s: []const u8) !void {
-    var i: usize = 0;
-    var start: usize = 0;
-    while (i < s.len) {
-        const c = s[i];
-        if (c < 0x20 or c == 0x7f) {
-            try buf.appendSlice(gpa, s[start..i]);
-            try buf.appendSlice(gpa, &.{ '\\', 'x', hex_digits[c >> 4], hex_digits[c & 0x0f] });
-            i += 1;
-            start = i;
-            continue;
-        }
-        const len: usize = if (c < 0x80) 1 else chat.utf8SequenceLen(s, i);
-        if (len == 0) {
-            try buf.appendSlice(gpa, s[start..i]);
-            try buf.appendSlice(gpa, "\u{fffd}");
-            i += 1;
-            start = i;
-            continue;
-        }
-        i += len;
-    }
-    try buf.appendSlice(gpa, s[start..i]);
 }
 
 /// Bytes a terminal acts on rather than prints: the C0 controls, DEL, and the
@@ -1014,7 +989,8 @@ test "the tool gutter stays one line whatever the model sent" {
     const arena = arena_state.allocator();
 
     var buf: std.ArrayList(u8) = .empty;
-    try writeGutterText(arena, &buf, "rg -n 'foo'\nnext line\u{1b}[31mred\xff");
+    const text = chat.safeText(arena, "rg -n 'foo'\nnext line\u{1b}[31mred\xff", 120);
+    try buf.appendSlice(arena, text);
     try std.testing.expectEqualStrings("rg -n 'foo'\\x0anext line\\x1b[31mred\u{fffd}", buf.items);
     try std.testing.expect(std.mem.indexOfScalar(u8, buf.items, '\n') == null);
 }

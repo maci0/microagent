@@ -9,6 +9,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const net = @import("net.zig");
+const chat = @import("chat.zig");
 
 const version = @import("build_options").version;
 
@@ -23,14 +24,13 @@ const max_asset_bytes: usize = 256 * 1024 * 1024;
 /// How much of a `--repo` argument an error message quotes back.
 const repo_in_error_bytes: usize = 80;
 
-/// A `--repo` short of the quote, cut on a codepoint boundary: the value is
-/// whatever the user typed, and a partial codepoint in a diagnostic reads as a
-/// replacement character in the middle of the flag they got wrong.
-fn quoteRepo(repo: []const u8) []const u8 {
-    if (repo.len <= repo_in_error_bytes) return repo;
-    var end = repo_in_error_bytes;
-    while (end > 0 and repo[end] & 0xc0 == 0x80) end -= 1;
-    return repo[0..end];
+/// A `--repo` short of the quote: the value is whatever the user typed, so it
+/// is cut on a codepoint boundary (a partial codepoint in a diagnostic reads
+/// as a replacement character in the middle of the flag they got wrong) and
+/// the bytes a terminal cannot be shown are escaped. One spelling of it, with
+/// the one the agent's own diagnostics use.
+fn quoteRepo(arena: std.mem.Allocator, repo: []const u8) []const u8 {
+    return chat.safeText(arena, repo, repo_in_error_bytes);
 }
 
 pub const Verdict = enum {
@@ -659,7 +659,7 @@ fn runChecked(
     // flag and the rule rather than guessing at the mistake: a URL, a second
     // slash and an empty value are three different typos with one answer.
     const api = releaseApiUrl(&api_buf, repo) catch
-        return updateUsageError(io, "--repo must be owner/name, got '{s}'", .{quoteRepo(repo)});
+        return updateUsageError(io, "--repo must be owner/name, got '{s}'", .{quoteRepo(arena, repo)});
 
     var client: std.http.Client = .{ .allocator = gpa, .io = io };
     defer client.deinit();
@@ -1010,15 +1010,21 @@ test "update: a repo quoted back in an error keeps whole characters" {
     // A `--repo` is whatever the user typed, and the quote is cut at a fixed
     // length, so a cut that lands inside a multi-byte character would put a
     // replacement character in the middle of the flag they got wrong.
-    try std.testing.expectEqualStrings("maci0/microagent", quoteRepo("maci0/microagent"));
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const gpa = arena_state.allocator();
+    try std.testing.expectEqualStrings("maci0/microagent", quoteRepo(gpa, "maci0/microagent"));
     const long = "日本語/" ++ "x" ** 200;
-    const quoted = quoteRepo(long);
+    const quoted = quoteRepo(gpa, long);
     try std.testing.expect(quoted.len <= repo_in_error_bytes);
     try std.testing.expect(std.unicode.utf8ValidateSlice(quoted));
     try std.testing.expect(std.mem.startsWith(u8, long, quoted));
     // Three-byte characters throughout: the cut is on one of them, so the
     // quote holds whole ones and no more than the byte budget allows.
-    try std.testing.expectEqualStrings("日" ** 26, quoteRepo("日" ** 40));
+    try std.testing.expectEqualStrings("日" ** 26, quoteRepo(gpa, "日" ** 40));
+    // A byte that is not text, and a control character, reach the line as
+    // text rather than as mojibake or as a cursor the operator did not ask for.
+    try std.testing.expectEqualStrings("bad\\x1b[31m\u{fffd}", quoteRepo(gpa, "bad\x1b[31m\xff"));
 }
 
 test "update: comparison and install lines use the release wording" {

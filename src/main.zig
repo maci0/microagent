@@ -502,7 +502,9 @@ fn budgetSeconds(buf: []u8, from: []const u8, value: []const u8, out: *?u64) ?[]
 /// How much of a value an error message quotes back, cut on a codepoint
 /// boundary like every other truncation here: a partial codepoint is a
 /// replacement character in the middle of a diagnostic, and the value being
-/// quoted is whatever the user typed.
+/// quoted is whatever the user typed. Text that came out of a file rather than
+/// off the command line is quoted through `chat.safeText` instead, which makes
+/// the bytes printable as well as cutting them.
 const quoted_value_bytes = 80;
 
 fn clip(s: []const u8) []const u8 {
@@ -701,22 +703,30 @@ const LoadedStyle = struct { style: style_mod.Style, source: ?[]const u8 };
 fn loadStyle(io: Io, init: std.process.Init, arena: std.mem.Allocator, config: []const u8) LoadedStyle {
     var style: style_mod.Style = .{};
     const source = styleConfigPath(init.environ_map, arena, config);
+    // Both a path and a key out of this file are quoted through `safeText`
+    // rather than `clip`: a config is a file a reviewed repository can
+    // commit, so its lines carry whatever bytes the commit did, and the same
+    // is true of a path a directory name was spelled with. The two untrusted
+    // byte paths this program already has normalize what they print, and a
+    // diagnostic is the third.
+    const path_text = chat_mod.safeText(arena, source.path orelse "", quoted_value_bytes);
     var text: ?[]const u8 = null;
     if (source.path) |p| {
         text = std.Io.Dir.cwd().readFileAlloc(io, p, arena, .limited(max_config_bytes)) catch |err| blk: {
             if (configReadWorthReporting(source.named, err))
-                net.note(io, arena, "microagent: config {s}: {s}; using the built-in levels\n", .{ p, @errorName(err) });
+                net.note(io, arena, "microagent: config {s}: {s}; using the built-in levels\n", .{ path_text, @errorName(err) });
             break :blk null;
         };
     }
     if (resolveStyle(&style, text, envValue(init.environ_map, "MICROAGENT_CAVEMAN"), envValue(init.environ_map, "MICROAGENT_PONYTAIL"))) |unknown| {
+        const key = chat_mod.safeText(arena, unknown.key, quoted_value_bytes);
         if (unknown.from_config) {
             if (unknown.bad_value)
-                net.note(io, arena, "microagent: config {s}: '{s}' is not a level; keeping the default\n", .{ source.path.?, unknown.key })
+                net.note(io, arena, "microagent: config {s}: '{s}' is not a level; keeping the default\n", .{ path_text, key })
             else
-                net.note(io, arena, "microagent: config {s}: '{s}' is not a key this file uses; keeping the default\n", .{ source.path.?, unknown.key });
+                net.note(io, arena, "microagent: config {s}: '{s}' is not a key this file uses; keeping the default\n", .{ path_text, key });
         } else {
-            net.note(io, arena, "microagent: {s} is not a level; keeping the default\n", .{unknown.key});
+            net.note(io, arena, "microagent: {s} is not a level; keeping the default\n", .{key});
         }
     }
     return .{ .style = style, .source = source.path };
