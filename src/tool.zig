@@ -328,6 +328,17 @@ fn captureResult(arena: std.mem.Allocator, parts: CaptureParts) ![]const u8 {
     const will_cut = parts.at_limit or body > max_tool_output -| exit_cost -| reason_cost -| cut_cost;
     const room = max_tool_output -| exit_cost -| reason_cost -| (if (will_cut) cut_cost else 0);
 
+    // A clean call that printed on one stream and needs no note beside it is
+    // already the whole of the answer, and the buffer below would copy it byte
+    // for byte to say so. `search`, `ast` and `git` all land here, so a run
+    // that spends its turn matching lines copies every match it read out of a
+    // subprocess for nothing. Nothing below would run: no separator without a
+    // second stream, no cut, no status beside output that was not a failure, no
+    // reason, and a non-empty buffer, so the copy is the only work left to skip.
+    if (parts.stdout.len != 0 and parts.stderr.len == 0 and !will_cut and !report_term and parts.reason == null) {
+        return parts.stdout;
+    }
+
     var stdout = parts.stdout;
     var stderr = parts.stderr;
     if (body > room) {
@@ -3185,6 +3196,46 @@ test "tool output truncation keeps whole lines" {
     // No newline at all means one line, which a limit of one keeps whole.
     try std.testing.expectEqualStrings("solo", try firstLines(arena, "solo", 1));
     try std.testing.expectEqualStrings("solo\n", try firstLines(arena, "solo\n", 1));
+}
+
+test "a clean one-stream result is the capture itself, and a note still reaches it" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // A `search` that matched and said nothing else: the bytes handed back are
+    // the capture, not a copy of it, so what `toolResult` cuts and what the
+    // model reads are the same bytes either way.
+    const captured = try arena.dupe(u8, "a\nb\n");
+    const clean = try captureResult(arena, .{ .stdout = captured });
+    try std.testing.expectEqualStrings("a\nb\n", clean);
+    try std.testing.expectEqual(captured.ptr, clean.ptr);
+
+    // Each of the three notes a clean result has none of, so none of them is
+    // skipped by the hand-back.
+    try std.testing.expectEqualStrings("a\nb\n\n(exit: exited 1)", try captureResult(arena, .{
+        .stdout = "a\nb\n",
+        .term = .{ .exited = 1 },
+    }));
+    // Empty output beside a term: the hand-back needs a non-empty stdout, so
+    // this one still assembles, and the status takes the place of the output.
+    try std.testing.expectEqualStrings("(no output, exit exited 0)", try captureResult(arena, .{
+        .term = .{ .exited = 0 },
+    }));
+    try std.testing.expectEqualStrings("a\nb\n\nerror: no such path", try captureResult(arena, .{
+        .stdout = "a\nb\n",
+        .reason = "error: no such path",
+    }));
+    // A cut is a note too, and the two streams still need the separator the
+    // hand-back would have skipped past.
+    try std.testing.expectEqualStrings("a\nb\n\n[output truncated at the tool's cap]", try captureResult(arena, .{
+        .stdout = "a\nb\n",
+        .at_limit = true,
+    }));
+    try std.testing.expectEqualStrings("a\nb\n\nc", try captureResult(arena, .{
+        .stdout = "a\nb\n",
+        .stderr = "c",
+    }));
 }
 
 test "output cut by the capture cap is marked even when no line was dropped" {
