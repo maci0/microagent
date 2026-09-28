@@ -15,7 +15,7 @@ BIN := zig-out/bin/microagent
 export LC_ALL := C
 export TZ := UTC
 
-.PHONY: default help preflight version build small musl test test-one watch fmt fmt-python lint lint-versions lint-lock zig-version required-zig-version release-targets check-targets check-reproducible lint-shell lint-python lint-yaml check bench gauntlet instructions overhead install release-assets checksums clean
+.PHONY: default help preflight version build small musl test test-one watch fmt fmt-check fmt-python lint lint-versions lint-lock zig-version required-zig-version release-targets check-targets check-reproducible lint-shell lint-python lint-yaml check bench gauntlet instructions overhead install release-assets checksums clean
 
 # The targets `microagent update` asks for, in the names release.yml publishes.
 # ci.yml rehearses the same list on every push and release.yml publishes it, so
@@ -91,8 +91,9 @@ help:
 	  'test-one FILTER=...   only tests whose name contains FILTER' \
 	  'watch [FILTER=...]    rerun the suite on every source change, until Ctrl-C' \
 	  'preflight             name every tool check and lint need that is not on PATH' \
-	  'fmt                   rewrite src, build.zig and the Harbor adapter in format style' \
-	  'check                 preflight, zig-version, fmt --check, the linters, the tests, an optimized build' \
+	  'fmt                   rewrite every tracked .zig and .py file in format style' \
+	  'fmt-check             what check runs over the same files, without rewriting' \
+	  'check                 preflight, zig-version, fmt-check, the linters, the tests, an optimized build' \
 	  'lint                  the pin checks, then shellcheck, ruff and yamllint' \
 	  'lint-versions         check ruff and yamllint against the versions the gate runs' \
 	  'lint-lock             check the Harbor lock carries the manifest pins, a hash each, and nothing else' \
@@ -165,20 +166,20 @@ musl:
 test:
 	$(ZIG) build test --summary all
 
-# The Zig sources the test names are read out of, for `test-one`.
-ZIG_SOURCES := $(wildcard src/*.zig)
+# The Zig sources the test names are read out of, for `test-one`, and the ones
+# `fmt` and `fmt-check` read. Taken from git for the reason lint-shell names: a
+# glob names the paths as they stand, so a Zig file added outside src/ is
+# formatted by nothing and the gate still passes.
+ZIG_SOURCES := $(shell git ls-files '*.zig')
 
-# The Python and YAML the linters read, taken from git rather than from the
-# directories that hold them today, for the reason lint-shell names: a glob
-# names the paths as they stand, so a file added outside them is linted by
-# nothing and the gate still passes.
+# The Python and YAML the linters read, for the same reason.
 PY_SOURCES := $(shell git ls-files '*.py')
 YAML_SOURCES := $(shell git ls-files '*.yml' '*.yaml')
 
 test-one:
 	@test -n "$(FILTER)" || { printf 'usage: make test-one FILTER=<test name substring>\n' >&2; exit 2; }
 	@grep -h -o -E '^test "[^"]+"' $(ZIG_SOURCES) | grep -F -q -- "$(FILTER)" || { \
-	  printf 'no test declared in src/ is named like "%s"\n' "$(FILTER)" >&2; \
+	  printf 'no declared test is named like "%s"\n' "$(FILTER)" >&2; \
 	  printf 'the run below would report success without running a test; list the names with:\n' >&2; \
 	  printf "  grep -h -o -E '^test \"[^\"]+\"' $(ZIG_SOURCES)\n" >&2; \
 	  exit 2; }
@@ -193,7 +194,7 @@ test-one:
 watch:
 	@if [ -n "$(FILTER)" ]; then \
 	  grep -h -o -E '^test "[^"]+"' $(ZIG_SOURCES) | grep -F -q -- "$(FILTER)" || { \
-	    printf 'no test declared in src/ is named like "%s"\n' "$(FILTER)" >&2; \
+	    printf 'no declared test is named like "%s"\n' "$(FILTER)" >&2; \
 	    printf 'the watch below would report success without running a test; list the names with:\n' >&2; \
 	    printf "  grep -h -o -E '^test \"[^\"]+\"' $(ZIG_SOURCES)\n" >&2; \
 	    exit 2; }; \
@@ -203,8 +204,17 @@ watch:
 	fi
 
 fmt:
-	$(ZIG) fmt src build.zig
+	@test -n "$(ZIG_SOURCES)" || { echo "no tracked .zig file to format" >&2; exit 1; }
+	$(ZIG) fmt $(ZIG_SOURCES)
 	$(MAKE) fmt-python
+
+# What `check` runs, and what the workflows run, so the file list the gate
+# formats is the Makefile's rather than a second spelling of it in a workflow.
+# The guard is fmt-python's: a list that came back empty would leave zig fmt
+# reading nothing and the step green.
+fmt-check:
+	@test -n "$(ZIG_SOURCES)" || { echo "no tracked .zig file to check" >&2; exit 1; }
+	$(ZIG) fmt --check $(ZIG_SOURCES)
 
 fmt-python:
 	@test -n "$(PY_SOURCES)" || { echo "no tracked .py file to format" >&2; exit 1; }
@@ -212,8 +222,11 @@ fmt-python:
 
 # The Zig sources have no linter beyond zig fmt, which check runs; the shell,
 # Python and YAML around them do, and a shell that only fails when a benchmark
-# runs is a shell nobody has read. Keep these in step with
-# .github/workflows/ci.yml and .github/dependabot.yml.
+# runs is a shell nobody has read. This list is the whole of the gate the
+# workflows run: ci.yml and release.yml both call `make lint` rather than
+# repeating the targets, so a linter added here reaches a push and a tag.
+# .github/dependabot.yml is the other thing to keep in step, since it decides
+# what opens a bump for these.
 lint: lint-versions lint-lock lint-shell lint-python lint-yaml
 
 # A version mismatch is reported by name rather than surfacing later as a
@@ -324,7 +337,7 @@ check:
 	$(MAKE) preflight
 	$(MAKE) zig-version
 	$(MAKE) check-targets
-	$(ZIG) fmt --check src build.zig
+	$(MAKE) fmt-check
 	$(MAKE) lint
 	$(ZIG) build test --summary all
 	$(ZIG) build -Doptimize=ReleaseSmall

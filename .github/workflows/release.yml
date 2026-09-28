@@ -61,7 +61,7 @@ jobs:
         run: make check-targets
 
       - name: format is clean
-        run: zig fmt --check src build.zig
+        run: make fmt-check
 
       - name: the shell, Python and YAML linters are clean
         run: make lint

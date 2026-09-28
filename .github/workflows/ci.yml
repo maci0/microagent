@@ -57,7 +57,7 @@ jobs:
       - uses: ./.github/actions/setup-zig
 
       - name: format is clean
-        run: zig fmt --check src build.zig
+        run: make fmt-check
 
       - name: unit tests pass
         run: zig build test --summary all
@@ -98,27 +98,14 @@ jobs:
       # are two places a version bump can miss one of.
       - uses: ./.github/actions/setup-linters
 
-      # `make check` runs this before the linters, and it is the check that
-      # keeps the version in lint-requirements.txt and the one in the Makefile
-      # from drifting. A bump to either that forgets the other would otherwise
-      # only be caught by whoever ran the gate locally.
-      - name: the installed linters are the versions the Makefile names
-        run: make lint-versions
-
-      # The Harbor adapter's manifest and lock are refreshed by hand, and a lock
-      # left behind by an earlier pin still installs and still hashes, so
-      # nothing but this says the adapter and the pin still agree.
-      - name: the Harbor lock matches the manifest it is generated from
-        run: make lint-lock
-
-      - name: the shell scripts parse and are shellcheck-clean
-        run: make lint-shell
-
-      - name: the Harbor adapter is ruff-clean and ruff-formatted
-        run: make lint-python
-
-      - name: the workflows, the shared toolchain action and the dependabot config are yamllint-clean
-        run: make lint-yaml
+      # The checks themselves are `make lint`, the same list `make check` runs
+      # in the same order, rather than one step per linter. A step each is a
+      # second spelling of that list, and a linter added to the Makefile
+      # without a step added here would gate a push locally and not on the
+      # runner. release.yml already gates a tag the same way, and the failing
+      # sub-target names itself.
+      - name: the shell, Python and YAML linters are clean
+        run: make lint
 
   release-assets:
     # Every target the `update` subcommand asks for, built the way release.yml

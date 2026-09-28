@@ -89,7 +89,7 @@ a row leaves its band and 2 when a row cannot be measured at all, so run it
 before a push that touches a hot path and re-record
 `bench/instructions.baseline` only when the change is meant to move it.
 
-`make check` is the whole gate: it is the same `zig fmt --check`, the same
+`make check` is the whole gate: it is the same `make fmt-check`, the same
 `ruff check`, `ruff format --check` and `yamllint`, the same `zig build test`,
 the same `make lint-versions` and `make lint-lock`, and the same `ReleaseSmall`
 build whose binary it then runs, that
@@ -102,13 +102,16 @@ target on top of it, with the clock, the locale, the timezone, both compiler
 caches and the output directory varied, and one of them from a copy of the source
 at another path) and the other runners, where the same gate also
 runs on macOS. `make help` lists every target.
-Source is formatted with `zig fmt`; `make fmt` applies it, and `ruff format`
-does the same for the Harbor adapter. The three linters cover what `zig fmt`
-cannot: the bench shell, the Harbor adapter under `integrations/harbor` (rules
-in [ruff.toml](ruff.toml)) and the workflows, the composite toolchain action and
+Source is formatted with `zig fmt`; `make fmt` applies it and `make fmt-check`
+is what the gate runs, and `ruff format` does the same for the Harbor adapter.
+The three linters cover what `zig fmt` cannot: the bench shell, the Harbor
+adapter under `integrations/harbor` (rules in [ruff.toml](ruff.toml)) and the
+workflows, the composite toolchain action and
 the Dependabot config (rules in [.yamllint](.yamllint)). Each takes its file
-list from git, so a Python or YAML file added outside the paths named above is
-linted too.
+list from git, so a Zig, Python or YAML file added outside the paths named above
+is linted too. `make lint` is that whole list, and both workflows call it rather
+than repeating the targets, so a linter added to the Makefile gates a push and
+a tag as well as a laptop.
 
 ## Tests
 

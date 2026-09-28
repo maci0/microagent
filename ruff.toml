@@ -71,6 +71,14 @@ lint.ignore = [
     "TRY003",
 ]
 
+# The caps the size rules measure against, written down rather than left at
+# ruff's defaults so a bump is a line someone edited on purpose. Branches are
+# held to the same 10 as mccabe below, because the two measure the same thing
+# from two directions: a function C901 passes can still be one PLR0912 refuses.
+lint.pylint.max-branches = 10
+lint.pylint.max-returns = 6
+lint.pylint.max-statements = 50
+
 # The cap C901 measures against, written down rather than left at ruff's
 # default so a bump is a line someone edited on purpose.
 [lint.mccabe]
