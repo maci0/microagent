@@ -147,8 +147,13 @@ fn isSessionLogName(name: []const u8) bool {
 /// nanoseconds, so a plain lexicographic sort is oldest first, and only this
 /// program's own `<digits>[-<digits>].jsonl` files are touched. Every failure
 /// is ignored: a store that cannot be pruned costs a run nothing.
+///
+/// Through the cwd, the way `open` creates the directory and `createSessionLog`
+/// creates the log: `MICROAGENT_SESSION_DIR=logs/x` is a legal value, and a
+/// reader that insists the path is absolute turns it into a panic in a checked
+/// build.
 fn pruneSessions(io: Io, arena: std.mem.Allocator, session_dir: []const u8) void {
-    var dir = std.Io.Dir.openDirAbsolute(io, session_dir, .{ .iterate = true }) catch return;
+    var dir = std.Io.Dir.openDir(std.Io.Dir.cwd(), io, session_dir, .{ .iterate = true }) catch return;
     defer dir.close(io);
 
     var names: std.ArrayList([]u8) = .empty;
@@ -498,6 +503,44 @@ test "the session store keeps the most recent logs and drops the rest" {
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "1.jsonl", .{}));
 }
 
+// `MICROAGENT_SESSION_DIR=logs/x` names a store through the working directory,
+// and `open` creates it and its log that way, so pruning has to read it the
+// same way rather than insist on an absolute path the caller never promised.
+test "a store named relative to the working directory is pruned where it is" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // The store sits under the test's own temporary directory, which is under
+    // the working directory, so the same relative spelling a run would be given
+    // reaches it, and the cleanup takes it with the rest.
+    const relative = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}/store", .{tmp.sub_path});
+    try tmp.dir.createDirPath(io, "store");
+    var i: usize = 0;
+    while (i < max_session_logs + 1) : (i += 1) {
+        const log = createSessionLog(io, arena, relative, @intCast(i + 1)) orelse return error.TestUnexpectedResult;
+        log.close(io);
+    }
+
+    pruneSessions(io, arena, relative);
+
+    var dir = try std.Io.Dir.openDir(std.Io.Dir.cwd(), io, relative, .{ .iterate = true });
+    defer dir.close(io);
+    var walker = try dir.walk(arena);
+    defer walker.deinit();
+    var left: usize = 0;
+    while (try walker.next(io)) |entry| {
+        if (entry.kind == .file and isSessionLogName(entry.basename)) left += 1;
+    }
+    try std.testing.expectEqual(max_session_logs, left);
+}
+
 // A re-run that reads the same clock stamp writes its log beside the first
 // one under a `-N` name, and a store that only recognised `<digits>.jsonl`
 // would keep every one of those forever while still reporting itself pruned.
@@ -558,8 +601,6 @@ fn countSessionLogs(io: Io, arena: std.mem.Allocator, session_dir: []const u8) !
 
 // Pruning walks the store, so a file that only shares a basename with a log is
 // the case that decides whether it deletes a directory's contents by accident.
-// This lived beside a second copy of the store in main, attached to code the
-// run no longer calls; the live one has the check and had no test for it.
 test "a log in a subdirectory is pruned where it is, not by its bare name" {
     const gpa = std.testing.allocator;
     var arena_state = std.heap.ArenaAllocator.init(gpa);
