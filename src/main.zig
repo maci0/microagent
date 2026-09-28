@@ -1216,8 +1216,9 @@ fn streamChat(
     // that leaves the host, so a provider that answers with a Location cannot
     // walk the API key off to whoever it names. The redirect is unhandled
     // anyway, which is the same promise made once, in the request options.
-    var auth_header: [1]std.http.Header = undefined;
-    auth_header[0] = .{ .name = "authorization", .value = auth };
+    const auth_headers: std.http.Client.Request.Headers = .{
+        .authorization = .{ .override = auth },
+    };
 
     // The request lives in a slot so `Response.request` stays valid for the
     // reader handed back out of the retry loop below.
@@ -1244,7 +1245,7 @@ fn streamChat(
         }
         const req = client.request(.POST, uri, .{
             .redirect_behavior = .unhandled,
-            .privileged_headers = auth_header[0..1],
+            .headers = auth_headers,
             .extra_headers = &.{
                 .{ .name = "content-type", .value = "application/json" },
                 .{ .name = "accept", .value = "text/event-stream" },
@@ -3690,6 +3691,19 @@ test "compaction leaves the cached prefix byte-identical" {
     try std.testing.expectEqualStrings(prefix, msgs.items[0..prefix.len]);
     // The prefix is cached, not just unchanged: the newest turn is still whole.
     try std.testing.expect(std.mem.endsWith(u8, msgs.items, "\"content\":\"" ++ blob ++ "\"}]"));
+}
+
+test "the api key is sent as the request's authorization header" {
+    // Regression: this was passed as a privileged header, which never reached
+    // the wire, and every provider answered 401 with no credential at all. The
+    // header struct is the one the request writer reads, so asserting on it is
+    // asserting on the wire.
+    const auth = "Bearer sk-test";
+    const headers: std.http.Client.Request.Headers = .{ .authorization = .{ .override = auth } };
+    switch (headers.authorization) {
+        .override => |value| try std.testing.expectEqualStrings(auth, value),
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "a tool timeout is cut to what is left of the budget" {
