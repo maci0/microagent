@@ -147,63 +147,6 @@ pub fn readSecret(io: Io, arena: std.mem.Allocator, path: []const u8) SecretRead
     return .{ .found = std.mem.trim(u8, chat.stripBom(raw), " \t\r\n") };
 }
 
-/// Runs a tool subprocess and reaps it with everything it started. The first of
-/// the two runners: no tool calls it, `runCapped` is the one every tool that
-/// shells out uses, and this one is kept for the reaping checks that compare
-/// the two.
-pub fn runToolProcess(
-    io: Io,
-    arena: std.mem.Allocator,
-    argv: []const []const u8,
-    stdout_limit: usize,
-    stderr_limit: usize,
-    timeout: Io.Timeout,
-    environ_map: ?*const std.process.Environ.Map,
-) !std.process.RunResult {
-    var spawned = try ToolChild.spawn(io, argv, environ_map);
-    // The group is published while the call runs, so an interrupt reaches it,
-    // and cleared on the way out, so a later signal does not hit a dead group.
-    watchToolGroup(spawned.pgid);
-    defer {
-        watchToolGroup(0);
-        spawned.reap(io);
-    }
-    const child = &spawned.child;
-
-    var multi_buffer: Io.File.MultiReader.Buffer(2) = undefined;
-    var multi: Io.File.MultiReader = undefined;
-    multi.init(arena, io, multi_buffer.toStreams(), &.{ child.stdout.?, child.stderr.? });
-    defer multi.deinit();
-
-    // The timeout is a deadline taken once, not a duration handed to every
-    // wait: `fill` arms its wait from now each time, so a child that keeps
-    // answering never spends it, and `yes` or a chatty build outlives a
-    // ten-minute ceiling by never going quiet for ten minutes. The reap on
-    // the way out is what kills it, and the ceiling it runs under is only set
-    // for a tool that can be cut.
-    const deadline = timeout.toDeadline(io);
-    while (multi.fill(64, deadline)) |_| {
-        if (multi.reader(0).bufferedLen() > stdout_limit) return error.StreamTooLong;
-        if (multi.reader(1).bufferedLen() > stderr_limit) return error.StreamTooLong;
-    } else |err| switch (err) {
-        error.EndOfStream => {},
-        else => |e| return e,
-    }
-    try multi.checkAnyError();
-    // A child that filled the pipes it was given and then kept running has
-    // nothing left to read and is waited on below, which has no timeout of
-    // its own: the deadline is what catches it here, and the reap that runs
-    // on the way out takes the process group with it.
-    if (deadline.toDurationFromNow(io)) |left| if (left.raw.nanoseconds <= 0) return error.Timeout;
-
-    const term = try child.wait(io);
-    return .{
-        .term = term,
-        .stdout = try multi.toOwnedSlice(0),
-        .stderr = try multi.toOwnedSlice(1),
-    };
-}
-
 /// SIGKILL to a whole process group. A group that is already gone is the normal
 /// case, not a failure.
 fn signalGroup(pgid: std.posix.pid_t) void {
@@ -1058,7 +1001,7 @@ const Captured = struct {
 /// its own end, so the exit status and the timeout keep meaning what they did.
 ///
 /// The child leads its own process group and the whole group is signalled on the
-/// way out, for the reason `runToolProcess` gives: a model-supplied `bash`
+/// way out: a model-supplied `bash`
 /// command that backgrounds work and exits leaves that work holding a port, a
 /// build cache or a database lock for every later turn of the run and for
 /// whatever starts next, and a timeout that fires while the shell is still there
@@ -1094,8 +1037,8 @@ pub fn runCapped(
         .data = &vecs[i],
     } });
 
-    // One deadline for the whole drain, for the reason `runToolProcess` gives:
-    // a per-wait duration is re-armed by every read that arrives, so a
+    // One deadline for the whole drain, taken once rather than handed to every
+    // wait: a per-wait duration is re-armed by every read that arrives, so a
     // command that never goes quiet for the length of the timeout is never
     // timed out at all. The reap on the way out kills the group either way.
     const deadline = timeout.toDeadline(io);
@@ -2499,30 +2442,12 @@ test "an edit issued twice leaves the file the first run left" {
     try std.testing.expectEqualStrings("a x b", try tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
 }
 
-/// The two runners a tool subprocess can go through, named so the reaping
-/// check below runs against both with one body.
-const ToolRunner = enum {
-    /// `runToolProcess`, which no tool calls: it is kept for the reaping
-    /// checks that run the same body against both runners.
-    tool_process,
-    /// `runCapped`, the runner every tool that shells out goes through.
-    capped,
-
-    pub fn call(self: ToolRunner, arena: std.mem.Allocator, io: Io, argv: []const []const u8) anyerror!void {
-        const timeout = net.durationMs(300);
-        switch (self) {
-            .tool_process => _ = try runToolProcess(io, arena, argv, 4096, 4096, timeout, null),
-            .capped => _ = try runCapped(io, arena, argv, 4096, timeout, null),
-        }
-    }
-};
-
-/// Asserts that a runner took its whole process tree down with it. The command
-/// backgrounds a grandchild that outlives the shell that started it, writes
-/// that grandchild's pid, and then leaves the pipe held open: without the group
-/// signal the grandchild is still alive when the call returns, and every
-/// timed-out call leaked one.
-fn expectNoProcessSurvived(runner: ToolRunner) !void {
+/// Asserts that a tool call took its whole process tree down with it. The
+/// command backgrounds a grandchild that outlives the shell that started it,
+/// writes that grandchild's pid, and then leaves the pipe held open: without
+/// the group signal the grandchild is still alive when the call returns, and
+/// every timed-out call leaked one.
+fn expectNoProcessSurvived() !void {
     const pid_name = "grandchild.pid";
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -2542,7 +2467,7 @@ fn expectNoProcessSurvived(runner: ToolRunner) !void {
     // which has already exited, so the check below would pass on a process
     // that was never running.
     const script = try std.fmt.allocPrint(arena, "sh -c 'sleep 30 & echo $! > {s}; wait' & exit 0", .{pid_path});
-    try std.testing.expectError(error.Timeout, runner.call(arena, io, &.{ "/bin/sh", "-c", script }));
+    try std.testing.expectError(error.Timeout, runCapped(io, arena, &.{ "/bin/sh", "-c", script }, 4096, net.durationMs(300), null));
 
     const raw = tmp.dir.readFileAlloc(io, pid_name, arena, .limited(64)) catch return error.GrandchildNotReported;
     const pid = try std.fmt.parseInt(std.posix.pid_t, std.mem.trim(u8, raw, " \t\r\n"), 10);
@@ -2553,7 +2478,7 @@ fn expectNoProcessSurvived(runner: ToolRunner) !void {
         std.posix.kill(pid, .CONT) catch return;
         try io.sleep(.{ .nanoseconds = 20 * std.time.ns_per_ms }, .awake);
     }
-    std.debug.print("grandchild {d} survived {s}\n", .{ pid, @tagName(runner) });
+    std.debug.print("grandchild {d} survived the timed-out call\n", .{pid});
     return error.GrandchildSurvived;
 }
 
@@ -2590,7 +2515,7 @@ test "an interrupt during a tool call is forwarded to that call's process group"
         pub fn go(a: std.mem.Allocator, t: Io) void {
             // The call outlives nothing here: the handler kills its group, so
             // a hung call would hang the suite rather than fail it.
-            _ = runToolProcess(t, a, &.{ "/bin/sh", "-c", "sleep 5" }, 4096, 4096, net.durationMs(3000), null) catch {};
+            _ = runCapped(t, a, &.{ "/bin/sh", "-c", "sleep 5" }, 4096, net.durationMs(3000), null) catch {};
         }
     };
     const thread = try Thread.spawn(.{}, Call.go, .{ arena, io });
@@ -2603,15 +2528,11 @@ test "an interrupt during a tool call is forwarded to that call's process group"
     try std.testing.expectEqual(@as(std.posix.pid_t, 0), tool_group.load(.monotonic));
 }
 
-test "a tool call that times out leaves no process of its own behind" {
-    try expectNoProcessSurvived(.tool_process);
-}
-
 test "a tool call reports the exit status of the command it ran" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const res = try runToolProcess(std.testing.io, arena, &.{ "/bin/sh", "-c", "printf out; printf err 1>&2; exit 3" }, 4096, 4096, net.durationMs(10_000), null);
+    const res = try runCapped(std.testing.io, arena, &.{ "/bin/sh", "-c", "printf out; printf err 1>&2; exit 3" }, 4096, net.durationMs(10_000), null);
     try std.testing.expectEqualStrings("out", res.stdout);
     try std.testing.expectEqualStrings("err", res.stderr);
     try std.testing.expectEqual(@as(u8, 3), res.term.exited);
@@ -2638,34 +2559,27 @@ test "a tool call is timed out by the clock, not by how long it stayed quiet" {
     const io = threaded.io();
 
     // A byte every tenth of a second: fast enough that every wait ends in a
-    // read and is re-armed, slow enough that neither output cap is anywhere
-    // near being reached. What is left to end either call is the deadline.
+    // read and is re-armed, slow enough that the output cap is nowhere near
+    // being reached. What is left to end the call is the deadline.
     // A host whose `sleep` has no fractional form fails the assertion below
     // loudly rather than passing it.
     const script = "while :; do printf x; sleep 0.1; done";
     const budget_ms: u64 = 400;
     const started = Io.Timestamp.now(io, .awake).nanoseconds;
     try std.testing.expectError(error.Timeout, runCapped(io, arena, &.{ "/bin/sh", "-c", script }, 4096, net.durationMs(budget_ms), null));
-    const after_capped = Io.Timestamp.now(io, .awake).nanoseconds - started;
-    try std.testing.expectError(error.Timeout, runToolProcess(io, arena, &.{ "/bin/sh", "-c", script }, 4096, 4096, net.durationMs(budget_ms), null));
     const spent = Io.Timestamp.now(io, .awake).nanoseconds - started;
-    // The deadline is what ended both calls, so neither returned before it:
-    // an error raised on the way in is a different fault wearing this one's
-    // name, and a lower bound is what tells the two apart. The bound carries
+    // The deadline is what ended the call, so it did not return before it: an
+    // error raised on the way in is a different fault wearing this one's name,
+    // and a lower bound is what tells the two apart. The bound carries
     // `deadline_slack_ms` because the wait is armed on a timer and the elapsed
     // time is read off a clock, and the two are not the same reading: a
     // machine that has been suspended, or one whose timer fires on the first
     // tick of a coarser one, hands back a deadline a hair before it is due.
-    try std.testing.expect(after_capped + deadline_slack_ms * std.time.ns_per_ms >= budget_ms * std.time.ns_per_ms);
-    try std.testing.expect(spent + deadline_slack_ms * std.time.ns_per_ms >= 2 * budget_ms * std.time.ns_per_ms);
+    try std.testing.expect(spent + deadline_slack_ms * std.time.ns_per_ms >= budget_ms * std.time.ns_per_ms);
 }
 
-// `bash` goes through the capped runner, not the search runner, and it is the
-// tool that starts builds, so it carries the same process-group kill: a command
-// that backgrounds work and then outruns its deadline took the whole tree with
-// it only where the search tools already did.
-test "a bash call that times out leaves no process of its own behind" {
-    try expectNoProcessSurvived(.capped);
+test "a tool call that times out leaves no process of its own behind" {
+    try expectNoProcessSurvived();
 }
 
 // `bash` is the tool with no path argument, so it is the one a model reaches a
@@ -2727,11 +2641,10 @@ test "a tool subprocess cannot see the provider key" {
     defer clean.deinit();
     try clean.put("PATH", "/usr/bin");
 
-    const res = try runToolProcess(
+    const res = try runCapped(
         std.testing.io,
         arena,
         &.{ "/bin/sh", "-c", "printenv OPENROUTER_API_KEY; printenv PATH" },
-        4096,
         4096,
         net.durationMs(10_000),
         &clean,
@@ -2741,11 +2654,10 @@ test "a tool subprocess cannot see the provider key" {
 
     // Under the inherited environment the same command does print it, which is
     // what makes the first assertion mean something.
-    const inherited = try runToolProcess(
+    const inherited = try runCapped(
         std.testing.io,
         arena,
         &.{ "/bin/sh", "-c", "printenv OPENROUTER_API_KEY" },
-        4096,
         4096,
         net.durationMs(10_000),
         &env,

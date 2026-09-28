@@ -757,7 +757,7 @@ fn parseArgs(buf: []u8, argv: []const []const u8, opts: *Options) ?[]const u8 {
         } else if (valuedFlag(name)) |flag| {
             // A flag that ends the command line and one handed an empty value
             // are the same mistake, so both say the same thing.
-            const v = joined orelse flagValue(argv, i) orelse return flagNeeds(buf, flag, "bad arguments");
+            const v = joined orelse if (i + 1 < argv.len) argv[i + 1] else return flagNeeds(buf, flag, "bad arguments");
             if (v.len == 0) return flagNeeds(buf, flag, "bad arguments");
             if (setValued(buf, opts, flag.option, v)) |m| return m;
             if (joined == null) i += 1;
@@ -794,11 +794,6 @@ fn earlyAction(argv: []const []const u8) ?Action {
         if (valuedFlag(split.name) != null and split.joined == null) i += 1;
     }
     return null;
-}
-
-/// The value that follows a flag, or null when the flag ends the command line.
-fn flagValue(argv: []const []const u8, i: usize) ?[]const u8 {
-    return if (i + 1 < argv.len) argv[i + 1] else null;
 }
 
 fn isFlag(name: []const u8, short: []const u8, long: []const u8) bool {

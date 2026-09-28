@@ -198,10 +198,6 @@ fn logName(name: []const u8) ?LogName {
     };
 }
 
-fn isSessionLogName(name: []const u8) bool {
-    return logName(name) != null;
-}
-
 /// Deletes the oldest logs past `max_session_logs`. The oldest is read off the
 /// numbers the name carries rather than off its bytes: `-` sorts below every
 /// digit and a short stamp sorts below a long one, so a lexicographic sort puts
@@ -680,7 +676,7 @@ test "a store named relative to the working directory is pruned where it is" {
     defer walker.deinit();
     var left: usize = 0;
     while (try walker.next(io)) |entry| {
-        if (entry.kind == .file and isSessionLogName(entry.basename)) left += 1;
+        if (entry.kind == .file and logName(entry.basename) != null) left += 1;
     }
     try std.testing.expectEqual(max_session_logs, left);
 }
@@ -780,7 +776,7 @@ fn countSessionLogs(io: Io, arena: std.mem.Allocator, session_dir: []const u8) !
     var n: usize = 0;
     while (try walker.next(io)) |entry| {
         if (entry.kind != .file) continue;
-        if (isSessionLogName(entry.basename)) n += 1;
+        if (logName(entry.basename) != null) n += 1;
     }
     return n;
 }
@@ -828,7 +824,7 @@ test "a log in a subdirectory is pruned where it is, not by its bare name" {
         var walker = try dir.walk(arena);
         defer walker.deinit();
         while (try walker.next(io)) |entry| {
-            if (entry.kind == .file and isSessionLogName(entry.basename)) left += 1;
+            if (entry.kind == .file and logName(entry.basename) != null) left += 1;
         }
     }
     try std.testing.expectEqual(max_session_logs, left);
