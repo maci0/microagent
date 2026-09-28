@@ -36,6 +36,15 @@ printf '%-10s %-14s %8s %10s %8s  %s\n' agent task wall_s tokens lines result
 printf '%s\n' "--------------------------------------------------------------------------"
 
 for agent in $agents; do
+	# A harness that is not on PATH is not measured, it is failed: the task runs
+	# against an empty tree and every row reads fail(rc=127), appended to a
+	# committed results file. Skipped here, before the work directory is made,
+	# so the run says which harness is missing and writes no row for it.
+	if ! command -v "$agent" >/dev/null 2>&1; then
+		printf '%s: %s is not on PATH, skipping it (make bench builds microagent into zig-out/bin)\n' \
+			"$0" "$agent" >&2
+		continue
+	fi
 	for task_dir in "$tasks_dir"/*; do
 		task=$(basename "$task_dir")
 		work="$work_root/$task/$agent"

@@ -24,6 +24,14 @@ uv tool install ruff@0.16.4
 uv tool install yamllint==1.38.0
 ```
 
+`shellcheck` rides on the runner image, so it has no pinned version to
+install; it is a system package, and `make check` reaches the bench shell
+without it:
+
+```sh
+apt-get install -y shellcheck     # or: brew install shellcheck
+```
+
 CI installs those two from [lint-requirements.txt](lint-requirements.txt),
 which pins them and the packages `yamllint` imports, one sha256 per published
 artifact, and installs it with `--require-hashes` into a venv on `PATH`, so the

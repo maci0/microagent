@@ -123,6 +123,11 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- `bench/run.sh` and `bench/gauntlet.sh` skip a harness that is not on `PATH`, naming it on
+  stderr, as `bench/overhead.sh` already did. They invoked each harness by bare name, so a first
+  run on a machine without the binary built every task against an empty tree and appended a
+  `fail(rc=127)` row per task to the committed `results.jsonl` and `gauntlet-results.jsonl`. A
+  harness named with a model (`microagent:model`) is matched on the harness alone.
 - `write` refuses a call with no `content` instead of writing an empty file. The tool schema names
   `content` as required, but the argument was read as an empty string when it was missing, so a call
   that arrived naming only a path (a model that forgot it, or arguments cut short in the stream)

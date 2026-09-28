@@ -32,6 +32,17 @@ printf '%-40s %6s %6s %7s %8s %8s %8s  %s\n' agent passed failed files wall_s to
 printf '%s\n' "-------------------------------------------------------------------------------------------------------"
 
 for agent in $agents; do
+	# The harness is the spec's first field: everything after the first colon is
+	# the model and provider gauntlet appends. A harness that is not on PATH
+	# makes every review below it fail with no diff and no log to read, and
+	# records that as a run, so it is named and skipped before the clone.
+	harness=${agent%%:*}
+	if ! command -v "$harness" >/dev/null 2>&1; then
+		printf '%s: %s is not on PATH, skipping it (make install puts microagent in ~/.local/bin)\n' \
+			"$0" "$harness" >&2
+		continue
+	fi
+
 	# Agent specs can carry a model ("microagent:stealth/space-bunny-alpha"),
 	# which is not a legal directory name.
 	dir="$work_root/$(printf '%s' "$agent" | tr '/:@' '___')"
