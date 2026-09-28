@@ -230,14 +230,14 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
 fn firstLines(arena: std.mem.Allocator, text: []const u8, limit: usize) ![]u8 {
     var lines: usize = 0;
     var end: usize = text.len;
-    var i: usize = 0;
-    while (i < text.len) : (i += 1) {
-        if (text[i] != '\n') continue;
+    var at: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, text, at, '\n')) |nl| {
         lines += 1;
         if (lines == limit) {
-            end = i + 1;
+            end = nl + 1;
             break;
         }
+        at = nl + 1;
     }
     if (end == text.len) return arena.dupe(u8, text);
     return std.fmt.allocPrint(arena, "{s}... [output truncated at {d} lines]", .{ text[0..end], limit });
@@ -446,22 +446,85 @@ fn credentialRefusal(arena: std.mem.Allocator, path: []const u8) error{OutOfMemo
 fn toolRead(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     const path = chat.str(args.get("path")) orelse return std.fmt.allocPrint(arena, "error: missing path", .{});
     if (isCredentialPath(path)) return try credentialRefusal(arena, path);
-    const raw = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_read_bytes)) catch |err|
-        return std.fmt.allocPrint(arena, "error: cannot read {s}: {s}", .{ path, @errorName(err) });
-    if (!args.contains("offset") and !args.contains("limit")) return raw;
+    if (!args.contains("offset") and !args.contains("limit"))
+        return std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_read_bytes)) catch |err|
+            return readFailed(arena, path, err);
 
     const offset: usize = @max(1, chat.numCount(args.get("offset")));
     const limit: usize = if (args.get("limit")) |v| chat.numCount(v) else std.math.maxInt(usize);
+    return readLines(io, arena, path, offset, limit);
+}
+
+/// What a `read` says when the file is not there, is a directory, or cannot be
+/// opened: the same words whichever way the bytes were going to be fetched.
+fn readFailed(arena: std.mem.Allocator, path: []const u8, err: anyerror) []u8 {
+    return std.fmt.allocPrint(arena, "error: cannot read {s}: {s}", .{ path, @errorName(err) }) catch
+        @constCast("error: cannot read the file");
+}
+
+/// Bytes one read of a streamed file brings in.
+const read_chunk = 8 * 1024;
+
+/// The lines of a file in `[offset, offset + limit)`, each with the newline the
+/// model reads them back with.
+///
+/// The file is streamed rather than read whole. A `read` of fifty lines out of
+/// a four-megabyte artifact used to pull all four megabytes into the turn's
+/// memory, copy fifty lines out of them, and keep reading to the end of the
+/// file to find out there was nothing more; this reads up to the last line
+/// asked for and stops. A file whose last line has no newline is still a line,
+/// and gets the newline the split-based reader gave it.
+fn readLines(io: Io, arena: std.mem.Allocator, path: []const u8, offset: usize, limit: usize) ![]u8 {
+    var file = std.Io.Dir.cwd().openFile(io, path, .{ .allow_directory = true }) catch |err|
+        return readFailed(arena, path, err);
+    defer file.close(io);
+
+    var read_buffer: [read_chunk]u8 = undefined;
+    var file_reader = file.reader(io, &read_buffer);
+    const r = &file_reader.interface;
+
     var buf: std.ArrayList(u8) = .empty;
-    var lines = std.mem.splitScalar(u8, raw, '\n');
-    var n: usize = 0;
+    // The bytes of a line the last read cut in half, moved to the front each
+    // time a new one lands behind them.
+    var rest: std.ArrayList(u8) = .empty;
+    var chunk: [read_chunk]u8 = undefined;
+    var line: usize = 0;
     var taken: usize = 0;
-    while (lines.next()) |line| : (n += 1) {
-        if (n + 1 < offset) continue;
-        if (taken >= limit) break;
-        try buf.appendSlice(arena, line);
-        try buf.appendSlice(arena, "\n");
-        taken += 1;
+    var start: usize = 0;
+    var consumed: usize = 0;
+    while (consumed < max_read_bytes) {
+        const want = @min(read_chunk, max_read_bytes - consumed);
+        const n = r.readSliceShort(chunk[0..want]) catch |err| switch (err) {
+            // The generic `ReadFailed` names no cause; the reader kept the one
+            // that does, and a directory the model named is worth saying.
+            error.ReadFailed => return readFailed(arena, path, file_reader.err orelse error.ReadFailed),
+            else => |e| return e,
+        };
+        if (n == 0) break;
+        consumed += n;
+        try rest.appendSlice(arena, chunk[0..n]);
+        while (std.mem.indexOfScalarPos(u8, rest.items, start, '\n')) |at| {
+            line += 1;
+            if (line >= offset) {
+                if (taken >= limit) return buf.items;
+                try buf.appendSlice(arena, rest.items[start..at]);
+                try buf.append(arena, '\n');
+                taken += 1;
+            }
+            start = at + 1;
+        }
+        const left = rest.items.len - start;
+        std.mem.copyForwards(u8, rest.items[0..left], rest.items[start..]);
+        rest.shrinkRetainingCapacity(left);
+        start = 0;
+    }
+    // Out of cap rather than out of file, which is what a whole-file read of
+    // the same file reports, so one file over the cap reads the same whichever
+    // way the model asked for it.
+    if (consumed == max_read_bytes) return readFailed(arena, path, error.StreamTooLong);
+    if (rest.items.len > 0 and line + 1 >= offset and taken < limit) {
+        try buf.appendSlice(arena, rest.items);
+        try buf.append(arena, '\n');
     }
     return buf.items;
 }
@@ -716,6 +779,140 @@ pub fn dispatch(arena: std.mem.Allocator, name: []const u8, args: []const u8) ![
     };
     try call.args.appendSlice(arena, args);
     return runTool(std.testing.io, arena, call);
+}
+
+/// The line range a `read` with `offset` and `limit` returns: every line in
+/// range, each followed by a newline.
+///
+/// The newline that ends the last line of a file is a terminator, not the
+/// start of another line, so it does not add one. The split-based reader this
+/// replaced did count it, so `read` of a whole file and `read` of the same file
+/// line by line disagreed about whether the file ended in a blank line, and an
+/// empty file read as a single blank one.
+fn expectedLines(arena: std.mem.Allocator, raw: []const u8, offset: usize, limit: usize) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    if (raw.len == 0) return buf.toOwnedSlice(arena);
+    const body = if (raw[raw.len - 1] == '\n') raw[0 .. raw.len - 1] else raw;
+    var lines = std.mem.splitScalar(u8, body, '\n');
+    var n: usize = 1;
+    var taken: usize = 0;
+    while (lines.next()) |line| : (n += 1) {
+        if (n < offset) continue;
+        if (taken >= limit) break;
+        try buf.appendSlice(arena, line);
+        try buf.append(arena, '\n');
+        taken += 1;
+    }
+    return buf.toOwnedSlice(arena);
+}
+
+// A ranged read streams the file rather than pulling it whole, so the lines it
+// hands back are assembled across read boundaries instead of split out of one
+// buffer. What it must not change is the bytes: the same offset and limit give
+// the model the same text, whether the file ends in a newline or not and
+// whether the lines straddle a read.
+test "a ranged read returns the same lines the whole-file read used to return" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_path = dir_buf[0..try tmp.dir.realPath(std.testing.io, &dir_buf)];
+
+    // Short, empty, no trailing newline, and a file whose lines cross the
+    // 8 KB read boundary in both directions.
+    var long: std.ArrayList(u8) = .empty;
+    try long.appendSlice(arena, "head\n");
+    var i: usize = 0;
+    while (i < 900) : (i += 1)
+        try long.appendSlice(arena, try std.fmt.allocPrint(arena, "{d:0>5}\n", .{i}));
+    try long.appendSlice(arena, "tail without newline");
+
+    const files = [_]struct { name: []const u8, text: []const u8 }{
+        .{ .name = "short.txt", .text = "one\ntwo\nthree\n" },
+        .{ .name = "no_newline.txt", .text = "one\ntwo\nthree" },
+        .{ .name = "empty.txt", .text = "" },
+        .{ .name = "long.txt", .text = long.items },
+    };
+    const ranges = [_]struct { offset: usize, limit: usize }{
+        .{ .offset = 1, .limit = 1 },
+        .{ .offset = 2, .limit = 1 },
+        .{ .offset = 2, .limit = 2 },
+        .{ .offset = 3, .limit = 100 },
+        .{ .offset = 1, .limit = 100 },
+        .{ .offset = 900, .limit = 2 },
+        .{ .offset = 901, .limit = 2 },
+        .{ .offset = 902, .limit = 2 },
+        .{ .offset = 903, .limit = 2 },
+        .{ .offset = 10, .limit = 0 },
+        .{ .offset = 1, .limit = 0 },
+        .{ .offset = 50_000, .limit = 5 },
+    };
+
+    for (files) |f| {
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = f.name, .data = f.text });
+        const path = try std.fs.path.join(arena, &.{ dir_path, f.name });
+        for (ranges) |r| {
+            const got = try readLines(std.testing.io, arena, path, r.offset, r.limit);
+            try std.testing.expectEqualStrings(
+                try expectedLines(arena, f.text, r.offset, r.limit),
+                got,
+            );
+        }
+        // No range asked for: the file comes back exactly as it is on disk,
+        // trailing newline and all.
+        var args: std.json.ObjectMap = .empty;
+        try args.put(arena, "path", .{ .string = path });
+        try std.testing.expectEqualStrings(f.text, try toolRead(std.testing.io, arena, args));
+    }
+}
+
+test "a read of a file that is not there says the same whether or not it is a range" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    var args: std.json.ObjectMap = .empty;
+    try args.put(arena, "path", .{ .string = "nope.txt" });
+    try std.testing.expectEqualStrings("error: cannot read nope.txt: FileNotFound", try toolRead(std.testing.io, arena, args));
+    try args.put(arena, "offset", .{ .integer = 5 });
+    try std.testing.expectEqualStrings("error: cannot read nope.txt: FileNotFound", try toolRead(std.testing.io, arena, args));
+    try args.put(arena, "limit", .{ .integer = 5 });
+    try std.testing.expectEqualStrings("error: cannot read nope.txt: FileNotFound", try toolRead(std.testing.io, arena, args));
+}
+
+// The cap is what keeps a file over it out of the turn's memory, and it is a
+// property of the file rather than of the range asked for: streaming the bytes
+// a range needs must not be a way round it.
+test "a ranged read of a file over the cap is refused like a whole-file read" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fs.path.join(arena, &.{ dir_buf[0..try tmp.dir.realPath(std.testing.io, &dir_buf)], "big.txt" });
+
+    // A file is refused once it reaches the cap, whole-file read or ranged one:
+    // the cap is a property of the file, not of the lines the model asked for.
+    // Comfortably over it, and comfortably under.
+    var over: std.ArrayList(u8) = .empty;
+    try over.appendNTimes(arena, 'x', max_read_bytes + 1);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "big.txt", .data = over.items });
+    try std.testing.expectEqualStrings(
+        try std.fmt.allocPrint(arena, "error: cannot read {s}: StreamTooLong", .{path}),
+        try readLines(std.testing.io, arena, path, 1, 1),
+    );
+
+    var under: std.ArrayList(u8) = .empty;
+    try under.appendNTimes(arena, 'y', max_read_bytes - 2);
+    try under.append(arena, '\n');
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "under.txt", .data = under.items });
+    const under_path = try std.fs.path.join(arena, &.{ dir_buf[0..try tmp.dir.realPath(std.testing.io, &dir_buf)], "under.txt" });
+    try std.testing.expectEqual(max_read_bytes - 1, (try readLines(std.testing.io, arena, under_path, 1, 5)).len);
 }
 
 test "the tool gutter stays one line whatever the model sent" {

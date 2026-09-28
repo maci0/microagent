@@ -66,6 +66,17 @@ release, and `microagent update` moves you to it.
 
 ### Changed
 
+- A `read` with `offset` or `limit` streams the file instead of reading all of it and
+  copying the lines out. Reading fifty lines of a 3.9 MB file took 0.90 ms and left the
+  whole file in the turn's memory beside the response it shared that memory with; it takes
+  0.48 ms and leaves about one read's worth. The cap is unchanged, and still a property of
+  the file rather than of the range, so a file that reaches 4 MB is refused either way.
+
+  Two consequences the old reader had as bugs. The newline ending a file's last line
+  terminates it rather than starting another one, so `read` of a whole file and `read` of
+  the same file line by line no longer disagree about whether it ends in a blank line, and
+  an empty file no longer reads back as a single blank line.
+
 - The agent loop, the tools and the shared value types are three modules instead of one file.
   `main.zig` held the command line, the config, the session log, the provider request, the frame
   parser, the tools and every subprocess it started, which is a 4 400-line file where a change to
