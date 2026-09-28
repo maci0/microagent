@@ -38,6 +38,11 @@ release, and `microagent update` moves you to it.
   `--print`, and anything after `--` are still a task, by the rules that were
   already there, so `microagent -- "help"` and `microagent -p help` run.
 
+- `make lint-versions` also checks that every pin in `lint-requirements.txt`
+  carries a `--hash=sha256`. The file is installed with `--require-hashes`, so a
+  pin added without one fails the lint job on pip's own message, which names
+  neither the pin nor the linter that asked for it, and only in CI.
+
 ### Changed
 
 - `search`, `ast` and `git` name the program they delegate to when that program
@@ -66,6 +71,45 @@ release, and `microagent update` moves you to it.
   the log to connect it to the host that had a bundle to give.
 
 ### Fixed
+
+- A tool call whose subprocess failed keeps what the subprocess printed. A
+  `git log` that timed out after the last hundred commits, a `bash` build that
+  printed every error it had found and then hung, and a `git` command refused
+  by a timeout all reached the model as the error name alone, so the next turn
+  read that the command had produced nothing and ran it again from the start.
+  `bash`, `search`, `ast` and `git` now return both streams, the truncation
+  marker if a cap cut either of them, and the failure under them. A child that
+  was signalled, cancelled, or never finished is no longer reported as a
+  command that exited 0: the wait on the process group swallowed its own error
+  and left the status it had been initialised with, so a killed `bash` call
+  read as a successful one.
+
+- An `ast` rewrite whose result its own pattern still matches is refused,
+  rather than applied once per call the model repeats. `return $X` rewritten to
+  `return [$X]` gives `return [[1]]`, then `return [[[1]]]]`, on every match in
+  the tree, and the second run cannot tell an applied rewrite from a first one
+  because the two leave the same bytes. A replacement spelled as the pattern, a
+  pattern of metavariables alone, and a replacement carrying the pattern's
+  literal text are each refused, in the shape `edit` refuses in, and the
+  refusal names `edit` as the alternative. A replacement that re-matches
+  through a form the pattern's literal text does not spell is still applied, so
+  the model still reads the tree back.
+
+- A byte that is not part of a valid UTF-8 sequence is written as a dot in the
+  tool gutter and in a provider's error body, the way a control byte already
+  was. A tool argument is whatever the model sent and an error body is the
+  provider's own bytes, so a lone `0xff` or the `\xe6\x97` half of a character
+  reached the operator's screen as mojibake inside a run's diagnostic. A whole
+  sequence is copied byte for byte, so the pass is a fixed point.
+
+- `microagent update` quotes the asset url in its retry notes and the install
+  path in the failure it reports. `trustedGithubUrl` has read the scheme and the
+  host by the time a fetch retries, and everything after the host is the
+  release body's own bytes, so a path carrying an escape sequence reached the
+  screen as written; the install line on stdout keeps the path as it was
+  spelled, because that is the line a script reads the path out of. A url the
+  run cannot quote now says the retry is being taken without naming the url,
+  rather than printing it unquoted.
 
 - A mistyped `MICROAGENT_MAX_TOKENS` stops a Harbor run at the command line. The
   adapter forwards it to the container so a low provider balance is a setting
@@ -226,6 +270,16 @@ release, and `microagent update` moves you to it.
   quoted one does, and a `#` inside the quotes is still text.
 
 ### Security
+
+- A credentials file named as the `git` tool's `rev` is refused, the way one
+  named as its `path` already was. The `:(exclude)` pathspecs the tool carries
+  are arguments after the `--`, so they scope a revision the model named and
+  never a name it did not: `git blame .env` took the name as its one revision
+  argument and printed the file line by line with its hash and author, and
+  `git diff .env` printed the committed and working-tree text of every hunk. A
+  tool result is re-sent to the provider on every later turn. The tool's own
+  description now says the `rev` is refused too, so the model is not asked for
+  one.
 
 - A session log is created readable by its owner alone, and the directory a run makes for
   its own store with it. A log took the default file mode, `0o666` less the umask, so on the
@@ -1031,7 +1085,7 @@ First release.
   `aarch64-macos` with a checksum sidecar each, and refuses a tag that does not name the version in
   `build.zig.zon`.
 
-[Unreleased]: https://github.com/maci0/microagent/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/maci0/microagent/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/maci0/microagent/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/maci0/microagent/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/maci0/microagent/releases/tag/v0.1.0
