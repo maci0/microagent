@@ -2397,9 +2397,12 @@ test "a ranged read of a long line comes back whole" {
     const dir_path = dir_buf[0..try tmp.dir.realPath(std.testing.io, &dir_buf)];
     const path = try std.fs.path.join(arena, &.{ dir_path, "long-line.txt" });
 
-    // Four reads plus a bit, so the line straddles the read boundary several
-    // times and no read before the last one can end it.
-    const width = 8 * 1024 * 4 + 137;
+    // Sixty-four reads plus a bit. The size is the point: the quadratic is a
+    // re-scan and a full copy of the buffer per read, so it is invisible at a
+    // few reads and the instruction gate would sit inside its own tolerance
+    // band with a test too small to catch a re-introduction. At this width the
+    // work is two orders of magnitude apart between the two versions.
+    const width = 8 * 1024 * 64 + 137;
     var text: std.ArrayList(u8) = .empty;
     try text.appendSlice(arena, "before\n");
     try text.appendNTimes(arena, 'z', width);
