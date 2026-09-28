@@ -439,6 +439,24 @@ its budget ends the loop deliberately instead of being killed by the caller.
 Statistics, honestly: 11/23 against 7/23 with a standard error near 0.10 each is a difference of
 about 1.7 standard errors — suggestive, not proof. The exception count is not a matter of noise.
 
+The token columns say more about cost than the solve rate does. microagent wins
+on tasks solved and spends about 1.9x the input tokens and 4.3x the output to
+do it, which is 1.2x and 2.8x per task solved. Neither is waste on its face --
+a harness that keeps more evidence in front of the model spends more -- but it
+is worth knowing what those bytes are.
+
+16.5 M input tokens is about 66 MB of prompt. Spread over the turns those tasks
+took, that is 72-143 KB per request (the range is the turn count, which the
+benchmark does not keep), against a `conversation_soft_limit` of 400 KB. So on
+a benchmark of this shape the limit does not fire: the conversation never gets
+near it, and the fixed 3,460 bytes a request carries is under 3% of one. The
+prompt is evidence the agent accumulated, not the fixed harness cost and not
+compaction.
+
+That settles the limit's practical reach, which was the open question in this
+file: it is inert at benchmark scale and only binds on long runs. Tuning it
+would have changed nothing here.
+
 ## Matched comparison: microagent vs opencode
 
 Same 13 SWE-bench Verified instances, same model (`openrouter/deepseek/deepseek-v4-flash`, one
