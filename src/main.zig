@@ -54,6 +54,9 @@ const tools_json =
     \\]
 ;
 
+/// What the command line asked the binary to do before it does any work.
+const Action = enum { run, help, version };
+
 const Options = struct {
     prompt: []const u8 = "",
     model: []const u8 = default_model,
@@ -78,6 +81,12 @@ const Options = struct {
     /// while it is still going. Set by MICROAGENT_SESSION_DIR, else
     /// $HOME/.microagent/sessions; an empty value writes nothing.
     session_dir: []const u8 = "",
+    /// Reply-style config to read. Set by --config or MICROAGENT_CONFIG, else
+    /// $HOME/.microagent/config.toml. A missing file is not an error.
+    config: []const u8 = "",
+    /// What the command line asked for. `--help` and `--version` stop the
+    /// parse where they appear, before any option value is needed.
+    action: Action = .run,
 };
 
 /// `args` grows in place as the provider streams the arguments in fragments.
@@ -155,73 +164,28 @@ pub fn main(init: std.process.Init) !void {
     if (init.environ_map.get("MICROAGENT_REASONING_EFFORT")) |v| opts.reasoning_effort = v;
     opts.ca_bundle = net.caBundlePath(init.environ_map);
     if (init.environ_map.get("MICROAGENT_BUDGET_SECONDS")) |v|
-        opts.budget_s = std.fmt.parseInt(u64, v, 10) catch return usageError(io, "MICROAGENT_BUDGET_SECONDS must be a number");
+        opts.budget_s = std.fmt.parseInt(u64, v, 10) catch
+            return usageError(io, "MICROAGENT_BUDGET_SECONDS must be a number, got '{s}'", .{v});
     opts.session_dir = sessionDir(init);
 
-    var i: usize = 1;
-    while (i < args.items.len) : (i += 1) {
-        const arg = args.items[i];
-        if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--print")) {
-            i += 1;
-            if (i >= args.items.len) return usageError(io, "missing prompt");
-            opts.prompt = args.items[i];
-        } else if (std.mem.eql(u8, arg, "-m") or std.mem.eql(u8, arg, "--model")) {
-            i += 1;
-            if (i >= args.items.len) return usageError(io, "missing model");
-            opts.model = args.items[i];
-        } else if (std.mem.eql(u8, arg, "-b") or std.mem.eql(u8, arg, "--base-url")) {
-            i += 1;
-            if (i >= args.items.len) return usageError(io, "missing base url");
-            opts.base_url = args.items[i];
-        } else if (std.mem.eql(u8, arg, "-k") or std.mem.eql(u8, arg, "--api-key")) {
-            i += 1;
-            if (i >= args.items.len) return usageError(io, "missing api key");
-            opts.api_key = args.items[i];
-        } else if (std.mem.eql(u8, arg, "--ca-bundle")) {
-            i += 1;
-            if (i >= args.items.len) return usageError(io, "missing ca bundle path");
-            opts.ca_bundle = args.items[i];
-        } else if (std.mem.eql(u8, arg, "--budget")) {
-            i += 1;
-            if (i >= args.items.len) return usageError(io, "missing budget in seconds");
-            opts.budget_s = std.fmt.parseInt(u64, args.items[i], 10) catch
-                return usageError(io, "budget must be a number of seconds");
-        } else if (std.mem.eql(u8, arg, "--reasoning-effort")) {
-            i += 1;
-            if (i >= args.items.len) return usageError(io, "missing reasoning effort");
-            opts.reasoning_effort = args.items[i];
-        } else if (std.mem.eql(u8, arg, "--max-turns")) {
-            i += 1;
-            if (i >= args.items.len) return usageError(io, "missing max turns");
-            opts.max_turns = std.fmt.parseInt(usize, args.items[i], 10) catch
-                return usageError(io, "max turns must be a number");
-        } else if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-V")) {
-            std.Io.File.stdout().writeStreamingAll(io, "microagent " ++ version ++ "\n") catch {};
-            return;
-        } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+    var err_buf: [512]u8 = undefined;
+    if (parseArgs(&err_buf, args.items[1..], &opts)) |msg| return usageError(io, "{s}", .{msg});
+    switch (opts.action) {
+        .help => {
             std.Io.File.stdout().writeStreamingAll(io, help_text) catch {};
             return;
-        } else {
-            if (arg.len > 0 and arg[0] != '-') {
-                // A bare argument is the prompt. gauntlet's custom-agent
-                // definitions insert the model flags before the prompt, so
-                // "microagent -p {prompt}" would hand the model flag to -p;
-                // taking the prompt positionally makes the order irrelevant.
-                if (opts.prompt.len != 0) return usageError(io, arg);
-                opts.prompt = arg;
-                continue;
-            }
-            return usageError(io, arg);
-        }
+        },
+        .version => {
+            std.Io.File.stdout().writeStreamingAll(io, "microagent " ++ version ++ "\n") catch {};
+            return;
+        },
+        .run => {},
     }
 
-    if (opts.prompt.len == 0) {
-        std.Io.File.stderr().writeStreamingAll(io, help_text) catch {};
-        std.process.exit(2);
-    }
+    if (opts.prompt.len == 0) return usageError(io, "no prompt: pass it as an argument or with --print", .{});
     opts.api_key = resolveKey(init, opts.api_key);
     if (opts.api_key.len == 0)
-        return usageError(io, "no API key: pass --api-key or set MICROAGENT_API_KEY / OPENAI_API_KEY");
+        return usageError(io, "no API key: pass --api-key or set MICROAGENT_API_KEY / OPENAI_API_KEY / OPENROUTER_API_KEY / DEEPSEEK_API_KEY", .{});
 
     var client: std.http.Client = .{ .allocator = gpa, .io = io };
     defer client.deinit();
@@ -232,7 +196,7 @@ pub fn main(init: std.process.Init) !void {
     var msgs: std.ArrayList(u8) = .empty;
     defer msgs.deinit(gpa);
     try msgs.appendSlice(gpa, "[");
-    const style = loadStyle(io, init, init.arena.allocator());
+    const style = loadStyle(io, init, init.arena.allocator(), opts.config);
     const reply_style = try style.ruleset(init.arena.allocator());
     const prompt = if (reply_style.len == 0)
         system_prompt
@@ -257,13 +221,16 @@ const final_push =
 const help_text =
     \\microagent - tiny OpenAI-compatible coding agent
     \\
-    \\usage: microagent -p "<prompt>" [options]
+    \\usage: microagent [options] "<prompt>"
     \\
     \\  -p, --print <prompt>   task to run (also accepted as a bare argument)
     \\  -m, --model <model>    model id (env MICROAGENT_MODEL)
     \\  -b, --base-url <url>   OpenAI-compatible base url (env MICROAGENT_BASE_URL)
-    \\  -k, --api-key <key>    api key (env MICROAGENT_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY)
+    \\  -k, --api-key <key>    api key (env MICROAGENT_API_KEY, OPENAI_API_KEY,
+    \\                         OPENROUTER_API_KEY, DEEPSEEK_API_KEY)
     \\      --max-turns <n>    tool-loop turn ceiling (default 100)
+    \\      --config <file>    reply-style TOML config (env MICROAGENT_CONFIG,
+    \\                         default ~/.microagent/config.toml)
     \\      --ca-bundle <file>
     \\                         PEM file to trust instead of the system store
     \\                         (env MICROAGENT_CA_BUNDLE, SSL_CERT_FILE). Needed in
@@ -277,29 +244,154 @@ const help_text =
     \\  -h, --help             this text
     \\  -V, --version          version
     \\
-    \\reply style (env, or the TOML config at MICROAGENT_CONFIG, default
-    \\~/.microagent/config.toml with the keys "caveman" and "ponytail"):
+    \\every long flag also takes --flag=value. A flag wins over the environment
+    \\variable for the same option.
+    \\
+    \\reply style (MICROAGENT_CAVEMAN / MICROAGENT_PONYTAIL, or the same two keys
+    \\in the config named above):
     \\  MICROAGENT_CAVEMAN     how terse the reply is: off, lite, full, ultra,
     \\                         wenyan-lite, wenyan-full, wenyan-ultra
     \\                         (default ultra)
     \\  MICROAGENT_PONYTAIL    how lazy the code is: off, lite, full, ultra
     \\                         (default full)
     \\
+    \\  MICROAGENT_SESSION_DIR where the per-response JSONL session log goes
+    \\                         (default ~/.microagent/sessions; empty writes none)
+    \\
     \\subcommand:
-    \\  update [--check] [--repo owner/name]
+    \\  update [-c|--check] [--repo owner/name]
     \\                         replace this binary with the latest GitHub
     \\                         release after verifying its .sha256 sidecar
     \\                         (--check only reports; GITHUB_TOKEN lifts the
-    \\                         API rate limit)
+    \\                         API rate limit). "microagent update --help" has
+    \\                         the details.
+    \\
+    \\exit status: 0 the run finished, 1 the run failed, 2 the command line was
+    \\wrong.
     \\
 ;
 
-fn usageError(io: Io, arg: []const u8) noreturn {
-    const msg = std.fmt.allocPrint(std.heap.page_allocator, "microagent: unknown or incomplete argument '{s}'\n", .{arg}) catch
+/// A command line that does not parse: one line saying which argument was
+/// wrong, then the help text. Both go to stderr, so a script reading stdout
+/// gets nothing from a failed invocation. Exit 2, the conventional code for a
+/// usage error.
+fn usageError(io: Io, comptime fmt: []const u8, args: anytype) noreturn {
+    const msg = std.fmt.allocPrint(std.heap.page_allocator, "microagent: " ++ fmt ++ "\n", args) catch
         "microagent: bad arguments\n";
     std.Io.File.stderr().writeStreamingAll(io, msg) catch {};
     std.Io.File.stderr().writeStreamingAll(io, help_text) catch {};
     std.process.exit(2);
+}
+
+fn clip(s: []const u8) []const u8 {
+    return s[0..@min(s.len, 80)];
+}
+
+/// Reads the arguments after the program name into `opts`, formatting any
+/// message that names a bad argument into `buf`. Returns null when
+/// they parse, or a message naming what was wrong, which `usageError` prints
+/// with the help text before exiting 2. Every long flag also takes
+/// `--flag=value`, the form `microagent update` already took, so both commands
+/// spell an option the same way. `--help` and `--version` win wherever they
+/// appear, and stop the parse there.
+fn parseArgs(buf: []u8, argv: []const []const u8, opts: *Options) ?[]const u8 {
+    var i: usize = 0;
+    while (i < argv.len) : (i += 1) {
+        const arg = argv[i];
+        // `--flag=value` splits into a name and an joined value; a short flag
+        // never does, so `-p=x` stays the unknown argument it is.
+        var name = arg;
+        var joined: ?[]const u8 = null;
+        if (arg.len > 2 and arg[0] == '-' and arg[1] == '-') {
+            if (std.mem.indexOfScalar(u8, arg, '=')) |eq| {
+                name = arg[0..eq];
+                joined = arg[eq + 1 ..];
+            }
+        }
+        if (isFlag(name, "-V", "--version")) {
+            opts.action = .version;
+            return null;
+        } else if (isFlag(name, "-h", "--help")) {
+            opts.action = .help;
+            return null;
+        } else if (isFlag(name, "-p", "--print")) {
+            const v = joined orelse flagValue(argv, i) orelse return "--print needs a prompt";
+            if (v.len == 0) return "--print needs a prompt";
+            if (setPrompt(buf, opts, v)) |m| return m;
+            if (joined == null) i += 1;
+        } else if (isFlag(name, "-m", "--model")) {
+            const v = joined orelse flagValue(argv, i) orelse return "--model needs a model id";
+            if (v.len == 0) return "--model needs a model id";
+            opts.model = v;
+            if (joined == null) i += 1;
+        } else if (isFlag(name, "-b", "--base-url")) {
+            const v = joined orelse flagValue(argv, i) orelse return "--base-url needs a url";
+            if (v.len == 0) return "--base-url needs a url";
+            opts.base_url = v;
+            if (joined == null) i += 1;
+        } else if (isFlag(name, "-k", "--api-key")) {
+            const v = joined orelse flagValue(argv, i) orelse return "--api-key needs a key";
+            if (v.len == 0) return "--api-key needs a key";
+            opts.api_key = v;
+            if (joined == null) i += 1;
+        } else if (std.mem.eql(u8, name, "--ca-bundle")) {
+            const v = joined orelse flagValue(argv, i) orelse return "--ca-bundle needs a file";
+            if (v.len == 0) return "--ca-bundle needs a file";
+            opts.ca_bundle = v;
+            if (joined == null) i += 1;
+        } else if (std.mem.eql(u8, name, "--config")) {
+            const v = joined orelse flagValue(argv, i) orelse return "--config needs a file";
+            if (v.len == 0) return "--config needs a file";
+            opts.config = v;
+            if (joined == null) i += 1;
+        } else if (std.mem.eql(u8, name, "--reasoning-effort")) {
+            const v = joined orelse flagValue(argv, i) orelse return "--reasoning-effort needs a level";
+            if (v.len == 0) return "--reasoning-effort needs a level";
+            opts.reasoning_effort = v;
+            if (joined == null) i += 1;
+        } else if (std.mem.eql(u8, name, "--budget")) {
+            const v = joined orelse flagValue(argv, i) orelse return "--budget needs a number of seconds";
+            if (v.len == 0) return "--budget needs a number of seconds";
+            opts.budget_s = std.fmt.parseInt(u64, v, 10) catch
+                return std.fmt.bufPrint(buf, "--budget must be a number of seconds, got '{s}'", .{v}) catch "bad --budget";
+            if (joined == null) i += 1;
+        } else if (std.mem.eql(u8, name, "--max-turns")) {
+            const v = joined orelse flagValue(argv, i) orelse return "--max-turns needs a number";
+            if (v.len == 0) return "--max-turns needs a number";
+            opts.max_turns = std.fmt.parseInt(usize, v, 10) catch
+                return std.fmt.bufPrint(buf, "--max-turns must be a number, got '{s}'", .{v}) catch "bad --max-turns";
+            if (joined == null) i += 1;
+        } else if (arg.len > 0 and arg[0] != '-') {
+            // A bare argument is the prompt. gauntlet's custom-agent
+            // definitions insert the model flags before the prompt, so
+            // "microagent -p {prompt}" would hand the model flag to -p;
+            // taking the prompt positionally makes the order irrelevant.
+            if (setPrompt(buf, opts, arg)) |m| return m;
+        } else {
+            return std.fmt.bufPrint(buf, "unknown or incomplete argument '{s}'", .{arg}) catch "bad arguments";
+        }
+    }
+    return null;
+}
+
+/// The value that follows a flag, or null when the flag ends the command line.
+fn flagValue(argv: []const []const u8, i: usize) ?[]const u8 {
+    return if (i + 1 < argv.len) argv[i + 1] else null;
+}
+
+fn isFlag(name: []const u8, short: []const u8, long: []const u8) bool {
+    return std.mem.eql(u8, name, short) or std.mem.eql(u8, name, long);
+}
+
+/// The prompt is accepted twice over, as `-p` and as a bare word, so the two
+/// spellings can collide. Take the first and say so on the second rather than
+/// silently running whichever came last.
+fn setPrompt(buf: []u8, opts: *Options, value: []const u8) ?[]const u8 {
+    if (opts.prompt.len != 0)
+        return std.fmt.bufPrint(buf, "prompt given twice: '{s}' and '{s}'", .{ clip(opts.prompt), clip(value) }) catch
+            "prompt given twice";
+    opts.prompt = value;
+    return null;
 }
 
 fn resolveKey(init: std.process.Init, given: []const u8) []const u8 {
@@ -319,14 +411,14 @@ fn readSecret(init: std.process.Init, name: []const u8) ?[]const u8 {
     return std.mem.trim(u8, raw, " \t\r\n");
 }
 
-/// The reply-style levels for this run, from the TOML config at
-/// MICROAGENT_CONFIG or `$HOME/.microagent/config.toml`, then the
+/// The reply-style levels for this run, from the TOML config named by
+/// --config, MICROAGENT_CONFIG or `$HOME/.microagent/config.toml`, then the
 /// MICROAGENT_CAVEMAN / MICROAGENT_PONYTAIL overrides, then the built-in
 /// defaults. A missing file, an unreadable one, or an unknown key costs the run
 /// nothing: the levels that were understood still apply.
-fn loadStyle(io: Io, init: std.process.Init, arena: std.mem.Allocator) style_mod.Style {
+fn loadStyle(io: Io, init: std.process.Init, arena: std.mem.Allocator, config: []const u8) style_mod.Style {
     var style: style_mod.Style = .{};
-    const path = styleConfigPath(init, arena);
+    const path = styleConfigPath(init, arena, config);
     const text: ?[]const u8 = if (path) |p|
         std.Io.Dir.cwd().readFileAlloc(io, p, arena, .limited(max_config_bytes)) catch null
     else
@@ -340,9 +432,11 @@ fn loadStyle(io: Io, init: std.process.Init, arena: std.mem.Allocator) style_mod
     return style;
 }
 
-/// Where the style config is read from. An empty MICROAGENT_CONFIG turns the
+/// Where the style config is read from: --config, else MICROAGENT_CONFIG, else
+/// `$HOME/.microagent/config.toml`. An empty MICROAGENT_CONFIG turns the
 /// file off, as does a home that is not there.
-fn styleConfigPath(init: std.process.Init, arena: std.mem.Allocator) ?[]const u8 {
+fn styleConfigPath(init: std.process.Init, arena: std.mem.Allocator, config: []const u8) ?[]const u8 {
+    if (config.len > 0) return std.fs.path.resolve(arena, &.{config}) catch config;
     if (init.environ_map.get("MICROAGENT_CONFIG")) |path| {
         if (path.len == 0) return null;
         return std.fs.path.resolve(arena, &.{path}) catch path;
@@ -1302,6 +1396,46 @@ test "every ASCII byte survives escaping" {
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, buf.items(), .{});
     defer parsed.deinit();
     try std.testing.expectEqualSlices(u8, &all, parsed.value.string);
+}
+
+test "the command line parses in either flag form and in any order" {
+    var opts: Options = .{};
+    var buf: [512]u8 = undefined;
+    const argv = [_][]const u8{ "fix it", "--model=some/model", "--budget=90", "--max-turns", "7" };
+    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &argv, &opts));
+    try std.testing.expectEqualStrings("fix it", opts.prompt);
+    try std.testing.expectEqualStrings("some/model", opts.model);
+    try std.testing.expectEqual(@as(?u64, 90), opts.budget_s);
+    try std.testing.expectEqual(@as(usize, 7), opts.max_turns);
+
+    var short: Options = .{};
+    const short_argv = [_][]const u8{ "-m", "some/model", "-b", "http://localhost:1234/v1", "-p", "fix it" };
+    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &short_argv, &short));
+    try std.testing.expectEqualStrings("some/model", short.model);
+    try std.testing.expectEqualStrings("http://localhost:1234/v1", short.base_url);
+    try std.testing.expectEqualStrings("fix it", short.prompt);
+}
+
+test "a wrong command line names the flag and the value it was given" {
+    var opts: Options = .{};
+    var buf: [512]u8 = undefined;
+    try std.testing.expectEqualStrings("unknown or incomplete argument '--nope'", parseArgs(&buf, &.{"--nope"}, &opts).?);
+    try std.testing.expectEqualStrings("--model needs a model id", parseArgs(&buf, &.{"--model"}, &opts).?);
+    try std.testing.expectEqualStrings("--budget must be a number of seconds, got 'soon'", parseArgs(&buf, &.{ "--budget", "soon" }, &opts).?);
+    try std.testing.expectEqualStrings("prompt given twice: 'one' and 'two'", parseArgs(&buf, &.{ "one", "two" }, &opts).?);
+    var joined: Options = .{};
+    try std.testing.expectEqualStrings("prompt given twice: 'one' and 'two'", parseArgs(&buf, &.{ "-p", "one", "--print=two" }, &joined).?);
+}
+
+test "help and version win wherever they appear" {
+    var opts: Options = .{};
+    var buf: [512]u8 = undefined;
+    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &.{ "a prompt", "--help" }, &opts));
+    try std.testing.expectEqual(Action.help, opts.action);
+
+    var v: Options = .{};
+    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &.{ "-V", "--model" }, &v));
+    try std.testing.expectEqual(Action.version, v.action);
 }
 
 test "clamp keeps short strings intact" {

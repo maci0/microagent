@@ -24,7 +24,7 @@ agents=${*:-microagent}
 # argvFor AGENT PROMPT -> prints the command line to run
 argv_for() {
 	case "$1" in
-	microagent) printf '%s' "microagent -p \"\$PROMPT\"" ;;
+	microagent) printf '%s' "microagent --print \"\$PROMPT\"" ;;
 	claude) printf '%s' "claude -p \"\$PROMPT\"" ;;
 	kimi) printf '%s' "kimi -p \"\$PROMPT\"" ;;
 	codex) printf '%s' "codex exec --skip-git-repo-check \"\$PROMPT\"" ;;

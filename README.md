@@ -47,6 +47,7 @@ microagent -p "fix the failing test and run it"
 -b, --base-url <url>   OpenAI-compatible base url (env MICROAGENT_BASE_URL)
 -k, --api-key <key>    api key         (env MICROAGENT_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY)
     --max-turns <n>    tool-loop turn ceiling (default 100)
+    --config <file>    reply-style TOML config (env MICROAGENT_CONFIG)
     --ca-bundle <file>
                        PEM file to trust instead of the system store
                        (env MICROAGENT_CA_BUNDLE, SSL_CERT_FILE). Needed in
@@ -74,6 +75,11 @@ subcommand:
                          (--check only reports; GITHUB_TOKEN lifts the
                          API rate limit)
 ```
+
+Every long flag also takes `--flag=value`, a flag wins over the environment variable for the same
+option, and the exit status is 0 for a finished run, 1 for a failed one and 2 for a wrong command
+line. `microagent --help` and `microagent update --help` are the full text; a wrong flag prints the
+reason and that help on stderr, so a script reading stdout gets nothing from a failed invocation.
 
 The prompt may also be the last bare argument. That matters for gauntlet: a custom-agent
 definition inserts the model flags immediately after `-p`, so an agent defined as

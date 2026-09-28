@@ -451,8 +451,9 @@ const usage_text =
     \\
     \\flags:
     \\  -c, --check            report the latest release and install nothing
-    \\      --repo OWNER/NAME  GitHub repository to track (default maci0/microagent)
-    \\  -h, --help             this text
+    \\      --repo OWNER/NAME  GitHub repository to track (default maci0/microagent);
+    \\                         --repo=OWNER/NAME also works
+    \\  -h, --help             this text ("update help" too)
     \\  -V, --version          version
     \\
     \\environment:
@@ -460,7 +461,8 @@ const usage_text =
     \\
     \\With --check, stdout is the release page URL and the version comparison
     \\goes to stderr; nothing is downloaded. Exit 0 means the check ran;
-    \\exit 1 means it did not, exit 2 is a usage error.
+    \\exit 1 means it did not, exit 2 is a usage error, and a usage error
+    \\writes both its reason and this text to stderr so stdout stays clean.
     \\
 ;
 
@@ -508,12 +510,12 @@ pub fn run(
             check_only = true;
         } else if (std.mem.eql(u8, arg, "--repo")) {
             i += 1;
-            if (i >= args.len) return updateUsageError(io, "--repo needs a value (owner/name)");
+            if (i >= args.len) return updateUsageError(io, "--repo needs an owner/name value", .{});
             repo_arg = args[i];
         } else if (std.mem.startsWith(u8, arg, "--repo=")) {
             repo_arg = arg["--repo=".len..];
         } else {
-            return updateUsageError(io, arg);
+            return unknownArgument(io, arg);
         }
     }
 
@@ -620,13 +622,19 @@ pub fn run(
     return 0;
 }
 
-fn updateUsageError(io: std.Io, arg: []const u8) u8 {
-    var buf: [224]u8 = undefined;
-    const line = std.fmt.bufPrint(&buf, "microagent update: unknown or incomplete argument '{s}'\n", .{arg}) catch
+/// A command line that does not parse. The message and the usage text both go
+/// to stderr, so a failed invocation leaves stdout empty for whatever reads it.
+fn updateUsageError(io: std.Io, comptime fmt: []const u8, args: anytype) u8 {
+    var buf: [512]u8 = undefined;
+    const line = std.fmt.bufPrint(&buf, "microagent update: " ++ fmt ++ "\n", args) catch
         "microagent update: bad arguments\n";
     writeErr(io, line);
-    printUsage(io);
+    writeErr(io, usage_text);
     return 2;
+}
+
+fn unknownArgument(io: std.Io, arg: []const u8) u8 {
+    return updateUsageError(io, "unknown or incomplete argument '{s}'", .{arg});
 }
 
 /// The same CA-bundle escape hatch the agent run has: an image that ships no
