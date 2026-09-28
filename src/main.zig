@@ -228,6 +228,8 @@ pub fn main(init: std.process.Init) !void {
     if (opts.prompt.len == 0) return usageError(io, "no prompt: pass it as an argument or with --print", .{});
     opts.api_key = resolveKey(init, opts.api_key);
     if (opts.api_key.len == 0) return configError(io, "no API key: pass --api-key or set {s}", .{key_var_names});
+    if (!baseUrlCarriesKey(opts.base_url))
+        return configError(io, "the API key would go to {s} in the clear; use an https base url, or http on loopback", .{clip(opts.base_url)});
 
     var client: std.http.Client = .{ .allocator = gpa, .io = io };
     defer client.deinit();
@@ -267,7 +269,9 @@ const help_text =
     \\
     \\  -p, --print <prompt>   task to run (also accepted as a bare argument)
     \\  -m, --model <model>    model id (env MICROAGENT_MODEL)
-    \\  -b, --base-url <url>   OpenAI-compatible base url (env MICROAGENT_BASE_URL)
+    \\  -b, --base-url <url>   OpenAI-compatible base url (env MICROAGENT_BASE_URL);
+    \\                         https, or http on loopback, because the api key
+    \\                         goes to it in the clear otherwise
     \\  -k, --api-key <key>    api key (env MICROAGENT_API_KEY, OPENAI_API_KEY,
     \\                         OPENROUTER_API_KEY, DEEPSEEK_API_KEY)
     \\      --max-turns <n>    tool-loop turn ceiling, at least 1
@@ -407,6 +411,53 @@ fn tokenCeiling(io: Io, from: []const u8, value: []const u8) u32 {
 }
 
 const key_var_names = "MICROAGENT_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY or DEEPSEEK_API_KEY";
+
+/// Whether the API key may be sent to this base url. The key rides in an
+/// Authorization header on every request, so a plaintext url hands it to
+/// whatever is on the path, and a typo that drops the `s` is the way that
+/// happens by accident. Loopback is exempt: there is no network path there to
+/// intercept, and `http://localhost:1234/v1` is how a gateway running on this
+/// machine is named.
+fn baseUrlCarriesKey(base_url: []const u8) bool {
+    const uri = std.Uri.parse(base_url) catch return false;
+    if (std.ascii.eqlIgnoreCase(uri.scheme, "https")) return true;
+    if (!std.ascii.eqlIgnoreCase(uri.scheme, "http")) return false;
+    var host_buf: [Io.net.HostName.max_len]u8 = undefined;
+    return isLoopbackHost((uri.getHost(&host_buf) catch return false).bytes);
+}
+
+fn isLoopbackHost(host: []const u8) bool {
+    if (std.ascii.eqlIgnoreCase(host, "localhost")) return true;
+    if (std.mem.endsWith(u8, host, ".localhost")) return true;
+    if (isIpv4Loopback(host)) return true;
+    return std.mem.eql(u8, std.mem.trim(u8, host, "[]"), "::1");
+}
+
+/// `127.x.y.z`, and only when every octet is a number: a name that merely
+/// begins `127.` is a host somebody else can point anywhere.
+fn isIpv4Loopback(host: []const u8) bool {
+    if (!std.mem.startsWith(u8, host, "127.")) return false;
+    var octets: usize = 0;
+    var it = std.mem.splitScalar(u8, host, '.');
+    while (it.next()) |part| {
+        if (part.len == 0 or part.len > 3) return false;
+        for (part) |c| if (!std.ascii.isDigit(c)) return false;
+        octets += 1;
+    }
+    return octets == 4;
+}
+
+/// The url as the stderr notes name it, with any `user:password@` in front of
+/// the host replaced. Credentials belong in the environment, but an operator
+/// who put them in the base url should not find them copied into every line
+/// the run writes when the stream fails.
+fn displayUrl(arena: std.mem.Allocator, url: []const u8) []const u8 {
+    const scheme_end = std.mem.indexOf(u8, url, "://") orelse return url;
+    const rest = url[scheme_end + "://".len ..];
+    const authority_end = std.mem.indexOfAny(u8, rest, "/?#") orelse rest.len;
+    const at = std.mem.lastIndexOfScalar(u8, rest[0..authority_end], '@') orelse return url;
+    return std.fmt.allocPrint(arena, "{s}[redacted]@{s}", .{ url[0 .. scheme_end + "://".len], rest[at + 1 ..] }) catch url;
+}
 
 fn clip(s: []const u8) []const u8 {
     return s[0..@min(s.len, 80)];
@@ -901,6 +952,15 @@ fn streamChat(
     const url = try std.fmt.allocPrint(arena, "{s}/chat/completions", .{std.mem.trimEnd(u8, opts.base_url, "/")});
     const uri = std.Uri.parse(url) catch return error.InvalidUrl;
     const auth = try std.fmt.allocPrint(arena, "Bearer {s}", .{opts.api_key});
+    // What the notes below name, and what the userinfo a base url may carry
+    // never reaches: the run's log is not the place for a password.
+    const shown_url = displayUrl(arena, url);
+    // Privileged, not an ordinary header: the client drops them on a redirect
+    // that leaves the host, so a provider that answers with a Location cannot
+    // walk the API key off to whoever it names. The redirect is unhandled
+    // anyway, which is the same promise made once, in the request options.
+    var auth_header: [1]std.http.Header = undefined;
+    auth_header[0] = .{ .name = "authorization", .value = auth };
 
     // The request lives in a slot so `Response.request` stays valid for the
     // reader handed back out of the retry loop below.
@@ -924,8 +984,8 @@ fn streamChat(
         }
         const req = client.request(.POST, uri, .{
             .redirect_behavior = .unhandled,
+            .privileged_headers = auth_header[0..1],
             .extra_headers = &.{
-                .{ .name = "authorization", .value = auth },
                 .{ .name = "content-type", .value = "application/json" },
                 .{ .name = "accept", .value = "text/event-stream" },
             },
@@ -997,7 +1057,7 @@ fn streamChat(
         // time the run's error line is written the only record of what arrived
         // is this one.
         const n = reader.readSliceShort(&chunk) catch |err| {
-            net.note(io, arena, "microagent: reading the completion stream from {s} failed after {d} byte(s) of content and {d} tool call(s): {s}\n", .{ url, result.content.items.len, calls.items.len, @errorName(err) });
+            net.note(io, arena, "microagent: reading the completion stream from {s} failed after {d} byte(s) of content and {d} tool call(s): {s}\n", .{ shown_url, result.content.items.len, calls.items.len, @errorName(err) });
             return err;
         };
         if (n == 0) break;
@@ -1028,12 +1088,12 @@ fn streamChat(
     }
 
     if (unparsable > 0)
-        net.note(io, arena, "microagent: {d} frame(s) of the completion stream from {s} were not JSON and their content is not in this turn\n", .{ unparsable, url });
+        net.note(io, arena, "microagent: {d} frame(s) of the completion stream from {s} were not JSON and their content is not in this turn\n", .{ unparsable, shown_url });
     // The provider closes a finished stream with a `[DONE]` frame. A stream
     // that ends without one was cut off partway, and the truncated turn below
     // would otherwise be appended as a complete answer: a turn that lost its
     // tail, tool calls and all, reads as one the model finished on purpose.
-    if (truncatedNotice(arena, url, done, result.content.items.len, calls.items.len)) |notice| {
+    if (truncatedNotice(arena, shown_url, done, result.content.items.len, calls.items.len)) |notice| {
         net.note(io, arena, "{s}\n", .{notice});
         return error.StreamTruncated;
     }
@@ -1969,6 +2029,49 @@ test "every ASCII byte survives escaping" {
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, buf.items(), .{});
     defer parsed.deinit();
     try std.testing.expectEqualSlices(u8, &all, parsed.value.string);
+}
+
+test "the api key is only sent over https, or to a loopback gateway" {
+    try std.testing.expect(baseUrlCarriesKey(default_base_url));
+    try std.testing.expect(baseUrlCarriesKey("https://gateway.internal:8443/v1"));
+
+    // The loopback exemption is what makes a local gateway usable at all.
+    try std.testing.expect(baseUrlCarriesKey("http://localhost:1234/v1"));
+    try std.testing.expect(baseUrlCarriesKey("http://LocalHost:1234/v1"));
+    try std.testing.expect(baseUrlCarriesKey("http://127.0.0.1:1234/v1"));
+    try std.testing.expect(baseUrlCarriesKey("http://127.1.2.3/v1"));
+    try std.testing.expect(baseUrlCarriesKey("http://[::1]:1234/v1"));
+
+    // Anywhere else, plaintext would put the key on the wire in the clear.
+    try std.testing.expect(!baseUrlCarriesKey("http://openrouter.ai/api/v1"));
+    try std.testing.expect(!baseUrlCarriesKey("http://gateway.internal:1234/v1"));
+    // A name that merely starts with the loopback prefix is somebody else's.
+    try std.testing.expect(!baseUrlCarriesKey("http://127.evil.com/api/v1"));
+    try std.testing.expect(!baseUrlCarriesKey("http://localhost.evil.com/api/v1"));
+    try std.testing.expect(!baseUrlCarriesKey("http://127.0.0/v1"));
+    try std.testing.expect(!baseUrlCarriesKey("http://[::2]:1234/v1"));
+    // Anything that is not a url at all carries nothing.
+    try std.testing.expect(!baseUrlCarriesKey("not a url"));
+    try std.testing.expect(!baseUrlCarriesKey(""));
+}
+
+test "a base url that carries credentials does not print them" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    try std.testing.expectEqualStrings(
+        "https://[redacted]@openrouter.ai/api/v1/chat/completions",
+        displayUrl(arena, "https://user:sk-secret@openrouter.ai/api/v1/chat/completions"),
+    );
+    // Nothing to redact: the common case comes back as it went in.
+    try std.testing.expectEqualStrings(default_base_url, displayUrl(arena, default_base_url));
+    try std.testing.expectEqualStrings(
+        "https://openrouter.ai/api/v1?x=1",
+        displayUrl(arena, "https://openrouter.ai/api/v1?x=1"),
+    );
+    // Not a url at all, so there is no authority to look in.
+    try std.testing.expectEqualStrings("openrouter.ai", displayUrl(arena, "openrouter.ai"));
 }
 
 test "the command line parses in either flag form and in any order" {

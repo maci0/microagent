@@ -46,7 +46,8 @@ microagent -p "fix the failing test and run it"
 ```
 -p, --print <prompt>   task to run (also accepted as a bare argument)
 -m, --model <model>    model id        (env MICROAGENT_MODEL)
--b, --base-url <url>   OpenAI-compatible base url (env MICROAGENT_BASE_URL)
+-b, --base-url <url>   OpenAI-compatible base url (env MICROAGENT_BASE_URL);
+                       https, or http on loopback
 -k, --api-key <key>    api key         (env MICROAGENT_API_KEY, OPENAI_API_KEY,
                        OPENROUTER_API_KEY, DEEPSEEK_API_KEY)
     --max-turns <n>    tool-loop turn ceiling, at least 1
@@ -112,6 +113,10 @@ With no key in the environment, `~/.secrets/openrouter` is read as a last resort
 Any OpenAI-compatible endpoint works: OpenRouter, DeepSeek, OpenAI, vLLM, LiteLLM, Z.AI. Both
 `deepseek/deepseek-v4-flash` and `stealth/space-bunny-alpha` (OpenRouter) were used to verify it
 end to end; see [BENCHMARK.md](BENCHMARK.md).
+
+The api key goes to the base url in an `Authorization` header on every request, so a plain `http://`
+base url is refused before the first one unless the host is loopback (`localhost`, `127.0.0.0/8`,
+`::1`): a local gateway is the one plaintext case with no network path to intercept.
 
 ### Reply style
 
