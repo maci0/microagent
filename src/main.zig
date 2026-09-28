@@ -2360,8 +2360,14 @@ fn retryAfterMs(io: Io, head_bytes: []const u8) ?u64 {
 /// and the backoff schedule would add to it.
 fn retryAfterValueMs(io: Io, raw: []const u8) ?u64 {
     if (std.fmt.parseInt(u64, raw, 10)) |seconds| {
-        const ms = std.math.mul(u64, seconds, std.time.ms_per_s) catch return null;
-        return @min(ms, max_retry_after_ms);
+        // Saturating, so a count too large for milliseconds is the ceiling
+        // rather than an unreadable header. The count is unbounded in RFC 9110
+        // and a sender's is not always sane (`retry-after: 99999999999` is a
+        // gateway that divided milliseconds by the wrong constant); reading
+        // that as unreadable drops the run onto the 1 s, 2 s, 4 s backoff, so
+        // it comes back while the provider is still refusing, which is the
+        // failure the header exists to prevent.
+        return @min(seconds *| std.time.ms_per_s, max_retry_after_ms);
     } else |_| {}
     const target = httpDateEpochSeconds(raw) orelse return null;
     const now = @divTrunc(Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s);
@@ -2399,6 +2405,8 @@ fn httpDateEpochSeconds(raw: []const u8) ?i64 {
     const second = std.fmt.parseInt(i64, clock.next() orelse return null, 10) catch return null;
     if (clock.next() != null) return null;
 
+    if (year < 1 or year > http_date_year_max) return null;
+
     const day = std.fmt.parseInt(u32, day_text, 10) catch return null;
     if (day == 0 or day > daysInMonth(year, month)) return null;
     if (hour < 0 or hour > 23 or minute < 0 or minute > 59 or second < 0 or second > 60) return null;
@@ -2406,6 +2414,15 @@ fn httpDateEpochSeconds(raw: []const u8) ?i64 {
     return daysFromCivil(year, month, day) * @as(i64, std.time.s_per_day) +
         hour * std.time.s_per_hour + minute * std.time.s_per_min + second;
 }
+
+/// The years an IMF-fixdate can spell: its year field is four digits wide, and
+/// RFC 9110 has no longer one. The bound is load-bearing rather than pedantic.
+/// The count below is days times 86 400, and days grows with the year, so a
+/// year a sender has no way of meaning (a gateway that writes the field from a
+/// 64-bit counter) puts that multiply past the 64 bits it has: the header then
+/// reads as a date in the past or the far future by whatever the wrap left
+/// behind, and the wait it asks for is the opposite of the one it named.
+const http_date_year_max: i64 = 9999;
 
 /// The month a header's three-letter name names, 1 through 12, or null.
 fn monthFromName(name: []const u8) ?u32 {
@@ -4236,8 +4253,14 @@ test "a Retry-After header sets the wait, and only a wait worth taking" {
     // business rather than a guess.
     try std.testing.expectEqual(@as(?u64, null), retryAfterMs(std.testing.io, "HTTP/1.1 429 Too Many Requests\r\ncontent-length: 0\r\n\r\n"));
     try std.testing.expectEqual(@as(?u64, null), retryAfterMs(std.testing.io, "HTTP/1.1 429 Too Many Requests\r\nretry-after: soon\r\n\r\n"));
-    // A count past what the multiply holds is a header this cannot read, not a
-    // wrap into a short wait.
+
+    // A count past what the multiply holds is still a count, so it is the
+    // ceiling rather than an unreadable header: the run sits the ceiling out
+    // rather than coming back on the 1 s backoff while the provider is still
+    // refusing, and no wrap turns it into a short wait.
+    try std.testing.expectEqual(@as(?u64, max_retry_after_ms), retryAfterMs(std.testing.io, "HTTP/1.1 429 Too Many Requests\r\nretry-after: 99999999999\r\n\r\n"));
+    // A count that is not a number a sender can mean at all, digits or not a
+    // delay-seconds, is the one value the backoff's business.
     try std.testing.expectEqual(@as(?u64, null), retryAfterMs(std.testing.io, "HTTP/1.1 429 Too Many Requests\r\nretry-after: 99999999999999999999\r\n\r\n"));
 }
 
@@ -4265,6 +4288,19 @@ test "a Retry-After date is an instant, read against the clock it names" {
     try std.testing.expectEqual(@as(?i64, null), httpDateEpochSeconds("Wed, 21 Oct 2026 07:28:00 CET"));
     try std.testing.expectEqual(@as(?i64, null), httpDateEpochSeconds("Wed, 21 Oct 2026 07:28:00"));
     try std.testing.expectEqual(@as(?i64, null), httpDateEpochSeconds("21 Oct 2026 07:28:00 GMT"));
+    // A year no IMF-fixdate can spell. The count is days times 86 400, so a
+    // year wide enough to overflow it wraps: the header then reads as a date
+    // in the past or the far future by whatever the wrap left, which is a wait
+    // the opposite of the one the sender named.
+    try std.testing.expectEqual(@as(?i64, null), httpDateEpochSeconds("Wed, 06 Nov 99999999999999 08:49:37 GMT"));
+    try std.testing.expectEqual(@as(?i64, null), httpDateEpochSeconds("Wed, 06 Nov 9223372036854775807 08:49:37 GMT"));
+    try std.testing.expectEqual(@as(?i64, null), httpDateEpochSeconds("Wed, 06 Nov 10000 08:49:37 GMT"));
+    try std.testing.expectEqual(@as(?i64, null), httpDateEpochSeconds("Wed, 06 Nov -0001 08:49:37 GMT"));
+    // The widest years that are dates, at the century rule's own edge: 2400 is
+    // divisible by four hundred and 9996 by four, so both have a 29 February.
+    try std.testing.expect(httpDateEpochSeconds("Fri, 29 Feb 2400 00:00:00 GMT") != null);
+    try std.testing.expect(httpDateEpochSeconds("Wed, 29 Feb 9996 00:00:00 GMT") != null);
+    try std.testing.expectEqual(@as(?i64, null), httpDateEpochSeconds("Wed, 29 Feb 9999 00:00:00 GMT"));
     // A weekday that does not match the date is ignored rather than refused:
     // it is redundant, and a server a second off writes the wrong one.
     try std.testing.expectEqual(@as(?i64, 1_792_567_680), httpDateEpochSeconds("Mon, 21 Oct 2026 07:28:00 GMT"));

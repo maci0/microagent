@@ -248,6 +248,18 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- A `Retry-After` year too wide to be a date is refused, and a `Retry-After`
+  count too wide to be milliseconds is the ceiling. Both were read anyway, and
+  both are arithmetic on a header value the run has no control over. The date
+  form counts days from 1970 and multiplies by 86 400, so a gateway that wrote
+  the year field from a 64-bit counter put that multiply past the 64 bits it
+  has: the instant it named then read as whatever the wrap left, which is a
+  wait the opposite of the one the provider asked for. The count form scaled to
+  milliseconds the same way, and a count it could not hold was treated as an
+  unreadable header, dropping the run onto the 1 s, 2 s, 4 s backoff and back
+  into the provider while the provider was still refusing. IMF-fixdate's year
+  field is four digits wide and is now read as such, and a count that fits is
+  clamped rather than discarded.
 - A `Retry-After` sent as an HTTP date is read, not ignored. RFC 9110 lets a
   server answer with either a count of seconds or an instant, and the run only
   read the first: a provider or a gateway that computed a deadline against its
