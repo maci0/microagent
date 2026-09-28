@@ -429,10 +429,10 @@ const help_text =
     \\A variable set to an empty string is not a value: MICROAGENT_MODEL,
     \\MICROAGENT_BASE_URL, MICROAGENT_REASONING_EFFORT, MICROAGENT_BUDGET_SECONDS,
     \\MICROAGENT_MAX_SPEND_TOKENS, MICROAGENT_MAX_TURNS, MICROAGENT_MAX_TOKENS
-    \\and MDEBUG keep their defaults,
-    \\and MICROAGENT_CA_BUNDLE and MICROAGENT_CAVEMAN/PONYTAIL fall through to
-    \\whatever comes next. MICROAGENT_CONFIG and MICROAGENT_SESSION_DIR are the
-    \\two where empty means off: no style file, no session log. HOME is trimmed
+    \\and MDEBUG keep their defaults, and MICROAGENT_CA_BUNDLE, the four api
+    \\key variables and MICROAGENT_CAVEMAN/PONYTAIL fall through to whatever
+    \\comes next. MICROAGENT_CONFIG and MICROAGENT_SESSION_DIR are the two
+    \\where empty means off: no style file, no session log. HOME is trimmed
     \\like the rest, and an empty one is no home rather than a path off the root.
     \\
 ;
@@ -858,7 +858,14 @@ fn earlyAction(argv: []const []const u8) ?Action {
         if (std.mem.eql(u8, split.name, "--")) return null;
         if (isFlag(split.name, "-V", "--version")) return .version;
         if (isFlag(split.name, "-h", "--help")) return .help;
-        if (valuedFlag(split.name) != null and split.joined == null) {
+        if (valuedFlag(split.name)) |flag| {
+            // `--print` is the prompt flag, so its value is the prompt the
+            // walk below counts. Without this the two walks disagreed:
+            // `microagent -p task help` printed the help text and exited 0
+            // here, where `parseArgs` refuses the same command line because
+            // the task and the word `help` are two prompts.
+            if (flag.option == .prompt) prompt_seen = true;
+            if (split.joined != null) continue;
             i += 1;
             continue;
         }
@@ -3348,6 +3355,8 @@ test "the walk that answers help before reading the environment agrees with the 
         // The word is a request only while it is the first bare word, and only
         // outside a value a flag took.
         .{ .argv = &.{ "hi", "help" }, .want = null },
+        .{ .argv = &.{ "-p", "hi", "help" }, .want = null },
+        .{ .argv = &.{ "--print=hi", "help" }, .want = null },
         .{ .argv = &.{ "-p", "help" }, .want = null },
         .{ .argv = &.{ "--", "help" }, .want = null },
         .{ .argv = &.{"--nope"}, .want = null },

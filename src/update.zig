@@ -703,7 +703,8 @@ const usage_text =
     \\  -V, --version          version
     \\
     \\environment:
-    \\  GITHUB_TOKEN           GitHub token, to get past the anonymous rate limit
+    \\  GITHUB_TOKEN           GitHub token, to get past the anonymous rate
+    \\                         limit. An empty value is not a token.
     \\  MICROAGENT_CA_BUNDLE   PEM file to trust instead of the system store,
     \\                         else SSL_CERT_FILE (needed in images that ship
     \\                         no ca-certificates). An empty value is not one.

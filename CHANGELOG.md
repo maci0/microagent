@@ -61,6 +61,13 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- `-p task help` is the usage error the parser already refused, not the usage text. The
+  walk that answers `--help` and `--version` before the environment is read stepped over
+  the value `--print` takes and counted no prompt there, so `microagent -p task help`
+  printed the help text and exited 0 while `microagent task help` named two prompts and
+  exited 2. The walk counts `--print`, in the `--print=value` spelling as well as the
+  separate one, so both answer the same on every command line.
+
 - A session log on a machine whose clock reads before 1970 is pruned like any other. The
   log's name is the wall clock's nanosecond stamp, and a negative one spelled a name
   beginning with `-`, which the pruner does not parse as a name it wrote: the log was
