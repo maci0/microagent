@@ -307,6 +307,47 @@ log, show, blame - fixed subcommands, capped output) and `read`/`edit`/`write`. 
 machine is graphviz's binary, not the AST rewriter, and `semcode` is a dangling symlink into a
 never-built cargo target, so neither is wired up.
 
+## Matched comparison: microagent vs opencode
+
+Same 13 SWE-bench Verified instances, same model (`openrouter/deepseek/deepseek-v4-flash`, one
+OpenRouter key), same task container, harbor 0.23.0, `-n 4`. microagent is the current build (git
+tool, bug-fix workflow prompt, 150-turn ceiling, 2700 s budget); opencode 1.18.31 runs its own
+defaults (its task timeout is the benchmark's 3000 s). Two runs each, because one run is not a
+measurement here.
+
+| run | microagent | opencode |
+| --- | --- | --- |
+| SWE-bench Verified, run 1 | 8/13 = 0.615 | 6/13 = 0.462 |
+| SWE-bench Verified, run 2 | 7/13 = 0.538 | 7/13 = 0.538 |
+| **pooled** | **15/26 = 0.577** | **13/26 = 0.500** |
+| wall, 13 instances | 16m25s / 18m29s | 24m34s / 30m09s |
+| input tokens, 13 instances | ~4.5 M | ~8.2 M |
+| exceptions | 0 | 0 |
+
+Terminal-Bench 2, the same five tasks, each harness at the benchmark's own timeout:
+
+| run | microagent | opencode |
+| --- | --- | --- |
+| run 1 | 3/5 = 0.600 | 3/5 = 0.600 |
+| run 2 | 3/5 = 0.600 | 4/5 = 0.800 |
+
+Microagent's run-2 losses were `overfull-hbox` (genuine 0.0) and `adaptive-rejection-sampler`, which
+the adapter killed at its 880 s process timeout: the agent's own `--budget` is checked between turns,
+so one long tool call can overrun it. That is a harness defect, not a model one, and it is the next
+thing to fix.
+
+Read honestly: pooled over 26 paired trials microagent is ahead by two trials, and on Terminal-Bench
+the two runs split. Nothing here is a decisive win; 13 instances cannot decide a two-task gap, and
+opencode's own two SWE runs differ by 0.23 (0.462 to 0.692) — larger than the gap between harnesses.
+
+### kimi
+
+Not measured. Harbor's `kimi-cli` agent refuses to run ("kimi-cli is no longer maintained. Please use
+the new Kimi Code CLI"), and `kimi-code` reaches the provider but every credential in `~/.secrets`
+returns `401 The API Key appears to be invalid or may have expired` against
+`https://api.kimi.com/coding/v1`. A zero recorded from a failed setup would be a lie, so there is no
+kimi column rather than a zero column.
+
 ## Head to head with opencode
 
 The same machine, the same 13 SWE-bench instances, the same model
