@@ -42,6 +42,14 @@ from the two bench scripts.
 Startup for the node-based harnesses moves by hundreds of milliseconds between runs on a loaded
 machine, so a range is reported rather than a single figure.
 
+Turns after the first reuse the TLS session rather than paying a handshake:
+`keep_alive` defaults to true in `std.http.Client`, so every turn's request
+participates in the client's connection pool, and the request's `deinit` drains
+an unread response tail before handing the connection back. This is worth
+stating because a fresh handshake per turn would be tens of milliseconds of CPU
+and two or three round trips, which is a larger per-turn cost than everything
+else in this file added together.
+
 A gauntlet loop starts an agent once per review, so this is per-review overhead. On a 60 s review,
 2 ms is 0.003% of the loop; on the node-based harnesses it is still under 0.1%. The number
 matters for the tight loops people actually run (`--retries`, short timeouts, hundreds of reviews),
