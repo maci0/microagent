@@ -30,20 +30,40 @@ runs:
     # are restored here so every job that installs the toolchain gets them and
     # no workflow repeats the step. The global cache is moved under
     # RUNNER_TEMP because its default path differs per runner OS and
-    # platform. The key carries the Zig version and a hash of the sources, so
-    # either changing starts a new cache; the restore prefix falls back to the
-    # most recent cache with the same toolchain, which still holds the
-    # compiler's compiled artifacts.
+    # platform.
     - name: point the global cache at a known path
       shell: bash
       run: echo "ZIG_GLOBAL_CACHE_DIR=$RUNNER_TEMP/zig-global" >> "$GITHUB_ENV"
 
-    - name: restore the zig build caches
+    # Two caches rather than one, because the two directories change at
+    # different rates and a single key over both re-uploads the expensive one
+    # on every push.
+    #
+    # `.zig-cache` is this tree's own build products, so its key carries the
+    # Zig version and a hash of the sources: changing either starts a new
+    # entry. The restore prefix falls back to the most recent cache for the
+    # same toolchain, so a commit that changed a file still reuses what an
+    # earlier one built for the rest of the tree rather than recompiling it
+    # from nothing.
+    - name: restore the project build cache
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
-        path: |
-          .zig-cache
-          ${{ runner.temp }}/zig-global
-        key: zig-${{ runner.os }}-${{ steps.zig.outputs.version }}-${{ hashFiles('build.zig', 'build.zig.zon', 'src/**') }}
+        path: .zig-cache
+        key: zig-local-${{ runner.os }}-${{ steps.zig.outputs.version }}-${{ hashFiles('build.zig', 'build.zig.zon', 'src/**') }}
         restore-keys: |
-          zig-${{ runner.os }}-${{ steps.zig.outputs.version }}-
+          zig-local-${{ runner.os }}-${{ steps.zig.outputs.version }}-
+
+    # The global cache is the compiled standard library, which the toolchain
+    # version alone decides. Nothing in this repository is an input to it, so
+    # hashing the sources into its key would give every push that touched
+    # src/ a miss, a fresh save, and an upload of the whole multi-hundred-
+    # megabyte directory to store a handful of entries that changed. It is by
+    # far the larger of the two: ci.yml's release-assets job alone builds four
+    # published targets and rebuilds each of them twice for the
+    # reproducibility check. The key is the version, so the entry is written
+    # once per toolchain per runner OS and every later push restores it.
+    - name: restore the zig global cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.temp }}/zig-global
+        key: zig-global-${{ runner.os }}-${{ steps.zig.outputs.version }}
