@@ -1549,20 +1549,50 @@ const test_runners = [_][]const u8{
 /// glued to the front of the first word.
 const tool_word_separators = " \t\r\n\"{},:";
 
+/// The most words any name in `test_runners` is spelled as, counted out of the
+/// table rather than guessed, so the window `isTestRun` slides over it is wide
+/// enough for the longest name and no wider.
+const test_runner_max_words = blk: {
+    var n: usize = 0;
+    // The tokenizer is run 33 times over short constants here, which is past
+    // the default comptime branch budget and nothing the shipped code hits.
+    @setEvalBranchQuota(10_000);
+    for (test_runners) |runner| {
+        var count: usize = 0;
+        var words = std.mem.tokenizeAny(u8, runner, tool_word_separators);
+        while (words.next()) |_| count += 1;
+        n = @max(n, count);
+    }
+    break :blk n;
+};
+comptime {
+    std.debug.assert(test_runner_max_words > 0);
+}
+
+/// One name out of `test_runners`, split into its words. Built from that table
+/// rather than spelled beside it, so a name added to one is split the same way
+/// for the other and the two cannot drift.
+const RunnerWords = struct { words: [test_runner_max_words][]const u8, len: usize };
+
+const test_runner_words = blk: {
+    var list: [test_runners.len]RunnerWords = undefined;
+    @setEvalBranchQuota(10_000);
+    for (test_runners, 0..) |runner, i| {
+        var entry: RunnerWords = .{ .words = undefined, .len = 0 };
+        var words = std.mem.tokenizeAny(u8, runner, tool_word_separators);
+        while (words.next()) |word| {
+            entry.words[entry.len] = word;
+            entry.len += 1;
+        }
+        list[i] = entry;
+    }
+    break :blk list;
+};
+
 /// True when a single tool call's arguments name a test runner. It reads the
 /// call's own arguments, not the whole conversation: a `read` of a test file,
 /// or the issue text mentioning pytest, is not a test run, and judging by the
 /// conversation counted both of those and never asked for verification.
-fn isTestRun(call_name: []const u8, args: []const u8) bool {
-    if (chat_mod.Tool.fromName(call_name) != .bash) return false;
-    for (test_runners) |runner| {
-        if (namesWords(args, runner)) return true;
-    }
-    return false;
-}
-
-/// Whether every word of `needle` appears in `haystack` as consecutive
-/// whitespace-separated words.
 ///
 /// A substring is not the question the flag is asking. The model reads
 /// `pytest_output.log`, greps a comment for the words `cargo test`, or edits
@@ -1578,25 +1608,38 @@ fn isTestRun(call_name: []const u8, args: []const u8) bool {
 /// The haystack is the call's raw argument JSON, so the JSON punctuation cuts
 /// words too: `{"command":"cargo test"}` glues the key to the first word, and
 /// a runner welded to `{"command":"` is the one command this has to see.
-fn namesWords(haystack: []const u8, needle: []const u8) bool {
-    var words = std.mem.tokenizeAny(u8, haystack, tool_word_separators);
+///
+/// The arguments are walked once, not once per name. Every name used to be
+/// searched for by tokenizing the whole string again, so a multi-kilobyte
+/// `bash` command was scanned 33 times over to answer one question, on the path
+/// every tool call walks until the run has seen a test. A name matches where
+/// its words end at the word just read, so the last `test_runner_max_words`
+/// words are all the answer needs, and each name is tried against them once.
+fn isTestRun(call_name: []const u8, args: []const u8) bool {
+    if (!std.mem.eql(u8, call_name, "bash")) return false;
+    var window: [test_runner_max_words][]const u8 = undefined;
+    var filled: usize = 0;
+    var words = std.mem.tokenizeAny(u8, args, tool_word_separators);
     while (words.next()) |word| {
-        var ahead = words;
-        var wanted = std.mem.tokenizeAny(u8, needle, tool_word_separators);
-        const head = wanted.next() orelse return false;
-        if (!std.mem.eql(u8, word, head)) continue;
-        var matched = true;
-        while (wanted.next()) |want| {
-            const got = ahead.next() orelse {
-                matched = false;
-                break;
-            };
-            if (!std.mem.eql(u8, got, want)) {
-                matched = false;
-                break;
-            }
+        if (filled < window.len) {
+            window[filled] = word;
+            filled += 1;
+        } else {
+            std.mem.copyForwards([]const u8, window[0 .. window.len - 1], window[1..]);
+            window[window.len - 1] = word;
         }
-        if (matched) return true;
+        for (test_runner_words) |entry| {
+            if (entry.len > filled) continue;
+            const at = filled - entry.len;
+            var matched = true;
+            for (entry.words[0..entry.len], window[at..filled]) |want, got| {
+                if (!std.mem.eql(u8, got, want)) {
+                    matched = false;
+                    break;
+                }
+            }
+            if (matched) return true;
+        }
     }
     return false;
 }
@@ -2853,10 +2896,8 @@ fn finishTurn(
 
     for (result.calls.items) |call| {
         // Both flags only ever go false to true, so once one is set nothing
-        // later in the turn can change it. `isTestRun` is the expensive half:
-        // it scans the call's whole argument string once per test-runner name,
-        // and a multi-kilobyte `bash` command pays that every time. The check
-        // is what records the fact, so it is skipped rather than repeated.
+        // later in the turn can change it, and the check that would record it
+        // is skipped rather than repeated over the remaining calls' arguments.
         if (!progress.edited and isEdit(call.name, call.args.items)) progress.edited = true;
         if (!progress.tested and isTestRun(call.name, call.args.items)) progress.tested = true;
         // A call the budget will not pay for still gets a tool message. An
@@ -4800,6 +4841,76 @@ test "only a bash call that names a runner counts as verification" {
     // The same words on their own still are, whatever surrounds them.
     try std.testing.expect(isTestRun("bash", "{\"command\":\"cd src && cargo test --all\"}"));
     try std.testing.expect(isTestRun("bash", "{\"command\":\"uv run pytest -q\"}"));
+
+    // The window is the optimization, and the edge it puts between a name that
+    // matches and one that does not is a name spanning a word boundary the
+    // window drops. A three-word name matched at its last word, so the two
+    // words before it have to survive being pushed out by everything between
+    // it and the next candidate; the two-word names have to survive the same
+    // push. The brute-force reference below is the predicate the window has to
+    // agree with, spelled out per name over the whole string, and these are the
+    // shapes where the two can part company.
+    const cases = [_][]const u8{
+        "{\"command\":\"cargo test\"}",
+        "{\"command\":\"zig build test\"}",
+        "{\"command\":\"manage.py test\"}",
+        "{\"command\":\"gradle test --info\"}",
+        "{\"command\":\"dotnet test -c Release\"}",
+        // A two-word name whose first word is one read, and the second another.
+        "{\"command\":\"ls; cargo test; ls\"}",
+        "{\"command\":\"a b cargo c d test e f\"}",
+        // The longest name, with words on either side pushing the window.
+        "{\"command\":\"x y z zig build test p q r\"}",
+        "{\"command\":\"x y z mvn test p q r\"}",
+        // One word short of a name, and one past it.
+        "{\"command\":\"cargo tests\"}",
+        "{\"command\":\"zig build tests\"}",
+        // A name whose words are adjacent but in the wrong order.
+        "{\"command\":\"test cargo\"}",
+        "{\"command\":\"build zig test\"}",
+        // The same name split across the JSON punctuation rather than a space.
+        "{\"command\":\"cargo\",\"other\":\"test\"}",
+        // Nothing at all, and only separators.
+        "{\"command\":\"\"}",
+        "{\"command\":\"   \"}",
+        "",
+    };
+    inline for (cases) |args| {
+        try std.testing.expectEqual(
+            bruteForceTestRun(args),
+            isTestRun("bash", args),
+        );
+    }
+}
+
+/// The runner search `isTestRun` answers, written as it was before the window:
+/// every name searched for by tokenizing the whole argument string again. Kept
+/// as the reference the windowed version is asserted against, because the two
+/// answering differently is a verification turn gained or lost and neither
+/// shape is a case a hand-picked example reliably finds.
+fn bruteForceTestRun(args: []const u8) bool {
+    for (test_runners) |runner| {
+        var words = std.mem.tokenizeAny(u8, args, tool_word_separators);
+        while (words.next()) |word| {
+            var ahead = words;
+            var wanted = std.mem.tokenizeAny(u8, runner, tool_word_separators);
+            const head = wanted.next() orelse return false;
+            if (!std.mem.eql(u8, word, head)) continue;
+            var matched = true;
+            while (wanted.next()) |want| {
+                const got = ahead.next() orelse {
+                    matched = false;
+                    break;
+                };
+                if (!std.mem.eql(u8, got, want)) {
+                    matched = false;
+                    break;
+                }
+            }
+            if (matched) return true;
+        }
+    }
+    return false;
 }
 
 test "only a call that changes the tree counts as an edit" {

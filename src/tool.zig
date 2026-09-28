@@ -681,6 +681,15 @@ fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_
         error.Timeout => return failedOutput(arena, got, try std.fmt.allocPrint(arena, "error: command timed out after {d}ms", .{timeout_ms})),
         else => return failedOutput(arena, got, try std.fmt.allocPrint(arena, "error: {s}", .{@errorName(err)})),
     };
+    // One stream, whole, and nothing to say after it: the capture is the
+    // answer, and handing it back costs no copy. `runSearchTool` and
+    // `firstLines` both do this, and a `bash` call was the one tool that paid a
+    // second copy of a cap's worth of output per call to produce bytes it
+    // already had. `res` is arena-owned and outlives the call, and the caller
+    // only reads it, so the slice is as good as a copy of it.
+    const clean = !atCaptureLimit(res) and res.term == .exited and res.term.exited == 0;
+    if (clean and res.stderr.len == 0 and res.stdout.len > 0) return res.stdout;
+    if (clean and res.stdout.len == 0 and res.stderr.len > 0) return res.stderr;
     // The captured size is known before the first append, so the buffer is
     // sized once rather than doubling its way up to `capture_limit` on each
     // stream, copying everything written so far at every step. The two
@@ -3694,6 +3703,58 @@ test "a bash command with no output still says which exit it was" {
     try std.testing.expectEqualStrings(
         "hi\n\n(exit: exited 3)",
         try dispatch(arena, "bash", "{\"command\":\"echo hi; exit 3\"}"),
+    );
+}
+
+// A command that succeeded with its whole output on one stream is handed back
+// as the capture, with no second copy of it made. The bytes are the ones the
+// assembling path would have produced, so this pins that the elision changed
+// the cost and not the answer: every case below is one where the old path
+// appended nothing after the single stream, and the new path returns it
+// outright. The cases where a note follows the output are the ones the
+// elision must not reach, and they are asserted here too.
+test "a bash result is the capture itself when nothing is said after it" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // One stream, exit 0: exactly what the child wrote, no trailing newline
+    // added and no note. A `read` of a file is the same shape, and it is
+    // compared byte for byte against what the child was asked to print, so a
+    // newline the old path did not add is caught here rather than shipped.
+    try std.testing.expectEqualStrings(
+        "one line\n",
+        try dispatch(arena, "bash", "{\"command\":\"printf 'one line\\\\n'\"}"),
+    );
+    // Output big enough that a copy of it is a cost worth noticing: 64 KB, well
+    // past the 24 KB a tool result is capped at, so this also walks the clamp
+    // in `toolResult` on the way out.
+    const big = try std.fmt.allocPrint(arena, "{{\"command\":\"head -c 65536 /dev/zero | tr '\\\\0' 'x'\"}}", .{});
+    const big_out = try dispatch(arena, "bash", big);
+    try std.testing.expectEqual(@as(usize, 65536), big_out.len);
+    for (big_out) |c| try std.testing.expectEqual(@as(u8, 'x'), c);
+    // Nothing was appended, so it is not longer than what the child wrote.
+    try std.testing.expect(std.mem.indexOf(u8, big_out, "[output truncated") == null);
+
+    // The cases the elision must not reach: a non-zero exit and a stream that
+    // was cut at the cap both put a note after the output, and both are
+    // asserted by the tests above and by the truncation test below.
+    try std.testing.expectEqualStrings(
+        "hi\n\n(exit: exited 3)",
+        try dispatch(arena, "bash", "{\"command\":\"echo hi; exit 3\"}"),
+    );
+    // stderr alone, on a command that succeeded, is the same shape as stdout
+    // alone: one stream, nothing said after it.
+    try std.testing.expectEqualStrings(
+        "to stderr\n",
+        try dispatch(arena, "bash", "{\"command\":\"printf 'to stderr\\\\n' 1>&2\"}"),
+    );
+    // Both streams is a third shape, and it is the one the elision leaves
+    // alone: the two are joined by a newline of the assembler's own, which is
+    // why the output carries a blank line between them.
+    try std.testing.expectEqualStrings(
+        "out\n\nerr\n",
+        try dispatch(arena, "bash", "{\"command\":\"printf 'out\\\\n'; printf 'err\\\\n' 1>&2\"}"),
     );
 }
 

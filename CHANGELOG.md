@@ -56,6 +56,22 @@ release, and `microagent update` moves you to it.
   level, and says that a `--max-spend-tokens` run warns on stderr once 80% of
   the ceiling is spent, which the README already said and the flag did not.
 
+- A `bash` call that succeeded with its whole output on one stream is handed to
+  the model as the capture itself rather than as a second copy of it. The bytes
+  are the ones the assembling path produced, so the answer does not change; a
+  command that exited non-zero, was cut at the cap, or wrote to both streams
+  still has its note appended exactly as before. Every other tool already
+  returned its capture this way, and `bash` was the one that paid a copy of up
+  to 96 KB of output per call to produce bytes it was already holding.
+
+- The verification-turn check no longer rescans a tool call's arguments once per
+  test-runner name. The name is now matched against a window of the last few
+  words as the arguments are walked, so a multi-kilobyte `bash` command is read
+  once rather than 25 times over. Which calls count as a test run and which as
+  an edit does not change: a name inside a longer word, a name split across
+  JSON punctuation, and a name in the issue text are all still refused, and a
+  test asserts the two answers agree over each of those shapes.
+
 - `search`, `ast` and `git` name the program they delegate to when that program
   is not installed, and how to install it. `rg` and `ast-grep` are not part of a
   stock macOS, where this binary ships and runs, so `error: ripgrep failed:
