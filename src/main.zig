@@ -80,6 +80,10 @@ const Options = struct {
     session_dir: []const u8 = "",
 };
 
+/// `args` grows in place as the provider streams the arguments in fragments.
+/// It is a buffer, not a string that is re-spelled per fragment: a large
+/// `write` arrives as thousands of deltas, and copying what has accumulated so
+/// far on every one of them is quadratic in the size of the call.
 const ToolCall = struct {
     id: []u8,
     name: []u8,
@@ -918,7 +922,7 @@ fn finishTurn(
             try tool_msg.writer().writeAll(",{\"role\":\"tool\",\"tool_call_id\":");
             try writeJsonString(tool_msg.writer(), call.id);
             try tool_msg.writer().writeAll(",\"content\":");
-            try writeJsonString(tool_msg.writer(), clamp(output, max_tool_output));
+            try writeJsonString(tool_msg.writer(), try toolResult(arena, output));
             try tool_msg.writer().writeAll("}");
             try msgs.appendSlice(gpa, tool_msg.items());
         }
@@ -1242,6 +1246,18 @@ fn clamp(s: []const u8, max: usize) []const u8 {
     return s[0..end];
 }
 
+/// One tool result as the model reads it: capped, cut on a code point
+/// boundary, and marked when bytes were dropped. Without the marker a
+/// truncated file or a truncated test log is indistinguishable from a complete
+/// one, and the agent reasons about output it never saw.
+fn toolResult(arena: std.mem.Allocator, output: []const u8) ![]const u8 {
+    const kept = clamp(output, max_tool_output);
+    if (kept.len == output.len) return kept;
+    return std.fmt.allocPrint(arena, "{s}\n... [tool output truncated at {d} of {d} bytes]", .{
+        kept, kept.len, output.len,
+    });
+}
+
 // A file's tests are collected only when the root file's test block imports
 // it, so the `update` subcommand's tests and the style levels' tests are
 // pulled in here.
@@ -1280,6 +1296,62 @@ test "clamp keeps short strings intact" {
     try std.testing.expectEqualStrings("abc", clamp("abc", 3));
     try std.testing.expectEqualStrings("ab", clamp("abcd", 2));
     try std.testing.expectEqualStrings("", clamp("abc", 0));
+}
+
+test "a cut never leaves half a code point in the request body" {
+    // The bytes go into the JSON body verbatim, so anything clamp keeps has to
+    // be a whole character: source files are full of multi-byte text and a
+    // cut lands in one often enough to matter.
+    const text = "caf\u{00e9} \u{1f600} fin";
+    var n: usize = 0;
+    while (n <= text.len) : (n += 1) {
+        const kept = clamp(text, n);
+        try std.testing.expect(kept.len <= n);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(kept));
+        try std.testing.expect(std.mem.startsWith(u8, text, kept));
+    }
+    // The cut is at the boundary, not somewhere short of it.
+    try std.testing.expectEqualStrings("caf\u{00e9} ", clamp(text, 7));
+    try std.testing.expectEqualStrings("caf\u{00e9} \u{1f600}", clamp(text, 10));
+    try std.testing.expectEqualStrings("", clamp("\u{1f600}", 2));
+}
+
+test "a capped tool result says how much was dropped" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const whole = try toolResult(arena, "one line");
+    try std.testing.expectEqualStrings("one line", whole);
+
+    const big = "x" ** (max_tool_output + 500);
+    const cut = try toolResult(arena, big);
+    try std.testing.expect(std.mem.startsWith(u8, cut, "x" ** max_tool_output));
+    try std.testing.expect(std.mem.endsWith(u8, cut, "truncated at 24576 of 25076 bytes]"));
+}
+
+test "a real tool result over the cap stays a string the body can carry" {
+    // The whole path, from a command that prints well past the cap to the
+    // bytes that would be written into the request body.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var args: std.json.ObjectMap = .empty;
+    // Five bytes per line, so the cap does not land on a character boundary: a
+    // plain cut here leaves half an e-acute in the string.
+    try args.put(arena, "command", .{ .string = "i=0; while [ $i -lt 5000 ]; do printf '\\303\\251a\\303\\251'; i=$((i+1)); done" });
+    const output = try toolBash(std.testing.io, arena, args);
+    try std.testing.expect(output.len > max_tool_output);
+
+    const result = try toolResult(arena, output);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(result));
+    try std.testing.expect(std.mem.indexOf(u8, result, "tool output truncated at") != null);
+    // It still parses as the JSON string the body is built from.
+    var jb = JsonBuf.init(arena);
+    try writeJsonString(jb.writer(), result);
+    const parsed = std.json.parseFromSlice(std.json.Value, arena, jb.items(), .{}) catch return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(result, parsed.value.string);
 }
 
 test "conversation and tool schema serialize as one valid request body" {

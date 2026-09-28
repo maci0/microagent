@@ -323,6 +323,62 @@ fn writeOut(io: std.Io, bytes: []const u8) void {
     std.Io.File.stdout().writeStreamingAll(io, bytes) catch {};
 }
 
+/// A response body that stops at a cap while the bytes are arriving. Testing
+/// the length after the fetch bounds what is accepted, not what is allocated:
+/// the body is buffered whole first, so a response past the cap costs its full
+/// size in memory before anything notices. The overshoot is at most the chunk
+/// the reader hands over, which is what the cap has to allow for.
+const Capped = struct {
+    body: std.Io.Writer.Allocating,
+    writer: std.Io.Writer,
+    limit: usize,
+    over: bool = false,
+    vtable: std.Io.Writer.VTable = .{ .drain = drain, .rebase = rebase },
+
+    /// `writer` recovers `self` by field name and points at `self.vtable`, so
+    /// both have to be wired up in the final address, not in a copy that gets
+    /// returned: `var c: Capped = undefined; try c.start(...)`.
+    fn start(self: *Capped, allocator: std.mem.Allocator, limit: usize) !void {
+        self.* = .{
+            .body = try std.Io.Writer.Allocating.initCapacity(allocator, @min(limit, 64 * 1024)),
+            .writer = undefined,
+            .limit = limit,
+        };
+        self.writer = .{ .vtable = &self.vtable, .buffer = &.{} };
+    }
+
+    fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const self: *Capped = @fieldParentPtr("writer", w);
+        var total: usize = 0;
+        // The last slice of `data` is the one `splat` repeats, so it is not
+        // also written in the loop below.
+        for (data[0..data.len -| 1]) |part| {
+            try self.body.writer.writeAll(part);
+            total += part.len;
+        }
+        if (data.len != 0) {
+            const part = data[data.len - 1];
+            const reps = @max(splat, 1);
+            var one = [_][]const u8{part};
+            try self.body.writer.writeSplatAll(&one, reps);
+            total += part.len * reps;
+        }
+        if (self.body.written().len > self.limit) {
+            self.over = true;
+            return error.WriteFailed;
+        }
+        return total;
+    }
+
+    /// Nothing is buffered here: every byte is on its way to `body` by the time
+    /// `drain` is asked for room, so there is nothing to rebase.
+    fn rebase(w: *std.Io.Writer, preserve: usize, capacity: usize) std.Io.Writer.Error!void {
+        _ = w;
+        _ = preserve;
+        _ = capacity;
+    }
+};
+
 fn fail(io: std.Io, comptime fmt: []const u8, args: anytype) u8 {
     var buf: [512]u8 = undefined;
     const line = std.fmt.bufPrint(&buf, "microagent update: " ++ fmt ++ "\n", args) catch
@@ -349,21 +405,23 @@ fn fetchBody(
         break :blk priv_buf[0..1];
     } else &.{};
 
-    var writer = try std.Io.Writer.Allocating.initCapacity(gpa, @min(max_size, 64 * 1024));
-    defer writer.deinit();
+    var capped: Capped = undefined;
+    try capped.start(gpa, max_size);
+    defer capped.body.deinit();
 
-    const result = try client.fetch(.{
+    const result = client.fetch(.{
         .location = .{ .url = url },
         .headers = .{ .user_agent = .{ .override = "microagent/" ++ version } },
         .privileged_headers = priv_headers,
-        .response_writer = &writer.writer,
-    });
+        .response_writer = &capped.writer,
+    }) catch |err| {
+        if (capped.over) return error.PayloadTooLarge;
+        return err;
+    };
     status_out.* = result.status;
     if (@intFromEnum(result.status) >= 400) return error.HttpStatus;
 
-    const data = writer.written();
-    if (data.len > max_size) return error.PayloadTooLarge;
-    return try arena.dupe(u8, data);
+    return try arena.dupe(u8, capped.body.written());
 }
 
 fn replaceExecutable(io: std.Io, gpa: std.mem.Allocator, asset: []const u8) ![]const u8 {
@@ -835,6 +893,24 @@ test "update: checksum match replaces a copy; mismatch, missing sidecar, and a b
     const got = try copyOf(io, tmp.dir);
     defer alloc.free(got);
     try std.testing.expectEqualStrings("abc", got);
+}
+
+test "update: a body over the cap is refused while it arrives" {
+    const gpa = std.testing.allocator;
+    var capped: Capped = undefined;
+    try capped.start(gpa, 64);
+    defer capped.body.deinit();
+
+    // Under the cap: the body comes through whole.
+    try capped.writer.writeAll("short");
+    try std.testing.expect(!capped.over);
+    try std.testing.expectEqualStrings("short", capped.body.written());
+
+    // Over it: the write fails on the chunk that crosses the line, so the cost
+    // is the cap plus that chunk rather than the whole body.
+    try std.testing.expectError(error.WriteFailed, capped.writer.writeAll("y" ** 1024));
+    try std.testing.expect(capped.over);
+    try std.testing.expect(capped.body.written().len <= 64 + 1024);
 }
 
 test "update: replaceVerified follows a symlinked destination" {

@@ -1,4 +1,5 @@
-//! Reply-style modes appended to the system prompt, set from one TOML config.
+//! Reply-style modes appended to the system prompt, with the levels set from
+//! one TOML config.
 //!
 //! Two independent knobs, both a level the task asked for and both a prompt
 //! fragment rather than a code path:
@@ -11,8 +12,9 @@
 //!   root cause.
 //!
 //! Neither mode touches the tools, the request shape, or the conversation; the
-//! text below is the whole feature. It is compiled in, not read from a skill
-//! directory, because a benchmark run has no `$HOME` to read from.
+//! text below is the whole feature. The wording is compiled in rather than read
+//! from a skill directory, so a run needs nothing on disk but its config: a
+//! level the config does not name still gets the compiled-in default.
 
 const std = @import("std");
 
