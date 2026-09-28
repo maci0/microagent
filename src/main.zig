@@ -318,7 +318,8 @@ const help_text =
     \\                         images that ship no ca-certificates.
     \\      --budget <seconds>
     \\                         stop starting turns after this long, and say so.
-    \\                         The last turn it takes may run 5 minutes past it;
+    \\                         A tool call still running is cut there too. The
+    \\                         last turn it takes may run 5 minutes past it;
     \\                         a turn cut off there is discarded, not half-applied
     \\                         (env MICROAGENT_BUDGET_SECONDS)
     \\      --reasoning-effort <level>
@@ -751,6 +752,17 @@ const Budget = struct {
         return Io.Timestamp.now(io, .awake).nanoseconds >= d;
     }
 
+    /// What is left of the budget in whole milliseconds, or null when no budget
+    /// was set. Zero is an answer, not an absence: a tool that starts with the
+    /// budget already spent is a tool that runs for no time at all, so this is
+    /// what a call's own deadline is capped by.
+    fn remainingMs(self: Budget, io: Io) ?u64 {
+        const d = self.deadline_ns orelse return null;
+        const left = d - Io.Timestamp.now(io, .awake).nanoseconds;
+        if (left <= 0) return 0;
+        return @intCast(@divTrunc(left, std.time.ns_per_ms));
+    }
+
     /// The same budget with `seconds` more to run. The final push is the one
     /// turn that is allowed past the budget, and the grace is what keeps that
     /// turn bounded too: it lands or it is cut off with a reason, never left
@@ -926,18 +938,54 @@ fn allDigits(text: []const u8) bool {
     return true;
 }
 
-/// Deletes the oldest logs past `max_session_logs`. The names are unix
-/// nanoseconds, so a plain lexicographic sort is oldest first, and only this
-/// program's own `<digits>.jsonl` files are touched. Every failure is ignored:
-/// a store that cannot be pruned costs a run nothing.
+/// One log the store holds: the file to delete, and the unix nanoseconds its
+/// name carries. The name is a wall-clock stamp, so the two are separate: the
+/// stamp is what orders the store, and a name no wider than another one is no
+/// evidence of that (see `pruneSessions`).
+const SessionLog = struct {
+    name: []u8,
+    stamp: u128,
+};
+
+/// The extension every log's name carries, and the name without it.
+const session_ext = ".jsonl";
+
+fn sessionLogStem(name: []const u8) []const u8 {
+    return name[0 .. name.len - session_ext.len];
+}
+
+/// The stamp a log's name carries, and whether the name is one of this
+/// program's own: `<digits>.jsonl`, or `<digits>-<digits>.jsonl` for the
+/// repeated run that wrote beside the first rather than over it. A name more
+/// digits wide than a `u128` is a name no clock here can have produced, and it
+/// is read as the newest of all rather than the oldest.
+fn sessionLogStamp(name: []const u8) ?u128 {
+    if (!std.mem.endsWith(u8, name, session_ext)) return null;
+    const stem = sessionLogStem(name);
+    const dash = std.mem.indexOfScalar(u8, stem, '-') orelse stem.len;
+    if (!allDigits(stem[0..dash])) return null;
+    if (dash != stem.len and !allDigits(stem[dash + 1 ..])) return null;
+    return std.fmt.parseInt(u128, stem[0..dash], 10) catch std.math.maxInt(u128);
+}
+
+/// Deletes the oldest logs past `max_session_logs`.
+///
+/// Order is by the number the name carries, not by the name's bytes. The names
+/// are unix nanoseconds and that width is not fixed: a stamp from before
+/// 2001-09-09 is 18 digits and every stamp since is 19, and a clock NTP or an
+/// admin steps backwards writes the shorter one beside the longer ones. Sorted
+/// as bytes, `190000000000000000` reads as the newest of the two and the log a
+/// monitor is watching is the one that goes, on every later run, since nothing
+/// about the ordering changes. Only this program's own names are touched, and
+/// every failure is ignored: a store that cannot be pruned costs a run nothing.
 fn pruneSessions(io: Io, arena: std.mem.Allocator, session_dir: []const u8) void {
     var dir = std.Io.Dir.openDirAbsolute(io, session_dir, .{ .iterate = true }) catch return;
     defer dir.close(io);
 
-    var names: std.ArrayList([]u8) = .empty;
+    var logs: std.ArrayList(SessionLog) = .empty;
     defer {
-        for (names.items) |name| arena.free(name);
-        names.deinit(arena);
+        for (logs.items) |log| arena.free(log.name);
+        logs.deinit(arena);
     }
     // The walk is scoped: the walker holds the directory handle, and deleting
     // through `dir` while it is still open closes that handle under it.
@@ -947,22 +995,25 @@ fn pruneSessions(io: Io, arena: std.mem.Allocator, session_dir: []const u8) void
         while (walker.next(io) catch return) |entry| {
             if (entry.kind != .file) continue;
             const name = entry.basename;
-            if (!std.mem.endsWith(u8, name, ".jsonl")) continue;
-            if (!allDigits(name[0 .. name.len - ".jsonl".len])) continue;
-            names.append(arena, arena.dupe(u8, name) catch return) catch return;
+            const stamp = sessionLogStamp(name) orelse continue;
+            logs.append(arena, .{ .name = arena.dupe(u8, name) catch return, .stamp = stamp }) catch return;
         }
     }
-    if (names.items.len <= max_session_logs) return;
+    if (logs.items.len <= max_session_logs) return;
 
-    std.mem.sort([]u8, names.items, {}, struct {
-        fn lessThan(_: void, a: []u8, b: []u8) bool {
-            return std.mem.order(u8, a, b) == .lt;
+    // Two runs that read the same nanosecond share a stamp, and the run that
+    // wrote first is the one whose name is the other's prefix, so the stems
+    // order them the same way on every pass rather than as the walk found them.
+    std.mem.sort(SessionLog, logs.items, {}, struct {
+        fn lessThan(_: void, a: SessionLog, b: SessionLog) bool {
+            if (a.stamp != b.stamp) return a.stamp < b.stamp;
+            return std.mem.order(u8, sessionLogStem(a.name), sessionLogStem(b.name)) == .lt;
         }
     }.lessThan);
 
     var i: usize = 0;
-    while (i < names.items.len - max_session_logs) : (i += 1) {
-        dir.deleteFile(io, names.items[i]) catch {};
+    while (i < logs.items.len - max_session_logs) : (i += 1) {
+        dir.deleteFile(io, logs.items[i].name) catch {};
     }
 }
 
@@ -1678,8 +1729,8 @@ fn forwardInterruptsToToolGroup() void {
 /// A tool that delegates to a binary already on PATH: the caller builds the
 /// argv, and the failure text, the empty result and the two output streams are
 /// handled the same way for each of them.
-fn runSearchTool(io: Io, arena: std.mem.Allocator, argv: []const []const u8, what: []const u8) ![]u8 {
-    const res = runToolProcess(io, arena, argv, max_tool_output * 4, tool_stderr_limit, durationMs(tool_timeout_ms)) catch |err|
+fn runSearchTool(io: Io, arena: std.mem.Allocator, argv: []const []const u8, what: []const u8, budget: Budget) ![]u8 {
+    const res = runToolProcess(io, arena, argv, max_tool_output * 4, tool_stderr_limit, durationMs(toolTimeoutMs(tool_timeout_ms, io, budget))) catch |err|
         return std.fmt.allocPrint(arena, "error: {s} failed: {s}", .{ what, @errorName(err) });
     if (res.stdout.len > 0) return res.stdout;
     if (res.stderr.len > 0) return res.stderr;
@@ -1700,7 +1751,7 @@ fn gitLineLimit(args: std.json.ObjectMap) usize {
 
 /// Read-only git, with the subcommands fixed here rather than assembled by the
 /// model. Deterministic, no shell quoting, and the output is capped.
-fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
+fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, budget: Budget) ![]u8 {
     const cmd = str(args.get("cmd")) orelse return std.fmt.allocPrint(arena, "error: missing cmd", .{});
     const path = str(args.get("path"));
     const rev = str(args.get("rev"));
@@ -1731,7 +1782,7 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     try argv.append(arena, "--");
     if (path) |p| try argv.append(arena, p);
 
-    const res = runToolProcess(io, arena, argv.items, max_tool_output * 4, tool_stderr_limit, durationMs(tool_timeout_ms)) catch |err|
+    const res = runToolProcess(io, arena, argv.items, max_tool_output * 4, tool_stderr_limit, durationMs(toolTimeoutMs(tool_timeout_ms, io, budget))) catch |err|
         return std.fmt.allocPrint(arena, "error: git {s} failed: {s}", .{ cmd, @errorName(err) });
     const text = if (res.stdout.len > 0) res.stdout else res.stderr;
     if (text.len == 0) return std.fmt.allocPrint(arena, "(git {s}: no output)", .{cmd});
@@ -1867,11 +1918,13 @@ fn finishTurn(
         // A call the budget will not pay for still gets a tool message. An
         // assistant turn that names calls the conversation never answers is one
         // the next request rejects, so the loop below would spend a turn on a
-        // 400 instead of on the answer.
-        const output = if (budget.expired(io))
+        // 400 instead of on the answer. Zero left is the same answer as a
+        // deadline in the past: a call that starts here is killed at once.
+        const left = budget.remainingMs(io);
+        const output = if (left != null and left.? == 0)
             try std.fmt.allocPrint(arena, "error: not run, the run's time budget is exhausted", .{})
         else
-            runTool(io, arena, call) catch |err|
+            runTool(io, arena, call, budget) catch |err|
                 // A tool that fails outright (rather than reporting its own
                 // failure as text) is named here, so a result reading
                 // `error: OutOfMemory` says which of the calls ran out.
@@ -1931,7 +1984,7 @@ fn logUsage(io: Io, arena: std.mem.Allocator, usage: *Usage, result: *const Chat
     net.writeOut(io, usage_line.items());
 }
 
-fn runTool(io: Io, arena: std.mem.Allocator, call: ToolCall) ![]u8 {
+fn runTool(io: Io, arena: std.mem.Allocator, call: ToolCall, budget: Budget) ![]u8 {
     const parsed = std.json.parseFromSlice(std.json.Value, arena, call.args.items, .{}) catch
         return std.fmt.allocPrint(arena, "error: tool arguments are not valid JSON", .{});
     const args = switch (parsed.value) {
@@ -1940,13 +1993,13 @@ fn runTool(io: Io, arena: std.mem.Allocator, call: ToolCall) ![]u8 {
     };
 
     noteToolCall(io, arena, call.name, args);
-    if (std.mem.eql(u8, call.name, "bash")) return toolBash(io, arena, args);
+    if (std.mem.eql(u8, call.name, "bash")) return toolBash(io, arena, args, budget);
     if (std.mem.eql(u8, call.name, "read")) return toolRead(io, arena, args);
     if (std.mem.eql(u8, call.name, "write")) return toolWrite(io, arena, args);
     if (std.mem.eql(u8, call.name, "edit")) return toolEdit(io, arena, args);
-    if (std.mem.eql(u8, call.name, "search")) return toolSearch(io, arena, args);
-    if (std.mem.eql(u8, call.name, "ast")) return toolAst(io, arena, args);
-    if (std.mem.eql(u8, call.name, "git")) return toolGit(io, arena, args);
+    if (std.mem.eql(u8, call.name, "search")) return toolSearch(io, arena, args, budget);
+    if (std.mem.eql(u8, call.name, "ast")) return toolAst(io, arena, args, budget);
+    if (std.mem.eql(u8, call.name, "git")) return toolGit(io, arena, args, budget);
     return std.fmt.allocPrint(arena, "error: unknown tool '{s}'", .{call.name});
 }
 
@@ -2030,9 +2083,20 @@ fn bashTimeoutMs(requested: ?u64) u64 {
     return @min(requested orelse default_bash_timeout_ms, max_bash_timeout_ms);
 }
 
-fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
+/// The deadline one tool subprocess runs under: the timeout the tool asked for,
+/// never past the ceiling, and never past what is left of the run's budget. A
+/// `bash` call that starts with a second of budget left does not run for the
+/// ten minutes it asked for, because the run then ends past the deadline it
+/// promised a caller and is killed in the middle of the call. No budget set
+/// means no cap beyond the tool's own.
+fn toolTimeoutMs(requested_ms: u64, io: Io, budget: Budget) u64 {
+    const left = budget.remainingMs(io) orelse return requested_ms;
+    return @min(requested_ms, left);
+}
+
+fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, budget: Budget) ![]u8 {
     const command = str(args.get("command")) orelse return std.fmt.allocPrint(arena, "error: missing command", .{});
-    const timeout_ms: u64 = bashTimeoutMs(if (args.get("timeout_ms")) |v| num(v) else null);
+    const timeout_ms: u64 = toolTimeoutMs(bashTimeoutMs(if (args.get("timeout_ms")) |v| num(v) else null), io, budget);
     const capture_limit = max_tool_output * 4;
     const res = runCapped(io, arena, &.{ "/bin/sh", "-c", command }, capture_limit, durationMs(timeout_ms)) catch |err| switch (err) {
         error.Timeout => return std.fmt.allocPrint(arena, "error: command timed out after {d}ms", .{timeout_ms}),
@@ -2121,7 +2185,7 @@ fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     return std.fmt.allocPrint(arena, "replaced {d} occurrence(s) in {s}", .{ count, path });
 }
 
-fn toolSearch(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
+fn toolSearch(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, budget: Budget) ![]u8 {
     const pattern = str(args.get("pattern")) orelse return std.fmt.allocPrint(arena, "error: missing pattern", .{});
     const path = str(args.get("path")) orelse ".";
     const glob = str(args.get("glob"));
@@ -2131,13 +2195,13 @@ fn toolSearch(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 
         try argv.appendSlice(arena, &.{ "--glob", g });
     }
     try argv.appendSlice(arena, &.{ "--", pattern, path });
-    return runSearchTool(io, arena, argv.items, "ripgrep");
+    return runSearchTool(io, arena, argv.items, "ripgrep", budget);
 }
 
 /// Structural search/rewrite through ast-grep. `rewrite` set means the change
 /// is applied to every match (`--update-all`), so the next turn reads the
 /// result back rather than trusting the tool's summary.
-fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
+fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, budget: Budget) ![]u8 {
     const pattern = str(args.get("pattern")) orelse return std.fmt.allocPrint(arena, "error: missing pattern", .{});
     const lang = str(args.get("lang")) orelse return std.fmt.allocPrint(arena, "error: missing lang", .{});
     const path = str(args.get("path")) orelse ".";
@@ -2148,7 +2212,7 @@ fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     if (rewrite) |r| try argv.appendSlice(arena, &.{ "--rewrite", r, "--update-all" });
     try argv.appendSlice(arena, &.{ "--", path });
 
-    return runSearchTool(io, arena, argv.items, "ast-grep");
+    return runSearchTool(io, arena, argv.items, "ast-grep", budget);
 }
 
 fn appendMessage(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), role: []const u8, content: []const u8) !void {
@@ -2658,7 +2722,7 @@ test "a real tool result over the cap stays a string the body can carry" {
     // Five bytes per line, so the cap does not land on a character boundary: a
     // plain cut here leaves half an e-acute in the string.
     try args.put(arena, "command", .{ .string = "i=0; while [ $i -lt 5000 ]; do printf '\\303\\251a\\303\\251'; i=$((i+1)); done" });
-    const output = try toolBash(std.testing.io, arena, args);
+    const output = try toolBash(std.testing.io, arena, args, .{});
     try std.testing.expect(output.len > max_tool_output);
 
     const result = try toolResult(arena, output);
@@ -2681,6 +2745,32 @@ test "a model cannot ask bash for a timeout past the ceiling" {
     // tool's own default rather than the ceiling.
     try std.testing.expectEqual(@as(u64, 1000), bashTimeoutMs(1000));
     try std.testing.expectEqual(default_bash_timeout_ms, bashTimeoutMs(null));
+}
+
+// A run with no budget sets no cap, so the tool's own timeout stands. With one,
+// the timeout is what is left of it: a bash call that starts a second before the
+// deadline runs for a second, not for the ten minutes it asked for, which is the
+// run ending inside a caller's per-review timeout instead of beside it.
+test "a tool deadline is capped by what is left of the run's budget" {
+    const io = std.testing.io;
+    const now = Io.Timestamp.now(io, .awake).nanoseconds;
+    const none = Budget.of(now, null);
+    try std.testing.expectEqual(@as(?u64, null), none.remainingMs(io));
+    try std.testing.expectEqual(max_bash_timeout_ms, toolTimeoutMs(max_bash_timeout_ms, io, none));
+
+    const roomy = Budget.of(now, 600);
+    const left = roomy.remainingMs(io).?;
+    // A second of work left is a second of wall, give or take the millisecond
+    // the calls in between cost.
+    try std.testing.expect(left > 599_000 and left <= 600_000);
+    try std.testing.expectEqual(left, toolTimeoutMs(max_bash_timeout_ms, io, roomy));
+    // Asking for less than the budget still buys what was asked for.
+    try std.testing.expectEqual(@as(u64, 1000), toolTimeoutMs(1000, io, roomy));
+
+    // Spent: the cap is zero, and a call that starts there is not run at all.
+    const spent = Budget.of(now, 0);
+    try std.testing.expectEqual(@as(?u64, 0), spent.remainingMs(io));
+    try std.testing.expectEqual(@as(u64, 0), toolTimeoutMs(max_bash_timeout_ms, io, spent));
 }
 
 test "a tool argument cannot repaint the operator's terminal" {
@@ -3396,7 +3486,7 @@ test "git tool refuses a rev that git would read as an option" {
     var args: std.json.ObjectMap = .empty;
     try args.put(arena, "cmd", .{ .string = "diff" });
     try args.put(arena, "rev", .{ .string = "--output=pwned" });
-    const out = try toolGit(std.testing.io, arena, args);
+    const out = try toolGit(std.testing.io, arena, args, .{});
     try std.testing.expectEqualStrings("error: rev must not start with '-'", out);
 }
 
@@ -3433,7 +3523,7 @@ test "git tool refuses a missing or unknown subcommand" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     {
-        const out = try toolGit(std.testing.io, arena, .empty);
+        const out = try toolGit(std.testing.io, arena, .empty, .{});
         try std.testing.expectEqualStrings("error: missing cmd", out);
     }
     {
@@ -3443,7 +3533,7 @@ test "git tool refuses a missing or unknown subcommand" {
         try args.put(arena, "cmd", .{ .string = "push" });
         try std.testing.expectEqualStrings(
             "error: unknown git cmd 'push'",
-            try toolGit(std.testing.io, arena, args),
+            try toolGit(std.testing.io, arena, args, .{}),
         );
     }
 }
@@ -3523,7 +3613,7 @@ fn dispatch(arena: std.mem.Allocator, name: []const u8, args: []const u8) ![]u8 
         .name = try arena.dupe(u8, name),
     };
     try call.args.appendSlice(arena, args);
-    return runTool(std.testing.io, arena, call);
+    return runTool(std.testing.io, arena, call, .{});
 }
 
 test "a child that outruns the capture cap keeps its first bytes instead of failing" {
@@ -3807,6 +3897,51 @@ test "a repeated session log writes beside the first and never over it" {
     const survived = try tmp.dir.readFileAlloc(io, "1759000000000000000.jsonl", alloc, .limited(64));
     defer alloc.free(survived);
     try std.testing.expectEqualStrings("first\n", survived);
+}
+
+// The store is pruned by the number a name carries, not by the name's bytes.
+// Unix nanoseconds are 18 digits before 2001-09-09 and 19 after, so a shorter
+// name beside longer ones is the oldest log in the store while reading as the
+// newest of them. Sorted as bytes it survived every pass, and the run a monitor
+// is watching was the one deleted.
+test "pruning deletes the oldest stamp, not the one that reads as the newest" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The oldest log by value, and the oldest by width-free comparison. Sorted
+    // as bytes the second is the smaller of the two.
+    const oldest = "190000000000000000.jsonl";
+    const next = "1759000000000000000.jsonl";
+    const beside = "1759000000000000000-1.jsonl";
+    try tmp.dir.writeFile(io, .{ .sub_path = oldest, .data = "" });
+    try tmp.dir.writeFile(io, .{ .sub_path = next, .data = "" });
+    try tmp.dir.writeFile(io, .{ .sub_path = beside, .data = "" });
+    var newest: []u8 = undefined;
+    var i: usize = 1;
+    while (i <= max_session_logs - 1) : (i += 1) {
+        const name = try std.fmt.allocPrint(arena, "1759000000000000{d:0>3}.jsonl", .{i});
+        try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "" });
+        if (i == max_session_logs - 1) newest = try arena.dupe(u8, name);
+    }
+    // Two over the ceiling, and the two oldest are the wide-spaced one above
+    // and the run it precedes.
+    try std.testing.expectEqual(max_session_logs + 2, 3 + (max_session_logs - 1));
+
+    pruneSessions(io, arena, try tmp.dir.realPathFileAlloc(io, ".", arena));
+
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, oldest, .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, next, .{}));
+    // The newest run is still there, and so is the repeated run that wrote
+    // beside it: both are logs this store is keeping.
+    tmp.dir.access(io, newest, .{}) catch |err| return err;
+    tmp.dir.access(io, beside, .{}) catch |err| return err;
 }
 
 // A log that cannot be written to has stopped recording the run. Kept, it is

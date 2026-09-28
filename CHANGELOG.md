@@ -55,6 +55,18 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- The session store is pruned by the number each log's name carries rather than by the name's
+  bytes. Unix nanoseconds are 18 digits before 2001-09-09 and 19 after, and a clock NTP or an
+  admin steps backwards writes the shorter one beside the longer ones, so the oldest log in the
+  store read as the newest of it and survived every pass while the run a monitor was watching
+  was deleted. A log written beside a repeated run (`<stamp>-1.jsonl`) is counted and pruned
+  too; it was never counted, so a store that had any could grow past the ceiling for good.
+- A tool call is cut at the run's time budget, not only the turn that started it. The budget was
+  checked between stream reads and before each tool call, but a `bash` call that started with a
+  second of budget left then ran for the ten minutes it asked for, so a run could end well past
+  the deadline it set and be killed in the middle of the call. `bash`, `git`, `search` and `ast`
+  now take what is left of the budget as their own deadline, and a call with none left is not run
+  at all.
 - Ctrl+C and `kill` now take the tool subprocess with them. A tool child leads its own process
   group so its tree can be reaped, which is also where the terminal's interrupt does not reach: the
   agent died and the build it had launched kept running and writing files. The run now forwards

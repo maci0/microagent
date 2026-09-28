@@ -63,7 +63,8 @@ microagent -p "fix the failing test and run it"
                        (env MICROAGENT_CA_BUNDLE, SSL_CERT_FILE). Needed in
                        images that ship no ca-certificates.
     --budget <seconds> stop starting turns after this long, then take one last
-                       turn to make the edit, which may run 5 minutes past it
+                       turn to make the edit, which may run 5 minutes past it.
+                       A tool call still running is cut at the budget
                        (env MICROAGENT_BUDGET_SECONDS)
     --reasoning-effort <level>
                        reasoning.effort sent to the provider: minimal, low,
