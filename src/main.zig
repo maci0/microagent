@@ -289,6 +289,17 @@ fn streamChat(
     var result: ChatResult = .{};
     var calls: std.ArrayList(ToolCall) = .empty;
 
+    // Frames are parsed in a scratch arena reset after each one, so a long
+    // stream costs the size of its largest frame, not the sum of all of them.
+    var frame_arena_state = std.heap.ArenaAllocator.init(arena);
+    const frame_arena = frame_arena_state.allocator();
+
+    // stdout is buffered per read chunk rather than written per token: one
+    // write per chunk the provider sent. Tokens that arrived in the same chunk
+    // are drawn in the same tick either way, so streaming latency is unchanged
+    // while the syscall count per completion drops by orders of magnitude.
+    var out_buf: std.ArrayList(u8) = .empty;
+
     // Chunked reads, split into lines here rather than with the reader's
     // delimiter helpers: those stall on a chunked body reader (they hand back
     // an endless run of empty lines instead of reading on).
@@ -312,49 +323,8 @@ fn streamChat(
                 done = true;
                 break;
             }
-
-            const parsed = std.json.parseFromSlice(std.json.Value, arena, payload, .{}) catch continue;
-            const root = parsed.value;
-            if (root != .object) continue;
-
-            if (root.object.get("usage")) |u| if (u == .object) {
-                result.prompt_tokens = num(u.object.get("prompt_tokens"));
-                result.completion_tokens = num(u.object.get("completion_tokens"));
-                result.total_tokens = num(u.object.get("total_tokens"));
-                if (u.object.get("completion_tokens_details")) |d| {
-                    if (d == .object) result.reasoning_tokens = num(d.object.get("reasoning_tokens"));
-                }
-            };
-            const choices = root.object.get("choices") orelse continue;
-            if (choices != .array or choices.array.items.len == 0) continue;
-            const choice = choices.array.items[0];
-            if (choice != .object) continue;
-            const delta = choice.object.get("delta") orelse continue;
-            if (delta != .object) continue;
-
-            if (str(delta.object.get("content"))) |text| {
-                try result.content.appendSlice(arena, text);
-                std.Io.File.stdout().writeStreamingAll(io, text) catch {};
-            }
-            if (delta.object.get("tool_calls")) |tcs| if (tcs == .array) {
-                for (tcs.array.items) |tc| {
-                    if (tc != .object) continue;
-                    const idx: usize = @intCast(@max(0, num(tc.object.get("index"))));
-                    while (calls.items.len <= idx) try calls.append(arena, .{
-                        .id = try arena.dupe(u8, ""),
-                        .name = try arena.dupe(u8, ""),
-                        .args = &.{},
-                    });
-                    var args_buf: std.ArrayList(u8) = .empty;
-                    try args_buf.appendSlice(arena, calls.items[idx].args);
-                    if (str(tc.object.get("id"))) |v| calls.items[idx].id = try arena.dupe(u8, v);
-                    if (tc.object.get("function")) |f| if (f == .object) {
-                        if (str(f.object.get("name"))) |v| calls.items[idx].name = try arena.dupe(u8, v);
-                        if (str(f.object.get("arguments"))) |v| try args_buf.appendSlice(arena, v);
-                    };
-                    calls.items[idx].args = args_buf.items;
-                }
-            };
+            try applyFrame(frame_arena, arena, payload, &result, &calls, &out_buf);
+            _ = frame_arena_state.reset(.retain_capacity);
         }
         // Drop what was consumed, so a long stream does not keep every frame.
         if (start > 0) {
@@ -362,12 +332,78 @@ fn streamChat(
             std.mem.copyForwards(u8, pending.items[0..rest], pending.items[start..]);
             pending.shrinkRetainingCapacity(rest);
         }
+        flushOut(io, &out_buf);
     }
 
+    if (result.content.items.len > 0) try out_buf.append(arena, '\n');
+    flushOut(io, &out_buf);
     result.calls = calls;
-    if (result.content.items.len > 0)
-        std.Io.File.stdout().writeStreamingAll(io, "\n") catch {};
     return result;
+}
+
+/// Folds one SSE payload into the response being built.
+///
+/// `scratch` is reset by the caller after every frame, so nothing parsed out of
+/// it may survive: strings that do are copied into `arena`, which lives for the
+/// whole run.
+fn applyFrame(
+    scratch: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    payload: []const u8,
+    result: *ChatResult,
+    calls: *std.ArrayList(ToolCall),
+    out_buf: *std.ArrayList(u8),
+) !void {
+    const parsed = std.json.parseFromSlice(std.json.Value, scratch, payload, .{}) catch return;
+    const root = parsed.value;
+    if (root != .object) return;
+
+    if (root.object.get("usage")) |u| if (u == .object) {
+        result.prompt_tokens = num(u.object.get("prompt_tokens"));
+        result.completion_tokens = num(u.object.get("completion_tokens"));
+        result.total_tokens = num(u.object.get("total_tokens"));
+        if (u.object.get("completion_tokens_details")) |d| {
+            if (d == .object) result.reasoning_tokens = num(d.object.get("reasoning_tokens"));
+        }
+    };
+    const choices = root.object.get("choices") orelse return;
+    if (choices != .array or choices.array.items.len == 0) return;
+    const choice = choices.array.items[0];
+    if (choice != .object) return;
+    const delta = choice.object.get("delta") orelse return;
+    if (delta != .object) return;
+
+    if (str(delta.object.get("content"))) |text| {
+        try result.content.appendSlice(arena, text);
+        try out_buf.appendSlice(arena, text);
+    }
+    if (delta.object.get("tool_calls")) |tcs| if (tcs == .array) {
+        for (tcs.array.items) |tc| {
+            if (tc != .object) continue;
+            const idx: usize = @intCast(@max(0, num(tc.object.get("index"))));
+            while (calls.items.len <= idx) try calls.append(arena, .{
+                .id = try arena.dupe(u8, ""),
+                .name = try arena.dupe(u8, ""),
+                .args = &.{},
+            });
+            var args_buf: std.ArrayList(u8) = .empty;
+            try args_buf.appendSlice(arena, calls.items[idx].args);
+            if (str(tc.object.get("id"))) |v| calls.items[idx].id = try arena.dupe(u8, v);
+            if (tc.object.get("function")) |f| if (f == .object) {
+                if (str(f.object.get("name"))) |v| calls.items[idx].name = try arena.dupe(u8, v);
+                if (str(f.object.get("arguments"))) |v| try args_buf.appendSlice(arena, v);
+            };
+            calls.items[idx].args = args_buf.items;
+        }
+    };
+}
+
+/// Hands the buffered tokens to stdout. A failed write is ignored: a closed
+/// pipe means the reader left, not that the run should be abandoned.
+fn flushOut(io: Io, out_buf: *std.ArrayList(u8)) void {
+    if (out_buf.items.len == 0) return;
+    Io.File.stdout().writeStreamingAll(io, out_buf.items) catch {};
+    out_buf.clearRetainingCapacity();
 }
 
 /// Appends the assistant message and, for every tool call it requested, runs
@@ -751,6 +787,82 @@ test "conversation and tool schema serialize as one valid request body" {
         try std.testing.expect(f.get("name").?.string.len > 0);
     }
     opts.max_turns = 1;
+}
+
+test "a long stream costs the largest frame, not the sum of frames" {
+    const gpa = std.testing.allocator;
+    var run_state = std.heap.ArenaAllocator.init(gpa);
+    defer run_state.deinit();
+    var frame_state = std.heap.ArenaAllocator.init(gpa);
+    defer frame_state.deinit();
+
+    var result: ChatResult = .{};
+    var calls: std.ArrayList(ToolCall) = .empty;
+    var out_buf: std.ArrayList(u8) = .empty;
+
+    const payload = "{\"choices\":[{\"delta\":{\"content\":\"tok\"}}]}";
+    const frames: usize = 20_000;
+
+    // Reference point: the scratch capacity one frame needs.
+    try applyFrame(frame_state.allocator(), run_state.allocator(), payload, &result, &calls, &out_buf);
+    const one_frame_capacity = frame_state.queryCapacity();
+    _ = frame_state.reset(.retain_capacity);
+
+    var i: usize = 1;
+    while (i < frames) : (i += 1) {
+        try applyFrame(frame_state.allocator(), run_state.allocator(), payload, &result, &calls, &out_buf);
+        _ = frame_state.reset(.retain_capacity);
+    }
+
+    try std.testing.expectEqual(frames * 3, result.content.items.len);
+    try std.testing.expectEqual(frames * 3, out_buf.items.len);
+    // The work counter this test asserts on: scratch bytes retained after the
+    // last frame. It must equal what one frame needed, not grow with the frame
+    // count, which is what it did before the per-frame reset (20_000 frames'
+    // worth of parse trees were kept alive in the run arena).
+    try std.testing.expect(one_frame_capacity > 0);
+    try std.testing.expectEqual(one_frame_capacity, frame_state.queryCapacity());
+}
+
+test "tool call fragments merge by index across frames" {
+    const gpa = std.testing.allocator;
+    var run_state = std.heap.ArenaAllocator.init(gpa);
+    defer run_state.deinit();
+    var frame_state = std.heap.ArenaAllocator.init(gpa);
+    defer frame_state.deinit();
+
+    var result: ChatResult = .{};
+    var calls: std.ArrayList(ToolCall) = .empty;
+    var out_buf: std.ArrayList(u8) = .empty;
+
+    const frames = [_][]const u8{
+        "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"pa\"}}]}}]}",
+        "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"th\\\":\\\"a.zig\\\"}\",\"arguments_end\":null}}]}}]}",
+    };
+    for (frames) |f| {
+        try applyFrame(frame_state.allocator(), run_state.allocator(), f, &result, &calls, &out_buf);
+        _ = frame_state.reset(.retain_capacity);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), calls.items.len);
+    try std.testing.expectEqualStrings("call_1", calls.items[0].id);
+    try std.testing.expectEqualStrings("read", calls.items[0].name);
+    try std.testing.expectEqualStrings("{\"path\":\"a.zig\"}", calls.items[0].args);
+}
+
+test "usage counters land on the result" {
+    var run_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer run_state.deinit();
+    var result: ChatResult = .{};
+    var calls: std.ArrayList(ToolCall) = .empty;
+    var out_buf: std.ArrayList(u8) = .empty;
+    const payload =
+        "{\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":22,\"total_tokens\":33,\"completion_tokens_details\":{\"reasoning_tokens\":7}}}";
+    try applyFrame(run_state.allocator(), run_state.allocator(), payload, &result, &calls, &out_buf);
+    try std.testing.expectEqual(@as(u64, 11), result.prompt_tokens);
+    try std.testing.expectEqual(@as(u64, 22), result.completion_tokens);
+    try std.testing.expectEqual(@as(u64, 33), result.total_tokens);
+    try std.testing.expectEqual(@as(u64, 7), result.reasoning_tokens);
 }
 
 test "only weather-shaped statuses are retried" {

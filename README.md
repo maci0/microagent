@@ -103,7 +103,8 @@ so no `usage.roots` entry is required either.
 
 ```sh
 bench/run.sh microagent kimi opencode   # three coding tasks, pass/fail + wall time + tokens
-bench/overhead.sh                # startup latency and no-op request cost per harness
+bench/gauntlet.sh microagent kimi       # the same gauntlet reviews per agent, scored on the diff
+bench/overhead.sh                       # startup latency and no-op request cost per harness
 ```
 
 Results from this machine are in [BENCHMARK.md](BENCHMARK.md).
