@@ -43,8 +43,23 @@ for agent in $agents; do
 		work="$work_root/$task/$agent"
 		rm -rf "$work"
 		mkdir -p "$work"
-		( cd "$work" && sh "$task_dir/setup.sh" >/dev/null 2>&1 )
-		( cd "$work" && git init -q && git add -A && git -c user.email=b@b -c user.name=b commit -qm base ) >/dev/null 2>&1
+		# A setup that fails, on the first run or on any later one, leaves a
+		# tree the task never defined. Running the agent against it and
+		# recording the outcome would charge the agent for a broken task
+		# setup, and append that as a real measurement to results.jsonl, so
+		# the row is written as an error instead.
+		if ! ( cd "$work" && sh "$task_dir/setup.sh" ) >"$work_root/$task.setup.log" 2>&1; then
+			printf '%-10s %-14s %8s %10s %8s  %s\n' "$agent" "$task" - - - setup-error
+			printf '{"agent":"%s","task":"%s","wall_s":null,"tokens":null,"lines":"n/a","result":"setup-error"}\n' \
+				"$agent" "$task" >>"$results"
+			continue
+		fi
+		if ! ( cd "$work" && git init -q && git add -A && git -c user.email=b@b -c user.name=b commit -qm base ) >/dev/null 2>&1; then
+			printf '%-10s %-14s %8s %10s %8s  %s\n' "$agent" "$task" - - - commit-error
+			printf '{"agent":"%s","task":"%s","wall_s":null,"tokens":null,"lines":"n/a","result":"commit-error"}\n' \
+				"$agent" "$task" >>"$results"
+			continue
+		fi
 
 		prompt=$(cat "$task_dir/prompt.txt")
 		start=$(monotonic_ns)

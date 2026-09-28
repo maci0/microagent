@@ -15,8 +15,12 @@ printf '%s\n' "----------------------------------------------"
 
 for agent in $agents; do
 	command -v "$agent" >/dev/null 2>&1 || continue
-	startup=$(hyperfine -w 3 -r 20 -N --export-json /tmp/bench-startup.json "$agent --version" >/dev/null 2>&1 \
-		&& awk -F'[:,]' '/"mean"/{printf "%.1f", $2*1000; exit}' /tmp/bench-startup.json) || startup=-
+	# One work directory per agent, and hyperfine's export inside it: a fixed
+	# machine-wide path is written by two runs at once and read by the other,
+	# so each row's startup number is the other row's measurement.
+	work=$(mktemp -d)
+	startup=$(hyperfine -w 3 -r 20 -N --export-json "$work/startup.json" "$agent --version" >/dev/null 2>&1 \
+		&& awk -F'[:,]' '/"mean"/{printf "%.1f", $2*1000; exit}' "$work/startup.json") || startup=-
 	[ -z "$startup" ] && startup=-
 
 	work=$(mktemp -d)

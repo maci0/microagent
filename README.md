@@ -128,7 +128,8 @@ conversation. It is read from whichever of `prompt_tokens_details.cached_tokens`
 
 Each run appends one JSONL record per model response to `~/.microagent/sessions/<unix-ns>.jsonl`
 (`MICROAGENT_SESSION_DIR` moves it, an empty value turns it off), so a monitor can follow the run
-while it is still going:
+while it is still going. A run that finds its name taken takes the next one (`-1`, `-2`, ...), so a
+re-launched run writes beside the earlier log rather than over it:
 
 ```json
 {"ts":1790608347342,"cwd":"/home/maci/Desktop/Projects/microagent","model":"deepseek/deepseek-v4-flash","elapsed_ms":1448,"usage":{"prompt_tokens":998,"cached_tokens":896,"completion_tokens":19,"reasoning_tokens":16,"total_tokens":1017}}

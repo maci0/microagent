@@ -439,6 +439,34 @@ const Session = struct {
     model: []const u8,
 };
 
+/// How many names `createSessionLog` tries before it gives the run no log. The
+/// name space only runs out when the clock stamp is degenerate, and losing a
+/// log costs the run nothing.
+const session_name_attempts = 8;
+
+/// This run's log, under a name nothing already holds.
+///
+/// The wall clock is settable, so its stamp is not a claim on a file: two runs
+/// can read the same nanosecond, and one that is re-launched shortly after a
+/// previous one can. Creating the file without `exclusive` would truncate the
+/// log already sitting there, so a second run would erase the first run's
+/// usage records, which is the whole reason the log exists. Every name is
+/// opened exclusively and a taken one moves to the next, so a repeat run writes
+/// beside the first rather than over it.
+fn createSessionLog(io: Io, arena: std.mem.Allocator, session_dir: []const u8, stamp: i128) ?Io.File {
+    var attempt: usize = 0;
+    while (attempt < session_name_attempts) : (attempt += 1) {
+        var suffix_buf: [4]u8 = undefined;
+        const suffix = if (attempt == 0) "" else std.fmt.bufPrint(&suffix_buf, "-{d}", .{attempt}) catch return null;
+        const path = std.fmt.allocPrint(arena, "{s}/{d}{s}.jsonl", .{ session_dir, stamp, suffix }) catch return null;
+        return std.Io.Dir.createFileAbsolute(io, path, .{ .exclusive = true }) catch |err| switch (err) {
+            error.PathAlreadyExists => continue,
+            else => return null,
+        };
+    }
+    return null;
+}
+
 fn openSession(io: Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, opts: Options) ?Session {
     if (opts.session_dir.len == 0) return null;
     // Every record names the directory it ran in. That is what attributes the
@@ -448,8 +476,7 @@ fn openSession(io: Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, opts: O
     const cwd = std.Io.Dir.cwd().realPathFileAlloc(io, ".", gpa) catch return null;
     std.Io.Dir.cwd().createDirPath(io, opts.session_dir) catch return null;
     const stamp = Io.Clock.real.now(io).nanoseconds;
-    const path = std.fmt.allocPrint(arena, "{s}/{d}.jsonl", .{ opts.session_dir, stamp }) catch return null;
-    const file = std.Io.Dir.createFileAbsolute(io, path, .{}) catch return null;
+    const file = createSessionLog(io, arena, opts.session_dir, stamp) orelse return null;
     return .{ .file = file, .cwd = cwd, .model = opts.model };
 }
 
@@ -1715,6 +1742,49 @@ test "backoff doubles, caps, and never overflows an attempt counter" {
     try std.testing.expectEqual(@as(u64, 2000), backoffMs(2));
     try std.testing.expectEqual(@as(u64, 4000), backoffMs(3));
     try std.testing.expectEqual(max_backoff_ms, backoffMs(1000));
+}
+
+// A run that starts twice, or two runs that start together, can read the same
+// wall-clock stamp. The second one must write beside the first: truncating it
+// would leave the store holding one run's records labelled as another's.
+test "a repeated session log writes beside the first and never over it" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", arena);
+
+    const first = createSessionLog(io, arena, dir, 1759000000000000000) orelse return error.TestUnexpectedResult;
+    first.writeStreamingAll(io, "first\n") catch return error.TestUnexpectedResult;
+    first.close(io);
+
+    const second = createSessionLog(io, arena, dir, 1759000000000000000) orelse return error.TestUnexpectedResult;
+    second.writeStreamingAll(io, "second\n") catch return error.TestUnexpectedResult;
+    second.close(io);
+
+    const kept = try tmp.dir.readFileAlloc(io, "1759000000000000000.jsonl", alloc, .limited(64));
+    defer alloc.free(kept);
+    try std.testing.expectEqualStrings("first\n", kept);
+    const beside = try tmp.dir.readFileAlloc(io, "1759000000000000000-1.jsonl", alloc, .limited(64));
+    defer alloc.free(beside);
+    try std.testing.expectEqualStrings("second\n", beside);
+
+    // The name space is finite and running out of it is a null, not a fall
+    // back to the truncating open.
+    var filled: usize = 2;
+    while (filled < session_name_attempts) : (filled += 1) {
+        const extra = createSessionLog(io, arena, dir, 1759000000000000000) orelse return error.TestUnexpectedResult;
+        extra.close(io);
+    }
+    try std.testing.expect(createSessionLog(io, arena, dir, 1759000000000000000) == null);
+    const survived = try tmp.dir.readFileAlloc(io, "1759000000000000000.jsonl", alloc, .limited(64));
+    defer alloc.free(survived);
+    try std.testing.expectEqualStrings("first\n", survived);
 }
 
 test "a tool call index past the cap is dropped, not allocated" {
