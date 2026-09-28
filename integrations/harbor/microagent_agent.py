@@ -149,19 +149,42 @@ def api_key() -> str:
     )
 
 
-def int_env(name: str, default: str, minimum: int = 1) -> int:
-    """A whole-number knob read from the host environment. An empty value is
-    not a value, and a bad one names the variable instead of surfacing as a
-    ValueError from int() with no indication of which knob it was. A knob the
-    binary reads as a ceiling is refused here too, so a mistyped value stops
-    the run before a container is started rather than inside one."""
-    raw = trimmed_env(name) or default
+def checked_int(name: str, raw: str, minimum: int = 1) -> int:
+    """One whole-number value, refused here for the reason `int_env` gives. The
+    value and its name are passed in, so a knob with no default of its own is
+    checked by the same rules as one that has."""
     try:
         value = int(raw)
     except ValueError:
         raise RuntimeError(f"{name} must be a whole number, got {raw!r}") from None
     if value < minimum:
         raise RuntimeError(f"{name} must be at least {minimum}, got {raw!r}")
+    return value
+
+
+def int_env(name: str, default: str, minimum: int = 1) -> int:
+    """A whole-number knob read from the host environment. An empty value is
+    not a value, and a bad one names the variable instead of surfacing as a
+    ValueError from int() with no indication of which knob it was. A knob the
+    binary reads as a ceiling is refused here too, so a mistyped value stops
+    the run before a container is started rather than inside one."""
+    return checked_int(name, trimmed_env(name) or default, minimum)
+
+
+def max_tokens() -> str | None:
+    """The generation ceiling, as the string the container is handed, or None
+    when the operator set none and the binary's own default stands.
+
+    Checked for the reason the numeric knobs are, and by the same reader: the
+    binary reads MICROAGENT_MAX_TOKENS as a ceiling and refuses anything that is
+    not a whole number of at least 1, and refusing it there costs a container
+    start and a binary upload before the reason is printed. The value is
+    returned as written rather than as the int it parses to, because it is
+    handed to the container as the string the operator wrote."""
+    value = trimmed_env("MICROAGENT_MAX_TOKENS")
+    if not value:
+        return None
+    checked_int("MICROAGENT_MAX_TOKENS", value)
     return value
 
 
@@ -259,6 +282,7 @@ def validate_env() -> None:
             f"than {FINAL_TURN_ROOM_S}, or the run is killed mid-turn and scored as an exception"
         )
     reasoning_effort()
+    max_tokens()
     base_url()
 
 
@@ -422,10 +446,11 @@ class Microagent(BaseAgent):
         # Forwarded because a provider can refuse a request whose max_tokens
         # exceeds what the account can still afford: with a low balance the
         # default 65536 is answered with `402 ... you can only afford N`, and
-        # the only lever the caller has is to ask for less.
-        max_tokens = trimmed_env("MICROAGENT_MAX_TOKENS")
-        if max_tokens:
-            env["MICROAGENT_MAX_TOKENS"] = max_tokens
+        # the only lever the caller has is to ask for less. Read through the
+        # same reader `validate_env` checked, so the value refused at the
+        # command line is the one this run would have been given.
+        if token_ceiling := max_tokens():
+            env["MICROAGENT_MAX_TOKENS"] = token_ceiling
 
         started = self.logs_dir / "microagent-stdout.txt"
         try:

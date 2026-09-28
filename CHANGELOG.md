@@ -67,6 +67,13 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- A mistyped `MICROAGENT_MAX_TOKENS` stops a Harbor run at the command line. The
+  adapter forwards it to the container so a low provider balance is a setting
+  rather than a wall of 402s, and forwards it unchecked: the binary reads it as
+  a ceiling and refuses a value that is not a whole number of at least 1, which
+  it did after a container start and a binary upload, in a log the operator was
+  not watching. It is checked with the ceilings already checked there.
+
 - `-p task help` is the usage error the parser already refused, not the usage text. The
   walk that answers `--help` and `--version` before the environment is read stepped over
   the value `--print` takes and counted no prompt there, so `microagent -p task help`
