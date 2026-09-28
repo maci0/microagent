@@ -104,11 +104,13 @@ surface to model.
   process-spawn inventories and for every file reference in the document; `zig build test`
   and `make check` for the gate, before and after; a locally built binary's `--help`,
   `--version` and `update --help` for the surface a control claim names, and a real
-  run of the named code path where a claim is about what it accepts or refuses, since
-  neither the gate nor a read of the source settles a claim about the bytes a control
-  lets through. Locate code by name (`fn` and the call sites), never by a line number
-  copied from the document, since a stale reference is the defect this review exists to
-  find. Never install tools, and never let a check reach the network.
+  run of the named code path, stopped before anything reaches the network, where a claim
+  is about what it accepts or refuses, since neither the gate nor a read of the source
+  settles a claim about the bytes a control lets through. A claim only a networked run
+  settles is recorded as unproven, not asserted. Locate code by name (`fn` and the call
+  sites), never by a line number copied from the document, since a stale reference is
+  the defect this review exists to find. Never install tools, and never let a check
+  reach the network.
 
 ## For each finding include:
 

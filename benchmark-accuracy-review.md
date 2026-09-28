@@ -79,9 +79,10 @@ measured left to check.
    musl row, in `BENCHMARK.md`; the tool count is in `BENCHMARK.md` and in the
    `README.md` opening. Two spellings of one measured fact are a defect when
    they disagree, and the fix is the pairing a comment names, never a third
-   copy. This item is the figure: the tool names the help and the README
-   promise against the `tools` array belong to `cli-contract-review.md`, and a
-   figure the code no longer produces is that review's finding, not this one.
+   copy. The tool *names* the help and the README promise against the `tools` array
+   belong to `cli-contract-review.md`; the count and the byte size are this item's,
+   and a figure the tree no longer produces is item 1's finding, not that
+   review's.
 
 7. **A benchmark task whose check no longer tests its own prompt.** Each
    directory under `bench/tasks/` is a `setup.sh`, a `prompt.txt` and a

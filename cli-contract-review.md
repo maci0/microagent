@@ -111,16 +111,18 @@ a fragment with no invocation surface to hold a contract.
   falls back to, then the line that documents it. An inferred default is not a finding.
 - Fix with the smallest edit that makes the surfaces agree: correct the stale line, or
   point it at the existing constant. Do not restyle the help text, reflow the README, or
-  rewrap prose that is already correct.
+  rewrap prose that is already correct. A contract fix is not a refactor: do not move a
+  parser, split a file, or move where a value is stored on the way to agreement.
 - One source of truth per value. When a default is now written in two places, collapse it
   to the code constant the help can reference, or note the pairing in a comment. Never
   leave both a copy and a reference.
 - Never remove or weaken an option, an env var, or an exit code to make a document match.
   The documented surface is the contract; when the code is wrong, the code is what
   changes, and a change to behaviour belongs in the CHANGELOG.
-- Do not touch the network, the API key handling, the update download path, or anything in
-  `bench/`, `integrations/`, or `.github/`. This review reads those at most to confirm a
-  documented flag is passed correctly; the numbers those scripts publish belong to
+- Do not edit the network client, the API key handling, the download path, or anything in
+  `bench/`, `integrations/`, or `.github/`. Item 7 reads the update argument loop, the
+  token lookup and the paths that fetch an asset; reading them is not a licence to change
+  how the download works. The numbers those scripts publish belong to
   `benchmark-accuracy-review.md`.
 - Do not rewrite the CHANGELOG's history or its release entries. Add an entry under
   `## [Unreleased]` only when your edit changes what an existing invocation does.
