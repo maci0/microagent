@@ -20,6 +20,8 @@ const exec_mode: std.Io.File.Permissions = @enumFromInt(@as(std.posix.mode_t, 0o
 const max_api_bytes: usize = 10 * 1024 * 1024;
 const max_sidecar_bytes: usize = 64 * 1024;
 const max_asset_bytes: usize = 256 * 1024 * 1024;
+/// How much of a `--repo` argument an error message quotes back.
+const repo_in_error_bytes: usize = 80;
 
 pub const Verdict = enum {
     current,
@@ -573,7 +575,7 @@ pub fn run(
     // A value the flag cannot carry is a usage error, so it prints the reason
     // and the usage text together like every other one.
     const api = releaseApiUrl(&api_buf, repo) catch
-        return updateUsageError(io, "want owner/repo, not a URL (got '{s}')", .{repo[0..@min(repo.len, 80)]});
+        return updateUsageError(io, "want owner/repo, not a URL (got '{s}')", .{repo[0..@min(repo.len, repo_in_error_bytes)]});
 
     var client: std.http.Client = .{ .allocator = gpa, .io = io };
     defer client.deinit();

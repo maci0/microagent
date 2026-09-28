@@ -255,15 +255,13 @@ pub fn main(init: std.process.Init) !void {
     // message is appended once, in the wire format, with no model in between.
     var msgs: std.ArrayList(u8) = .empty;
     defer msgs.deinit(gpa);
-    try msgs.appendSlice(gpa, "[");
     const style = loadStyle(io, init, init.arena.allocator(), opts.config);
     const reply_style = try style.ruleset(init.arena.allocator());
     const prompt = if (reply_style.len == 0)
         system_prompt
     else
         try std.fmt.allocPrint(init.arena.allocator(), "{s}\n\n{s}", .{ system_prompt, reply_style });
-    try appendMessage(gpa, &msgs, "system", prompt);
-    try appendMessage(gpa, &msgs, "user", opts.prompt);
+    try openConversation(gpa, &msgs, prompt, opts.prompt);
 
     run(&client, io, gpa, init.arena.allocator(), opts, &msgs) catch |err| {
         const msg = try std.fmt.allocPrint(init.arena.allocator(), "microagent: {s}\n", .{@errorName(err)});
@@ -483,8 +481,13 @@ fn budgetSeconds(value: []const u8) ?u64 {
     return std.fmt.parseInt(u64, std.mem.trim(u8, value, " \t\r\n"), 10) catch null;
 }
 
+/// How much of a value an error message quotes back. Cut on bytes, not on a
+/// codepoint boundary: the text lands on stderr, where a partial codepoint is
+/// a replaced byte rather than invalid UTF-8 on the wire.
+const quoted_value_bytes = 80;
+
 fn clip(s: []const u8) []const u8 {
-    return s[0..@min(s.len, 80)];
+    return s[0..@min(s.len, quoted_value_bytes)];
 }
 
 /// Reads the arguments after the program name into `opts`, formatting any
@@ -2969,13 +2972,13 @@ test "tool output truncation keeps whole lines" {
     try std.testing.expectEqualStrings("solo\n", try firstLines(arena, "solo\n", 1));
 }
 
-/// The system and user messages a run starts from, in the bytes the agent
-/// appends. `appendToolResults` follows it with the tool results that push a
-/// conversation past the compaction limit.
-fn conversationHeader(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), system: []const u8) !void {
+/// The `[` and the first two messages a run starts from, in the bytes the
+/// agent appends. `appendToolResults` follows it with the tool results that
+/// push a conversation past the compaction limit.
+fn openConversation(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), system: []const u8, user: []const u8) !void {
     try msgs.appendSlice(gpa, "[");
     try appendMessage(gpa, msgs, "system", system);
-    try appendMessage(gpa, msgs, "user", "fix the bug");
+    try appendMessage(gpa, msgs, "user", user);
 }
 
 fn appendToolResults(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), count: usize, blob: []const u8) !void {
@@ -3003,7 +3006,7 @@ test "compaction elides old tool output and keeps the recent turns" {
     defer msgs.deinit(gpa);
 
     const blob = "x" ** 8192;
-    try conversationHeader(gpa, &msgs, "you are a coding agent");
+    try openConversation(gpa, &msgs, "you are a coding agent", "fix the bug");
     try appendToolResults(gpa, &msgs, 120, blob);
     const before = msgs.items.len;
     try std.testing.expect(before > conversation_soft_limit);
@@ -3151,7 +3154,7 @@ test "compaction leaves the cached prefix byte-identical" {
     const blob = "x" ** 8192;
     // Characters a JSON round trip could re-spell: quote, backslash, newline,
     // a control byte, and a non-ASCII byte.
-    try conversationHeader(gpa, &msgs, "you are a coding agent: \"a\\b\"\n\u{7} caf\u{00e9}");
+    try openConversation(gpa, &msgs, "you are a coding agent: \"a\\b\"\n\u{7} caf\u{00e9}", "fix the bug");
     const prefix = try gpa.dupe(u8, msgs.items);
     defer gpa.free(prefix);
     try appendToolResults(gpa, &msgs, 120, blob);
@@ -3770,7 +3773,7 @@ fn fuzzStream(_: void, smith: *std.testing.Smith) !void {
 
     var msgs: std.ArrayList(u8) = .empty;
     defer msgs.deinit(gpa);
-    try conversationHeader(gpa, &msgs, system_prompt);
+    try openConversation(gpa, &msgs, system_prompt, "fix the bug");
     try msgs.appendSlice(gpa, ",");
     try msgs.appendSlice(gpa, try assistantMessage(arena, &sink.result));
     for (sink.calls.items) |call| {
@@ -3889,34 +3892,26 @@ test "edit replaces one match, or every match when asked" {
     try std.testing.expectEqualStrings("y and y", try tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
 }
 
-// A tool call must take its whole process tree down with it. The command
-// backgrounds a grandchild that outlives the shell, writes that grandchild's
-// pid, and then runs past the timeout: without the group signal the
-// grandchild is still alive when the call returns, and every timed-out call
-// leaked one.
-test "a tool call that times out leaves no process of its own behind" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+/// The command whose process tree has to come down with it: it backgrounds a
+/// grandchild that outlives the shell, writes that grandchild's pid, and then
+/// runs past the timeout.
+const timeout_script = "sh -c 'echo $$ > {s}; sleep 30' &\nsleep 30";
 
+/// Runs `timeout_script` through one of the two runners that carry the
+/// process-group kill, and fails unless nothing of it is left alive.
+fn expectNoSurvivingGrandchild(io: Io, arena: std.mem.Allocator, runner: enum { tool, bash }) !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const n = try tmp.dir.realPath(io, &path_buf);
     const pid_path = try std.fs.path.join(arena, &.{ path_buf[0..n], "grandchild.pid" });
     // The grandchild holds the pipe open, so the read only ends when the
-    // timeout fires, which is the path under test. `$!` and not `$$`: inside a
-    // nested `sh -c` the latter is still the outer shell's pid, so the check
-    // below would be about a process that had already exited rather than about
-    // the grandchild the group signal exists to take down.
-    const script = try std.fmt.allocPrint(arena,
-        \\sh -c 'sleep 30 & echo $! > {s}; wait' &
-        \\sleep 30
-    , .{pid_path});
-    try std.testing.expectError(error.Timeout, runToolProcess(arena, io, &.{ "/bin/sh", "-c", script }, 4096, 4096, durationMs(300)));
+    // timeout fires, which is the path under test.
+    const script = try std.fmt.allocPrint(arena, timeout_script, .{pid_path});
+    switch (runner) {
+        .tool => try std.testing.expectError(error.Timeout, runToolProcess(arena, io, &.{ "/bin/sh", "-c", script }, 4096, 4096, durationMs(300))),
+        .bash => try std.testing.expectError(error.Timeout, runCapped(io, arena, &.{ "/bin/sh", "-c", script }, 4096, durationMs(300))),
+    }
 
     const raw = tmp.dir.readFileAlloc(io, "grandchild.pid", arena, .limited(64)) catch return error.GrandchildNotReported;
     const pid = try std.fmt.parseInt(std.posix.pid_t, std.mem.trim(u8, raw, " \t\r\n"), 10);
@@ -3927,7 +3922,7 @@ test "a tool call that times out leaves no process of its own behind" {
         std.posix.kill(pid, .CONT) catch return;
         try io.sleep(.{ .nanoseconds = 20 * std.time.ns_per_ms }, .awake);
     }
-    std.debug.print("grandchild {d} survived the tool call\n", .{pid});
+    std.debug.print("{s} grandchild {d} survived the tool call\n", .{ @tagName(runner), pid });
     return error.GrandchildSurvived;
 }
 
@@ -3965,6 +3960,18 @@ test "an interrupt during a tool call is forwarded to that call's process group"
     try std.testing.expect(tool_group.load(.monotonic) > 0);
     thread.join();
     try std.testing.expectEqual(@as(std.posix.pid_t, 0), tool_group.load(.monotonic));
+}
+
+// A tool call must take its whole process tree down with it: without the group
+// signal the grandchild is still alive when the call returns, and every
+// timed-out call leaked one.
+test "a tool call that times out leaves no process of its own behind" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    try expectNoSurvivingGrandchild(threaded.io(), arena_state.allocator(), .tool);
 }
 
 // The session store is a per-run directory nothing used to delete from, so a
@@ -4034,32 +4041,10 @@ test "a tool call reports the exit status of the command it ran" {
 test "a bash call that times out leaves no process of its own behind" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
-    const arena = arena_state.allocator();
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
-    const io = threaded.io();
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const n = try tmp.dir.realPath(io, &path_buf);
-    const pid_path = try std.fs.path.join(arena, &.{ path_buf[0..n], "bash_grandchild.pid" });
-    const script = try std.fmt.allocPrint(arena,
-        \\sh -c 'echo $$ > {s}; sleep 30' &
-        \\sleep 30
-    , .{pid_path});
-
-    try std.testing.expectError(error.Timeout, runCapped(io, arena, &.{ "/bin/sh", "-c", script }, 4096, durationMs(300)));
-
-    const raw = tmp.dir.readFileAlloc(io, "bash_grandchild.pid", arena, .limited(64)) catch return error.GrandchildNotReported;
-    const pid = try std.fmt.parseInt(std.posix.pid_t, std.mem.trim(u8, raw, " \t\r\n"), 10);
-    var attempt: usize = 0;
-    while (attempt < 50) : (attempt += 1) {
-        std.posix.kill(pid, .CONT) catch return;
-        try io.sleep(.{ .nanoseconds = 20 * std.time.ns_per_ms }, .awake);
-    }
-    std.debug.print("bash grandchild {d} survived the tool call\n", .{pid});
-    return error.GrandchildSurvived;
+    try expectNoSurvivingGrandchild(threaded.io(), arena_state.allocator(), .bash);
 }
 
 // The name and the id of a streamed tool call are copies the run allocator

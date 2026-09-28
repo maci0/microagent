@@ -181,16 +181,16 @@ class Microagent(BaseAgent):
         if reasoning:
             env["MICROAGENT_REASONING_EFFORT"] = reasoning
 
-        # UTF-8 named rather than left to the locale: a host running under
-        # LANG=C or a legacy code page raises on a non-ASCII byte, and the run's
-        # own transcript is the one log that must always land.
         started = self.logs_dir / "microagent-stdout.txt"
         result = await environment.exec(
             command=command,
             env=env,
             timeout_sec=int_env("MICROAGENT_AGENT_TIMEOUT_SEC", "1500"),
         )
-        (self.logs_dir / "microagent-stdout.txt").write_text(result.stdout or "", encoding="utf-8")
+        # UTF-8 named rather than left to the locale: a host running under
+        # LANG=C or a legacy code page raises on a non-ASCII byte, and the run's
+        # own transcript is the one log that must always land.
+        started.write_text(result.stdout or "", encoding="utf-8")
         (self.logs_dir / "microagent-stderr.txt").write_text(result.stderr or "", encoding="utf-8")
 
         usage = last_usage(result.stdout or "")

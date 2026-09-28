@@ -22,7 +22,7 @@ for agent in $agents; do
 	# so each row's startup number is the other row's measurement.
 	work=$(mktemp -d)
 	startup=$(hyperfine -w 3 -r 20 -N --export-json "$work/startup.json" "$agent --version" >/dev/null 2>&1 \
-		&& awk -F'[:,]' '/"mean"/{printf "%.1f", $2*1000; exit}' "$work/startup.json") || startup=-
+		&& awk -F'[:,]' '/"mean"/{printf "%.1f", $2*1000; exit}' "$work/startup.json")
 	[ -z "$startup" ] && startup=-
 
 	start=$(monotonic_ns)

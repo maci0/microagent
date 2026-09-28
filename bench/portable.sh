@@ -7,17 +7,18 @@
 #   run_limited SECS DIR CMD.. -> run CMD in DIR, TERM it after SECS
 
 # macOS ships neither `timeout` nor `gtimeout` without coreutils installed.
+limiter=
 if command -v timeout >/dev/null 2>&1; then
-	run_limited() {
-		secs=$1 dir=$2
-		shift 2
-		(cd "$dir" && exec timeout "$secs" "$@")
-	}
+	limiter=timeout
 elif command -v gtimeout >/dev/null 2>&1; then
+	limiter=gtimeout
+fi
+
+if [ -n "$limiter" ]; then
 	run_limited() {
 		secs=$1 dir=$2
 		shift 2
-		(cd "$dir" && exec gtimeout "$secs" "$@")
+		(cd "$dir" && exec "$limiter" "$secs" "$@")
 	}
 else
 	# A watchdog polls the child and TERMs it at the ceiling. The sleep is one
