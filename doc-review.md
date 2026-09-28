@@ -30,8 +30,10 @@ reduced to a fragment with no instructions for anyone to follow.
 
 1. **Commands the prose names that the Makefile does not carry.** Every
    `make <target>` in `README.md`, `CONTRIBUTING.md` and `PERFORMANCE.md` must be a
-   target that exists. The ground truth is the rule list in the `Makefile` (a recipe
-   begins at column 0 with a name, a colon and nothing else) and the `.PHONY` line,
+   target that exists. The ground truth is the rule list in the `Makefile` (a rule is a
+   line at column 0 whose name is followed by a colon, with or without prerequisites:
+   `default: build` and `lint: lint-versions lint-shell` are rules, and reading the list
+   as names followed by a bare colon drops them) and the `.PHONY` line,
    not the help text, because a name in the help block that no rule backs is the
    same defect one file over. Search the documents for `` `make `` and for the
    commands inside their fenced blocks, and check each name against both lists.
@@ -77,8 +79,11 @@ reduced to a fragment with no instructions for anyone to follow.
    `YAMLLINT_VERSION` out of the `Makefile` and the `ruff==` and `yamllint==`
    lines out of `lint-requirements.txt`, and read the versions the document
    prints: three spellings of one pin is a defect the moment any two of them
-   move apart, and `make lint-versions` compares only the Makefile against the
-   requirements file, so the document is the only place the third is checked.
+   move apart, and `make lint-versions` compares the Makefile pins against the
+   requirements file, checks the two tools actually on `PATH`, and audits that
+   every pin in that file carries a `--hash=sha256` so CI's `--require-hashes`
+   install resolves; none of that reads the document, so the printed version is
+   the only place the third spelling is checked.
 
 7. **What the release documentation promises against what the release does.**
    The versioning section counts the published binaries and states the rules for

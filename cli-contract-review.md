@@ -87,12 +87,14 @@ a fragment with no invocation surface to hold a contract.
    not in the prose, or a counter emitted in a different order than promised, is a
    defect: a consumer parses this.
 
-9. **Tools the model is offered.** The help and the README call the tool set seven tools.
+9. **Tools the model is offered.** The README's "Tools" table calls the tool set seven
+   tools and names each one; the help text names no tool at all, so the table is the only
+   prose to check, and a tool the array offers that the table lacks is this item's finding
+   in the direction the caller reads it.
    Read the schemas in `tools_json` in `src/main.zig`, the array the request body is
    built from, and name them one by one; a repo-wide count of the `"type":"function"`
    literal also matches a test fixture elsewhere in the file, and a count taken that way
-   reports a tool that is not offered. Flag any name the prose does not carry, and any
-   tool the prose carries that the array does not. The count and byte size
+   reports a tool that is not offered. The count and byte size
    `BENCHMARK.md` states about the same array belong to
    `benchmark-accuracy-review.md`; this item is the list the caller is offered.
 
