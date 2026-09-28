@@ -1,12 +1,12 @@
-//! What the three modules that touch the machine share: the CA-bundle escape
+//! What the four modules that touch the machine share: the CA-bundle escape
 //! hatch, a deadline, the two output sinks (stderr for notes and stdout for the
 //! answers a caller parses), the path a write through a symlink really lands on,
 //! and the two budgets a value read out of the environment or off the wire is
 //! held to.
 //!
 //! A leaf module. It imports nothing from the rest of the program, so the
-//! agent run and `update` can both use it without either of them importing
-//! the other.
+//! agent run, the session log and `update` can each use it without importing
+//! one another.
 
 const std = @import("std");
 const Io = std.Io;
@@ -162,8 +162,8 @@ pub fn nextLineEnd(pending: []const u8, scanned: *usize) ?usize {
 }
 
 /// A monotonic duration for `Io.Timeout`, from milliseconds. A tool deadline
-/// and a provider read both name one, so the conversion is spelled once here
-/// rather than at each call site.
+/// is named in milliseconds in every tool, so the conversion is spelled once
+/// here rather than at each call site.
 pub fn durationMs(ms: u64) Io.Timeout {
     return .{ .duration = .{ .raw = .{ .nanoseconds = ms *| std.time.ns_per_ms }, .clock = .awake } };
 }

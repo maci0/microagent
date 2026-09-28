@@ -100,9 +100,10 @@ const session_name_attempts = 8;
 /// beside the first rather than over it.
 ///
 /// The failure that is not a taken name is said. Running out of the name
-/// attempts is the one case that is expected to be quiet, and it is left to the
-/// caller: it needs a clock that repeats the same nanosecond `attempts` times,
-/// which the operator can do something about and a silent log cannot show.
+/// attempts needs a clock that repeats the same nanosecond
+/// `session_name_attempts` times, which the operator can do something about and
+/// a silent log cannot show, so it is named here like any other failure to open
+/// a log.
 fn createSessionLog(io: Io, arena: std.mem.Allocator, session_dir: []const u8, stamp: i128) ?Io.File {
     var attempt: usize = 0;
     while (attempt < session_name_attempts) : (attempt += 1) {
@@ -360,9 +361,6 @@ fn sessionRecord(
     return jb.items();
 }
 
-// A record a monitor reads has to be one JSON object with this response's own
-// counters, the directory that attributes it, and the model time a rate is
-// taken over.
 test "the session directory is the variable, trimmed, and empty means off" {
     var env: std.process.Environ.Map = .init(std.testing.allocator);
     defer env.deinit();
@@ -395,6 +393,9 @@ test "the session directory is the variable, trimmed, and empty means off" {
     try std.testing.expectEqualStrings("/var/log/agent", sessionDir(&env, arena));
 }
 
+// A record a monitor reads has to be one JSON object with this response's own
+// counters, the directory that attributes it, and the model time a rate is
+// taken over.
 test "session record carries one response's counters, cwd and model time" {
     var state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer state.deinit();

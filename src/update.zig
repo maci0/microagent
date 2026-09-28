@@ -3,8 +3,8 @@
 //! match the `.sha256` sidecar the release publishes.
 //!
 //! The decision (repo shape, exact version, asset name, checksum, trusted URL)
-//! is pure; `runChecked` is the only function that talks to GitHub or names the
-//! running executable, and tests never execute it.
+//! is pure; `runChecked` drives the one network path and names the running
+//! executable, and tests never execute either.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -33,7 +33,7 @@ const max_asset_bytes: usize = 256 * 1024 * 1024;
 /// else (the release and sidecar harnesses read it as exactly that), and a tag
 /// carrying ESC, BEL or a C1 control puts an escape sequence on the operator's
 /// terminal through every line that prints it as written. The tag decides
-/// which version line is printed, and the asset name reaches four messages
+/// which version line is printed, and the asset name reaches three messages
 /// about a download that failed.
 fn quoteUntrusted(arena: std.mem.Allocator, text: []const u8) []const u8 {
     return chat.safeText(arena, text, net.quoted_value_bytes);
@@ -157,9 +157,9 @@ pub fn validRepo(text: []const u8) bool {
     return repoPartOk(owner) and repoPartOk(name);
 }
 
-/// The release API URL's format: everything but the repo. Spelled once so the
-/// fuzz harness below can tell a repo too long for its buffer from one that
-/// fits, without repeating the prefix and suffix.
+/// The release API URL, spelled twice: once with the repo in it, and once with
+/// it left empty so the fuzz harness can measure the fixed part against its
+/// buffer instead of repeating the prefix and suffix.
 const release_api_url_fmt = "https://api.github.com/repos/{s}/releases/latest";
 const release_api_url_fixed = "https://api.github.com/repos//releases/latest";
 
@@ -453,7 +453,8 @@ fn fail(io: std.Io, comptime fmt: []const u8, args: anytype) u8 {
     return 1;
 }
 
-/// One GET, body capped at `max_size` while it streams, into `capped`. The
+/// One GET into `capped`, whose `limit` is the cap the body is refused past.
+/// The
 /// fetch itself, with the headers and the two status cases every caller wants
 /// the same answer to. `client` is shared across the three fetches a run makes
 /// so the CA store is loaded once. On an HTTP error `status_out` carries the
@@ -505,9 +506,10 @@ fn fetchInto(
 /// Attempts one fetch makes before the error is the caller's. Three, with the
 /// schedule below, is the same budget the agent's own request loop spends.
 const max_fetch_attempts: u32 = 3;
-/// The wait before the first retry, doubled per attempt and capped. A provider
-/// that is briefly busy is the case this covers, and the schedule is the one
-/// the agent run already uses for the same failure.
+/// The wait before the first retry, doubled per attempt and capped at 30 s. A
+/// provider that is briefly busy is the case this covers, and the base and the
+/// number of doublings are the ones the agent run uses for the same failure,
+/// whose own cap is 60 s.
 const fetch_retry_base_ms: u64 = 1000;
 const fetch_retry_max_ms: u64 = 30_000;
 
@@ -570,7 +572,6 @@ fn fetchRetryBackoffMs(attempt: u32) u64 {
 }
 
 /// One GET, body capped at `max_size` while it streams, copied into `arena`.
-///
 /// The body is copied and the buffer it arrived in is released on the way out.
 /// The arena copy is the one that has to outlive this call, and an arena frees
 /// its most recent allocation, so the buffer cannot be the arena's own and then
@@ -854,7 +855,7 @@ fn runChecked(
     repo: []const u8,
 ) u8 {
     // The longest `owner/name` `validRepo` accepts is 201 bytes, and the URL
-    // around it is 46 more, so a buffer under that reported a legal repo as a
+    // around it is 45 more, so a buffer under that reported a legal repo as a
     // malformed one before a single byte was requested.
     var api_buf: [256]u8 = undefined;
     // A value the flag cannot carry is a usage error, so it prints the reason
@@ -927,7 +928,7 @@ fn runChecked(
     var side_name_buf: [208]u8 = undefined;
     const side_name = writeSidecarName(&side_name_buf, asset_name) catch
         return fail(io, "release asset name does not fit", .{});
-    // What the four messages below name the download with. The lookup, the
+    // What the three messages below name the download with. The lookup, the
     // sidecar's basename and the verdict all read `asset_name` itself: what the
     // release published is the name to match against, not the one to print.
     const asset_name_text = quoteUntrusted(arena, asset_name);

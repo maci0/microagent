@@ -32,8 +32,8 @@ pub const CavemanLevel = enum {
     wenyan_ultra,
 
     /// The spelling that goes in the config file and in the injected header: the
-    /// tag name, with the underscore a config value cannot carry written as a
-    /// dash. Reading it off the enum rather than off a second table means a
+    /// tag name, with `_` written as the `-` the header names. Reading it off
+    /// the enum rather than off a second table means a
     /// level added above is spelled by the header and accepted by the parser
     /// without either being told about it.
     pub fn name(self: CavemanLevel) []const u8 {
@@ -98,7 +98,8 @@ pub const Style = struct {
     /// One bad value does not hide the keys after it, so the scan runs to the
     /// end of the document and every key it does understand still applies.
     ///
-    /// Only `key = "value"` is understood, at the top level or under `[style]`.
+    /// Only `key = value` is understood, quoted or bare, at the top level or
+    /// under `[style]`.
     /// That is the whole config, so it does not need a TOML parser: the rest of
     /// the format (numbers, arrays, dates, nested tables) has nowhere to go.
     ///
@@ -356,8 +357,8 @@ test "the config reads either root or [style] keys, and nothing else" {
 
 test "a config an editor saved with a byte order mark reads the same" {
     // The mark sits ahead of the first key and is invisible in the editor that
-    // wrote it, so a file that carries one used to name a key spelled
-    // `﻿caveman`, match nothing, and leave the default in force
+    // wrote it, so a file that carries one names a key spelled with U+FEFF
+    // ahead of `caveman`, matches nothing, and leaves the default in force
     // with a complaint about a key the operator never wrote.
     var style: Style = .{};
     try std.testing.expect(style.applyToml(chat.bom ++ "caveman = \"lite\"\n") == null);

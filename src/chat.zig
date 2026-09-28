@@ -72,8 +72,8 @@ pub const ChatResult = struct {
     /// call's arguments together. `max_response_bytes` bounds a response, not
     /// each stream in it, and the streams are not one: a provider that streams
     /// the full allowance of arguments for each of `max_tool_calls` calls holds
-    /// a gigabyte of a single turn in memory, which is a ceiling the run
-    /// documented and did not have.
+    /// a gigabyte of a single turn in memory, which is why the ceiling is one
+    /// budget for the whole response rather than one per stream.
     streamed: usize = 0,
     /// Whether a fragment arrived that `clamp` would not take, because the
     /// response ceiling had no room left for a whole character of it.
@@ -292,9 +292,10 @@ pub fn ownString(gpa: std.mem.Allocator, text: []const u8) ![]u8 {
     return try gpa.dupe(u8, text);
 }
 
-/// The first `max` bytes, cut on a UTF-8 codepoint boundary. Both callers feed
-/// text a model will read back, one of them inside a JSON request body, so a
-/// cut in the middle of a codepoint would put invalid UTF-8 on the wire.
+/// The first `max` bytes, cut on a UTF-8 codepoint boundary. Every caller feeds
+/// text a model will read back: the two streams of one response in `main` and a
+/// tool's output in `tool`, all of which reach a JSON request body, so a cut in
+/// the middle of a codepoint would put invalid UTF-8 on the wire.
 pub fn clamp(s: []const u8, max: usize) []const u8 {
     if (s.len <= max) return s;
     var end = max;
@@ -333,10 +334,11 @@ pub fn stripBom(text: []const u8) []const u8 {
 ///
 /// What the value quotes is not this program's to choose: a config key is a
 /// line a reviewed repository committed and a flag is whatever the caller
-/// typed, so neither is guaranteed to be text. The two other untrusted-byte
-/// paths already normalize, the request body by `writeJsonString` and an
-/// error body by the tool module's `terminalSafe`; this is the third, for the
-/// diagnostics in between.
+/// typed, so neither is guaranteed to be text. The other untrusted-byte paths
+/// normalize in their own way, the request body by `writeJsonString` and an
+/// error body by the tool module's `terminalSafe`; this is the one every value
+/// on its way to a diagnostic passes through: a tool name and detail, a config
+/// key and path, a release tag and an asset name.
 ///
 /// The result is a prefix of the escaped text, never cut inside a character or
 /// inside an escape, and the budget bounds what comes out rather than what

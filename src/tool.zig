@@ -11,12 +11,14 @@ const Io = std.Io;
 const chat = @import("chat.zig");
 const net = @import("net.zig");
 
-/// How much of one tool's stdout reaches the model. The whole conversation is
+/// How much of one tool's output reaches the model. The whole conversation is
 /// re-sent every turn, so what a tool prints is paid for again on each of them;
-/// a build log or a broad ripgrep is kilobytes. `clamp` cuts the rest at a
+/// a build log or a broad ripgrep is kilobytes. Each of a child's two streams
+/// is captured at four times this, and `clamp` cuts the combined result at a
 /// codepoint boundary and appends a marker naming how much was dropped, so a
 /// model reading a truncated log knows the tail is missing rather than reading
-/// a build failure as the end of the output.
+/// a build failure as the end of the output. `git` is the exception: it is cut
+/// by line count instead.
 const max_tool_output = 24 * 1024;
 
 /// Ceiling on a file `read` returns whole. A source file is kilobytes, so the
@@ -28,9 +30,11 @@ const max_edit_bytes: usize = 8 * 1024 * 1024;
 /// A secret file is one key, not a document.
 const max_secret_bytes: usize = 4096;
 
-/// Ceilings shared by every tool that shells out: how long a read-only
-/// subprocess may run. `max_tool_output * 4` is how much of each stream is kept
-/// before `clamp` trims the result to `max_tool_output` for the model.
+/// How long a read-only tool subprocess may run: `search`, `ast` and `git`.
+/// `bash` has its own default and ceiling below, because it is the one tool
+/// that runs what the model wrote. `max_tool_output * 4` is how much of each of
+/// a child's streams is kept before `clamp` trims the result to
+/// `max_tool_output` for the model.
 const tool_timeout_ms: u64 = 60_000;
 /// Ceiling on the `timeout_ms` a model may ask `bash` for. The value is model
 /// output, so it arrives with the same trust as a path or a command string: an
@@ -96,9 +100,19 @@ const ToolChild = struct {
     }
 };
 
-/// A key file, read whole and trimmed. A secret is one key, not a document, so
-/// it is read under a cap of its own rather than the one `read` uses for
-/// source.
+/// A key file, and which of the three things happened to it.
+pub const SecretRead = union(enum) {
+    /// The file is not there, which is the ordinary case for a run that has
+    /// its key somewhere else.
+    absent,
+    /// The file is there and holds a key.
+    found: []const u8,
+    /// The file is there and could not be read, with the reason.
+    unreadable: struct { reason: anyerror },
+};
+
+/// Reads a key file whole and trimmed, under a cap of its own rather than the
+/// one `read` uses for source: a secret is one key, not a document.
 ///
 /// The reason comes back with the answer, because "there is no key file" and
 /// "the key file is there and this process cannot read it" are different
@@ -111,16 +125,6 @@ const ToolChild = struct {
 /// Takes the io and the arena rather than the process init, so the two file
 /// boundaries a key arrives through (the mark, then the surrounding
 /// whitespace) are testable without standing up an init.
-pub const SecretRead = union(enum) {
-    /// The file is not there, which is the ordinary case for a run that has
-    /// its key somewhere else.
-    absent,
-    /// The file is there and holds a key.
-    found: []const u8,
-    /// The file is there and could not be read, with the reason.
-    unreadable: struct { reason: anyerror },
-};
-
 pub fn readSecret(io: Io, arena: std.mem.Allocator, path: []const u8) SecretRead {
     const raw = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_secret_bytes)) catch |err| switch (err) {
         error.FileNotFound => return .absent,
@@ -132,7 +136,10 @@ pub fn readSecret(io: Io, arena: std.mem.Allocator, path: []const u8) SecretRead
     return .{ .found = std.mem.trim(u8, chat.stripBom(raw), " \t\r\n") };
 }
 
-/// Runs a tool subprocess and reaps it with everything it started.
+/// Runs a tool subprocess and reaps it with everything it started. The first of
+/// the two runners: no tool calls it, `runCapped` is the one every tool that
+/// shells out uses, and this one is kept for the reaping checks that compare
+/// the two.
 pub fn runToolProcess(
     io: Io,
     arena: std.mem.Allocator,
@@ -328,9 +335,9 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
         if (rev) |r| try argv.append(arena, r);
     } else if (std.mem.eql(u8, cmd, "log")) {
         // git counts the lines the model asked for, so a `limit` above the
-        // 400-line default is honored rather than silently cut to 30, and one
-        // past what git parses is cut to what it will accept rather than
-        // turned into `fatal: not an integer`.
+        // 400-line default is honored, and one past what git parses
+        // (`INT_MAX`) is cut to what it will accept rather than turned into
+        // `fatal: not an integer`.
         try argv.appendSlice(arena, &.{ "log", "--oneline", "--no-color", "-n" });
         try argv.append(arena, try std.fmt.allocPrint(arena, "{d}", .{gitLogLines(limit)}));
     } else if (std.mem.eql(u8, cmd, "show")) {
@@ -360,9 +367,9 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
     }
 
     // The cap drains rather than fails, for the reason `runCapped` gives: the
-    // documented ceiling here is 400 lines, and 400 long diff lines pass the
-    // capture cap, so a call the model asked to be trimmed to 400 lines came
-    // back as `error: git diff failed: StreamTooLong` with no lines at all.
+    // default here is 400 lines, and 400 long diff lines pass the capture cap,
+    // so a call the model asked to be trimmed came back as
+    // `error: git diff failed: StreamTooLong` with no lines at all.
     const res = runCapped(io, arena, argv.items, max_tool_output * 4, net.durationMs(boundedMs(tool_timeout_ms, ceiling_ms)), environ_map) catch |err|
         return std.fmt.allocPrint(arena, "error: git {s} failed: {s}", .{ cmd, @errorName(err) });
     const text = if (res.stdout.len > 0) res.stdout else res.stderr;
@@ -585,7 +592,8 @@ fn isCredentialName(name: []const u8) bool {
     return false;
 }
 
-/// The same names, as the ignore globs `search` and `ast` hand their backends.
+/// The same names, as the ignore globs `search` and `ast` hand their backends
+/// and `git` receives as exclusion pathspecs.
 ///
 /// A search that matches a line of `.env` returns it as a tool result, and a
 /// tool result is re-sent to the provider on every later turn of the run: the
@@ -644,7 +652,9 @@ test "every credential the name rule refuses is in the exclusion set git carries
     }
 }
 
-/// True when a path names a credential file, so `read` refuses it. The path is
+/// True when a path names a credential file, so the tools that read, search or
+/// name a path refuse it: `read`, `search`, `ast`, `git`, and the word check
+/// `bash` runs over its command. The path is
 /// model-supplied text and never touches the filesystem before this runs, so
 /// the answer is a decision about the name, not about what opened.
 fn isCredentialPath(path: []const u8) bool {
@@ -671,9 +681,10 @@ fn isCredentialPath(path: []const u8) bool {
 /// instead, because a bare error reads as a broken tool and gets retried.
 fn credentialRefusal(arena: std.mem.Allocator, tool: []const u8, path: []const u8) error{OutOfMemory}![]u8 {
     // The advice has to be the one that is true for the tool that was refused.
-    // Sending a model to `bash` for the bytes `read` will not return is the
-    // hole this check exists to close, so the one place that would say it is
-    // the one place it does not.
+    // The `bash` branch sends the model to the operator because `bash` runs
+    // the same name check over its own words: telling a model that `read` just
+    // refused to run the command that fetches the bytes walks it into the same
+    // refusal one line later.
     const advice = if (std.mem.eql(u8, tool, "bash"))
         "`bash` does not read it either. Ask the operator for the value you need rather than printing a key."
     else
@@ -775,10 +786,9 @@ fn readLines(io: Io, arena: std.mem.Allocator, path: []const u8, offset: usize, 
             // of, and truncate it.
             start = pos + 1;
         }
-        // Nothing was consumed on a read that completed no line, and the
-        // move below is a memmove of the whole pending line onto itself when
-        // `start` is zero, which on a file of long lines is the other half of
-        // that gigabyte.
+        // A read that completed no line consumed nothing, and the move below
+        // is then a memmove of the whole pending line onto itself, which on a
+        // file of long lines is the other half of that gigabyte.
         if (true) {
             const left = rest.items.len - start;
             std.mem.copyForwards(u8, rest.items[0..left], rest.items[start..]);
@@ -2384,9 +2394,10 @@ test "an edit issued twice leaves the file the first run left" {
 /// The two runners a tool subprocess can go through, named so the reaping
 /// check below runs against both with one body.
 const ToolRunner = enum {
-    /// `runToolProcess`, behind the search and git tools.
+    /// `runToolProcess`, which no tool calls: it is kept for the reaping
+    /// checks that run the same body against both runners.
     tool_process,
-    /// `runCapped`, behind `bash`.
+    /// `runCapped`, the runner every tool that shells out goes through.
     capped,
 
     pub fn call(self: ToolRunner, arena: std.mem.Allocator, io: Io, argv: []const []const u8) anyerror!void {

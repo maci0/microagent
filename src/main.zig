@@ -294,9 +294,10 @@ pub fn main(init: std.process.Init) !void {
 }
 
 /// Injected when the wall-clock budget runs out: the model has done its
-/// reading, so it is asked for the edit rather than another investigation.
-/// Asked once when a run that already edited the tree stops without having run
-/// any test runner. The measured failure mode: a SWE-bench instance that ended
+/// reading, so it is asked for the edit rather than another investigation
+/// (`final_push`, below). Asked once when a run that already edited the tree
+/// stops without having run any test runner. The measured failure mode: a
+/// SWE-bench instance that ended
 /// after 20 turns and zero test commands, against 5-15 test commands in every
 /// instance that passed.
 const verify_push =
@@ -1035,7 +1036,7 @@ const Budget = struct {
     /// A budget is seconds the caller typed, and a cast is where that stops
     /// being trustworthy: the deadline is held at nanosecond resolution, so a
     /// budget past `u64` milliseconds (about 5.8e8 years, which
-    /// `--budget-seconds 20000000000000000` is) needs more milliseconds than
+    /// `--budget 20000000000000000` is) needs more milliseconds than
     /// the answer has bits for. `cast` saturates instead, and a ceiling no
     /// caller can wait out is as good an answer as the exact figure.
     fn remainingMs(self: Budget, io: Io) ?u64 {
@@ -1086,11 +1087,12 @@ const Budget = struct {
 /// Resetting with the capacity retained is what keeps a turn from asking the
 /// allocator again on every turn, and an ordinary turn is a couple of
 /// megabytes, so nothing is given back for it. The ceiling matters for the turn
-/// that is not ordinary: a response at `max_response_bytes` is held twice over,
-/// once as the turn's record and once as the buffer handed to stdout, and
-/// retaining that leaves 48 MB resident for the rest of the run to serve turns
-/// that need a few. Four megabytes is comfortably above an ordinary turn and
-/// far below the ceiling, so a big turn re-allocates once and a normal one
+/// that is not ordinary: a response at `max_response_bytes` fills the turn's
+/// content buffer in full, and retaining that leaves 16 MB resident for the rest
+/// of the run to serve turns that need a few. The stdout copy of the same
+/// response is the run's own allocator, not the turn's, so it does not count
+/// against this ceiling. Four megabytes is comfortably above an ordinary turn
+/// and far below the ceiling, so a big turn re-allocates once and a normal one
 /// never notices.
 const turn_arena_retain_bytes: usize = 4 * 1024 * 1024;
 
@@ -1320,7 +1322,8 @@ fn incompleteAnswer(arena: std.mem.Allocator, result: *const chat_mod.ChatResult
 /// Prompt caching keys on the exact byte prefix of a request, so a turn's body
 /// has to be the previous turn's body plus the new messages. That only holds
 /// while nothing constant sits *behind* the growing array: the tool schema is
-/// 3.0 KB, and written after `messages` it fell outside the cacheable prefix
+/// a few kilobytes, and written after `messages` it fell outside the cacheable
+/// prefix
 /// on every turn of every run, so the provider re-read it each time. Member
 /// order is not significant in JSON, so the constant fields go first and the
 /// conversation ends the body.
@@ -1374,10 +1377,10 @@ fn streamChat(
     // What the notes below name, and what the userinfo a base url may carry
     // never reaches: the run's log is not the place for a password.
     const shown_url = displayUrl(arena, url);
-    // Privileged, not an ordinary header: the client drops them on a redirect
-    // that leaves the host, so a provider that answers with a Location cannot
-    // walk the API key off to whoever it names. The redirect is unhandled
-    // anyway, which is the same promise made once, in the request options.
+    // The authorization header is `override`, not `privileged`, and
+    // `authHeaders` says why. The redirect is unhandled, which is the promise
+    // made again here: a provider that answers with a Location is an error
+    // rather than a second request, so nothing to drop the key out of.
     const auth_headers = try authHeaders(arena, opts.api_key);
 
     // The request lives in a slot so `Response.request` stays valid for the
@@ -1604,7 +1607,9 @@ fn streamChat(
     // `length` is the provider saying it stopped at `max_tokens`. The frame
     // arrived and the stream terminated cleanly, so nothing here is broken: the
     // response is simply the prefix of what the model meant to say, and a
-    // truncated tool call's arguments are not JSON the next turn can tool_mod.dispatch.
+    // truncated tool call's arguments are not JSON the next turn can run them
+    // from, so the run fails and blames the model rather than calling a tool
+    // with half an argument.
     // A run that printed it as a finished answer would be reporting a cut
     // generation as the review's result.
     if (std.mem.eql(u8, result.finish_reason, "length"))
@@ -1982,10 +1987,10 @@ fn applyFrame(
 
 /// Replaces the oldest tool results longer than `threshold` with a marker, oldest
 /// first, and answers how many bytes that took out of the conversation. Stops
-/// once the conversation would hold `target` bytes, so every pass shares one
-/// size budget with the ones before it. Results are replaced in place and no
-/// message is dropped, so every `tool_call_id` still has the message that
-/// answers it.
+/// once it has taken `target` bytes out, a budget the caller splits across both
+/// passes, so the second only gets what the first left. Results are replaced in
+/// place and no message is dropped, so every `tool_call_id` still has the
+/// message that answers it.
 fn elideToolResults(
     arena: std.mem.Allocator,
     array: std.json.Array,
@@ -2108,10 +2113,10 @@ fn compactMessages(
 }
 
 /// Hands the buffered tokens to stdout, and says so when stdout refuses them.
-/// A closed pipe and a full disk both arrive as a failed write, and neither is
-/// worth abandoning a run over on its own: the model sees the fault on its next
-/// turn and can stop. Swallowing it instead is what leaves a caller reading an
-/// empty answer off a run that exited 0.
+/// A closed pipe and a full disk both arrive as a failed write, and the turn is
+/// given up on either: continuing would put a partial answer on stdout under an
+/// exit status that says the run finished. The reason is on stderr before the
+/// run ends, and the error is re-raised so the caller fails the run.
 fn flushOut(io: Io, arena: std.mem.Allocator, out_buf: *std.ArrayList(u8), shown_url: []const u8) !void {
     if (out_buf.items.len == 0) return;
     net.writeOut(io, out_buf.items) catch |err| {
@@ -2320,8 +2325,11 @@ fn waitMs(io: Io, ms: u64) !void {
 /// bounds the wait instead.
 const max_retry_after_ms: u64 = 120_000;
 
-/// The wait a 429 or 503 asks for, in milliseconds, or null when the header is
-/// absent or is not one this run will wait.
+/// The wait a `Retry-After` asks for, in milliseconds, or null when the header
+/// is absent or is not one this run can read. A value past
+/// `max_retry_after_ms` is clamped to it rather than refused, so the run sits
+/// out the cap instead of falling back to a schedule shorter than the one that
+/// was asked for.
 ///
 /// Both forms RFC 9110 defines are read, because a provider chooses which to
 /// send and the run has a clock to check the second one against. A header this
@@ -2784,12 +2792,6 @@ fn inArgv(argv: []const []const u8, value: []const u8) bool {
     return false;
 }
 
-// A tool result, a filename or a working directory may hold bytes that are not
-// UTF-8: a latin-1 source file, a binary read, a directory named with a stray
-// 0xFF. Copied through, one of them makes the request body unparseable and the
-// provider refuses the whole turn, so each bad byte becomes U+FFFD and nothing
-// else about the string changes.
-
 test "conversation and tool schema serialize as one valid request body" {
     // The body's storage belongs to a chat_mod.JsonBuf, not to the caller, so the test
     // hands it an arena instead of trying to free the slice by hand.
@@ -2841,12 +2843,8 @@ test "conversation and tool schema serialize as one valid request body" {
     }
 }
 
-// The cacheable part of a request is its leading bytes, so the only thing a
-// turn may add is the tail. Asserted as a byte count, because that is the whole
-// point: a field moved back behind `messages` costs the provider a re-read of
-// its bytes on every turn of every run, and nothing else here would notice.
-// The same quadratic the ranged read had, one module up: a line longer than
-// the tool's 8 KB read means nothing is consumed until the far end of the file,
+// The quadratic a ranged read had, one module up: a line longer than the
+// tool's 8 KB read means nothing is consumed until the far end of the file,
 // so a scan that restarts at the front of the buffer and a copy of the whole
 // buffer cost a full pass per read. This lives in main rather than in the tool
 // module on purpose: `--test-filter` does not reach tests declared in an
@@ -2966,6 +2964,10 @@ test "a long run keeps the conversation bounded and the cache alive between comp
     try std.testing.expect(sum_cacheable * 100 / sum_sent > 50);
 }
 
+// The cacheable part of a request is its leading bytes, so the only thing a
+// turn may add is the tail. Asserted as a byte count, because that is the whole
+// point: a field moved back behind `messages` costs the provider a re-read of
+// its bytes on every turn of every run, and nothing else here would notice.
 test "one request body is the previous one plus its new messages" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -3015,10 +3017,10 @@ test "the tool schema sits inside the cacheable prefix, not behind the conversat
     const tools_at = std.mem.indexOf(u8, body, "\"tools\":").?;
     const messages_at = std.mem.indexOf(u8, body, "\"messages\":").?;
     try std.testing.expect(tools_at < messages_at);
-    // Worth ordering only because the schema is worth caching: 3.0 KB is
-    // several hundred tokens of prefill the provider would otherwise repeat.
-    // The band is here so the size the comments quote cannot drift again
-    // unnoticed; a schema that leaves it is big enough to want remeasuring.
+    // Worth ordering only because the schema is worth caching: a few kilobytes
+    // of it is several hundred tokens of prefill the provider would otherwise
+    // repeat. The band below is what holds the size the comments quote, so a
+    // schema that leaves it is big enough to want remeasuring.
     try std.testing.expect(tools_json.len > 2 * 1024);
     try std.testing.expect(tools_json.len < 8 * 1024);
     try std.testing.expectEqualStrings(tools_json, body[tools_at + 8 ..][0..tools_json.len]);
@@ -3468,10 +3470,6 @@ test "cached prompt tokens read every provider spelling" {
         try std.testing.expectEqual(@as(u64, 768), sink.result.cached_tokens);
     }
 }
-
-// A record a monitor reads has to be one JSON object with this response's own
-// counters, the directory that attributes it, and the model time a rate is
-// taken over.
 
 // A stream may spread its usage over several frames, and a frame that carries
 // one counter says nothing about the others. Folding field by field is what
@@ -4137,21 +4135,11 @@ test "backoff doubles, caps, and never overflows an attempt counter" {
     try std.testing.expectEqual(max_backoff_ms, backoffMs(1000));
 }
 
-// A rate limit names the wait it wants. Retrying on this run's own 1 s/2 s/4 s
-// schedule instead is a second, third and fourth refusal from a provider that
-// asked for thirty seconds, and every one of them is billed as a request.
-// A provider that asks for longer than the run has left is weather the run
-// cannot wait out: sleeping the full ask puts it to bed inside the caller's
-// timeout, which is what --budget exists to stop, and retrying early is the
-// second billable refusal the header was there to prevent. So the decision is
-// the budget's.
-//
-// The two ends only, because std.testing.io's clock does not advance and a
-// deadline between them is arithmetic that needs a real one.
 // Retaining a turn's peak is a speed choice; retaining an unbounded one is a
-// memory choice nobody made. A turn at the response ceiling would hold 48 MB
-// for the rest of the run to serve turns that need a few megabytes, and the
-// reset is the only place that can give it back.
+// memory choice nobody made. A response at the ceiling fills the turn's content
+// buffer in full, and keeping that would leave 16 MB resident for the rest of
+// the run to serve turns that need a few megabytes. The reset is the only place
+// that can give it back.
 test "a turn that outgrows the retained size gives the memory back" {
     var base_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer base_state.deinit();
@@ -4178,6 +4166,17 @@ test "a turn that outgrows the retained size gives the memory back" {
     try std.testing.expect(huge.queryCapacity() <= turn_arena_retain_bytes);
 }
 
+// A rate limit names the wait it wants. Retrying on this run's own 1 s/2 s/4 s
+// schedule instead is a second, third and fourth refusal from a provider that
+// asked for thirty seconds, and every one of them is billed as a request.
+// A provider that asks for longer than the run has left is weather the run
+// cannot wait out: sleeping the full ask puts it to bed inside the caller's
+// timeout, which is what --budget exists to stop, and retrying early is the
+// second billable refusal the header was there to prevent. So the decision is
+// the budget's.
+//
+// The two ends only, because std.testing.io's clock does not advance and a
+// deadline between them is arithmetic that needs a real one.
 test "a wait the budget cannot cover is not taken" {
     // No budget: every wait is affordable, which is the behaviour for a run
     // nobody put a ceiling on. This is the two-minute ask and the run's own
@@ -4195,7 +4194,7 @@ test "a wait the budget cannot cover is not taken" {
 }
 
 test "a budget too large to count in milliseconds is a ceiling, not a trap" {
-    // `--budget-seconds 20000000000000000` is a number `ceiling` accepts: it
+    // `--budget 20000000000000000` is a number `ceiling` accepts: it
     // is a u64 and it is not zero. In milliseconds it needs more bits than a
     // u64 has, and the deadline is nanoseconds, so the millisecond answer is
     // the one that runs out of room. It saturates: a run set up that way keeps
@@ -4341,9 +4340,6 @@ test "the time budget is a deadline the turn itself is held to" {
     try std.testing.expect(!none.withGraceNs(final_push_grace_s).expired(io));
 }
 
-// A generation the provider cut at `max_tokens` arrives with a clean
-// terminator, so nothing else in the run knows the answer is a prefix of what
-// the model meant to say. The reason has to survive the frame that carries it.
 // The declared shapes are a speedup, not a filter: a provider is free to send
 // fields neither shape names, and nested junk inside a delta must not cost the
 // frame. Anything the declared shapes cannot hold at all lands on the generic
@@ -4373,6 +4369,9 @@ test "a frame with fields the shapes do not name still lands" {
     try std.testing.expectEqualStrings("read", sink.calls.items[0].name);
 }
 
+// A generation the provider cut at `max_tokens` arrives with a clean
+// terminator, so nothing else in the run knows the answer is a prefix of what
+// the model meant to say. The reason has to survive the frame that carries it.
 test "a response cut at the generation ceiling says so" {
     var sink = FrameSink.init(std.testing.allocator);
     defer sink.deinit();
@@ -4393,9 +4392,6 @@ test "a response cut at the generation ceiling says so" {
     try sink.feed("{\"choices\":[{\"delta\":{},\"finish_reason\":null}]}");
     try std.testing.expectEqualStrings("stop", sink.result.finish_reason);
 }
-
-// A model command that backgrounds work and exits is the shape that used to
-// leave a process holding the run's ports after the call returned.
 
 test "a conversation that cannot be compacted is sent as it stands" {
     const gpa = std.testing.allocator;
