@@ -45,6 +45,12 @@ const max_tool_calls = 64;
 /// sending, and the caller chose the base url, not the server on the other end
 /// of it. Well past any real completion.
 const max_response_bytes = 16 * 1024 * 1024;
+/// Ceiling on one line of the completion stream, the unit the SSE reader splits
+/// on. A frame is a piece of one response, so a real one is kilobytes even at
+/// the `max_tokens` ceiling; anything past this is a server that stopped
+/// framing its stream, and the reader that would have to buffer it is the one
+/// thing here that had no bound.
+const max_frame_bytes: usize = 4 * 1024 * 1024;
 /// The reply-style config is a handful of keys; a bigger file is not one.
 const max_config_bytes: usize = 64 * 1024;
 /// Ceiling on a file `read` returns whole. A source file is kilobytes, so the
@@ -261,7 +267,12 @@ pub fn main(init: std.process.Init) !void {
     // wrote a key there is not looking for the four variables.
     if (opts.api_key.len == 0) return configError(io, "no API key: pass --api-key, set {s}, or put one in {s}/.secrets/openrouter", .{ key_var_names, init.environ_map.get("HOME") orelse "$HOME" });
     if (!baseUrlCarriesKey(opts.base_url))
-        return configError(io, "the API key would go to {s} in the clear; use an https base url, or http on loopback", .{clip(opts.base_url)});
+        // The redacted spelling: an operator who put a password in the base url
+        // is the one being told the url is refused, and the refusal is not where
+        // that password should be copied to stderr.
+        return configError(io, "the API key would go to {s} in the clear; use an https base url, or http on loopback", .{
+            clip(displayUrl(init.arena.allocator(), opts.base_url)),
+        });
 
     var client: std.http.Client = .{ .allocator = gpa, .io = io };
     defer client.deinit();
@@ -1270,7 +1281,7 @@ fn streamChat(
         // run its budget and stop there, not a caller's whole review timeout.
         if (budget.expired(io)) {
             net.note(io, arena, "microagent: the time budget ran out after {d} byte(s) of content and {d} tool call(s) from {s}; the turn is discarded\n", .{
-                result.content.items.len, calls.items.len, url,
+                result.content.items.len, calls.items.len, shown_url,
             });
             return error.BudgetExhausted;
         }
@@ -1307,6 +1318,16 @@ fn streamChat(
             pending.shrinkRetainingCapacity(rest);
             scanned -|= start;
         }
+        // A provider that never sends a newline grows this buffer for as long
+        // as it keeps writing, and every other unbounded read in this program
+        // is capped: the caller chose the base url, not the server on the other
+        // end of it, and a body that stops being line-framed is not a frame.
+        if (pending.items.len > max_frame_bytes) {
+            net.note(io, arena, "microagent: a line of the completion stream from {s} passed {d} bytes without a newline; the turn is discarded\n", .{
+                shown_url, pending.items.len,
+            });
+            return error.StreamFrameTooLong;
+        }
         flushOut(io, &out_buf);
     }
 
@@ -1328,7 +1349,7 @@ fn streamChat(
     // generation as the review's result.
     if (std.mem.eql(u8, result.finish_reason, "length"))
         net.note(io, arena, "microagent: the response from {s} hit the generation ceiling (max_tokens {d}) after {d} byte(s) of content and {d} tool call(s); the turn is incomplete\n", .{
-            url, opts.max_tokens, result.content.items.len, calls.items.len,
+            shown_url, opts.max_tokens, result.content.items.len, calls.items.len,
         });
     if (result.content.items.len > 0) try out_buf.append(gpa, '\n');
     flushOut(io, &out_buf);
