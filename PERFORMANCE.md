@@ -30,7 +30,7 @@ that moves is a gate that moved with it:
 | everything before the first request is sent | 1,303,779 | — |
 | a streamed content frame (47 B) | — | 4,101 |
 | a streamed tool-argument frame | — | 9,253 |
-| compaction of a 1 MB conversation | 44,046,577 | one call |
+| compaction of a 1 MB conversation | 37,153,055 | one call |
 | building the request body | — | 113,949 |
 | a ranged read of a 512 KB line | 7,543,588 | one call |
 

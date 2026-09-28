@@ -253,7 +253,7 @@ const utf8_max_sequence_bytes = 4;
 /// The length of the UTF-8 sequence starting at `i`, or 0 where the bytes are
 /// not one: a bad lead byte, a truncated tail, or an overlong or surrogate
 /// encoding all read as a replacement rather than being copied through.
-fn utf8SequenceLen(s: []const u8, i: usize) usize {
+pub fn utf8SequenceLen(s: []const u8, i: usize) usize {
     const want = std.unicode.utf8ByteSequenceLength(s[i]) catch return 0;
     const end = i + want;
     if (end > s.len) return 0;
