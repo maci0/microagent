@@ -95,6 +95,17 @@ const Usage = struct {
     /// whether the prefix is still being reused: a prompt-sized `prompt_tokens`
     /// with `cached_tokens` near it is a hit, and near-zero is a full re-read.
     cached: u64 = 0,
+
+    /// Adds one response's counters. Saturating, because a provider number
+    /// beyond u64 saturates on the way in (`num`) and a second one in the same
+    /// run would otherwise overflow the run total and trap a checked build.
+    fn add(self: *Usage, result: *const ChatResult) void {
+        self.prompt +|= result.prompt_tokens;
+        self.cached +|= result.cached_tokens;
+        self.completion +|= result.completion_tokens;
+        self.reasoning +|= result.reasoning_tokens;
+        self.total +|= result.total_tokens;
+    }
 };
 
 const ChatResult = struct {
@@ -836,11 +847,7 @@ fn finishTurn(
 
     // One machine-readable line per response: gauntlet reads these for live
     // token rates, and they are the only stdout that is not model output.
-    usage.prompt += result.prompt_tokens;
-    usage.cached += result.cached_tokens;
-    usage.completion += result.completion_tokens;
-    usage.reasoning += result.reasoning_tokens;
-    usage.total += result.total_tokens;
+    usage.add(result);
     var usage_line = JsonBuf.init(arena);
     const w = usage_line.writer();
     try w.writeAll("{\"type\":\"usage\",\"usage\":{");
@@ -1092,6 +1099,10 @@ fn num(v: ?std.json.Value) u64 {
 }
 
 const max_attempts: u32 = 3;
+const retry_backoff_base_ms: u64 = 1000;
+const max_backoff_ms: u64 = 60_000;
+/// Enough doublings to reach the cap; the cap is what bounds the wait.
+const max_backoff_shift: u32 = 6;
 
 /// Statuses worth another attempt: the provider is busy, not the request wrong.
 fn retryableStatus(status: std.http.Status) bool {
@@ -1110,10 +1121,18 @@ fn waitBeforeRetry(io: Io, attempt: u32, what: []const u8) bool {
     return true;
 }
 
-/// Exponential backoff, 1 s then 2 s.
+/// Backoff before the next attempt: 1 s, 2 s, 4 s, capped. Saturating, because
+/// the shift and the multiply both overflow long before a u32 attempt counter
+/// does, and a checked build panicking where a release build wraps is not a
+/// property to want in a sleep.
+fn backoffMs(attempt: u32) u64 {
+    if (attempt == 0) return retry_backoff_base_ms;
+    const shift: u6 = @intCast(@min(attempt - 1, max_backoff_shift));
+    return @min(retry_backoff_base_ms *| (@as(u64, 1) << shift), max_backoff_ms);
+}
+
 fn waitFor(io: Io, attempt: u32) !void {
-    const ms = 1000 * (@as(u64, 1) << @intCast(attempt - 1));
-    try io.sleep(.{ .nanoseconds = @intCast(ms * std.time.ns_per_ms) }, .awake);
+    try io.sleep(.{ .nanoseconds = backoffMs(attempt) *| std.time.ns_per_ms }, .awake);
 }
 
 /// A monotonic duration for `Io.Timeout`, from milliseconds.
@@ -1121,8 +1140,14 @@ fn durationMs(ms: u64) Io.Timeout {
     return .{ .duration = .{ .raw = .{ .nanoseconds = ms *| std.time.ns_per_ms }, .clock = .awake } };
 }
 
+/// The first `max` bytes, cut on a UTF-8 codepoint boundary. Both callers feed
+/// text a model will read back, one of them inside a JSON request body, so a
+/// cut in the middle of a codepoint would put invalid UTF-8 on the wire.
 fn clamp(s: []const u8, max: usize) []const u8 {
-    return if (s.len <= max) s else s[0..max];
+    if (s.len <= max) return s;
+    var end = max;
+    while (end > 0 and s[end] & 0xc0 == 0x80) end -= 1;
+    return s[0..end];
 }
 
 // A file's tests are collected only when the root file's test block imports
@@ -1491,6 +1516,32 @@ test "out-of-range numbers from the model saturate instead of trapping" {
     try std.testing.expectEqual(@as(u64, 0), num(.{ .float = -5 }));
     try std.testing.expectEqual(@as(u64, 0), num(.{ .float = std.math.nan(f64) }));
     _ = durationMs(std.math.maxInt(u64));
+}
+
+test "a saturated token count does not overflow the run total" {
+    var usage: Usage = .{};
+    const absurd: ChatResult = .{ .prompt_tokens = std.math.maxInt(u64), .total_tokens = std.math.maxInt(u64) };
+    usage.add(&absurd);
+    const ordinary: ChatResult = .{ .prompt_tokens = 10 };
+    usage.add(&ordinary);
+    try std.testing.expectEqual(std.math.maxInt(u64), usage.prompt);
+    try std.testing.expectEqual(std.math.maxInt(u64), usage.total);
+}
+
+test "a truncated tool result keeps whole codepoints" {
+    // "日" is 3 bytes, so a 4- or 5-byte cut lands inside it.
+    try std.testing.expectEqualStrings("abc", clamp("abc日本", 4));
+    try std.testing.expectEqualStrings("ab", clamp("ab日", 4));
+    try std.testing.expectEqualStrings("abc", clamp("abc", 4));
+    try std.testing.expect(std.unicode.utf8ValidateSlice(clamp("abc日本語のテキスト", 8)));
+}
+
+test "backoff doubles, caps, and never overflows an attempt counter" {
+    try std.testing.expectEqual(@as(u64, 1000), backoffMs(0));
+    try std.testing.expectEqual(@as(u64, 1000), backoffMs(1));
+    try std.testing.expectEqual(@as(u64, 2000), backoffMs(2));
+    try std.testing.expectEqual(@as(u64, 4000), backoffMs(3));
+    try std.testing.expectEqual(max_backoff_ms, backoffMs(1000));
 }
 
 test "a tool call index past the cap is dropped, not allocated" {
