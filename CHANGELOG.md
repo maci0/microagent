@@ -37,6 +37,13 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- A session log on a machine whose clock reads before 1970 is pruned like any other. The
+  log's name is the wall clock's nanosecond stamp, and a negative one spelled a name
+  beginning with `-`, which the pruner does not parse as a name it wrote: the log was
+  written and then never counted toward the retention window, so the store grew past its
+  limit on that machine while reporting itself pruned. The stamp is clamped to the oldest
+  one instead, so a clock that says nothing about the time sorts as the oldest log.
+
 - The harbor adapter's own logs cannot end a run the verifier has to score. Writing
   `microagent-stdout.txt`, `microagent-stderr.txt` or `microagent-timeout.txt` raised on a
   filesystem that refused it, and a `FileNotFoundError` out of a log write was recorded as

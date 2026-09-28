@@ -906,6 +906,44 @@ test "the session store prunes by stamp, not by the bytes of the name" {
     try store.tmp.dir.access(io, "202.jsonl", .{});
 }
 
+// A clock set before 1970 reads a negative number of nanoseconds, and a name
+// spelled from one begins with `-`, which `logName` refuses: the log is written
+// and then nothing ever counts it toward the retention window, so a machine
+// whose clock is wrong in that direction grows the store without bound while
+// still reporting itself pruned. The stamp `open` hands over is the oldest
+// stamp there is rather than a negative one, so the log sorts and prunes like
+// any other.
+test "a log named from a clock before 1970 is still one the pruner counts" {
+    var store = try StoreFixture.init(std.testing.allocator);
+    defer store.deinit();
+    const io = store.io();
+    const arena = store.arena();
+    const dir_path = try store.path();
+
+    // The stamp `open` computes for a clock reading before the epoch.
+    const before_epoch_ns: i128 = -1_000_000_000;
+    const stamp: u128 = if (before_epoch_ns < 0) 0 else @intCast(before_epoch_ns);
+    const log = createSessionLog(io, arena, dir_path, stamp) orelse return error.TestUnexpectedResult;
+    log.close(io);
+    try store.tmp.dir.access(io, "0.jsonl", .{});
+    // The name a negative stamp would have produced is one the pruner does not
+    // recognise, which is the whole reason the stamp is clamped.
+    try std.testing.expect(logName("-1000000000.jsonl") == null);
+
+    var i: usize = 0;
+    while (i < max_session_logs) : (i += 1) {
+        const filler = createSessionLog(io, arena, dir_path, @intCast(i + 3)) orelse return error.TestUnexpectedResult;
+        filler.close(io);
+    }
+    pruneSessions(io, arena, dir_path);
+
+    // The zero-stamped log is the oldest of the store, so it is the one the
+    // window takes, and what is left is the limit rather than the limit plus
+    // a log nothing was counting.
+    try std.testing.expectError(error.FileNotFound, store.tmp.dir.access(io, "0.jsonl", .{}));
+    try std.testing.expectEqual(max_session_logs, try countSessionLogs(io, arena, dir_path));
+}
+
 test "the session store prunes the logs a re-run wrote beside the first" {
     var store = try StoreFixture.init(std.testing.allocator);
     defer store.deinit();
