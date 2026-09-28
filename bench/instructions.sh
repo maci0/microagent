@@ -96,6 +96,18 @@ measure() {
 		printf 'bench/instructions.sh: no test binary was emitted for filter %s\n' "$filter" >&2
 		return 3
 	}
+	# A filter that matches nothing still builds, still runs, and reports the
+	# cost of the process and nothing else, so the row looks like a real number
+	# and measures an empty binary. `main.test_0` is the reference block: it
+	# runs whatever the filter is, so one test means the filter selected none.
+	# This is not hypothetical: --test-filter does not reach tests declared in
+	# an imported module, so a row naming one reads as a passing measurement of
+	# nothing at all.
+	matched=$("$bin" 2>&1 | sed -n 's/^All \([0-9][0-9]*\) tests\? passed\..*/\1/p' | tail -n 1)
+	if [ "${2:-}" != baseline ] && [ -n "$matched" ] && [ "$matched" -le 1 ]; then
+		printf 'bench/instructions.sh: the filter %s selected no test, so the row would measure an empty binary\n' "$filter" >&2
+		return 3
+	fi
 	i=0
 	samples="$work/samples"
 	: >"$samples"
@@ -112,7 +124,9 @@ measure() {
 	sort -n "$samples" | awk '{ v[NR] = $1 } END { print v[int((NR + 1) / 2)] }'
 }
 
-baseline=$(measure zzzz_no_such_test) || exit 2
+# The baseline is meant to select no test: it is the same binary with nothing
+# run, which is what every other row is measured net of.
+baseline=$(measure zzzz_no_such_test baseline) || exit 2
 printf '%-32s %14s %14s\n' path instructions instr_per_unit
 printf '%s\n' "--------------------------------------------------------------------------"
 printf '%-32s %14s %14s\n' baseline "$baseline" -
