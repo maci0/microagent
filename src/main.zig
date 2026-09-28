@@ -1293,10 +1293,18 @@ fn streamChat(
         if (debug_enabled) std.debug.print("[mdebug] head status={d} enc={s}\n", .{ @intFromEnum(response.head.status), @tagName(response.head.content_encoding) });
         if (response.head.status != .ok) {
             if (retryableStatus(response.head.status) and attempt < max_attempts) {
-                net.note(io, arena, "microagent: {s} answered HTTP {d}, retrying (attempt {d}/{d})\n", .{
-                    shown_url, @intFromEnum(response.head.status), attempt + 1, max_attempts,
+                // A rate limit carries the wait the provider wants, and its own
+                // backoff is the wrong one to spend: this run's schedule is 1 s,
+                // 2 s, 4 s, and a provider that says "come back in 30" is still
+                // refusing at second 4, so each retry is a second billable
+                // refusal. The header wins where it is a number this run is
+                // willing to wait, and the schedule stands where it is not.
+                const asked = retryAfterMs(response.head.bytes);
+                const wait = asked orelse backoffMs(attempt);
+                net.note(io, arena, "microagent: {s} answered HTTP {d}, retrying in {d}ms (attempt {d}/{d})\n", .{
+                    shown_url, @intFromEnum(response.head.status), wait, attempt + 1, max_attempts,
                 });
-                try waitFor(io, attempt);
+                try waitMs(io, wait);
                 continue;
             }
             var err_transfer: [8 * 1024]u8 = undefined;
@@ -2037,7 +2045,38 @@ fn backoffMs(attempt: u32) u64 {
 }
 
 fn waitFor(io: Io, attempt: u32) !void {
-    try io.sleep(.{ .nanoseconds = backoffMs(attempt) *| std.time.ns_per_ms }, .awake);
+    try waitMs(io, backoffMs(attempt));
+}
+
+fn waitMs(io: Io, ms: u64) !void {
+    try io.sleep(.{ .nanoseconds = ms *| std.time.ns_per_ms }, .awake);
+}
+
+/// The longest `Retry-After` this run will sit out. A provider asking for an
+/// hour is not a provider to wait an hour for, and the schedule behind it
+/// bounds the wait instead.
+const max_retry_after_ms: u64 = 120_000;
+
+/// The wait a 429 or 503 asks for, in milliseconds, or null when the header is
+/// absent or is not one this run will wait.
+///
+/// Only the delta-seconds form is read. The HTTP-date form is what a provider
+/// sends when it computes a deadline against a clock, and the run has no
+/// second clock to check it against; a header this cannot read falls back to
+/// the backoff schedule rather than being guessed at.
+fn retryAfterMs(head_bytes: []const u8) ?u64 {
+    var lines = std.mem.splitSequence(u8, head_bytes, "\r\n");
+    _ = lines.next(); // the status line
+    while (lines.next()) |line| {
+        if (line.len == 0) break;
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, line[0..colon], " \t"), "retry-after")) continue;
+        const raw = std.mem.trim(u8, line[colon + 1 ..], " \t");
+        const seconds = std.fmt.parseInt(u64, raw, 10) catch return null;
+        const ms = std.math.mul(u64, seconds, std.time.ms_per_s) catch return null;
+        return @min(ms, max_retry_after_ms);
+    }
+    return null;
 }
 
 // A file's tests are collected only when the root file's test block imports
@@ -3422,6 +3461,37 @@ test "backoff doubles, caps, and never overflows an attempt counter" {
     try std.testing.expectEqual(@as(u64, 2000), backoffMs(2));
     try std.testing.expectEqual(@as(u64, 4000), backoffMs(3));
     try std.testing.expectEqual(max_backoff_ms, backoffMs(1000));
+}
+
+// A rate limit names the wait it wants. Retrying on this run's own 1 s/2 s/4 s
+// schedule instead is a second, third and fourth refusal from a provider that
+// asked for thirty seconds, and every one of them is billed as a request.
+test "a Retry-After header sets the wait, and only a wait worth taking" {
+    const head =
+        "HTTP/1.1 429 Too Many Requests\r\n" ++
+        "content-type: application/json\r\n" ++
+        "retry-after: 30\r\n" ++
+        "content-length: 0\r\n\r\n";
+    try std.testing.expectEqual(@as(?u64, 30_000), retryAfterMs(head));
+
+    // The header's name is case-insensitive, and the value carries the spaces
+    // a real server puts around it.
+    const sloppy = "HTTP/1.1 503 Service Unavailable\r\nRetry-After:   7  \r\n\r\n";
+    try std.testing.expectEqual(@as(?u64, 7000), retryAfterMs(sloppy));
+
+    // A wait longer than this run will sit out falls back to the schedule
+    // rather than stalling the turn for an hour.
+    const forever = "HTTP/1.1 429 Too Many Requests\r\nretry-after: 3600\r\n\r\n";
+    try std.testing.expectEqual(@as(?u64, max_retry_after_ms), retryAfterMs(forever));
+
+    // Absent, and the forms this run cannot read, are all the backoff's
+    // business rather than a guess.
+    try std.testing.expectEqual(@as(?u64, null), retryAfterMs("HTTP/1.1 429 Too Many Requests\r\ncontent-length: 0\r\n\r\n"));
+    try std.testing.expectEqual(@as(?u64, null), retryAfterMs("HTTP/1.1 429 Too Many Requests\r\nretry-after: Wed, 21 Oct 2026 07:28:00 GMT\r\n\r\n"));
+    try std.testing.expectEqual(@as(?u64, null), retryAfterMs("HTTP/1.1 429 Too Many Requests\r\nretry-after: soon\r\n\r\n"));
+    // A count past what the multiply holds is a header this cannot read, not a
+    // wrap into a short wait.
+    try std.testing.expectEqual(@as(?u64, null), retryAfterMs("HTTP/1.1 429 Too Many Requests\r\nretry-after: 99999999999999999999\r\n\r\n"));
 }
 
 // The budget is a deadline, not a turn counter. Checked only at the top of the

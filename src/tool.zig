@@ -506,6 +506,33 @@ fn isCredentialPath(path: []const u8) bool {
     return isCredentialName(std.fs.path.basename(std.mem.trimEnd(u8, path, "/")));
 }
 
+/// Appends the exclusion globs that keep a search off a credentials file.
+///
+/// `read` refuses one because what it returns is re-sent to the provider on
+/// every later turn, and that reasoning holds for a search: a `search` for
+/// `SECRET=` over a tree with a `.env` in it hands the provider the value
+/// through the tool the system prompt tells the model to prefer. The rule is
+/// the one `isCredentialName` and `credential_dirs` already spell, restated as
+/// globs, because there is no way to hand a predicate to a subprocess.
+///
+/// The globs are `-i` and cover every component, so `.secrets/key` and
+/// `.SSH/id_rsa` are excluded the way `isCredentialPath` refuses them: the
+/// names are matched case-insensitively there, and a filesystem that resolves
+/// `.ENV` to `.env` resolves it for ripgrep too. `.env*` and `*.env` are the
+/// two spellings `isCredentialName` matches on, which no other table holds.
+fn appendCredentialGlobs(arena: std.mem.Allocator, argv: *std.ArrayList([]const u8)) !void {
+    for (credential_dirs) |dir| {
+        try argv.appendSlice(arena, &.{ "--iglob", try std.fmt.allocPrint(arena, "!**/{s}/**", .{dir}) });
+    }
+    for (credential_names) |name| {
+        try argv.appendSlice(arena, &.{ "--iglob", try std.fmt.allocPrint(arena, "!{s}", .{name}) });
+    }
+    for (credential_extensions) |ext| {
+        try argv.appendSlice(arena, &.{ "--iglob", try std.fmt.allocPrint(arena, "!*{s}", .{ext}) });
+    }
+    try argv.appendSlice(arena, &.{ "--iglob", "!.env*", "--iglob", "!*.env" });
+}
+
 /// What `read` returns instead of a credential. It names the file, so a model
 /// that asked for it knows which one was refused, and it says what to do
 /// instead, because a bare error reads as a broken tool and gets retried.
@@ -717,6 +744,10 @@ fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
 fn toolSearch(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64) ![]u8 {
     const pattern = chat.str(args.get("pattern")) orelse return std.fmt.allocPrint(arena, "error: missing pattern", .{});
     const path = chat.str(args.get("path")) orelse ".";
+    // A glob narrows what a search walks; naming a credentials file as the
+    // root is a search that walks one, so it takes the same refusal `read`
+    // gives it. A recursive search is covered by the globs below instead.
+    if (isCredentialPath(path)) return try credentialRefusal(arena, path);
     const glob = chat.str(args.get("glob"));
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(arena, &.{ "rg", "--line-number", "--no-heading", "--color", "never", "--max-count", "200", "--glob-case-insensitive" });
@@ -738,6 +769,7 @@ fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
     const pattern = chat.str(args.get("pattern")) orelse return std.fmt.allocPrint(arena, "error: missing pattern", .{});
     const lang = chat.str(args.get("lang")) orelse return std.fmt.allocPrint(arena, "error: missing lang", .{});
     const path = chat.str(args.get("path")) orelse ".";
+    if (isCredentialPath(path)) return try credentialRefusal(arena, path);
     const rewrite = chat.str(args.get("rewrite"));
 
     var argv: std.ArrayList([]const u8) = .empty;
@@ -1418,6 +1450,75 @@ test "search and ast skip the files read refuses, and git refuses one by name" {
     ));
     try std.testing.expect(std.mem.startsWith(u8, refused, "refused: "));
     try std.testing.expect(std.mem.indexOf(u8, refused, needle) == null);
+}
+
+// A search returns the same bytes a `read` refuses, and the system prompt
+// sends the model to `search` first, so a guard that only the `read` tool
+// carries is a guard a single well-formed `search` walks around. The globs
+// are what closes it, and the test runs the real ripgrep over a real tree
+// rather than asserting on the argv, because a pattern ripgrep does not
+// match the way `isCredentialPath` refuses is the whole failure.
+test "a search returns no credentials file `read` would refuse" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // One file per way `isCredentialPath` refuses a name, each carrying the
+    // same marker, plus the case variants a case-insensitive match has to
+    // cover and one ordinary file that must survive.
+    const secrets = [_]struct { sub: []const u8, data: []const u8 }{
+        .{ .sub = ".env", .data = "MARKER=dotenv" },
+        .{ .sub = "app.env", .data = "MARKER=suffixed" },
+        .{ .sub = "config/.env.production", .data = "MARKER=dotted" },
+        .{ .sub = "id_rsa", .data = "MARKER=key" },
+        .{ .sub = "ID_RSA", .data = "MARKER=upperkey" },
+        .{ .sub = "certs/tls.pem", .data = "MARKER=pem" },
+        .{ .sub = "deploy/server.key", .data = "MARKER=keyext" },
+        .{ .sub = ".secrets/openrouter", .data = "MARKER=secretsdir" },
+        .{ .sub = "sub/.SSH/id_ed25519", .data = "MARKER=sshdir" },
+        .{ .sub = "sub/credentials", .data = "MARKER=name" },
+        .{ .sub = ".netrc", .data = "MARKER=netrc" },
+    };
+    for ([_][]const u8{ "config", "certs", "deploy", ".secrets", "sub/.SSH", "sub", "src" }) |dir|
+        try tmp.dir.createDirPath(io, dir);
+    for (secrets) |s| try tmp.dir.writeFile(io, .{ .sub_path = s.sub, .data = s.data });
+    try tmp.dir.writeFile(io, .{ .sub_path = "src/main.zig", .data = "MARKER=source\n" });
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+
+    var args: std.json.ObjectMap = .empty;
+    try args.put(arena, "pattern", .{ .string = "MARKER" });
+    try args.put(arena, "path", .{ .string = root });
+    const out = try toolSearch(io, arena, args, null);
+
+    // Every one of the files above holds a distinct value and only that value,
+    // so a hit on any of them is a credential handed to the provider. The
+    // source file is the control: it holds the marker too, so a guard that
+    // emptied every result would fail here rather than pass quietly.
+    for (secrets) |s| {
+        if (std.mem.indexOf(u8, out, s.data) != null) {
+            std.debug.print("search leaked {s}\n", .{s.sub});
+            return error.TestUnexpectedResult;
+        }
+    }
+    try std.testing.expect(std.mem.indexOf(u8, out, "src/main.zig") != null);
+
+    // Naming a credentials file as the search root is the other door in, and
+    // takes the same refusal `read` gives it.
+    var direct: std.json.ObjectMap = .empty;
+    try direct.put(arena, "pattern", .{ .string = "MARKER" });
+    try direct.put(arena, "path", .{ .string = try std.fs.path.join(arena, &.{ root, ".env" }) });
+    const refused = try toolSearch(io, arena, direct, null);
+    try std.testing.expect(std.mem.startsWith(u8, refused, "refused: "));
+    try std.testing.expect(std.mem.indexOf(u8, refused, "MARKER") == null);
 }
 
 test "tool output truncation keeps whole lines" {
