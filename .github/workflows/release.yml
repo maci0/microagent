@@ -127,9 +127,21 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          # The release is created as a draft and published one step later, so a
+          # run that died in between leaves a release the next run finds. A
+          # draft was never public: finishing it is what the run was for, and
+          # the assets are rebuilt byte-identical, so the rerun converges on the
+          # same published release. A published one is refused, because a
+          # consumer has it and replacing it is not this workflow's call.
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            echo "release ${GITHUB_REF_NAME} already exists; refusing to replace it" >&2
-            exit 1
+            if [ "$(gh release view "${GITHUB_REF_NAME}" --json isDraft --jq .isDraft)" != "true" ]; then
+              echo "release ${GITHUB_REF_NAME} is already published; refusing to replace it" >&2
+              exit 1
+            fi
+            echo "release ${GITHUB_REF_NAME} is a draft an earlier run left behind; finishing it"
+            gh release upload "${GITHUB_REF_NAME}" dist/microagent-* --clobber
+            gh release edit "${GITHUB_REF_NAME}" --draft=false
+            exit 0
           fi
           # The changelog section is the release note, so a consumer reads what
           # changed for them instead of a list of commit subjects.

@@ -249,7 +249,7 @@ Seven tools, all of them thin wrappers over tools you already have:
 | --- | --- |
 | `bash` | `/bin/sh -c`, 120 s default timeout (600 s ceiling on what the model may ask for), output capped at 24 KB |
 | `read` | read a file, optional line offset/limit; refuses credentials (`.env`, key files, `$HOME/.secrets`) |
-| `write` | create or overwrite a file, parents created |
+| `write` | create or overwrite a file, parents created; refuses a call with no `content` |
 | `edit` | exact string replacement, refuses an ambiguous match unless `replace_all` |
 | `search` | `rg --line-number --no-heading`, optional glob |
 | `ast` | `ast-grep run` for structural match, or `--rewrite --update-all` to apply one |

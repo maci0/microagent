@@ -103,6 +103,12 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- `write` refuses a call with no `content` instead of writing an empty file. The tool schema names
+  `content` as required, but the argument was read as an empty string when it was missing, so a call
+  that arrived naming only a path (a model that forgot it, or arguments cut short in the stream)
+  opened the file for writing and emptied what was there, and a `write` is the one tool call a run
+  cannot undo. A model that means an empty file says so, as `"content": ""`. The result changes from
+  `wrote 0 bytes to <path>` to `error: missing content` in that one case.
 - `read` refuses a credentials file. Its result goes into the conversation, and the conversation is
   re-sent to the provider on every turn after it, so a `read` of `.env`, a `.pem`, an `id_ed25519`
   or `$HOME/.secrets/openrouter` shipped a live key to a third party and kept shipping it for the

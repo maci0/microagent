@@ -154,7 +154,15 @@ install: build
 # update.zig asks for. Running it without TAG is the rehearsal ci.yml does on
 # every push; `make release-assets TAG=v0.2.0` produces the released names, so
 # a release can be built on a laptop exactly as the tag builds it.
+#
+# dist/ is emptied first, so what it holds after this recipe is this run's
+# assets and nothing else. Without that, a rehearsal's untagged binaries, or a
+# previous tag's, survive into the next run: release.yml publishes the glob
+# `dist/microagent-*`, so a second run on a machine that once built another
+# version would upload that version's binaries under this tag, and `checksums`
+# would sidecar them as if they were the ones just built.
 release-assets:
+	rm -rf dist
 	mkdir -p dist
 	@set -e; for target in $(RELEASE_TARGETS); do \
 		$(ZIG) build -Dtarget="$$target" -Doptimize=ReleaseSmall; \

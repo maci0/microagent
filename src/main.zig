@@ -2754,6 +2754,7 @@ test "one bad style value does not cost the run the levels it did understand" {
 var debug_enabled: bool = false;
 
 // have to be refused with the tool's own error text instead of reaching a
+// subprocess.
 
 test "a gap in the tool-call indexes leaves no nameless call behind" {
     const gpa = std.testing.allocator;

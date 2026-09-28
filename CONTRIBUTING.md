@@ -103,6 +103,11 @@ make release-assets TAG=v0.2.0   # the four cross-built assets, in dist/
 make checksums                   # the sha256 sidecars `update` verifies
 ```
 
+`make release-assets` empties `dist/` first, so what is there afterwards is the
+one run's assets: the release workflow publishes the glob `dist/microagent-*`,
+and a rehearsal's or a previous tag's binaries left in that directory would go
+out under this tag.
+
 Contributors do not tag or publish.
 
 ## Commit messages
