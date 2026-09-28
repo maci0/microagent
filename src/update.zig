@@ -720,7 +720,7 @@ pub fn run(
             return 0;
         },
         .bad_flag => |msg| return updateUsageError(io, "{s}", .{msg}),
-        .unknown => |arg| return updateUsageError(io, "unknown or incomplete argument '{s}'", .{arg}),
+        .unknown => |arg| return updateUsageError(io, "unknown or incomplete argument '{s}'", .{quoteRepo(arena, arg)}),
         .run => |opts| {
             return runChecked(io, gpa, arena, env, opts.check_only, opts.repo orelse default_repo);
         },

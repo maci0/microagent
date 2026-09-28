@@ -601,16 +601,28 @@ fn budgetSeconds(buf: []u8, from: []const u8, value: []const u8, out: *?u64) ?[]
     return null;
 }
 
-/// How much of a value an error message quotes back, cut on a codepoint
-/// boundary like every other truncation here: a partial codepoint is a
-/// replacement character in the middle of a diagnostic, and the value being
-/// quoted is whatever the user typed. Text that came out of a file rather than
-/// off the command line is quoted through `chat.safeText` instead, which makes
-/// the bytes printable as well as cutting them.
+/// How much of a value an error message quotes back, bounded on the bytes that
+/// come out rather than the bytes that went in, so a value of control
+/// characters cannot be several times the length it was given.
 const quoted_value_bytes = 80;
 
+/// A value quoted back into a message about itself.
+///
+/// Cutting the value on a codepoint boundary is only half of what a diagnostic
+/// needs. An `argv` entry is whatever bytes the shell passed, so `microagent
+/// $'\e[2J'` names an argument whose first bytes clear the terminal and
+/// `microagent $'\xff'` names one that reaches the screen as mojibake: cutting
+/// on a boundary leaves both untouched, and the message is the one place this
+/// program hands the operator's own bytes back to the terminal. `chat.safeText`
+/// is the escaping the gutter line, the config key and the config path already
+/// use, so every diagnostic quoting a value reads the same way.
+///
+/// The allocation is `page_allocator` because the caller cannot pass one: these
+/// functions format into a fixed buffer the parse owns, and `die` already
+/// formats its own line the same way. Every message here is terminal, and the
+/// process exits on it.
 fn clip(s: []const u8) []const u8 {
-    return chat_mod.clamp(s, quoted_value_bytes);
+    return chat_mod.safeText(std.heap.page_allocator, s, quoted_value_bytes);
 }
 
 /// The option a flag that takes a value sets.
@@ -748,7 +760,7 @@ fn parseArgs(buf: []u8, argv: []const []const u8, opts: *Options) ?[]const u8 {
             // describes a flag nobody wrote.
             return "the prompt is empty: pass the task as an argument or with --print";
         } else {
-            return std.fmt.bufPrint(buf, "unknown or incomplete argument '{s}'", .{arg}) catch "bad arguments";
+            return std.fmt.bufPrint(buf, "unknown or incomplete argument '{s}'", .{clip(arg)}) catch "bad arguments";
         }
     }
     return null;
@@ -1473,7 +1485,15 @@ fn streamChat(
     // dispatch: the run then reads its own `error: tool arguments are not valid
     // JSON` and blames the model for a truncation nothing reported. Only a turn
     // that arrived whole under the ceiling is a turn the model meant.
-    if (result.streamed >= max_response_bytes)
+    //
+    // `dropped` rather than the counter alone. `clamp` cuts on a codepoint
+    // boundary, so the last character before the ceiling is whatever fits: a
+    // response that arrives with one to three bytes of room and a character of
+    // two to four bytes to add keeps none of it, and the counter stops that
+    // far short of the ceiling. Reading the counter alone, that turn is
+    // reported as a finished one whose answer is short by a character nobody
+    // was told about.
+    if (result.dropped or result.streamed >= max_response_bytes)
         net.note(io, arena, "microagent: the completion stream from {s} reached the {d} byte ceiling for one turn with {d} tool call(s) still being assembled; anything past it is not in this turn, and a tool call whose arguments were cut cannot be dispatched\n", .{
             shown_url, max_response_bytes, calls.items.len,
         });
@@ -1701,6 +1721,7 @@ fn appendStreamed(
     out_buf: *std.ArrayList(u8),
 ) !void {
     const kept = chat_mod.clamp(text, max_response_bytes -| result.streamed);
+    if (kept.len != text.len) result.dropped = true;
     try result.content.appendSlice(gpa, kept);
     try out_buf.appendSlice(gpa, kept);
     result.streamed += kept.len;
@@ -1745,6 +1766,7 @@ fn applyCallDelta(
     }
     if (args) |v| {
         const kept = chat_mod.clamp(v, max_response_bytes -| result.streamed);
+        if (kept.len != v.len) result.dropped = true;
         try call.args.appendSlice(gpa, kept);
         result.streamed += kept.len;
     }
@@ -2282,6 +2304,47 @@ test "a wrong command line names the flag and the value it was given" {
     try std.testing.expectEqualStrings("prompt given twice: 'one' and 'two'", parseArgs(&buf, &.{ "-p", "one", "--print=two" }, &joined).?);
     // An empty word is an empty prompt, not an argument nobody knows.
     try std.testing.expectEqualStrings("the prompt is empty: pass the task as an argument or with --print", parseArgs(&buf, &.{""}, &opts).?);
+}
+
+// An `argv` entry is whatever bytes the shell passed, so a diagnostic that
+// quotes one is handing the operator's own bytes back to the terminal. Cut on
+// a codepoint boundary is not enough of a policy: `\e[2J` clears the screen
+// and `\e]0;...\a` retitles the window without a byte being invalid UTF-8, and
+// a lone `\xff` is invalid and used to reach the screen as mojibake. Every
+// message the parse produces goes through `clip`, which is the escaping the
+// gutter line and the config diagnostics already use.
+test "a command line that quotes a value quotes it as text, not as bytes" {
+    var opts: Options = .{};
+    var buf: [512]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "unknown or incomplete argument '--\\x1b[2J\\x1b[31m'",
+        parseArgs(&buf, &.{"--\x1b[2J\x1b[31m"}, &opts).?,
+    );
+    // A byte that is not text at all reads as U+FFFD rather than passing
+    // through, and the C1 range escapes as the code point a terminal acts on.
+    try std.testing.expectEqualStrings(
+        "unknown or incomplete argument '--\\x9b31m\u{fffd}'",
+        parseArgs(&buf, &.{"--\u{009b}31m\xff"}, &opts).?,
+    );
+    // Text is left alone, in the scripts the operator actually types.
+    try std.testing.expectEqualStrings(
+        "prompt given twice: 'caf\u{00e9}' and '\u{65e5}\u{672c}\u{8a9e}'",
+        parseArgs(&buf, &.{ "caf\u{00e9}", "\u{65e5}\u{672c}\u{8a9e}" }, &opts).?,
+    );
+    // The budget is the other message that quotes a value, and it quotes an
+    // environment value as well as an argument.
+    try std.testing.expectEqualStrings(
+        "--budget must be a number, got '\u{fffd}\u{fffd}'",
+        parseArgs(&buf, &.{ "--budget", "\xff\xfe" }, &opts).?,
+    );
+    // Nothing the escaper writes is a half character, whatever the value and
+    // whatever the budget.
+    for ([_][]const u8{ "--\x1b[2J", "\u{1f600}\u{1f600}\u{1f600}", "ok\xff\xff", "\u{65e5}\u{672c}\u{8a9e}" }) |raw| {
+        const quoted = clip(raw);
+        try std.testing.expect(quoted.len <= quoted_value_bytes);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(quoted));
+        for (quoted) |c| try std.testing.expect(c >= 0x20 and c != 0x7f);
+    }
 }
 
 // A zero budget is a deadline that has already passed, not the absence of one:
@@ -2939,6 +3002,47 @@ test "the response ceiling covers the calls as well as the text" {
     try std.testing.expectEqualStrings("bash", sink.calls.items[0].name);
     try std.testing.expectEqual(@as(usize, 0), sink.calls.items[0].args.items.len);
     try std.testing.expectEqual(max_response_bytes, sink.result.streamed);
+}
+
+// The ceiling is counted in bytes and cut on a codepoint boundary, so the two
+// do not have to agree about where the turn ends: a response that arrives with
+// a byte or two of room and a character too wide for it keeps none of it, and
+// the counter stops short of the ceiling by that residue rather than reaching
+// it. The run's notice reads `dropped` for this reason, because a turn whose
+// answer lost its last character and never reached the number is as incomplete
+// as one that was cut mid-character at it, and reporting it as whole is how a
+// truncated answer gets read as the whole of what the model said.
+test "a turn that cannot fit the last character still says the turn is short" {
+    var sink = FrameSink.init(std.testing.allocator);
+    defer sink.deinit();
+
+    // Two bytes of room, and a three-byte character to add. Nothing fits, so
+    // nothing is appended, and `streamed` stays where it was.
+    sink.result.streamed = max_response_bytes - 2;
+    try sink.feed("{\"choices\":[{\"delta\":{\"content\":\"\u{65e5}\"}}]}");
+    try std.testing.expectEqualStrings("", sink.result.content.items);
+    try std.testing.expectEqual(max_response_bytes - 2, sink.result.streamed);
+    try std.testing.expect(sink.result.dropped);
+
+    // An ASCII character of the same width does fit, which is what makes the
+    // residue the only thing that decides the turn's end.
+    var roomy = FrameSink.init(std.testing.allocator);
+    defer roomy.deinit();
+    roomy.result.streamed = max_response_bytes - 2;
+    try roomy.feed("{\"choices\":[{\"delta\":{\"content\":\"ab\"}}]}");
+    try std.testing.expectEqualStrings("ab", roomy.result.content.items);
+    try std.testing.expectEqual(max_response_bytes, roomy.result.streamed);
+    try std.testing.expect(!roomy.result.dropped);
+
+    // The same residue on a tool call's arguments, where the call arrives whole
+    // but its arguments do not, and cannot be dispatched next turn.
+    var call = FrameSink.init(std.testing.allocator);
+    defer call.deinit();
+    call.result.streamed = max_response_bytes - 1;
+    try call.feed("{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"bash\",\"arguments\":\"\u{65e5}\"}}]}}]}");
+    try std.testing.expectEqualStrings("bash", call.calls.items[0].name);
+    try std.testing.expectEqual(@as(usize, 0), call.calls.items[0].args.items.len);
+    try std.testing.expect(call.result.dropped);
 }
 
 // The ceiling is a limit on what a turn holds, so the last delta that crosses

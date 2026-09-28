@@ -75,6 +75,17 @@ pub const ChatResult = struct {
     /// a gigabyte of a single turn in memory, which is a ceiling the run
     /// documented and did not have.
     streamed: usize = 0,
+    /// Whether a fragment arrived that `clamp` would not take, because the
+    /// response ceiling had no room left for a whole character of it.
+    ///
+    /// The counter alone cannot say so. `clamp` cuts on a codepoint boundary,
+    /// so a response that arrives with one, two or three bytes of room under
+    /// the ceiling and a character of two, three or four bytes to add keeps
+    /// none of it and leaves `streamed` short of the ceiling by exactly that
+    /// residue. A turn that lost its tail that way is as incomplete as one cut
+    /// mid-character, and the run's notice is what says the turn is not the
+    /// whole of what the model meant to send.
+    dropped: bool = false,
 
     pub fn deinitFinish(self: *ChatResult, gpa: std.mem.Allocator) void {
         if (!std.mem.eql(u8, self.finish_reason, &.{})) gpa.free(self.finish_reason);

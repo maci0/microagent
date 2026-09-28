@@ -215,6 +215,19 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- A command-line argument quoted back in a usage error is quoted as text. The
+  message used to cut it on a codepoint boundary and nothing else, so
+  `microagent $'\e[2J'` cleared the terminal and `microagent update $'\e]0;x\a'`
+  retitled the window, and a byte that is not text at all reached the screen as
+  mojibake. Every such message now goes through the same escaping the gutter
+  line and the config diagnostics already used, and the unknown-argument message,
+  which quoted its argument directly, does too.
+- A turn that could not fit the last character of a response says it is short. The
+  16 MB ceiling is counted in bytes and cut on a codepoint boundary, so a response
+  arriving with a byte or two of room and a character too wide for it kept none of
+  it and the counter stopped short of the ceiling rather than reaching it. The
+  notice read the counter, so that turn was reported as a whole one whose answer
+  was missing a character nobody had been told about.
 - A turn that reaches the 16 MB per-response ceiling says so on stderr. Past it
   the streamed content and the streamed tool-call arguments are dropped rather
   than held, so a call whose arguments were cut arrived as
