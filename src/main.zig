@@ -49,8 +49,9 @@ const Options = struct {
     /// deliberately inside a caller's per-review timeout instead of being
     /// killed in the middle of one.
     budget_s: ?u64 = null,
-    /// Last turn of the loop, so the final one can be announced.
-    max_turns_seen: usize = 0,
+    /// PEM file to trust instead of scanning the system store. Set by
+    /// --ca-bundle, MICROAGENT_CA_BUNDLE or SSL_CERT_FILE.
+    ca_bundle: []const u8 = "",
 };
 
 const ToolCall = struct {
@@ -91,6 +92,10 @@ pub fn main(init: std.process.Init) !void {
     if (init.environ_map.get("MICROAGENT_MODEL")) |v| opts.model = v;
     if (init.environ_map.get("MICROAGENT_BASE_URL")) |v| opts.base_url = v;
     if (init.environ_map.get("MICROAGENT_REASONING_EFFORT")) |v| opts.reasoning_effort = v;
+    if (init.environ_map.get("MICROAGENT_CA_BUNDLE")) |v| opts.ca_bundle = v;
+    if (opts.ca_bundle.len == 0) {
+        if (init.environ_map.get("SSL_CERT_FILE")) |v| opts.ca_bundle = v;
+    }
     if (init.environ_map.get("MICROAGENT_BUDGET_SECONDS")) |v|
         opts.budget_s = std.fmt.parseInt(u64, v, 10) catch return usageError(io, "MICROAGENT_BUDGET_SECONDS must be a number");
 
@@ -113,6 +118,10 @@ pub fn main(init: std.process.Init) !void {
             i += 1;
             if (i >= args.items.len) return usageError(io, "missing api key");
             opts.api_key = args.items[i];
+        } else if (std.mem.eql(u8, arg, "--ca-bundle")) {
+            i += 1;
+            if (i >= args.items.len) return usageError(io, "missing ca bundle path");
+            opts.ca_bundle = args.items[i];
         } else if (std.mem.eql(u8, arg, "--budget")) {
             i += 1;
             if (i >= args.items.len) return usageError(io, "missing budget in seconds");
@@ -157,6 +166,7 @@ pub fn main(init: std.process.Init) !void {
 
     var client: std.http.Client = .{ .allocator = gpa, .io = io };
     defer client.deinit();
+    loadCaBundle(&client, io, gpa, opts.ca_bundle, init.arena.allocator());
 
     // The conversation is kept as the literal JSON array the API wants, so a
     // message is appended once, in the wire format, with no model in between.
@@ -190,6 +200,10 @@ const help_text =
     \\  -b, --base-url <url>   OpenAI-compatible base url (env MICROAGENT_BASE_URL)
     \\  -k, --api-key <key>    api key (env MICROAGENT_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY)
     \\      --max-turns <n>    tool-loop turn ceiling (default 60)
+    \\      --ca-bundle <file>
+    \\                         PEM file to trust instead of the system store
+    \\                         (env MICROAGENT_CA_BUNDLE, SSL_CERT_FILE). Needed in
+    \\                         images that ship no ca-certificates.
     \\      --budget <seconds>
     \\                         stop starting turns after this long, and say so
     \\                         (env MICROAGENT_BUDGET_SECONDS)
@@ -207,6 +221,29 @@ fn usageError(io: Io, arg: []const u8) noreturn {
     std.Io.File.stderr().writeStreamingAll(io, msg) catch {};
     std.Io.File.stderr().writeStreamingAll(io, help_text) catch {};
     std.process.exit(2);
+}
+
+/// Points the TLS client at a PEM file when one was named. Many container
+/// images (bare ubuntu, distroless) ship no ca-certificates at all, and the
+/// client's own rescan then fails with TlsInitializationFailed before a single
+/// request is sent. A path that cannot be read is a warning, not a failure: the
+/// client falls back to scanning the system store.
+fn loadCaBundle(
+    client: *std.http.Client,
+    io: Io,
+    gpa: std.mem.Allocator,
+    path: []const u8,
+    arena: std.mem.Allocator,
+) void {
+    if (path.len == 0) return;
+    const abs = std.fs.path.resolve(arena, &.{path}) catch path;
+    const now = Io.Clock.real.now(io);
+    client.ca_bundle.addCertsFromFilePathAbsolute(gpa, io, now, abs) catch |err| {
+        announce(io, arena, "microagent: cannot read CA bundle {s}: {s}; scanning the system store instead\n", .{ path, @errorName(err) });
+        return;
+    };
+    // Non-null `now` is how the client knows the bundle is already populated.
+    client.now = now;
 }
 
 fn resolveKey(init: std.process.Init, given: []const u8) []const u8 {
@@ -949,6 +986,21 @@ test "usage counters land on the result" {
     try std.testing.expectEqual(@as(u64, 22), result.completion_tokens);
     try std.testing.expectEqual(@as(u64, 33), result.total_tokens);
     try std.testing.expectEqual(@as(u64, 7), result.reasoning_tokens);
+}
+
+test "a CA bundle path that cannot be read falls back to the system store" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+
+    var client: std.http.Client = .{ .allocator = gpa, .io = io };
+    defer client.deinit();
+
+    loadCaBundle(&client, io, gpa, "/nonexistent/ca-bundle.pem", arena_state.allocator());
+    try std.testing.expect(client.now == null);
 }
 
 test "reasoning effort is only sent when asked for" {
