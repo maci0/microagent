@@ -1,0 +1,16 @@
+# Recorded by `sh bench/instructions.sh` on the machine named below; re-record
+# with the same command and commit the result when a change is meant to move
+# the number on purpose.
+#
+# Recorded: Ryzen 9 9950X, Linux 7.2.8-1-cachyos, Zig 0.16.0, perf 7.2.8,
+# ReleaseFast. Instructions for a fixed binary and a fixed input, median of 3.
+#
+# A new Zig release moves these without any change to this code, so the gate is
+# a 10% band (TOLERANCE) rather than an exact value, and the numbers are only
+# comparable within one toolchain. Re-record when the toolchain changes.
+#
+# path	instructions_per_unit
+stream content frame	4092
+stream tool-arg frame	9244
+compaction of a 1 MB conversation	44046580
+build the request body 40 times	112298
