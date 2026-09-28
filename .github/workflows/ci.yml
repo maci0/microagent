@@ -85,24 +85,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: install the linters
-        # The file is installed with --require-hashes, so an artifact whose
-        # sha256 is not the one written down there fails the job instead of
-        # becoming the linter that decides the gate passes. The pins are
-        # ruff and yamllint themselves, plus the two packages yamllint imports,
-        # so nothing in the resolution is chosen at install time.
-        #
-        # The install goes into a venv. The runner's python3 is marked
-        # externally managed (PEP 668), so pip refuses to install into it
-        # without --break-system-packages, which is the flag the runner image
-        # exists to not need. Its bin directory goes on PATH for the rest of
-        # the job, so the Makefile's bare `ruff` and `yamllint` are these.
-        run: |
-          set -euo pipefail
-          python3 -m venv "$RUNNER_TEMP/lintenv"
-          echo "$RUNNER_TEMP/lintenv/bin" >> "$GITHUB_PATH"
-          "$RUNNER_TEMP/lintenv/bin/pip" install --disable-pip-version-check \
-            --require-hashes -r lint-requirements.txt
+      # The pinned install lives in an action rather than in this step, because
+      # release.yml gates a tag with it and two copies of a hash-pinned install
+      # are two places a version bump can miss one of.
+      - uses: ./.github/actions/setup-linters
 
       # `make check` runs this before the linters, and it is the check that
       # keeps the version in lint-requirements.txt and the one in the Makefile

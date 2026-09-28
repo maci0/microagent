@@ -35,6 +35,10 @@ jobs:
       # The toolchain version is declared once, in build.zig.zon.
       - uses: ./.github/actions/setup-zig
 
+      # The same action the push gate installs its linters with, so a tag is
+      # published under the same ruff and yamllint a push was refused by.
+      - uses: ./.github/actions/setup-linters
+
       - name: tag names the build.zig.zon version
         run: |
           set -euo pipefail
@@ -45,9 +49,19 @@ jobs:
           fi
 
       # A tag push does not match ci.yml's branch filter, so nothing else has
-      # run the gate on this tree by the time these assets are published.
+      # run the gate on this tree by the time these assets are published. The
+      # whole of it, not the part of it this job used to repeat: the tag can
+      # name a commit no push has run since the last change to a shell script,
+      # the Harbor adapter or a workflow, and a release cut without that gate
+      # is how one of them reaches a consumer unreviewed.
+      - name: every published target is one `update` asks for
+        run: make check-targets
+
       - name: format is clean
         run: zig fmt --check src build.zig
+
+      - name: the shell, Python and YAML linters are clean
+        run: make lint
 
       - name: unit tests pass
         run: zig build test --summary all

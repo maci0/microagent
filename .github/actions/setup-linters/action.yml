@@ -1,0 +1,42 @@
+# Installs the linters `make lint` runs, in the versions lint-requirements.txt
+# pins. Every job that runs the shell, Python or YAML gate uses this rather
+# than repeating the install, so the linters a release is published from are
+# the ones a push was gated with.
+name: setup-linters
+description: install the ruff and yamllint versions the gate runs, pinned by hash
+
+runs:
+  using: composite
+  steps:
+    # The file is installed with --require-hashes, so an artifact whose
+    # sha256 is not the one written down there fails the job instead of
+    # becoming the linter that decides the gate passes. The pins are ruff and
+    # yamllint themselves, plus the two packages yamllint imports, so nothing
+    # in the resolution is chosen at install time.
+    #
+    # The install goes into a venv. The runner's python3 is marked externally
+    # managed (PEP 668), so pip refuses to install into it without
+    # --break-system-packages, which is the flag the runner image exists to not
+    # need. Its bin directory goes on PATH for the rest of the job, so the
+    # Makefile's bare `ruff` and `yamllint` are these.
+    #
+    # The wheels are cached, keyed on the file that names them, so a push that
+    # changes no lint pin installs nothing. The venv itself is not cached: it
+    # is built in a few seconds and caching it would put a second copy of the
+    # pinned wheels in the tree beside the ones this step already verified.
+    - name: restore the pip cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/pip
+        key: pip-${{ runner.os }}-${{ hashFiles('lint-requirements.txt') }}
+        restore-keys: |
+          pip-${{ runner.os }}-
+
+    - name: install the linters
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 -m venv "$RUNNER_TEMP/lintenv"
+        echo "$RUNNER_TEMP/lintenv/bin" >> "$GITHUB_PATH"
+        "$RUNNER_TEMP/lintenv/bin/pip" install --disable-pip-version-check \
+          --require-hashes -r lint-requirements.txt
