@@ -152,12 +152,17 @@ while IFS='|' read -r name filter units; do
 	if [ "${1:-}" = --check ]; then
 		want=$(awk -F'\t' -v n="$name" '$1 == n { print $2 }' "$root/bench/instructions.baseline" 2>/dev/null)
 		if [ -n "$want" ] && [ "$want" -gt 0 ]; then
-			# Compare in tenths so the ratio is an integer and shell
-			# arithmetic does not have to do division on a float. The two
-			# sides of the band are reported apart: above it a path retired
-			# more work than the baseline records, below it fewer, and the
-			# second is a stale baseline rather than a regression to fix.
-			now=$((per * 1000 / want))
+			# Compare in tenths so the ratio is an integer and the comparison
+			# does not have to do division on a float. The ratio is computed
+			# in awk rather than in `$(( ))`, which bench/gauntlet.sh does for
+			# the same reason: shell arithmetic is only as wide as `long`, and
+			# `per * 1000` for the 512 KB read row is past 2^32, so a shell
+			# with a 32-bit long wraps it and the row reads as a regression or
+			# an improvement that is only arithmetic. The two sides of the band
+			# are reported apart: above it a path retired more work than the
+			# baseline records, below it fewer, and the second is a stale
+			# baseline rather than a regression to fix.
+			now=$(awk -v per="$per" -v want="$want" 'BEGIN { printf "%d", per * 1000 / want }')
 			if [ "$now" -gt "$((1000 + tolerance * 10))" ]; then
 				printf '  REGRESSION: %s is %s per unit, baseline %s (band +/-%s%%): fix the code that retired more\n' \
 					"$name" "$per" "$want" "$tolerance"

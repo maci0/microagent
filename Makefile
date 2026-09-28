@@ -584,6 +584,14 @@ check-release:
 # little-endian. Both are declared per target rather than derived from the
 # suffix, so a target added to RELEASE_TARGETS has to say here what it is
 # before it can be published.
+#
+# The version check runs the asset for the host's own platform and architecture,
+# found from `uname` rather than named: an ELF is not runnable on Darwin and a
+# Mach-O is not runnable on Linux, so naming the Linux one unconditionally made
+# this target fail on both macOS runners and on an arm64 Linux host with a
+# message about a version that was never read. A host the release publishes no
+# asset for runs nothing and says so, and the object-format check below still
+# covers all of them.
 check-assets:
 	@set -eu; \
 	test -d dist || { echo "no dist/, run 'make release-assets TAG=v0.2.0' first" >&2; exit 2; }; \
@@ -604,16 +612,30 @@ check-assets:
 	  }; \
 	  want="$(patsubst v%,%,$(TAG))"; \
 	fi; \
-	host="dist/$${prefix}x86_64-linux-musl"; \
-	test -f "$$host" || { \
-	  echo "no $$host: 'make release-assets' builds every published target, and that one is missing" >&2; \
-	  exit 1; \
-	}; \
-	got="$$("$$host" --version)"; \
-	test "$$got" = "microagent $$want" || { \
-	  echo "$$host reports '$got', not 'microagent $$want', so the published asset is not the version this tag names" >&2; \
-	  exit 1; \
-	}; \
+	host_os="$$(uname -s)"; \
+	host_target=; \
+	case "$$host_os" in \
+	Darwin) host_target="$(MUSL_ARCH)-macos" ;; \
+	Linux) host_target="$(MUSL_ARCH)-linux-musl" ;; \
+	*) host_target= ;; \
+	esac; \
+	ran=; \
+	for target in $(RELEASE_TARGETS); do \
+	  if [ "$$target" = "$$host_target" ]; then ran=$$target; break; fi; \
+	done; \
+	if [ -z "$$ran" ]; then \
+	  echo "this host ($$host_os $(MUSL_ARCH)) is not one the release publishes an asset for, so none of them was run here"; \
+	else \
+	  got="$$(dist/$${prefix}$$ran --version)" || got=; \
+	  test -n "$$got" || { \
+	    echo "dist/$${prefix}$$ran did not run on this host, so its version was not checked" >&2; \
+	    exit 1; \
+	  }; \
+	  test "$$got" = "microagent $$want" || { \
+	    echo "dist/$${prefix}$$ran reports '$got', not 'microagent $$want', so the published asset is not the version this tag names" >&2; \
+	    exit 1; \
+	  }; \
+	fi; \
 	for target in $(RELEASE_TARGETS); do \
 	  asset="dist/$${prefix}$$target"; \
 	  test -f "$$asset" || { \
@@ -643,7 +665,11 @@ check-assets:
 	    exit 1; \
 	  }; \
 	done; \
-	echo "$${prefix}* is a $$want build of every published target, and one of them runs here"
+	if [ -n "$$ran" ]; then \
+	  echo "$${prefix}* is a $$want build of every published target, and $${prefix}$$ran runs here"; \
+	else \
+	  echo "$${prefix}* is a $$want build of every published target, none of which runs on this host"; \
+	fi
 
 # Every published target, cross-built, under the name release.yml publishes and
 # update.zig asks for. Running it without TAG is the rehearsal ci.yml does on

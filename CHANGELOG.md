@@ -145,6 +145,19 @@ release, and `microagent update` moves you to it.
   compile error refuses a grace that is not a whole number of one.
 - `microagent update --repo` is spelled `owner/name` in its flag list, the way
   every synopsis of it and every message about it already spelled it.
+- `make check-assets` runs the asset for the host's own platform and
+  architecture, found from `uname`, instead of always the Linux one. An ELF
+  does not run on Darwin and a Mach-O does not run on Linux, so the check a
+  laptop is asked to rehearse a release with failed on both macOS runners and on
+  an arm64 Linux host, and reported a version the run never read. A host the
+  release publishes no asset for now runs nothing, says so, and still gets the
+  object-format check over all four.
+- The band comparison in `bench/instructions.sh` computes its ratio in awk
+  rather than in shell arithmetic, which is only as wide as `long`. The 512 KB
+  read row multiplies a per-unit count of 7.5 million by a thousand, which is
+  past 2^32, so a shell with a 32-bit long wrapped it and the gate called a
+  regression that was only arithmetic. The same convention
+  `bench/gauntlet.sh` already follows for a nanosecond reading.
 - The bidi controls and zero-width characters are written out in every value
   quoted for the operator. They are well-formed UTF-8 carrying no C0 or C1
   control, so the escaping every diagnostic already went through passed them,
