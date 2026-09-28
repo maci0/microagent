@@ -167,6 +167,13 @@ test:
 # The Zig sources the test names are read out of, for `test-one`.
 ZIG_SOURCES := $(wildcard src/*.zig)
 
+# The Python and YAML the linters read, taken from git rather than from the
+# directories that hold them today, for the reason lint-shell names: a glob
+# names the paths as they stand, so a file added outside them is linted by
+# nothing and the gate still passes.
+PY_SOURCES := $(shell git ls-files '*.py')
+YAML_SOURCES := $(shell git ls-files '*.yml' '*.yaml')
+
 test-one:
 	@test -n "$(FILTER)" || { printf 'usage: make test-one FILTER=<test name substring>\n' >&2; exit 2; }
 	@grep -h -o -E '^test "[^"]+"' $(ZIG_SOURCES) | grep -F -q -- "$(FILTER)" || { \
@@ -199,7 +206,8 @@ fmt:
 	$(MAKE) fmt-python
 
 fmt-python:
-	ruff format --config ruff.toml integrations/harbor
+	@test -n "$(PY_SOURCES)" || { echo "no tracked .py file to format" >&2; exit 1; }
+	ruff format --config ruff.toml $(PY_SOURCES)
 
 # The Zig sources have no linter beyond zig fmt, which check runs; the shell,
 # Python and YAML around them do, and a shell that only fails when a benchmark
@@ -287,11 +295,13 @@ lint-shell:
 	git ls-files -z '*.sh' | xargs -0 shellcheck -x
 
 lint-python:
-	ruff check --config ruff.toml integrations/harbor
-	ruff format --check --config ruff.toml integrations/harbor
+	@test -n "$(PY_SOURCES)" || { echo "no tracked .py file to lint" >&2; exit 1; }
+	ruff check --config ruff.toml $(PY_SOURCES)
+	ruff format --check --config ruff.toml $(PY_SOURCES)
 
 lint-yaml:
-	yamllint -c .yamllint .github/workflows/ .github/actions/ .github/dependabot.yml
+	@test -n "$(YAML_SOURCES)" || { echo "no tracked .yml or .yaml file to lint" >&2; exit 1; }
+	yamllint -c .yamllint $(YAML_SOURCES)
 
 # The CI gate, so a formatting, lint or test failure shows up here rather than
 # after a push. Keep these in step with .github/workflows/ci.yml. The release

@@ -107,7 +107,9 @@ does the same for the Harbor adapter. The three linters cover what `zig fmt`
 cannot: the bench
 shell, the Harbor adapter under `integrations/harbor` (rules in
 [ruff.toml](ruff.toml)) and the workflows, the composite toolchain action and
-the Dependabot config (rules in [.yamllint](.yamllint)).
+the Dependabot config (rules in [.yamllint](.yamllint)). Each takes its file
+list from git, so a Python or YAML file added outside the paths named above is
+linted too.
 
 ## Tests
 

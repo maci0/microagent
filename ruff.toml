@@ -54,6 +54,8 @@ lint.select = [
     "FA",    # `__future__` imports, so an annotation cannot be a runtime error
     "FIX",   # modernizations pyupgrade's UP does not cover
     "FURB",  # ruff's own rewrites of the same code
+    "TD",    # a TODO or FIXME in a comment, which the tree carries none of
+    "YTT",   # sys.version and py.version branches, every one of them wrong now
 ]
 
 lint.ignore = [
