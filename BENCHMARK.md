@@ -384,6 +384,32 @@ log, show, blame - fixed subcommands, capped output) and `read`/`edit`/`write`. 
 machine is graphviz's binary, not the AST rewriter, and `semcode` is a dangling symlink into a
 never-built cargo target, so neither is wired up.
 
+## Terminal-Bench 2, 23-task sample
+
+Five hand-picked tasks cannot separate two harnesses, so the comparison moved to a stride sample of
+the real benchmark: every fourth task of Terminal-Bench 2's 89, sorted by name, chosen before the
+run. Same model (`openrouter/deepseek/deepseek-v4-flash`, one OpenRouter key), same task
+containers, same per-task timeouts, harbor 0.23.0, one run each.
+
+| | microagent | opencode 1.18.31 |
+| --- | --- | --- |
+| solved | **11/23 = 0.478** | 7/23 = 0.304 |
+| exceptions | **0** | 12 |
+| wall | 55m31s | 1h17m46s |
+| input tokens | 16.5 M | 8.7 M |
+| output tokens | 377 k | 87 k |
+
+Where the two disagree, both directions exist: microagent solves `largest-eigenval`,
+`password-recovery`, `regex-log`, `git-leak-recovery`, `sanitize-git-repo` and `sqlite-with-gcov`
+that opencode does not, and opencode solves `pypi-server`, `feal-differential-cryptanalysis` and
+`build-pmars` that microagent does not. The categorical difference is the exception column:
+opencode's twelve are nine `AgentSetupTimeoutError` (its own install step timing out inside those
+containers), two `AgentTimeoutError` and one non-zero exit; microagent finished every trial, because
+its budget ends the loop deliberately instead of being killed by the caller.
+
+Statistics, honestly: 11/23 against 7/23 with a standard error near 0.10 each is a difference of
+about 1.7 standard errors — suggestive, not proof. The exception count is not a matter of noise.
+
 ## Matched comparison: microagent vs opencode
 
 Same 13 SWE-bench Verified instances, same model (`openrouter/deepseek/deepseek-v4-flash`, one
