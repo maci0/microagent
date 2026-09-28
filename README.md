@@ -304,7 +304,10 @@ Seven tools, all of them thin wrappers over tools you already have:
 
 The system prompt tells the model to search with ripgrep and rewrite structurally with `ast-grep`
 rather than reimplementing either in the harness. `bash` is there for builds and tests; git state
-has its own tool, with the subcommands fixed here instead of assembled by the model.
+has its own tool, with the subcommands fixed here instead of assembled by the model. Those three
+programs have to be on `PATH`: `search` needs `rg`, `ast` needs `ast-grep`, `git` needs `git`. A
+stock macOS ships only the last of them, so a machine without the other two is told which program
+is missing and how to install it rather than handed an error code.
 
 The stream is delivered at least once, so a turn's tool calls are deduplicated by the id the
 provider gave them before anything is dispatched: a relay that reconnects replays frames, and a

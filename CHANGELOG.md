@@ -40,6 +40,12 @@ release, and `microagent update` moves you to it.
 
 ### Changed
 
+- `search`, `ast` and `git` name the program they delegate to when that program
+  is not installed, and how to install it. `rg` and `ast-grep` are not part of a
+  stock macOS, where this binary ships and runs, so `error: ripgrep failed:
+  FileNotFound` was a code with no program to install and no way to install it.
+  Every other failure, a timeout among them, keeps the wording it had.
+
 - A structural search is no longer counted as an edit. The loop asks for one
   verification turn when the model changed the tree without running a test, and
   `ast` was in the set of tools that could have changed it whether or not the

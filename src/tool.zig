@@ -187,17 +187,59 @@ pub fn forwardInterruptsToToolGroup() void {
     std.posix.sigaction(.TERM, &act, null);
 }
 
+/// How each delegated program is installed, per the platform that ships it.
+/// A macOS machine has git and none of the other two: ripgrep and ast-grep are
+/// not in the base system, so on a platform this release publishes for, the
+/// binary is simply not there. The message names a way to install it rather
+/// than leaving the operator to work out which of the names on their machine
+/// is the one the tool wanted.
+const ripgrep_install = "macOS: 'brew install ripgrep'; Debian/Ubuntu: 'apt-get install ripgrep'";
+const ast_grep_install = "macOS: 'brew install ast-grep'; or 'cargo install ast-grep'";
+const git_install = "macOS: 'brew install git' or the Xcode command line tools; Debian/Ubuntu: 'apt-get install git'";
+
+/// A delegated binary this machine does not have, named as that rather than as
+/// an error code.
+///
+/// The spawn failure for a program that is not on PATH is `FileNotFound`, and
+/// formatted as an error name it reaches the model and the operator as
+/// `error: ripgrep failed: FileNotFound`: no program to install, no way to
+/// install it, and on a stock macOS nothing at all that tells the two apart
+/// from a broken install. Every other failure keeps the shape the call site
+/// already had, so a timeout is still a timeout.
+fn missingProgram(
+    arena: std.mem.Allocator,
+    what: []const u8,
+    install: []const u8,
+    err: anyerror,
+) ![]const u8 {
+    return if (err == error.FileNotFound)
+        std.fmt.allocPrint(arena, "error: {s} is not on PATH, so this tool cannot run: install it ({s})", .{ what, install })
+    else
+        std.fmt.allocPrint(arena, "error: {s} failed: {s}", .{ what, @errorName(err) });
+}
+
 /// A tool that delegates to a binary already on PATH: the caller builds the
 /// argv, and the failure text, the empty result and the two output streams are
 /// handled the same way for each of them.
-fn runSearchTool(io: Io, arena: std.mem.Allocator, argv: []const []const u8, what: []const u8, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map) ![]const u8 {
+fn runSearchTool(
+    io: Io,
+    arena: std.mem.Allocator,
+    argv: []const []const u8,
+    what: []const u8,
+    install: []const u8,
+    ceiling_ms: ?u64,
+    environ_map: ?*const std.process.Environ.Map,
+) ![]const u8 {
     // The cap drains rather than fails, for the reason `runCapped` gives: a
     // broad ripgrep over a large tree passed the capture limit and came back
     // as `error: StreamTooLong` with no output at all, so the model was told
     // the search had failed rather than that it had found too much.
-    var got: Partial = undefined;
+    // Empty rather than undefined: a spawn that fails on its own never reaches
+    // the drain, so it leaves the out-param untouched, and the failure below
+    // reads it to say what the child printed before it did.
+    var got: Partial = .{ .stdout = &.{}, .stderr = &.{}, .dropped = .{ false, false } };
     const res = runCapped(io, arena, argv, max_tool_output * 4, net.durationMs(boundedMs(tool_timeout_ms, ceiling_ms)), environ_map, &got) catch |err|
-        return failedOutput(arena, got, try std.fmt.allocPrint(arena, "error: {s} failed: {s}", .{ what, @errorName(err) }));
+        return failedOutput(arena, got, try missingProgram(arena, what, install, err));
     if (res.stdout.len > 0) return withCaptureNote(arena, res.stdout, res.partial());
     // The cap drains either stream, so a stderr cut short is as much a prefix
     // of the warning as a stdout one is of the matches, and the marker is what
@@ -330,9 +372,11 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
     // default here is 400 lines, and 400 long diff lines pass the capture cap,
     // so a call the model asked to be trimmed came back as
     // `error: git diff failed: StreamTooLong` with no lines at all.
-    var got: Partial = undefined;
+    // Empty rather than undefined, for the reason `runSearchTool` says: a spawn
+    // that fails on its own never writes the out-param.
+    var got: Partial = .{ .stdout = &.{}, .stderr = &.{}, .dropped = .{ false, false } };
     const res = runCapped(io, arena, argv, max_tool_output * 4, net.durationMs(boundedMs(tool_timeout_ms, ceiling_ms)), environ_map, &got) catch |err|
-        return failedOutput(arena, got, try std.fmt.allocPrint(arena, "error: git {s} failed: {s}", .{ cmd, @errorName(err) }));
+        return failedOutput(arena, got, try missingProgram(arena, try std.fmt.allocPrint(arena, "git {s}", .{ cmd }), git_install, err));
     const text = if (res.stdout.len > 0) res.stdout else res.stderr;
     if (text.len == 0) return std.fmt.allocPrint(arena, "(git {s}: no output)", .{cmd});
     // The line cap below is the one git is cut by, and it only says so when it
@@ -1060,7 +1104,7 @@ fn toolSearch(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceilin
         argv.appendAssumeCapacity(g);
     }
     try argv.appendSlice(arena, &.{ "--", pattern, path });
-    return runSearchTool(io, arena, argv.items, "ripgrep", ceiling_ms, environ_map);
+    return runSearchTool(io, arena, argv.items, "ripgrep", ripgrep_install, ceiling_ms, environ_map);
 }
 
 /// Structural search/rewrite through ast-grep. `rewrite` set means the change
@@ -1089,7 +1133,7 @@ fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
     if (rewrite) |r| try argv.appendSlice(arena, &.{ "--rewrite", r, "--update-all" });
     try argv.appendSlice(arena, &.{ "--", path });
 
-    return runSearchTool(io, arena, argv.items, "ast-grep", ceiling_ms, environ_map);
+    return runSearchTool(io, arena, argv.items, "ast-grep", ast_grep_install, ceiling_ms, environ_map);
 }
 
 /// The fewest characters of literal text a pattern must carry for its
@@ -3501,6 +3545,44 @@ test "a tool subprocess cannot see the provider key" {
         null,
     );
     try std.testing.expect(std.mem.indexOf(u8, inherited.stdout, "sk-live-not-a-real-key") != null);
+}
+
+// A delegated program that is not installed is the ordinary case on a stock
+// macOS, which ships git and neither ripgrep nor ast-grep. The spawn reports
+// that as `FileNotFound`, and it used to reach the model and the operator as
+// `error: ripgrep failed: FileNotFound`: no program to install and no way to
+// install it, on a platform this release publishes for.
+test "a delegated program this machine does not have is named, with a way to install it" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The spawn resolves argv[0] against the parent's PATH whatever the child
+    // environment says, so the program that is missing is named here rather
+    // than engineered with a scrubbed PATH: this is the same spawn, failing
+    // the way it fails on a stock macOS with no ripgrep installed.
+    const got = try runSearchTool(
+        std.testing.io,
+        arena,
+        &.{"microagent-no-such-program"},
+        "ripgrep",
+        ripgrep_install,
+        10_000,
+        null,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, got, "ripgrep is not on PATH") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "brew install ripgrep") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "apt-get install ripgrep") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "FileNotFound") == null);
+
+    // Every other failure keeps the shape the call site already had, so a
+    // timeout is still a timeout and a message change cannot be mistaken for
+    // one.
+    const timed_out = try missingProgram(arena, "ripgrep", ripgrep_install, error.Timeout);
+    try std.testing.expectEqualStrings("error: ripgrep failed: Timeout", timed_out);
+    const git_missing = try missingProgram(arena, "git diff", git_install, error.FileNotFound);
+    try std.testing.expect(std.mem.indexOf(u8, git_missing, "git diff is not on PATH") != null);
+    try std.testing.expect(std.mem.indexOf(u8, git_missing, "brew install git") != null);
 }
 
 // A child that closes its own output streams and keeps running used to hang the
