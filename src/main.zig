@@ -2441,7 +2441,7 @@ fn httpDateEpochSeconds(raw: []const u8) ?i64 {
     var parts = std.mem.tokenizeScalar(u8, raw[comma + 1 ..], ' ');
     const day_text = parts.next() orelse return null;
     const month = monthFromName(parts.next() orelse return null) orelse return null;
-    const year = std.fmt.parseInt(i64, parts.next() orelse return null, 10) catch return null;
+    const year = httpDateYear(parts.next() orelse return null) orelse return null;
     const time_text = parts.next() orelse return null;
     const zone = parts.next() orelse return null;
     if (parts.next() != null) return null;
@@ -2474,6 +2474,28 @@ fn httpDateEpochSeconds(raw: []const u8) ?i64 {
 /// reads as a date in the past or the far future by whatever the wrap left
 /// behind, and the wait it asks for is the opposite of the one it named.
 const http_date_year_max: i64 = 9999;
+
+/// The year an IMF-fixdate names, or null when it is not the four digits
+/// RFC 9110 spells it as.
+///
+/// The width is the check, and it is the arithmetic's to have: the year is
+/// multiplied out into days and then into seconds below, and a year read as
+/// an unbounded `i64` reaches those products with nothing to stop it.
+/// `Retry-After: Sun, 06 Nov 9223372036854775807 08:49:37 GMT` overflowed the
+/// day count, panicking a checked build and wrapping a release one into a
+/// deadline the run then sat out for no reason at all. Four digits is what the
+/// grammar allows and what every sender sends, so a longer one is not a year
+/// this header means and the wait falls back to the backoff schedule, which is
+/// where every unreadable value goes.
+fn httpDateYear(text: []const u8) ?i64 {
+    if (text.len != http_date_year_digits) return null;
+    for (text) |c| if (!std.ascii.isDigit(c)) return null;
+    return std.fmt.parseInt(i64, text, 10) catch null;
+}
+
+/// The digits RFC 9110 gives the year in an IMF-fixdate, so a header naming
+/// any other number of them is not one this parser reads.
+const http_date_year_digits = 4;
 
 /// The month a header's three-letter name names, 1 through 12, or null.
 fn monthFromName(name: []const u8) ?u32 {
@@ -4381,16 +4403,21 @@ test "a Retry-After date is an instant, read against the clock it names" {
     try std.testing.expectEqual(@as(?i64, null), httpDateEpochSeconds("Wed, 21 Oct 2026 07:28:00 CET"));
     try std.testing.expectEqual(@as(?i64, null), httpDateEpochSeconds("Wed, 21 Oct 2026 07:28:00"));
     try std.testing.expectEqual(@as(?i64, null), httpDateEpochSeconds("21 Oct 2026 07:28:00 GMT"));
-    // A year no IMF-fixdate can spell. The count is days times 86 400, so a
-    // year wide enough to overflow it wraps: the header then reads as a date
-    // in the past or the far future by whatever the wrap left, which is a wait
-    // the opposite of the one the sender named.
-    try std.testing.expectEqual(@as(?i64, null), httpDateEpochSeconds("Wed, 06 Nov 99999999999999 08:49:37 GMT"));
+    // A year the grammar does not spell as four digits is not a date to read.
+    // An unbounded one reached the day arithmetic with nothing to stop it and
+    // overflowed the epoch, which is a panic in a checked build and a wrapped
+    // deadline in a release one.
     try std.testing.expectEqual(@as(?i64, null), httpDateEpochSeconds("Wed, 06 Nov 9223372036854775807 08:49:37 GMT"));
+    try std.testing.expectEqual(@as(?i64, null), httpDateEpochSeconds("Wed, 06 Nov 99999999999999 08:49:37 GMT"));
+    try std.testing.expectEqual(@as(?i64, null), httpDateEpochSeconds("Sun, 06 Nov 20260 08:49:37 GMT"));
+    try std.testing.expectEqual(@as(?i64, null), httpDateEpochSeconds("Sun, 06 Nov 26 08:49:37 GMT"));
+    try std.testing.expectEqual(@as(?i64, null), httpDateEpochSeconds("Sun, 06 Nov -197 08:49:37 GMT"));
     try std.testing.expectEqual(@as(?i64, null), httpDateEpochSeconds("Wed, 06 Nov 10000 08:49:37 GMT"));
     try std.testing.expectEqual(@as(?i64, null), httpDateEpochSeconds("Wed, 06 Nov -0001 08:49:37 GMT"));
-    // The widest years that are dates, at the century rule's own edge: 2400 is
-    // divisible by four hundred and 9996 by four, so both have a 29 February.
+    // The widest year that does pass is exact, and the widest years that are
+    // dates sit at the century rule's own edge: 2400 is divisible by four
+    // hundred and 9996 by four, so both have a 29 February.
+    try std.testing.expectEqual(@as(?i64, 253_402_300_799), httpDateEpochSeconds("Fri, 31 Dec 9999 23:59:59 GMT"));
     try std.testing.expect(httpDateEpochSeconds("Fri, 29 Feb 2400 00:00:00 GMT") != null);
     try std.testing.expect(httpDateEpochSeconds("Wed, 29 Feb 9996 00:00:00 GMT") != null);
     try std.testing.expectEqual(@as(?i64, null), httpDateEpochSeconds("Wed, 29 Feb 9999 00:00:00 GMT"));
