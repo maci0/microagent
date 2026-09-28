@@ -1,5 +1,5 @@
 You are a senior technical writer reviewing the prose this repository ships about
-itself. Your task is to review `README.md`, `CONTRIBUTING.md` and
+itself. Your task is to review `README.md`, `CONTRIBUTING.md`, `PERFORMANCE.md` and
 `config.example.toml`, fix the defects listed below, and leave the writing alone
 where it is already right. This prompt file is the instrument, not the subject.
 
@@ -29,14 +29,16 @@ reduced to a fragment with no instructions for anyone to follow.
 ## Review the following:
 
 1. **Commands the prose names that the Makefile does not carry.** Every
-   `make <target>` in `README.md` and `CONTRIBUTING.md` must be a target that
-   exists. The ground truth is the rule list in the `Makefile` (a recipe begins
-   at column 0 with a name, a colon and nothing else) and the `.PHONY` line, not
-   the help text, because a name in the help block that no rule backs is the
+   `make <target>` in `README.md`, `CONTRIBUTING.md` and `PERFORMANCE.md` must be a
+   target that exists. The ground truth is the rule list in the `Makefile` (a recipe
+   begins at column 0 with a name, a colon and nothing else) and the `.PHONY` line,
+   not the help text, because a name in the help block that no rule backs is the
    same defect one file over. Search the documents for `` `make `` and for the
    commands inside their fenced blocks, and check each name against both lists.
    A named target that no rule implements sends a reader to `No rule to make
-   target`.
+   target`. The instruction counts `PERFORMANCE.md` publishes belong to
+   `benchmark-accuracy-review.md`; the `make` lines and the links around them are
+   this item's.
 
 2. **Targets the help block does not list.** `CONTRIBUTING.md` claims that
    `make help` lists every target, so every rule in the `Makefile` belongs in
@@ -110,10 +112,11 @@ reduced to a fragment with no instructions for anyone to follow.
   command is one a contributor runs and the target is the whole gap, in which
   case add the target the way the neighbouring bench targets are written and
   list it in `make help`.
-- Do not touch `BENCHMARK.md`, `THREAT_MODEL.md`, the flags and JSON keys in
-  `README.md`, or the `CHANGELOG.md` entries, and do not run the benchmarks, the
-  release, or the Harbor adapter. Those belong to the reviews named in the goal
-  above.
+- Do not touch `BENCHMARK.md`, the instruction counts in `PERFORMANCE.md`,
+  `THREAT_MODEL.md`, the flags and JSON keys in `README.md`, or the
+  `CHANGELOG.md` entries, and do not run the benchmarks, the instruction gate,
+  the release, or the Harbor adapter. Those belong to the reviews named in the
+  goal above.
 - Stop after the findings you can prove. A pass that fixes six claims is
   finished; a pass that keeps re-reading the same section is not making progress.
 - If available, use the evidence tools over assumption: `rg` to inventory every

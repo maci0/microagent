@@ -96,8 +96,9 @@ surface to model.
   the document; a control that is missing is a finding for the maintainers, and adding
   one is a different change with a different review.
 - Do not touch the network, the API key handling, or the update download path, and do not
-  rewrite the CHANGELOG's history. Add an entry under `## [Unreleased]` only when your
-  edit changes what an existing invocation does, which an edit to this document does not.
+  rewrite the CHANGELOG's history. An entry under `## [Unreleased]` belongs to a change
+  in what an existing invocation does; an edit to this document never is one, so this
+  review adds none.
 - Stop after the findings you can prove. A pass that corrects six rows is finished; a pass
   that keeps re-reading the same table is not making progress.
 - If available, use the evidence tools over assumption: `rg` for the entry-point and

@@ -63,30 +63,33 @@ a fragment with no invocation surface to hold a contract.
    only in the help and only in the code is a defect even when the two agree today: it is
    the next edit that breaks them apart.
 
-6. **Exit codes that the error paths do not return.** The help promises 0 for a finished
-   run, 1 for a failed run, and 2 for a wrong command line. Check `usageError`,
-   `configError`, `updateUsageError`, and every other `noreturn` error printer in the two
-   files, and confirm each one exits with the code its class of failure implies.
+6. **Exit codes that the error paths do not return.** The help's "exit status" paragraph
+   promises five: 0 for a finished run, 1 for a failed run, 2 for a wrong command line,
+   3 for a run stopped at a ceiling, and 130 for an interrupted one. Check all five.
+   `usageError`, `configError`, `updateUsageError`, and every other `noreturn` error
+   printer in the two files must exit with the code its class of failure implies, and a
+   code the help names with no path that returns it is a finding the other direction.
 
-7. **Update subcommand contract.** The help advertises `update [-c|--check]
-   [--repo owner/name]`, that `--check` writes the release page URL to stdout and installs
-   nothing, and that `GITHUB_TOKEN` lifts the rate limit. Check the update help text, the
-   argument loop in `src/update.zig` (search `"--repo"`), the token lookup, and the `README.md`
-   mention of the subcommand for agreement on the flag spellings, including the
-   `--repo=OWNER/NAME` form, and on which paths fetch an asset.
+7. **Update subcommand contract.** The help advertises `microagent update [--check]
+   [--repo owner/name]`, with `-c` as the short of `--check` on the flag's own line
+   and `--repo=OWNER/NAME` named beside it; that `--check` writes the release page URL
+   to stdout and installs nothing, and that `GITHUB_TOKEN` lifts the rate limit. Check
+   the update help text, the argument loop in `src/update.zig` (search `"--repo"`), the
+   token lookup, and the `README.md` mention of the subcommand for agreement on the flag
+   spellings, including the `--repo=OWNER/NAME` form, and on which paths fetch an asset.
 
 8. **Emitted JSON that no document matches.** `usage_fields` in `src/chat.zig` fixes
-   the order of the five token counters, and it is one string in all three writers: the
-   usage line, the per-response usage object, and the session log, where `sessionRecord`
-   in `src/session.zig` writes it inside a record whose own keys are `ts`, `cwd`,
-   `model`, `finish_reason` and `elapsed_ms`. Compare those writers against the README
-   and CHANGELOG claims about the log. A key renamed in the writer but not in the prose,
-   or a counter emitted in a different order than promised, is a defect: a consumer
-   parses this.
+   the order of the five token counters, and it is one string in the two writers that
+   print them: `logUsage` in `src/main.zig`, which writes the per-response usage line,
+   and `sessionRecord` in `src/session.zig`, which writes it inside a record whose own
+   keys are `ts`, `cwd`, `model`, `finish_reason` and `elapsed_ms`. Compare both writers
+   against the README and CHANGELOG claims about the log. A key renamed in a writer but
+   not in the prose, or a counter emitted in a different order than promised, is a
+   defect: a consumer parses this.
 
 9. **Tools the model is offered.** The help and the README call the tool set seven tools.
-   Read the schemas in the `tools` array the request body is built from in
-   `src/main.zig` and name them one by one; a repo-wide count of the `"type":"function"`
+   Read the schemas in `tools_json` in `src/main.zig`, the array the request body is
+   built from, and name them one by one; a repo-wide count of the `"type":"function"`
    literal also matches a test fixture elsewhere in the file, and a count taken that way
    reports a tool that is not offered. Flag any name the prose does not carry, and any
    tool the prose carries that the array does not. The count and byte size

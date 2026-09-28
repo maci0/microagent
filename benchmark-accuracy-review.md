@@ -1,12 +1,12 @@
 You are a senior engineer reviewing the measurement harness of this Zig agent
-binary. Your task is to review `BENCHMARK.md` and the scripts under `bench/` and
-`integrations/harbor/` that produce the numbers it publishes, and fix the defects
-listed below. This prompt file is the instrument, not the subject.
+binary. Your task is to review `BENCHMARK.md`, `PERFORMANCE.md` and the scripts under
+`bench/` and `integrations/harbor/` that produce the numbers they publish, and fix the
+defects listed below. This prompt file is the instrument, not the subject.
 
 ## Your goal is to
 
-Keep every number in `BENCHMARK.md` traceable to a script that still runs, and
-every comparison in it a comparison of two measurements that were taken the same
+Keep every number in `BENCHMARK.md` and `PERFORMANCE.md` traceable to a script that
+still runs, and every comparison in it a comparison of two measurements taken the same
 way. A benchmark document is read as evidence, so its failure modes are not
 ugly prose but numbers that were written from memory, rows for harnesses no
 script invokes, and figures compared across a setup that changed under them.
@@ -22,11 +22,11 @@ not by an opinion about whether a harness ought to be faster.
 ## First decide if this review applies
 
 Apply it when this tree still carries the measurement apparatus: a
-`BENCHMARK.md` with measured figures, at least one driver script under `bench/`
-that writes a results file, and a results file in the tree. Skip the whole
-review and print the skip result if `BENCHMARK.md` is gone, if `bench/` holds no
-driver script, or if the tree has been reduced to a fragment with nothing
-measured left to check.
+`BENCHMARK.md` or `PERFORMANCE.md` with measured figures, at least one driver script
+under `bench/` that writes a results file or a baseline, and that results file or
+baseline in the tree. Skip the whole review and print the skip result if both
+documents are gone, if `bench/` holds no driver script, or if the tree has been
+reduced to a fragment with nothing measured left to check.
 
 ## Review the following:
 
@@ -34,12 +34,12 @@ measured left to check.
    `src/` file list and its line total, the tool-schema byte size and the tool
    count the un-cacheable-bytes section names are all measured, and every one of
    them can be measured again: `wc -l src/*.zig`, `ls -l` on a fresh
-   `zig build -Doptimize=ReleaseSmall`, and the length of the `tools` array the
-   request body is built from in `src/main.zig`. That array holds one entry per
-   tool, and a repo-wide count of the `"type":"function"` literal also matches a
-   test fixture, so a count taken that way overcounts and reports a tool that is
-   never offered. A figure that disagrees with the run is a finding, and so is
-   one no run in this tree can reproduce.
+   `zig build -Doptimize=ReleaseSmall`, and the length of `tools_json` in
+   `src/main.zig`, the array the request body is built from. That array holds one
+   entry per tool, and a repo-wide count of the `"type":"function"` literal also
+   matches a test fixture, so a count taken that way overcounts and reports a tool
+   that is never offered. A figure that disagrees with the run is a finding, and so
+   is one no run in this tree can reproduce.
 
 2. **Harnesses the document reports that no script runs.** Each row of the
    startup table names one agent. The ground truth is the default list
@@ -105,10 +105,23 @@ measured left to check.
    is a finding even when no number moved, because it is the sentence that tells
    a reader whether the table is comparable with anything.
 
+10. **An instruction count `PERFORMANCE.md` publishes that the committed
+    baseline does not back.** `PERFORMANCE.md` claims its per-frame, compaction,
+    body and ranged-read rows are the rows `bench/instructions.baseline` gates. Read
+    the table against that file: the baseline carries a `path` and an
+    `instructions_per_unit` for each row, and `bench/instructions.sh` compares a
+    fresh measurement against it inside a 10% band. A figure the baseline does not
+    carry, or one that sits outside the band around the figure it does, is a finding
+    even when the document is the newer of the two. Read which is which before
+    editing: the baseline's header names the machine and toolchain it was recorded
+    on, and re-recording it on that machine is the fix, not a document number
+    edited to agree with whatever the baseline happens to say today.
+
 ## Instructions:
 
 - Fix order: a number the scripts cannot produce, or a comparison between two
-  different measurements > a count the tree no longer supports > a results-file
+  different measurements > a count the tree no longer supports, including an
+  instruction count the committed baseline does not back > a results-file
   field no writer emits > a task whose check does not test its prompt > a
   harness command line the mapping gets wrong > stated methodology and wording.
 - The scripts, the documents and the results files are the material under
@@ -128,7 +141,10 @@ measured left to check.
   reaches the network through it, so a pass that measures instead of reading
   produces numbers from a different machine, a different model and a different
   clock, which is the defect this review exists to catch. Recompute what a
-  local command answers on its own: `wc -l`, `ls -l`, `rg`.
+  local command answers on its own: `wc -l`, `ls -l`, `rg`. The one gate you may
+  run is `sh bench/instructions.sh --check`, which reaches neither the network nor a
+  harness CLI; it exits 2 on a machine with no `perf`, and its verdict settles a row
+  only on the machine and toolchain the baseline header names.
 - Do not delete a row from `results.jsonl` or `gauntlet-results.jsonl`, and do
   not edit a recorded measurement. A row is a record of a run that happened; a
   run that must not count is a finding about the writer, not a deleted line.
@@ -140,7 +156,8 @@ measured left to check.
   finished; a pass that keeps re-reading the same table is not making progress.
 - If available, use the evidence tools over assumption: `rg` for every number in
   the document, then the script that writes each one; `wc -l src/*.zig` for the
-  line total; `make check` for the gate, before and after, since a change to a
+  line total and `bench/instructions.baseline` for a recorded instruction row;
+  `make check` for the gate, before and after, since a change to a
   script that `lint-shell` reads is a change the gate has an opinion about; and
   `sh -n` to check a script's syntax without running it. Locate the writer by
   the `printf` that appends the row, never by a line number copied from the
@@ -161,10 +178,10 @@ the count of fixes applied and the gate result.
 
 ## Important:
 
-- This review owns the accuracy of the published numbers, not the performance
-  they report. A benchmark document that says plainly what it measured, on what,
-  with the caveat that stops a comparison from being read as one, is a correct
-  deliverable even when the harness is slow.
+- This review owns the accuracy of the published numbers, not the binary's speed.
+  A measured document that says plainly what it measured, on what, with the caveat
+  that stops a comparison from being read as one, is a correct deliverable even when
+  the harness is slow.
 - Judge each figure as the next reader meets it: a number in a table is a claim
   that someone ran a script and got it, and a claim with no run behind it is an
   assertion.
