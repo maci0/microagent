@@ -1555,7 +1555,12 @@ fn toolRead(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     const offset: usize = @intCast(@max(1, num(args.get("offset"))));
     const limit: usize = if (args.get("limit")) |v| @intCast(num(v)) else std.math.maxInt(usize);
     var buf: std.ArrayList(u8) = .empty;
-    var lines = std.mem.splitScalar(u8, raw, '\n');
+    // A trailing newline ends the last line rather than starting an empty one,
+    // so the split's final empty segment is not a line of the file. Counting it
+    // hands the model a line that is not there, and every line after the window
+    // shifts by one.
+    const body = if (raw.len > 0 and raw[raw.len - 1] == '\n') raw[0 .. raw.len - 1] else raw;
+    var lines = std.mem.splitScalar(u8, body, '\n');
     var n: usize = 0;
     var taken: usize = 0;
     while (lines.next()) |line| : (n += 1) {
@@ -2747,6 +2752,40 @@ test "both pipes past the cap drain together, so the child never wedges" {
     try std.testing.expectEqualStrings("b" ** 8, noisy.stderr[0..8]);
 }
 
+// The search tool's whole contract is the argv it hands ripgrep: a model-named
+// pattern and path reach a real process, so `--` has to keep a pattern that
+// looks like a flag from being read as one, and the reply has to say the line
+// and the file it came from. A search that found nothing says so, rather than
+// returning an empty result the model reads as a file it should re-read.
+test "search returns file:line matches, and says so when there are none" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const orig = try chdirToTmp(arena, tmp);
+    defer std.process.setCurrentPath(std.testing.io, orig) catch {};
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.txt", .data = "needle here\nother\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "b.md", .data = "no match in this one\n" });
+
+    var args: std.json.ObjectMap = .empty;
+    try args.put(arena, "pattern", .{ .string = "needle" });
+    const found = try toolSearch(std.testing.io, arena, args);
+    try std.testing.expect(std.mem.indexOf(u8, found, "a.txt:1:needle here") != null);
+    // The file that does not hold the pattern is not in the answer.
+    try std.testing.expect(std.mem.indexOf(u8, found, "b.md") == null);
+
+    // A glob narrows it, and a pattern that matches nothing under that glob is
+    // reported as no matches rather than as an empty file list.
+    try args.put(arena, "glob", .{ .string = "*.md" });
+    try std.testing.expectEqualStrings("(no matches)", try toolSearch(std.testing.io, arena, args));
+
+    // A pattern starting with a dash is a pattern, not an option.
+    try args.put(arena, "pattern", .{ .string = "--help" });
+    try std.testing.expectEqualStrings("(no matches)", try toolSearch(std.testing.io, arena, args));
+}
+
 test "a gap in the tool-call indexes leaves no nameless call behind" {
     const gpa = std.testing.allocator;
     var run_state = std.heap.ArenaAllocator.init(gpa);
@@ -2787,6 +2826,79 @@ test "a saturated token count does not overflow the run total" {
     usage.add(&ordinary);
     try std.testing.expectEqual(std.math.maxInt(u64), usage.prompt);
     try std.testing.expectEqual(std.math.maxInt(u64), usage.total);
+}
+
+// The usage line is the only stdout a caller parses, and a monitor takes the
+// largest value it has seen rather than summing, because the run total is
+// cumulative. That only holds if every counter grows and a turn reporting
+// nothing leaves the previous total standing: a reset to zero reads as a run
+// that stopped spending tokens, which is the opposite of what happened.
+test "the run's usage total only ever grows" {
+    var usage: Usage = .{};
+    var first: ChatResult = .{ .prompt_tokens = 100, .cached_tokens = 40, .completion_tokens = 10, .reasoning_tokens = 4, .total_tokens = 110 };
+    usage.add(&first);
+    try std.testing.expectEqual(@as(u64, 100), usage.prompt);
+    try std.testing.expectEqual(@as(u64, 40), usage.cached);
+    try std.testing.expectEqual(@as(u64, 10), usage.completion);
+    try std.testing.expectEqual(@as(u64, 4), usage.reasoning);
+    try std.testing.expectEqual(@as(u64, 110), usage.total);
+
+    var second: ChatResult = .{ .prompt_tokens = 900, .cached_tokens = 832, .completion_tokens = 18, .total_tokens = 918 };
+    usage.add(&second);
+    try std.testing.expectEqual(@as(u64, 1000), usage.prompt);
+    try std.testing.expectEqual(@as(u64, 872), usage.cached);
+    try std.testing.expectEqual(@as(u64, 28), usage.completion);
+    try std.testing.expectEqual(@as(u64, 4), usage.reasoning);
+    try std.testing.expectEqual(@as(u64, 1028), usage.total);
+
+    // A turn the provider billed nothing adds nothing, and does not rewind the
+    // run to the zero it reported.
+    usage.add(&.{});
+    try std.testing.expectEqual(@as(u64, 1000), usage.prompt);
+    try std.testing.expectEqual(@as(u64, 1028), usage.total);
+}
+
+// The assistant turn is the half of the round trip the provider reads back: a
+// tool call carries its arguments as the string they streamed, whether or not
+// they are JSON yet, and a turn that is only a tool call has no content to say,
+// which the wire spells as null rather than an empty string.
+test "the assistant turn carries a tool call with its arguments as streamed" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    // No tool calls: plain content, and no `tool_calls` key at all.
+    var said: ChatResult = .{};
+    try said.content.appendSlice(arena, "hi");
+    try std.testing.expectEqualStrings("{\"role\":\"assistant\",\"content\":\"hi\"}", try assistantMessage(arena, &said));
+
+    // A turn that only calls a tool: content is null, not "", and the arguments
+    // go out as the raw string rather than being re-parsed and re-spelled.
+    var result: ChatResult = .{};
+    try result.calls.append(arena, .{
+        .id = try arena.dupe(u8, "call_1"),
+        .name = try arena.dupe(u8, "read"),
+    });
+    try result.calls.items[0].args.appendSlice(arena, "{\"path\":\"a");
+    const called = try assistantMessage(arena, &result);
+    try std.testing.expectEqualStrings(
+        "{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[" ++
+            "{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"read\"," ++
+            "\"arguments\":\"{\\\"path\\\":\\\"a\"}}]}",
+        called,
+    );
+
+    // Content alongside a call is kept: a provider that narrates and then calls
+    // is ordinary, and dropping the narration loses what it said.
+    var both: ChatResult = .{};
+    try both.content.appendSlice(arena, "looking");
+    try both.calls.appendSlice(arena, result.calls.items);
+    const narrated = try assistantMessage(arena, &both);
+    var parsed = try std.json.parseFromSlice(std.json.Value, arena, narrated, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try std.testing.expectEqualStrings("looking", root.get("content").?.string);
+    try std.testing.expectEqual(@as(usize, 1), root.get("tool_calls").?.array.items.len);
 }
 
 test "a truncated tool result keeps whole codepoints" {
@@ -3020,11 +3132,7 @@ test "edit replaces one match, or every match when asked" {
     const arena = state.allocator();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-
-    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const tmp_path = cwd_buf[0..try tmp.dir.realPath(std.testing.io, &cwd_buf)];
-    const orig = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, ".", arena);
-    try std.process.setCurrentPath(std.testing.io, tmp_path);
+    const orig = try chdirToTmp(arena, tmp);
     defer std.process.setCurrentPath(std.testing.io, orig) catch {};
 
     var args: std.json.ObjectMap = .empty;
@@ -3045,6 +3153,113 @@ test "edit replaces one match, or every match when asked" {
     try args.put(arena, "replace_all", .{ .bool = true });
     try std.testing.expectEqualStrings("replaced 2 occurrence(s) in a.txt", try toolEdit(std.testing.io, arena, args));
     try std.testing.expectEqualStrings("y and y", try tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
+}
+
+/// Moves the process into `tmp` for a test that drives a file tool, and returns
+/// the directory it came from. The tools resolve paths against the process
+/// directory, so a test that names a file has to be standing in the directory
+/// that holds it. The caller restores the returned path: the temp directory is
+/// removed when the test ends, and a process left inside a deleted directory
+/// breaks every test after it.
+fn chdirToTmp(arena: std.mem.Allocator, tmp: std.testing.TmpDir) ![]const u8 {
+    const orig = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, ".", arena);
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_path = cwd_buf[0..try tmp.dir.realPath(std.testing.io, &cwd_buf)];
+    try std.process.setCurrentPath(std.testing.io, tmp_path);
+    return orig;
+}
+
+// The read tool's window is the one part of it the model drives line by line: a
+// wrong offset shows the model a region of the file that is not there, and it
+// then edits text it believes it read. `offset` is 1-based, so offset 2 is the
+// second line, and an offset past the end is empty rather than an error.
+test "read returns the file whole, and only the lines it was asked for" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const orig = try chdirToTmp(arena, tmp);
+    defer std.process.setCurrentPath(std.testing.io, orig) catch {};
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.txt", .data = "l1\nl2\nl3\nl4\n" });
+
+    // No window at all is the file's own bytes, trailing newline and all: the
+    // no-window path returns `raw` rather than reassembling the lines.
+    var args: std.json.ObjectMap = .empty;
+    try args.put(arena, "path", .{ .string = "a.txt" });
+    try std.testing.expectEqualStrings("l1\nl2\nl3\nl4\n", try toolRead(std.testing.io, arena, args));
+
+    try args.put(arena, "offset", .{ .integer = 2 });
+    try args.put(arena, "limit", .{ .integer = 2 });
+    try std.testing.expectEqualStrings("l2\nl3\n", try toolRead(std.testing.io, arena, args));
+
+    // An offset of 0 is the model's off-by-one, and it reads as line 1 rather
+    // than skipping the first line or failing.
+    try args.put(arena, "offset", .{ .integer = 0 });
+    try std.testing.expectEqualStrings("l1\nl2\n", try toolRead(std.testing.io, arena, args));
+
+    // An offset past the last line is an empty window, not an error: the model
+    // paged off the end of a file it had just been told the length of.
+    try args.put(arena, "offset", .{ .integer = 99 });
+    try std.testing.expectEqualStrings("", try toolRead(std.testing.io, arena, args));
+
+    // A file with no trailing newline still reads back whole, so the window
+    // does not invent a line the file does not have.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "b.txt", .data = "x\ny" });
+    var noeol: std.json.ObjectMap = .empty;
+    try noeol.put(arena, "path", .{ .string = "b.txt" });
+    try noeol.put(arena, "offset", .{ .integer = 1 });
+    try std.testing.expectEqualStrings("x\ny\n", try toolRead(std.testing.io, arena, noeol));
+
+    // A window that covers a whole newline-terminated file ends at its last
+    // line. The split's final empty segment is not a line of the file, so
+    // counting it would report a 2-line file as 3 lines and hand the model a
+    // line it cannot find in the file.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "c.txt", .data = "l1\nl2\n" });
+    var covered: std.json.ObjectMap = .empty;
+    try covered.put(arena, "path", .{ .string = "c.txt" });
+    try covered.put(arena, "limit", .{ .integer = 10 });
+    try std.testing.expectEqualStrings("l1\nl2\n", try toolRead(std.testing.io, arena, covered));
+
+    // The last line of such a file is addressable: a 2-line file has no line 3.
+    try covered.put(arena, "offset", .{ .integer = 2 });
+    try std.testing.expectEqualStrings("l2\n", try toolRead(std.testing.io, arena, covered));
+    try covered.put(arena, "offset", .{ .integer = 3 });
+    try std.testing.expectEqualStrings("", try toolRead(std.testing.io, arena, covered));
+
+    // A file it cannot open is named, not reported as an empty one.
+    var missing: std.json.ObjectMap = .empty;
+    try missing.put(arena, "path", .{ .string = "nope.txt" });
+    try std.testing.expectEqualStrings(
+        "error: cannot read nope.txt: FileNotFound",
+        try toolRead(std.testing.io, arena, missing),
+    );
+}
+
+// The write tool is how the model lands a new file, so a missing parent
+// directory is the case that decides whether a run can create one at all, and
+// the byte count in the reply is what the model checks its own payload against.
+test "write creates the parent directories and overwrites what was there" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const orig = try chdirToTmp(arena, tmp);
+    defer std.process.setCurrentPath(std.testing.io, orig) catch {};
+
+    var args: std.json.ObjectMap = .empty;
+    try args.put(arena, "path", .{ .string = "sub/deep/c.txt" });
+    try args.put(arena, "content", .{ .string = "hello" });
+    try std.testing.expectEqualStrings("wrote 5 bytes to sub/deep/c.txt", try toolWrite(std.testing.io, arena, args));
+    try std.testing.expectEqualStrings("hello", try tmp.dir.readFileAlloc(std.testing.io, "sub/deep/c.txt", arena, .limited(64)));
+
+    // The second write replaces rather than appends, and the count is of the
+    // new content, not of the file.
+    try args.put(arena, "content", .{ .string = "bye" });
+    try std.testing.expectEqualStrings("wrote 3 bytes to sub/deep/c.txt", try toolWrite(std.testing.io, arena, args));
+    try std.testing.expectEqualStrings("bye", try tmp.dir.readFileAlloc(std.testing.io, "sub/deep/c.txt", arena, .limited(64)));
 }
 
 // A tool call must take its whole process tree down with it. The command
