@@ -280,10 +280,10 @@ Seven tools, all of them thin wrappers over tools you already have:
 
 | tool | what it does |
 | --- | --- |
-| `bash` | `/bin/sh -c`, 120 s default timeout (600 s ceiling on what the model may ask for), output capped at 24 KB; a command naming a credentials file is refused, and the child does not inherit the provider key |
+| `bash` | `/bin/sh -c`, 120 s default timeout (600 s ceiling on what the model may ask for), output capped at 24 KB; a command naming a credentials file is refused, and the child inherits no provider credential |
 | `read` | read a file, optional line offset/limit; refuses credentials (`.env`, key and keystore files, anything under `.secrets` or `.ssh`) |
-| `write` | create or overwrite a file, parents created; refuses a call with no `content` |
-| `edit` | exact string replacement, refuses an ambiguous match unless `replace_all`, and refuses a `new_string` that contains `old_string` so a repeated call cannot nest the change again |
+| `write` | create or overwrite a file, parents created; refuses a credentials path, and a call with no `content` |
+| `edit` | exact string replacement, refuses a credentials path, refuses an ambiguous match unless `replace_all`, and refuses a `new_string` that contains `old_string` so a repeated call cannot nest the change again |
 | `search` | `rg --line-number --no-heading`, optional glob; credentials files excluded |
 | `ast` | `ast-grep run` for structural match, or `--rewrite --update-all` to apply one; credentials files excluded |
 | `git` | read-only `status`, `diff`, `log`, `show`, `blame`, capped at 400 lines; a credentials path is refused |
@@ -304,11 +304,12 @@ conversation is re-sent to the provider on every turn after it, so a `read` of `
 an `id_ed25519` or `$HOME/.secrets/openrouter` would ship a key to a third party and keep
 shipping it. `search` and `ast` leave the same files out of their results, `git` refuses one
 named as a path, and `bash` refuses a command whose words name one, because a match, a patch
-and a `cat` are all tool results. The run's own API key is the other half, and it is closed
-structurally: every tool subprocess gets the environment minus the four variables the key is
-read from, so `bash: env` and `bash: printenv` have nothing to print. What is left is the name
-rule itself: a credential the tables do not recognize, and a path a command assembles at run
-time, are still read.
+and a `cat` are all tool results. `write` and `edit` refuse the same names, because a run that
+may not read a key file has no business replacing one with a guess. The run's own credentials
+are the other half, and it is closed structurally: every tool subprocess gets the environment
+minus the variables this binary sends in an `Authorization` header, so `bash: env` and
+`bash: printenv` have nothing to print. What is left is the name rule itself: a credential the
+tables do not recognize, and a path a command assembles at run time, are still read.
 
 A transient failure — 429, any 5xx, a connection that dies before the request reached the provider —
 is retried twice with 1 s and 2 s of backoff before the run exits non-zero, so a provider's bad

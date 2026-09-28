@@ -703,6 +703,14 @@ fn isCredentialPath(path: []const u8) bool {
     return isCredentialName(std.fs.path.basename(std.mem.trimEnd(u8, path, "/")));
 }
 
+/// The tools that change a file rather than report one. The credential refusal
+/// names them because the advice a reading tool gets is wrong for them: there
+/// is no reading of a key file that should be going on, so the answer is the
+/// operator rather than another tool.
+fn isWriting(tool: []const u8) bool {
+    return std.mem.eql(u8, tool, "write") or std.mem.eql(u8, tool, "edit");
+}
+
 /// What a tool returns instead of a credential. It names the file, so a model
 /// that asked for it knows which one was refused, and it says what to do
 /// instead, because a bare error reads as a broken tool and gets retried.
@@ -711,9 +719,12 @@ fn credentialRefusal(arena: std.mem.Allocator, tool: []const u8, path: []const u
     // The `bash` branch sends the model to the operator because `bash` runs
     // the same name check over its own words: telling a model that `read` just
     // refused to run the command that fetches the bytes walks it into the same
-    // refusal one line later.
+    // refusal one line later. A tool that would have overwritten the file says
+    // the same thing, because there is no reading of it anyone should be doing.
     const advice = if (std.mem.eql(u8, tool, "bash"))
         "`bash` does not read it either. Ask the operator for the value you need rather than printing a key."
+    else if (isWriting(tool))
+        "No tool rewrites a credentials file. Ask the operator to make that change rather than replacing a key with a guess."
     else
         "Run the command that needs the key through `bash`, and do not print it.";
     return std.fmt.allocPrint(
@@ -840,6 +851,12 @@ fn readLines(io: Io, arena: std.mem.Allocator, path: []const u8, offset: usize, 
 
 fn toolWrite(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     const path = chat.str(args.get("path")) orelse return std.fmt.allocPrint(arena, "error: missing path", .{});
+    // The same refusal `read` makes. A run that cannot read a key file has no
+    // business rewriting one either: `write` replaces the file whole, so a
+    // model that gets the path from a file in the tree and the content from a
+    // guess replaces the operator's working key with a placeholder, and the
+    // next run of the agent cannot authenticate at all.
+    if (isCredentialPath(path)) return try credentialRefusal(arena, "write", path);
     // A call that names a path and no content is a call the model got cut
     // short on, not one asking for an empty file: a `write` is the one tool
     // result a run cannot undo, and emptying a source file is worse than
@@ -898,6 +915,11 @@ pub fn writeFileAtomic(io: Io, dir: std.Io.Dir, path: []const u8, bytes: []const
 
 fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     const path = chat.str(args.get("path")) orelse return std.fmt.allocPrint(arena, "error: missing path", .{});
+    // The same refusal `read` makes. An edit reads the whole file to find its
+    // match, and the operator's key is the one file in a tree where a match the
+    // model guessed at and a rewrite of the value beside it is damage nobody
+    // asked for.
+    if (isCredentialPath(path)) return try credentialRefusal(arena, "edit", path);
     const old = chat.str(args.get("old_string")) orelse return std.fmt.allocPrint(arena, "error: missing old_string", .{});
     const new = chat.str(args.get("new_string")) orelse return std.fmt.allocPrint(arena, "error: missing new_string", .{});
     const all = if (args.get("replace_all")) |v| v == .bool and v.bool else false;
@@ -1959,6 +1981,47 @@ test "the read tool refuses a credentials path through dispatch" {
     const refused = try dispatch(arena, "read", "{\"path\":\".env\"}");
     try std.testing.expect(std.mem.startsWith(u8, refused, "refused: .env is a credentials file"));
     try std.testing.expect(std.mem.indexOf(u8, refused, "SECRET=") == null);
+}
+
+// A refusal only `read` carries is a refusal the other two writing tools walk
+// around, and the model is the one choosing which tool to call. `write`
+// replaces a file whole and `edit` reads it to find its match, so a path the
+// run may not read is a path the run must not rewrite either: the operator's
+// key is the one file where a guessed replacement is damage nobody asked for.
+test "the writing tools refuse a credentials path through dispatch" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const wrote = try dispatch(arena, "write", "{\"path\":\"/home/someone/.secrets/openrouter\",\"content\":\"sk-guess\"}");
+    try std.testing.expect(std.mem.startsWith(u8, wrote, "refused: /home/someone/.secrets/openrouter is a credentials file"));
+    try std.testing.expect(std.mem.indexOf(u8, wrote, "sk-guess") == null);
+    // The advice cannot send the model to `bash` for this one, because `bash`
+    // refuses the same file: a refusal that names the way round itself is the
+    // hole the check exists to close.
+    try std.testing.expect(std.mem.indexOf(u8, wrote, "`bash`") == null);
+    try std.testing.expect(std.mem.indexOf(u8, wrote, "operator") != null);
+
+    const edited = try dispatch(arena, "edit", "{\"path\":\".env\",\"old_string\":\"A=1\",\"new_string\":\"A=2\"}");
+    try std.testing.expect(std.mem.startsWith(u8, edited, "refused: .env is a credentials file"));
+    try std.testing.expect(std.mem.indexOf(u8, edited, "A=2") == null);
+
+    // An ordinary file is still writable and still editable, so the refusal is
+    // the name rule and not a broken tool. It goes in a temporary directory
+    // rather than the working tree, because a test that leaves a file behind
+    // in the repository it runs from is a test that changes what it measures.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(std.testing.io, &root_buf)];
+    const plain = try std.fs.path.join(arena, &.{ root, "notes.txt" });
+    const ok = try dispatch(arena, "write", try std.fmt.allocPrint(
+        arena,
+        "{{\"path\":\"{s}\",\"content\":\"x\"}}",
+        .{plain},
+    ));
+    try std.testing.expect(std.mem.startsWith(u8, ok, "wrote "));
+    try std.testing.expectEqualStrings("x", try tmp.dir.readFileAlloc(std.testing.io, "notes.txt", arena, .limited(64)));
 }
 
 // The refusal `read` makes is no protection to the operator when the same

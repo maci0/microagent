@@ -278,6 +278,22 @@ release, and `microagent update` moves you to it.
   it each review exited 127 into a log nothing reads, every count kept its
   default of zero, and the row was appended to `bench/gauntlet-results.jsonl` as
   a review that had run and found nothing, beside real rows in the same file.
+- `GITHUB_TOKEN` no longer reaches a tool subprocess. The environment every
+  tool runs under was scrubbed of the four variables the provider key is read
+  from and nothing else, so an operator who had exported the token
+  `microagent update` authenticates with, which this binary sends as an
+  `Authorization` header, handed it to every child: `bash: printenv` put it in
+  the tool result, and a tool result is re-sent to the provider on every turn
+  after it. The scrub is now one list of every variable this binary reads a
+  credential out of.
+- `write` and `edit` refuse a credentials path, the way `read`, `search`,
+  `ast`, `git` and `bash` already did. A run that cannot read `.env` or
+  `$HOME/.secrets/openrouter` could still overwrite one, and the model chooses
+  which tool to call: `write` replaces a file whole and `edit` reads it to find
+  its match, so a path guessed from a file in the tree replaced the operator's
+  working key with a placeholder and the next run could not authenticate. The
+  refusal text for a writing tool names the operator rather than sending the
+  model to `bash`, which refuses the same file.
 - A `Retry-After` sent as an HTTP date is read, not ignored. RFC 9110 lets a
   server answer with either a count of seconds or an instant, and the run only
   read the first: a provider or a gateway that computed a deadline against its
