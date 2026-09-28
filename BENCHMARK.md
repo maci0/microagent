@@ -503,6 +503,28 @@ returns `401 The API Key appears to be invalid or may have expired` against
 `https://api.kimi.com/coding/v1`. A zero recorded from a failed setup would be a lie, so there is no
 kimi column rather than a zero column.
 
+## Terminal-Bench 2, second pass, and what it says about method
+
+A repeat of the same 23-task sample, run for both harnesses **in parallel**, came back much worse
+for both: microagent 5/23 with 9 exceptions (all `RuntimeError`), opencode 4/23 with 19 (5 setup
+timeouts, 14 `RuntimeError`). Two things were wrong with that run, and neither was the agent:
+
+- It ran two 23-task jobs at once on one machine, so every trial competed for the same four cores
+  and the same rate limit.
+- The adapter in that process was the one loaded at start-up, before the fix that scores an
+  incomplete (exit 3) run's tree instead of raising. Every unfinished microagent trial was therefore
+  recorded as an exception and thrown away, including trials whose fix was on disk.
+
+| pass | conditions | microagent | opencode |
+| --- | --- | --- | --- |
+| 1 | sequential, one harness at a time | **11/23**, 0 exceptions | 7/23, 12 exceptions |
+| 2 | both in parallel, pre-fix adapter | 5/23, 9 exceptions | 4/23, 19 exceptions |
+
+Pooled across both passes microagent is 16/46 against opencode 11/46, but the honest reading is
+that only pass 1 is a valid comparison: pass 2 measured machine load and an adapter bug. A third
+pass runs sequentially with the fixed adapter; its result replaces this row when it lands, rather
+than being averaged into a contaminated one.
+
 ## Where the 13-instance SWE-bench sample stands
 
 Every run of the same 13 instances, same model, same containers. This is the whole record, because
