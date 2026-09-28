@@ -274,6 +274,8 @@ pub fn main(init: std.process.Init) !void {
     if (std.Uri.parse(opts.base_url)) |_| {} else |_| return configError(io, "{s} is not a url", .{clip(opts.base_url)});
     if (!baseUrlCarriesKey(opts.base_url))
         return configError(io, "the API key would go to {s} in the clear; use an https base url, or http on loopback", .{clip(opts.base_url)});
+    if (keyNamesOtherProvider(opts.base_url, key.source))
+        net.note(io, init.arena.allocator(), "microagent: {s} is a key for another provider and the base url is still the default {s}; the run sends it there. Set MICROAGENT_BASE_URL to that provider, or MICROAGENT_API_KEY to say the key is for openrouter\n", .{ chat_mod.safeTextAll(init.arena.allocator(), key.source), default_base_url });
 
     var client: std.http.Client = .{ .allocator = gpa, .io = io };
     defer client.deinit();
@@ -338,12 +340,20 @@ const help_text =
     \\usage: microagent [options] "<prompt>"
     \\
     \\  -p, --print <prompt>   task to run (also accepted as a bare argument)
-    \\  -m, --model <model>    model id (env MICROAGENT_MODEL)
-    \\  -b, --base-url <url>   OpenAI-compatible base url (env MICROAGENT_BASE_URL);
-    \\                         https, or http on loopback, because the api key
-    \\                         goes to it in the clear otherwise
+    \\  -m, --model <model>    model id (env MICROAGENT_MODEL,
+++ " default " ++ default_model ++ ")\n" ++
+    \\  -b, --base-url <url>   OpenAI-compatible base url (env
+    \\                         MICROAGENT_BASE_URL, default
+++ " " ++ default_base_url ++ "); https, or http on\n" ++
+    \\                         loopback, because the api key goes to it in
+    \\                         the clear otherwise
     \\  -k, --api-key <key>    api key (env MICROAGENT_API_KEY, OPENAI_API_KEY,
-    \\                         OPENROUTER_API_KEY, DEEPSEEK_API_KEY)
+    \\                         OPENROUTER_API_KEY, DEEPSEEK_API_KEY). The key
+    \\                         goes to the base url, so name a base url from
+    \\                         the same provider as the key: the default is
+    \\                         openrouter.ai, and a run that leaves it there
+    \\                         sends an OPENAI_API_KEY or DEEPSEEK_API_KEY to
+    \\                         openrouter and says so on stderr
     \\      --max-turns <n>    tool-loop turn ceiling, at least 1
     \\                         (env MICROAGENT_MAX_TURNS, default 100)
     \\      --max-tokens <n>   max_tokens sent to the provider: the ceiling on
@@ -494,6 +504,16 @@ test "a run that stopped at a ceiling reports a status of its own" {
     try std.testing.expect(std.mem.indexOf(u8, block.items, "3 the run stopped without an answer") != null);
 }
 
+test "the help text names the default model and base url" {
+    // The two a run reaches without anybody setting them, and the two whose
+    // absence from the help is what sends a key to a provider its owner did
+    // not name: a reader learns what a run talks to from this text, not from
+    // the source. Spelled from the constants, so a default that moves takes
+    // the sentence with it.
+    try std.testing.expect(std.mem.indexOf(u8, help_text, default_model) != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_text, default_base_url) != null);
+}
+
 /// The value of an environment variable, or null when it is not set or is set
 /// to nothing but whitespace. A wrapper that builds its own environment exports
 /// the name with nothing behind it, and an empty string read as a value sends
@@ -583,6 +603,51 @@ fn baseUrlCarriesKey(base_url: []const u8) bool {
     if (!std.ascii.eqlIgnoreCase(uri.scheme, "http")) return false;
     var host_buf: [Io.net.HostName.max_len]u8 = undefined;
     return isLoopbackHost((uri.getHost(&host_buf) catch return false).bytes);
+}
+
+/// The key variables that name a provider the default base url is not, so a
+/// run that takes one of them and leaves the base url at its built-in value
+/// hands that provider's credential to a third party. `MICROAGENT_API_KEY` and
+/// `OPENROUTER_API_KEY` are the two the default endpoint is for, so neither is
+/// here.
+const foreign_key_vars = [_][]const u8{ "OPENAI_API_KEY", "DEEPSEEK_API_KEY" };
+
+/// Whether this run would send one provider's key to another: the key came
+/// from a variable naming a provider, and the base url is still the built-in
+/// one, which is a different provider. Every request carries the key in an
+/// `Authorization` header, so the key leaves the machine for whoever serves
+/// that url.
+///
+/// Only the default base url is asked about, because it is the one a run
+/// reaches without anybody choosing it. A base url an operator named is their
+/// statement of where the key goes, including a self-hosted gateway that
+/// accepts a key from any provider.
+fn keyNamesOtherProvider(base_url: []const u8, key_source: []const u8) bool {
+    if (!std.mem.eql(u8, base_url, default_base_url)) return false;
+    for (foreign_key_vars) |name| if (std.mem.eql(u8, key_source, name)) return true;
+    return false;
+}
+
+test "a key is only sent to the default base url when its own provider is not named" {
+    // The default endpoint is openrouter, so the two keys minted for it are
+    // the ones a run may leave the base url alone with.
+    try std.testing.expect(!keyNamesOtherProvider(default_base_url, "MICROAGENT_API_KEY"));
+    try std.testing.expect(!keyNamesOtherProvider(default_base_url, "OPENROUTER_API_KEY"));
+    try std.testing.expect(!keyNamesOtherProvider(default_base_url, "--api-key"));
+    try std.testing.expect(!keyNamesOtherProvider(default_base_url, "none"));
+
+    // A key from another provider and no base url of its own: the run sends it
+    // to openrouter, which is the case the note is for.
+    for (foreign_key_vars) |name|
+        try std.testing.expect(keyNamesOtherProvider(default_base_url, name));
+
+    // A base url the operator named is where they said the key goes.
+    try std.testing.expect(!keyNamesOtherProvider("https://api.openai.com/v1", "OPENAI_API_KEY"));
+    try std.testing.expect(!keyNamesOtherProvider("https://api.deepseek.com/v1", "DEEPSEEK_API_KEY"));
+    // The url is compared whole rather than by host, so a path or a trailing
+    // slash on the same endpoint is an operator who typed something, and this
+    // is about the one nobody typed.
+    try std.testing.expect(!keyNamesOtherProvider(default_base_url ++ "/", "OPENAI_API_KEY"));
 }
 
 fn isLoopbackHost(host: []const u8) bool {

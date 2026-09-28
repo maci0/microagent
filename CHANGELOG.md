@@ -78,6 +78,17 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- A run that takes its key from `OPENAI_API_KEY` or `DEEPSEEK_API_KEY` and leaves
+  the base url at the built-in `https://openrouter.ai/api/v1` says so on stderr
+  before the first request. Every request carries the key in an `Authorization`
+  header, so a key minted for one provider reached a third party, and only
+  `MDEBUG=1` said which url the run had resolved. A base url named on the
+  command line or in `MICROAGENT_BASE_URL` is the operator's statement of where
+  the key goes, including a self-hosted gateway, and is not asked about.
+- `--model` and `--base-url` name their defaults in the usage text. They were
+  the two values a run reached without anybody setting them, and the two a
+  reader learns what a run talks to from, so `microagent --help` did not say
+  what a run does before it is asked anything.
 - A tool call whose subprocess failed keeps what the subprocess printed. A
   `git log` that timed out after the last hundred commits, a `bash` build that
   printed every error it had found and then hung, and a `git` command refused

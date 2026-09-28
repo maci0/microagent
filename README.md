@@ -54,11 +54,14 @@ The flags, abridged; `microagent --help` is the full text.
 
 ```
 -p, --print <prompt>   task to run (also accepted as a bare argument)
--m, --model <model>    model id        (env MICROAGENT_MODEL)
--b, --base-url <url>   OpenAI-compatible base url (env MICROAGENT_BASE_URL);
+-m, --model <model>    model id        (env MICROAGENT_MODEL,
+                       default deepseek/deepseek-v4-flash)
+-b, --base-url <url>   OpenAI-compatible base url (env MICROAGENT_BASE_URL,
+                       default https://openrouter.ai/api/v1);
                        https, or http on loopback
 -k, --api-key <key>    api key         (env MICROAGENT_API_KEY, OPENAI_API_KEY,
-                       OPENROUTER_API_KEY, DEEPSEEK_API_KEY)
+                       OPENROUTER_API_KEY, DEEPSEEK_API_KEY); sent to the base
+                       url, so name a base url from the same provider as the key
     --max-turns <n>    tool-loop turn ceiling, at least 1
                        (env MICROAGENT_MAX_TURNS, default 100)
     --max-tokens <n>   max_tokens sent to the provider: the ceiling on one
@@ -129,7 +132,13 @@ and that help on stderr, so a script reading stdout gets nothing from a failed i
 
 Every value is checked where it is set, so a mistyped level, a ceiling of zero
 or a non-numeric budget is refused before the first request rather than becoming
-a 400 or an empty run. A variable set to an empty string is not a value:
+a 400 or an empty run. The key is sent to the base url, and a run that sets
+neither ends up at `https://openrouter.ai/api/v1` with `deepseek/deepseek-v4-flash`,
+so a key read from `OPENAI_API_KEY` or `DEEPSEEK_API_KEY` and left there goes to
+OpenRouter; the run says so on stderr before the first request. A base url named
+on the command line or in `MICROAGENT_BASE_URL` is where the key goes, including a
+self-hosted gateway that takes a key from any provider. A variable set to an empty
+string is not a value:
 `MICROAGENT_MODEL`, `MICROAGENT_BASE_URL`, `MICROAGENT_REASONING_EFFORT`,
 `MICROAGENT_BUDGET_SECONDS`, `MICROAGENT_MAX_SPEND_TOKENS`, `MICROAGENT_MAX_TURNS`,
 `MICROAGENT_MAX_TOKENS` and `MDEBUG` keep their defaults, `MICROAGENT_CA_BUNDLE` falls through to
