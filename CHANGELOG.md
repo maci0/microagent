@@ -135,6 +135,18 @@ release, and `microagent update` moves you to it.
   `make release-assets TAG=v0.2.0`. `ci.yml` rehearses the release with that target and
   `release.yml` publishes what it builds, so a release can be built on a laptop the way the tag
   builds it, and a renamed target no longer has to be renamed in two workflows.
+- The Harbor adapter's budget follows the timeout it is given, and a run that still reaches it is
+  scored on the tree it left. `MICROAGENT_BUDGET_SECONDS` went to the container as sent, so a budget
+  at or above harbor's per-task timeout had its last turn killed by the caller mid-write: the binary
+  allows its forced final push 300 s past the budget, and a 780 s budget inside a 900 s timeout lost
+  Terminal-Bench 2's `adaptive-rejection-sampler` that way. The budget is now the smaller of
+  `MICROAGENT_BUDGET_SECONDS` and `MICROAGENT_AGENT_TIMEOUT_SEC` less 360 s, the grace plus a minute
+  for teardown, floored at 60 s. At the defaults, 600 against a 1500 s timeout, the budget is
+  unchanged; a caller that names both gets the cap, so a 900 s task timeout runs a 540 s budget where
+  it ran 600. A timeout the room does not cover no longer raises out of `run`, which recorded the
+  trial as an exception and scored the work as nothing: the tree the agent changed goes to
+  verification, the timeout lands in `microagent-timeout.txt` in the job's log directory, and a
+  warning names it, so a trial scored on a partial tree is visible rather than silent.
 - `release.yml` refuses a patch tag whose changelog section carries an `Added` or a `Changed`
   entry, and names the version above it in the message. The policy is in the README and in
   CONTRIBUTING, but nothing checked that the tag agreed with the entries it publishes, so a

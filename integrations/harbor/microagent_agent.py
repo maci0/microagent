@@ -61,8 +61,13 @@ DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 # Keep the agent's own budget under harbor's per-task agent timeout, so
 # microagent stops deliberately instead of being killed mid-turn.
 DEFAULT_BUDGET_SECONDS = "600"
-# Room left inside the caller's timeout for the last turn to finish.
-FINAL_TURN_ROOM_S = 90
+# The grace the binary allows its forced final push to run past the budget
+# (`final_push_grace_s` in src/main.zig). A run that reaches its budget can
+# spend this much longer, so a room smaller than it leaves the caller's timeout
+# landing in the middle of the last turn, which is the fault the room exists to
+# prevent. ROOM_S is that grace plus a minute for the container teardown.
+FINAL_PUSH_GRACE_S = 300
+FINAL_TURN_ROOM_S = FINAL_PUSH_GRACE_S + 60
 # The levels the binary accepts for reasoning.effort, kept beside the defaults
 # so a mistyped one is refused before a container is started rather than inside
 # one.

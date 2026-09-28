@@ -36,7 +36,7 @@ uv venv ~/harbor-venv && uv pip install --python ~/harbor-venv/bin/python \
 
 export MICROAGENT_API_KEY=...            # or OPENROUTER_API_KEY
 export MICROAGENT_REASONING_EFFORT=none  # see "Reasoning" below
-export MICROAGENT_BUDGET_SECONDS=1200    # stop below harbor's per-task timeout
+export MICROAGENT_BUDGET_SECONDS=1140    # working time; see the cap below
 
 PYTHONPATH=$PWD/integrations/harbor ~/harbor-venv/bin/harbor run \
   -d terminal-bench@2.0 -i log-summary-date-ranges \
@@ -63,11 +63,11 @@ installs. The command that regenerates it is in the comment at the top of
 | --- | --- |
 | `MICROAGENT_API_KEY` / `OPENROUTER_API_KEY` / `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` | provider key, passed to the container process only |
 | `MICROAGENT_BASE_URL` | OpenAI-compatible endpoint (default OpenRouter) |
-| `MICROAGENT_BUDGET_SECONDS` | elapsed-time budget inside the container, read from the monotonic clock (default 600) |
+| `MICROAGENT_BUDGET_SECONDS` | elapsed-time budget inside the container, read from the monotonic clock (default 600), capped at `MICROAGENT_AGENT_TIMEOUT_SEC` less 360 s |
 | `MICROAGENT_MAX_TURNS` | `--max-turns` passed to the binary (default 150, above the binary's own 100) |
 | `MICROAGENT_REASONING_EFFORT` | `none`/`low`/... — reasoning models otherwise spend the whole budget thinking; a level the binary does not have stops the run here |
 | `MICROAGENT_CA_BUNDLE` | PEM file to upload as the container's trust store, else `SSL_CERT_FILE`, else the host's system store |
-| `MICROAGENT_AGENT_TIMEOUT_SEC` | hard cap on the in-container process (default 1500) |
+| `MICROAGENT_AGENT_TIMEOUT_SEC` | hard cap on the in-container process (default 1500), and the ceiling the budget is derived from |
 | `MICROAGENT_BINARY` | path to the static binary, if not next to this file |
 | `MICROAGENT_VERSION` | version string reported to harbor, if not the binary's own |
 
@@ -79,6 +79,22 @@ no newline on a path or a key. A non-numeric or zero `MICROAGENT_MAX_TURNS`,
 `high`, `none`, stop the run before the container starts, naming the variable.
 `MICROAGENT_MAX_TURNS` is passed as `--max-turns` and the binary reads the same
 name itself, so either route ends at the same ceiling.
+
+The budget is the agent's working time, so the adapter takes the smaller of
+`MICROAGENT_BUDGET_SECONDS` and `MICROAGENT_AGENT_TIMEOUT_SEC` less 360 s, with
+a floor of 60 s. The 360 s is the binary's own 300 s grace on the forced final
+push plus a minute for teardown: a run that reaches its budget is allowed to
+keep going for that grace, so a smaller room puts the caller's timeout in the
+middle of the last turn. At the defaults the budget stays 600 against the 1500 s
+timeout, since 600 is the smaller. A task timeout of 900 s therefore runs a 540 s
+budget, and `MICROAGENT_BUDGET_SECONDS=1200` under the default timeout is capped
+to 1140.
+
+A run that still reaches the caller's timeout is scored on the tree it left
+rather than raised: the trial would otherwise be recorded as an exception and
+the work counted as nothing. The timeout is written to
+`microagent-timeout.txt` in the job's log directory and a warning names it, so a
+trial that scored on a partial tree is visible in the log rather than silent.
 
 `MICROAGENT_CA_BUNDLE` is read here in the order the binary reads it, the
 project's own variable first and `SSL_CERT_FILE` after it, so the bundle a host
