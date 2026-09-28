@@ -18,7 +18,10 @@ const system_prompt =
     "Use the tools to inspect and change the working tree. Prefer ripgrep (`rg`) for searching, " ++
     "`ast-grep` for structural matches and rewrites, and `bash` for builds, tests and git. " ++
     "Read a file before you edit it. Make the smallest correct change; never invent APIs. " ++
-    "Do not ask questions. When the task is done, reply with a short summary of what changed and why.";
+    "Budget your steps: a handful of tool calls should be enough to locate the problem, then edit. " ++
+    "Do not audit unrelated code, and do not read library or standard-library sources to answer a " ++
+    "question about this repository. Do not ask questions. When the task is done, reply with a " ++
+    "short summary of what changed and why.";
 
 const tools_json =
     \\[
@@ -37,6 +40,17 @@ const Options = struct {
     base_url: []const u8 = default_base_url,
     api_key: []const u8 = "",
     max_turns: usize = max_turns_default,
+    /// Passed to the provider as `reasoning.effort`. Unset by default: on a
+    /// reasoning model the thinking is usually most of the output tokens, and
+    /// in a gauntlet loop with a per-review timeout that is the difference
+    /// between finishing a review and being killed at the ceiling.
+    reasoning_effort: ?[]const u8 = null,
+    /// Stop starting turns once this much wall time has passed, so a run ends
+    /// deliberately inside a caller's per-review timeout instead of being
+    /// killed in the middle of one.
+    budget_s: ?u64 = null,
+    /// Last turn of the loop, so the final one can be announced.
+    max_turns_seen: usize = 0,
 };
 
 const ToolCall = struct {
@@ -76,6 +90,9 @@ pub fn main(init: std.process.Init) !void {
     var opts: Options = .{};
     if (init.environ_map.get("MICROAGENT_MODEL")) |v| opts.model = v;
     if (init.environ_map.get("MICROAGENT_BASE_URL")) |v| opts.base_url = v;
+    if (init.environ_map.get("MICROAGENT_REASONING_EFFORT")) |v| opts.reasoning_effort = v;
+    if (init.environ_map.get("MICROAGENT_BUDGET_SECONDS")) |v|
+        opts.budget_s = std.fmt.parseInt(u64, v, 10) catch return usageError(io, "MICROAGENT_BUDGET_SECONDS must be a number");
 
     var i: usize = 1;
     while (i < args.items.len) : (i += 1) {
@@ -96,6 +113,15 @@ pub fn main(init: std.process.Init) !void {
             i += 1;
             if (i >= args.items.len) return usageError(io, "missing api key");
             opts.api_key = args.items[i];
+        } else if (std.mem.eql(u8, arg, "--budget")) {
+            i += 1;
+            if (i >= args.items.len) return usageError(io, "missing budget in seconds");
+            opts.budget_s = std.fmt.parseInt(u64, args.items[i], 10) catch
+                return usageError(io, "budget must be a number of seconds");
+        } else if (std.mem.eql(u8, arg, "--reasoning-effort")) {
+            i += 1;
+            if (i >= args.items.len) return usageError(io, "missing reasoning effort");
+            opts.reasoning_effort = args.items[i];
         } else if (std.mem.eql(u8, arg, "--max-turns")) {
             i += 1;
             if (i >= args.items.len) return usageError(io, "missing max turns");
@@ -108,6 +134,15 @@ pub fn main(init: std.process.Init) !void {
             std.Io.File.stdout().writeStreamingAll(io, help_text) catch {};
             return;
         } else {
+            if (arg.len > 0 and arg[0] != '-') {
+                // A bare argument is the prompt. gauntlet's custom-agent
+                // definitions insert the model flags before the prompt, so
+                // "microagent -p {prompt}" would hand the model flag to -p;
+                // taking the prompt positionally makes the order irrelevant.
+                if (opts.prompt.len != 0) return usageError(io, arg);
+                opts.prompt = arg;
+                continue;
+            }
             return usageError(io, arg);
         }
     }
@@ -139,16 +174,28 @@ pub fn main(init: std.process.Init) !void {
     _ = reason;
 }
 
+/// Injected when the wall-clock budget runs out: the model has done its
+/// reading, so it is asked for the edit rather than another investigation.
+const final_push =
+    "Your budget is exhausted. Apply the single most important fix now, using what you already " ++
+    "know, with one edit or one write. Do not search again. Then stop.";
+
 const help_text =
     \\microagent - tiny OpenAI-compatible coding agent
     \\
     \\usage: microagent -p "<prompt>" [options]
     \\
-    \\  -p, --print <prompt>   task to run (required)
+    \\  -p, --print <prompt>   task to run (also accepted as a bare argument)
     \\  -m, --model <model>    model id (env MICROAGENT_MODEL)
     \\  -b, --base-url <url>   OpenAI-compatible base url (env MICROAGENT_BASE_URL)
     \\  -k, --api-key <key>    api key (env MICROAGENT_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY)
     \\      --max-turns <n>    tool-loop turn ceiling (default 60)
+    \\      --budget <seconds>
+    \\                         stop starting turns after this long, and say so
+    \\                         (env MICROAGENT_BUDGET_SECONDS)
+    \\      --reasoning-effort <level>
+    \\                         reasoning.effort sent to the provider: minimal, low,
+    \\                         medium, high, or none to disable (env MICROAGENT_REASONING_EFFORT)
     \\  -h, --help             this text
     \\  -V, --version          version
     \\
@@ -188,15 +235,44 @@ fn run(
     opts: Options,
     msgs: *std.ArrayList(u8),
 ) !usize {
+    const started = Io.Timestamp.now(io, .awake).nanoseconds;
     var turn: usize = 0;
     var usage: Usage = .{};
     while (turn < opts.max_turns) : (turn += 1) {
+        if (opts.budget_s) |budget| {
+            const spent_s = @divTrunc(Io.Timestamp.now(io, .awake).nanoseconds - started, std.time.ns_per_s);
+            if (spent_s >= budget) {
+                // Stop in the middle of the work, or stop after one last push
+                // that is told to edit? A review that ran out of time with
+                // nothing changed is worth less than one that ran out of time
+                // with a small diff, and the model has already done the reading.
+                announce(io, arena, "microagent: budget of {d}s reached after {d} turn(s); one final turn\n", .{ budget, turn });
+                try appendMessage(gpa, msgs, "user", final_push);
+                const body = try buildBody(arena, opts, msgs.items);
+                var result = try streamChat(client, io, arena, opts, body);
+                try finishTurn(io, arena, gpa, msgs, &result, &usage);
+                return turn + 1;
+            }
+        }
         const body = try buildBody(arena, opts, msgs.items);
         var result = try streamChat(client, io, arena, opts, body);
         try finishTurn(io, arena, gpa, msgs, &result, &usage);
         if (result.calls.items.len == 0) return turn + 1;
+
+        // One turn left: say so, rather than ending on a truncated answer that
+        // reads like a finished one.
+        if (turn + 1 == opts.max_turns - 1)
+            announce(io, arena, "microagent: last turn (--max-turns {d})\n", .{opts.max_turns});
     }
+    announce(io, arena, "microagent: stopped at the --max-turns ceiling ({d})\n", .{opts.max_turns});
     return turn;
+}
+
+/// A line on stderr, which is where gauntlet shows harness notes; stdout stays
+/// the model's own words and the usage line.
+fn announce(io: Io, arena: std.mem.Allocator, comptime fmt: []const u8, args: anytype) void {
+    const msg = std.fmt.allocPrint(arena, fmt, args) catch return;
+    Io.File.stderr().writeStreamingAll(io, msg) catch {};
 }
 
 fn buildBody(arena: std.mem.Allocator, opts: Options, messages: []const u8) ![]u8 {
@@ -208,7 +284,17 @@ fn buildBody(arena: std.mem.Allocator, opts: Options, messages: []const u8) ![]u
     try w.writeAll(messages);
     try w.writeAll("],\"tools\":");
     try w.writeAll(tools_json);
-    try w.writeAll(",\"stream\":true,\"stream_options\":{\"include_usage\":true}}");
+    try w.writeAll(",\"stream\":true,\"stream_options\":{\"include_usage\":true}");
+    if (opts.reasoning_effort) |effort| {
+        if (std.mem.eql(u8, effort, "none")) {
+            try w.writeAll(",\"reasoning\":{\"enabled\":false}");
+        } else {
+            try w.writeAll(",\"reasoning\":{\"effort\":");
+            try writeJsonString(w, effort);
+            try w.writeAll("}");
+        }
+    }
+    try w.writeAll("}");
     return jb.items();
 }
 
@@ -863,6 +949,29 @@ test "usage counters land on the result" {
     try std.testing.expectEqual(@as(u64, 22), result.completion_tokens);
     try std.testing.expectEqual(@as(u64, 33), result.total_tokens);
     try std.testing.expectEqual(@as(u64, 7), result.reasoning_tokens);
+}
+
+test "reasoning effort is only sent when asked for" {
+    // JsonBuf owns the storage it hands back, so the test gives it an arena
+    // rather than trying to free the returned slice.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const gpa = arena_state.allocator();
+
+    var msgs: std.ArrayList(u8) = .empty;
+    try msgs.appendSlice(gpa, "[{\"role\":\"user\",\"content\":\"hi\"}]");
+
+    const plain: Options = .{ .model = "m" };
+    const body_plain = try buildBody(gpa, plain, msgs.items);
+    try std.testing.expect(std.mem.indexOf(u8, body_plain, "\"reasoning\"") == null);
+
+    const low: Options = .{ .model = "m", .reasoning_effort = "low" };
+    const body_low = try buildBody(gpa, low, msgs.items);
+    try std.testing.expect(std.mem.indexOf(u8, body_low, "\"reasoning\":{\"effort\":\"low\"}") != null);
+
+    const none: Options = .{ .model = "m", .reasoning_effort = "none" };
+    const body_none = try buildBody(gpa, none, msgs.items);
+    try std.testing.expect(std.mem.indexOf(u8, body_none, "\"reasoning\":{\"enabled\":false}") != null);
 }
 
 test "only weather-shaped statuses are retried" {

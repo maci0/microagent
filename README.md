@@ -27,12 +27,22 @@ microagent -p "fix the failing test and run it"
 ```
 
 ```
--p, --print <prompt>   task to run (required)
+-p, --print <prompt>   task to run (also accepted as a bare argument)
 -m, --model <model>    model id        (env MICROAGENT_MODEL)
 -b, --base-url <url>   OpenAI-compatible base url (env MICROAGENT_BASE_URL)
 -k, --api-key <key>    api key         (env MICROAGENT_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY)
     --max-turns <n>    tool-loop ceiling (default 60)
+    --budget <seconds> stop starting turns after this long, then take one last
+                       turn to make the edit (env MICROAGENT_BUDGET_SECONDS)
+    --reasoning-effort <level>
+                       reasoning.effort sent to the provider: minimal, low,
+                       medium, high, or none to disable (env MICROAGENT_REASONING_EFFORT)
 ```
+
+The prompt may also be the last bare argument. That matters for gauntlet: a custom-agent
+definition inserts the model flags immediately after `-p`, so an agent defined as
+`["microagent", "-p", "{prompt}"]` would hand `--model` to `-p`. Define it as
+`["microagent", "{prompt}"]` instead, and any flag order works.
 
 With no key in the environment, `~/.secrets/openrouter` is read as a last resort.
 
@@ -81,7 +91,7 @@ Register it once in `~/.gauntlet/agents.json`:
 ```json
 {
   "microagent": {
-    "argv": ["microagent", "-p", "{prompt}"],
+    "argv": ["microagent", "{prompt}"],
     "model": ["--model", "{model}"],
     "note": "microagent: tiny zig OpenAI-compatible coding agent"
   }
@@ -94,7 +104,12 @@ Then:
 gauntlet doctor                       # microagent should show as installed
 gauntlet -a microagent -r quick --once
 gauntlet -a microagent:deepseek/deepseek-v4-flash -j 4
+MICROAGENT_BUDGET_SECONDS=600 gauntlet -a microagent -r quick --once
 ```
+
+Set a budget below gauntlet's `-t` timeout. A review the harness kills at the ceiling with an
+untouched tree is worth nothing; one that stops deliberately still has the model's diff. Review
+outcomes per harness are in [BENCHMARK.md](BENCHMARK.md#usefulness).
 
 No `stream` flags are needed: usage is always machine-readable. No session transcripts are written,
 so no `usage.roots` entry is required either.
