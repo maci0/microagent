@@ -1380,7 +1380,7 @@ fn streamChat(
                 // refusing at second 4, so each retry is a second billable
                 // refusal. The header wins where it is a number this run is
                 // willing to wait, and the schedule stands where it is not.
-                const asked = retryAfterMs(response.head.bytes);
+                const asked = retryAfterMs(io, response.head.bytes);
                 const wait = asked orelse backoffMs(attempt);
                 if (budget.affordableWaitMs(io, wait)) |affordable| {
                     net.note(io, arena, "microagent: {s} answered HTTP {d}, retrying in {d}ms (attempt {d}/{d})\n", .{
@@ -2217,23 +2217,125 @@ const max_retry_after_ms: u64 = 120_000;
 /// The wait a 429 or 503 asks for, in milliseconds, or null when the header is
 /// absent or is not one this run will wait.
 ///
-/// Only the delta-seconds form is read. The HTTP-date form is what a provider
-/// sends when it computes a deadline against a clock, and the run has no
-/// second clock to check it against; a header this cannot read falls back to
-/// the backoff schedule rather than being guessed at.
-fn retryAfterMs(head_bytes: []const u8) ?u64 {
+/// Both forms RFC 9110 defines are read, because a provider chooses which to
+/// send and the run has a clock to check the second one against. A header this
+/// cannot read falls back to the backoff schedule rather than being guessed at.
+fn retryAfterMs(io: Io, head_bytes: []const u8) ?u64 {
     var lines = std.mem.splitSequence(u8, head_bytes, "\r\n");
     _ = lines.next(); // the status line
     while (lines.next()) |line| {
         if (line.len == 0) break;
         const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
         if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, line[0..colon], " \t"), "retry-after")) continue;
-        const raw = std.mem.trim(u8, line[colon + 1 ..], " \t");
-        const seconds = std.fmt.parseInt(u64, raw, 10) catch return null;
-        const ms = std.math.mul(u64, seconds, std.time.ms_per_s) catch return null;
-        return @min(ms, max_retry_after_ms);
+        return retryAfterValueMs(io, std.mem.trim(u8, line[colon + 1 ..], " \t"));
     }
     return null;
+}
+
+/// One `Retry-After` value, in milliseconds: either a count of seconds or an
+/// instant the count is measured to.
+///
+/// The date form is not the exotic one. A CDN or gateway computing a deadline
+/// against its own clock sends it, and reading it as a number fails: the value
+/// is not a count at all, so the run falls back to a 1 s, 2 s, 4 s schedule and
+/// comes back while the provider is still refusing, once per step. Every one of
+/// those refusals is a second billable one, which is the whole thing the header
+/// is for.
+///
+/// A date already past is zero rather than null: the wait it names has elapsed,
+/// and the backoff schedule would add to it.
+fn retryAfterValueMs(io: Io, raw: []const u8) ?u64 {
+    if (std.fmt.parseInt(u64, raw, 10)) |seconds| {
+        const ms = std.math.mul(u64, seconds, std.time.ms_per_s) catch return null;
+        return @min(ms, max_retry_after_ms);
+    } else |_| {}
+    const target = httpDateEpochSeconds(raw) orelse return null;
+    const now = @divTrunc(Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s);
+    const left = target - now;
+    if (left <= 0) return 0;
+    return @min(@as(u64, @intCast(left)) *| std.time.ms_per_s, max_retry_after_ms);
+}
+
+/// An IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`) as seconds since the Unix
+/// epoch, or null for anything else.
+///
+/// The day of the week it names is not checked against the day of the month:
+/// it is redundant, a server whose clock is a second out from the run's writes
+/// it wrong, and a run that refused a deadline over it would refuse a correct
+/// one. The obsolete RFC 850 and asctime forms are not read either: RFC 9110
+/// has every sender use this one, and a value this does not read falls back to
+/// the backoff schedule, which is where every unreadable value goes.
+fn httpDateEpochSeconds(raw: []const u8) ?i64 {
+    const comma = std.mem.indexOfScalar(u8, raw, ',') orelse return null;
+    var parts = std.mem.tokenizeScalar(u8, raw[comma + 1 ..], ' ');
+    const day_text = parts.next() orelse return null;
+    const month = monthFromName(parts.next() orelse return null) orelse return null;
+    const year = std.fmt.parseInt(i64, parts.next() orelse return null, 10) catch return null;
+    const time_text = parts.next() orelse return null;
+    const zone = parts.next() orelse return null;
+    if (parts.next() != null) return null;
+    // The zone is spelled out and checked rather than assumed: the epoch these
+    // seconds are counted from is UTC, and reading a local time as UTC would
+    // shift every wait by the reader's offset.
+    if (!std.mem.eql(u8, zone, "GMT")) return null;
+
+    var clock = std.mem.splitScalar(u8, time_text, ':');
+    const hour = std.fmt.parseInt(i64, clock.next() orelse return null, 10) catch return null;
+    const minute = std.fmt.parseInt(i64, clock.next() orelse return null, 10) catch return null;
+    const second = std.fmt.parseInt(i64, clock.next() orelse return null, 10) catch return null;
+    if (clock.next() != null) return null;
+
+    const day = std.fmt.parseInt(u32, day_text, 10) catch return null;
+    if (day == 0 or day > daysInMonth(year, month)) return null;
+    if (hour < 0 or hour > 23 or minute < 0 or minute > 59 or second < 0 or second > 60) return null;
+
+    return daysFromCivil(year, month, day) * @as(i64, std.time.s_per_day) +
+        hour * std.time.s_per_hour + minute * std.time.s_per_min + second;
+}
+
+/// The month a header's three-letter name names, 1 through 12, or null.
+fn monthFromName(name: []const u8) ?u32 {
+    for (calendar_months, 1..) |candidate, number| {
+        if (std.ascii.eqlIgnoreCase(name, candidate)) return @intCast(number);
+    }
+    return null;
+}
+
+const calendar_months = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+
+/// Whether `year` is a leap year under the rule the epoch counts: divisible by
+/// four, and not by a hundred that is not by four hundred.
+fn isLeapYear(year: i64) bool {
+    if (@mod(year, 4) != 0) return false;
+    if (@mod(year, 100) != 0) return true;
+    return @mod(year, 400) == 0;
+}
+
+/// How many days `month` of `year` has, the leap day included. A month the
+/// name cannot have is zero, so a day past the end is refused by the caller
+/// rather than rolling into the next one.
+fn daysInMonth(year: i64, month: u32) u32 {
+    const lengths = [_]u32{ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    if (month == 0 or month > lengths.len) return 0;
+    if (month == 2 and isLeapYear(year)) return 29;
+    return lengths[month - 1];
+}
+
+/// Days from 1970-01-01 to `year`-`month`-`day`, by the civil-date algorithm
+/// that shifts the year to start in March so the leap day lands last.
+///
+/// Every day the epoch counts is one this gets right, leap years and century
+/// years included, with no table of month lengths and no rule of its own to get
+/// wrong: `daysFromCivil(1970, 1, 1)` is 0, and the arithmetic never passes
+/// through a day it would have to skip.
+fn daysFromCivil(year: i64, month: u32, day: u32) i64 {
+    const shifted = year -| @as(i64, if (month <= 2) @intCast(1) else 0);
+    const era = @divFloor(shifted, 400);
+    const year_of_era = shifted - era * 400; // 0 through 399
+    const month_of_era = @as(i64, month) + (if (month > 2) @as(i64, -3) else 9); // 0 through 11, March first
+    const day_of_year = @divTrunc(153 * month_of_era + 2, 5) + @as(i64, day) - 1; // 0 through 365
+    const day_of_era = year_of_era * 365 + @divTrunc(year_of_era, 4) - @divTrunc(year_of_era, 100) + day_of_year;
+    return era * 146097 + day_of_era - 719468;
 }
 
 // A file's tests are collected only when the root file's test block imports
@@ -3919,26 +4021,92 @@ test "a Retry-After header sets the wait, and only a wait worth taking" {
         "content-type: application/json\r\n" ++
         "retry-after: 30\r\n" ++
         "content-length: 0\r\n\r\n";
-    try std.testing.expectEqual(@as(?u64, 30_000), retryAfterMs(head));
+    try std.testing.expectEqual(@as(?u64, 30_000), retryAfterMs(std.testing.io, head));
 
     // The header's name is case-insensitive, and the value carries the spaces
     // a real server puts around it.
     const sloppy = "HTTP/1.1 503 Service Unavailable\r\nRetry-After:   7  \r\n\r\n";
-    try std.testing.expectEqual(@as(?u64, 7000), retryAfterMs(sloppy));
+    try std.testing.expectEqual(@as(?u64, 7000), retryAfterMs(std.testing.io, sloppy));
 
     // A wait longer than this run will sit out falls back to the schedule
     // rather than stalling the turn for an hour.
     const forever = "HTTP/1.1 429 Too Many Requests\r\nretry-after: 3600\r\n\r\n";
-    try std.testing.expectEqual(@as(?u64, max_retry_after_ms), retryAfterMs(forever));
+    try std.testing.expectEqual(@as(?u64, max_retry_after_ms), retryAfterMs(std.testing.io, forever));
 
     // Absent, and the forms this run cannot read, are all the backoff's
     // business rather than a guess.
-    try std.testing.expectEqual(@as(?u64, null), retryAfterMs("HTTP/1.1 429 Too Many Requests\r\ncontent-length: 0\r\n\r\n"));
-    try std.testing.expectEqual(@as(?u64, null), retryAfterMs("HTTP/1.1 429 Too Many Requests\r\nretry-after: Wed, 21 Oct 2026 07:28:00 GMT\r\n\r\n"));
-    try std.testing.expectEqual(@as(?u64, null), retryAfterMs("HTTP/1.1 429 Too Many Requests\r\nretry-after: soon\r\n\r\n"));
+    try std.testing.expectEqual(@as(?u64, null), retryAfterMs(std.testing.io, "HTTP/1.1 429 Too Many Requests\r\ncontent-length: 0\r\n\r\n"));
+    try std.testing.expectEqual(@as(?u64, null), retryAfterMs(std.testing.io, "HTTP/1.1 429 Too Many Requests\r\nretry-after: soon\r\n\r\n"));
     // A count past what the multiply holds is a header this cannot read, not a
     // wrap into a short wait.
-    try std.testing.expectEqual(@as(?u64, null), retryAfterMs("HTTP/1.1 429 Too Many Requests\r\nretry-after: 99999999999999999999\r\n\r\n"));
+    try std.testing.expectEqual(@as(?u64, null), retryAfterMs(std.testing.io, "HTTP/1.1 429 Too Many Requests\r\nretry-after: 99999999999999999999\r\n\r\n"));
+}
+
+test "a Retry-After date is an instant, read against the clock it names" {
+    // The dates below are the ones the arithmetic has to be right about: the
+    // epoch itself, a leap day, the day after a leap day, a century that is not
+    // a leap year and one that is, and the boundary where a year starts at
+    // month 13.
+    try std.testing.expectEqual(@as(?i64, 0), httpDateEpochSeconds("Thu, 01 Jan 1970 00:00:00 GMT"));
+    try std.testing.expectEqual(@as(?i64, 1), httpDateEpochSeconds("Thu, 01 Jan 1970 00:00:01 GMT"));
+    try std.testing.expectEqual(@as(?i64, 86_399), httpDateEpochSeconds("Thu, 01 Jan 1970 23:59:59 GMT"));
+    try std.testing.expectEqual(@as(?i64, 951_782_400), httpDateEpochSeconds("Tue, 29 Feb 2000 00:00:00 GMT"));
+    try std.testing.expectEqual(@as(?i64, 951_955_199), httpDateEpochSeconds("Wed, 01 Mar 2000 23:59:59 GMT"));
+    // 1900 is not a leap year under the rule (divisible by four, not by four
+    // hundred), so 29 February 1900 is not a date and 28 February is.
+    try std.testing.expectEqual(@as(?i64, null), httpDateEpochSeconds("Wed, 29 Feb 1900 00:00:00 GMT"));
+    try std.testing.expectEqual(@as(?i64, -2_203_977_600), httpDateEpochSeconds("Wed, 28 Feb 1900 00:00:00 GMT"));
+    // A day past the end of its month is refused rather than rolled into the
+    // next one, which is a different date and a different wait.
+    try std.testing.expectEqual(@as(?i64, null), httpDateEpochSeconds("Wed, 31 Apr 2026 00:00:00 GMT"));
+    try std.testing.expectEqual(@as(?i64, null), httpDateEpochSeconds("Wed, 32 Jan 2026 00:00:00 GMT"));
+    try std.testing.expectEqual(@as(?i64, null), httpDateEpochSeconds("Wed, 01 Jan 2026 24:00:00 GMT"));
+    // The zone is spelled out: a date naming another one is not this run's
+    // clock to read, and reading it as UTC would shift the wait by the offset.
+    try std.testing.expectEqual(@as(?i64, null), httpDateEpochSeconds("Wed, 21 Oct 2026 07:28:00 CET"));
+    try std.testing.expectEqual(@as(?i64, null), httpDateEpochSeconds("Wed, 21 Oct 2026 07:28:00"));
+    try std.testing.expectEqual(@as(?i64, null), httpDateEpochSeconds("21 Oct 2026 07:28:00 GMT"));
+    // A weekday that does not match the date is ignored rather than refused:
+    // it is redundant, and a server a second off writes the wrong one.
+    try std.testing.expectEqual(@as(?i64, 1_792_567_680), httpDateEpochSeconds("Mon, 21 Oct 2026 07:28:00 GMT"));
+
+    // The value the header carries becomes a wait: a deadline thirty seconds
+    // out is thirty seconds, and one the run read late is what is left of it.
+    var head: [160]u8 = undefined;
+    const thirty_ms = retryAfterMs(std.testing.io, retryAfterDateHead(&head, 30)).?;
+    try std.testing.expect(thirty_ms >= 29_000 and thirty_ms <= 30_000);
+
+    // A deadline already past is a wait of zero rather than the backoff
+    // schedule: the wait it names has elapsed, and adding to it is how a run
+    // comes back early and is refused again.
+    try std.testing.expectEqual(@as(?u64, 0), retryAfterMs(std.testing.io, retryAfterDateHead(&head, -5)));
+
+    // A deadline further out than this run will sit out is the ceiling, on
+    // either form.
+    try std.testing.expectEqual(@as(?u64, max_retry_after_ms), retryAfterMs(std.testing.io, retryAfterDateHead(&head, 3600)));
+}
+
+/// A 429 head whose `Retry-After` is an IMF-fixdate naming an instant
+/// `seconds` from now, written into `buf` by the caller. The calendar fields
+/// come from the epoch arithmetic in the standard library, so the header the
+/// test builds is one the parser has to agree with rather than one spelled the
+/// same way twice.
+fn retryAfterDateHead(buf: []u8, seconds: i64) []const u8 {
+    const now: i64 = @intCast(@divTrunc(Io.Clock.real.now(std.testing.io).nanoseconds, std.time.ns_per_s));
+    const target = now + seconds;
+    const seconds_in = std.time.epoch.EpochSeconds{ .secs = @intCast(target) };
+    const day = seconds_in.getEpochDay().calculateYearDay();
+    const month_day = day.calculateMonthDay();
+    const rest: u32 = @intCast(@mod(target, std.time.epoch.secs_per_day));
+    const clock = std.time.epoch.DaySeconds{ .secs = @intCast(rest) };
+    return std.fmt.bufPrint(buf, "HTTP/1.1 429 Too Many Requests\r\nretry-after: Thu, {d:0>2} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} GMT\r\n\r\n", .{
+        @as(u32, month_day.day_index) + 1,
+        calendar_months[month_day.month.numeric() - 1],
+        day.year,
+        clock.getHoursIntoDay(),
+        clock.getMinutesIntoHour(),
+        clock.getSecondsIntoMinute(),
+    }) catch unreachable;
 }
 
 // The budget is a deadline, not a turn counter. Checked only at the top of the

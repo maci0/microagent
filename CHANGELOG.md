@@ -226,6 +226,14 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- A `Retry-After` sent as an HTTP date is read, not ignored. RFC 9110 lets a
+  server answer with either a count of seconds or an instant, and the run only
+  read the first: a provider or a gateway that computed a deadline against its
+  own clock had its header fall back to the 1 s, 2 s, 4 s backoff, so the run
+  came back while the provider was still refusing, once per step, and each of
+  those refusals was a billable one. The date is now turned into the wait it
+  names, measured against the clock, clamped to the two minutes the run will sit
+  out, and a date already past is a wait of zero rather than the backoff.
 - A command-line argument quoted back in a usage error is quoted as text. The
   message used to cut it on a codepoint boundary and nothing else, so
   `microagent $'\e[2J'` cleared the terminal and `microagent update $'\e]0;x\a'`
