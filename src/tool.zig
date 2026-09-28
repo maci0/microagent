@@ -18,7 +18,7 @@ const net = @import("net.zig");
 /// codepoint boundary and appends a marker naming how much was dropped, so a
 /// model reading a truncated log knows the tail is missing rather than reading
 /// a build failure as the end of the output. `git` is the exception: it is cut
-/// by line count instead.
+/// by line count instead, and says so only when the line count is what cut it.
 pub const max_tool_output = 24 * 1024;
 
 /// Ceiling on a file `read` returns whole. A source file is kilobytes, so the
@@ -297,7 +297,12 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
         return std.fmt.allocPrint(arena, "error: git {s} failed: {s}", .{ cmd, @errorName(err) });
     const text = if (res.stdout.len > 0) res.stdout else res.stderr;
     if (text.len == 0) return std.fmt.allocPrint(arena, "(git {s}: no output)", .{cmd});
-    return firstLines(arena, text, limit);
+    // The line cap below is the one git is cut by, and it only says so when it
+    // is the one that cut. A capture the byte cap ended short of the line cap
+    // is marked here for the reason `runSearchTool` marks one: a half-read
+    // commit reads as the whole one otherwise, and the model narrows its next
+    // `git log` against a history it never saw.
+    return withCaptureNote(arena, try firstLines(arena, text, limit), res);
 }
 
 /// The command line one `git` call runs, with the subcommand and every flag
@@ -2388,6 +2393,23 @@ test "tool output truncation keeps whole lines" {
     // No newline at all means one line, which a limit of one keeps whole.
     try std.testing.expectEqualStrings("solo", try firstLines(arena, "solo", 1));
     try std.testing.expectEqualStrings("solo\n", try firstLines(arena, "solo\n", 1));
+}
+
+test "output cut by the capture cap is marked even when no line was dropped" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const whole: Captured = .{ .stdout = "", .stderr = "", .term = .{ .exited = 0 }, .dropped = .{ false, false } };
+    // Fewer lines than the limit, so the line count cut nothing, and nothing
+    // was dropped, so the bytes are the whole output.
+    try std.testing.expectEqualStrings("1\n2\n", try withCaptureNote(arena, try firstLines(arena, "1\n2\n", 400), whole));
+
+    const cut: Captured = .{ .stdout = "", .stderr = "", .term = .{ .exited = 0 }, .dropped = .{ true, false } };
+    try std.testing.expectEqualStrings("1\n2\n\n[output truncated at the tool's cap]", try withCaptureNote(arena, try firstLines(arena, "1\n2\n", 400), cut));
+    // Both caps can land on one result, and each says which one it was.
+    const both: Captured = .{ .stdout = "", .stderr = "", .term = .{ .exited = 0 }, .dropped = .{ false, true } };
+    try std.testing.expectEqualStrings("1\n... [output truncated at 1 lines]\n[output truncated at the tool's cap]", try withCaptureNote(arena, try firstLines(arena, "1\n2\n", 1), both));
 }
 
 test "git tool refuses a rev that git would read as an option" {

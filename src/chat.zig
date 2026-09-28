@@ -291,7 +291,7 @@ pub fn num(v: ?std.json.Value) u64 {
     return switch (value) {
         .integer => |n| if (n > 0) @intCast(n) else 0,
         .float => |f| std.math.lossyCast(u64, f),
-        .number_string => |s| std.fmt.parseInt(u64, s, 10) catch 0,
+        .number_string, .string => |s| std.fmt.parseInt(u64, s, 10) catch 0,
         else => 0,
     };
 }
@@ -921,6 +921,8 @@ test "a count is read from every shape a frame can spell it in" {
         .{ std.json.Value{ .float = 1e30 }, std.math.maxInt(u64) },
         .{ std.json.Value{ .number_string = "12" }, 12 },
         .{ std.json.Value{ .number_string = "twelve" }, 0 },
+        .{ std.json.Value{ .string = "12" }, 12 },
+        .{ std.json.Value{ .string = "twelve" }, 0 },
         .{ std.json.Value{ .bool = true }, 0 },
     };
     inline for (cases) |c| try std.testing.expectEqual(c[1], num(c[0]));
