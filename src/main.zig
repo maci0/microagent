@@ -1727,16 +1727,18 @@ fn truncatedNotice(
 
 /// A provider that skips a tool-call index leaves an empty slot where `applyFrame`
 /// sized the list by index, and a response cut at `max_tokens` or at the turn's
-/// byte ceiling leaves a call whose arguments stop mid-object. Neither is a call
-/// the run can carry, and both go back to the provider inside the assistant
-/// message: a function with no name, or `arguments` that are not a JSON object,
-/// and the next request is rejected with a 400 that ends the run. They are
-/// dropped here instead, so a truncated turn costs that turn and not the rest
-/// of the run. The ceiling notice above has already said the arguments were cut.
+/// byte ceiling leaves a call whose arguments stop mid-object, and a stream whose
+/// id never arrived leaves a call the tool results cannot be paired to. None is a
+/// call the run can carry, and each goes back to the provider inside the assistant
+/// message: a `tool_calls` entry with no `id`, a function with no name, or
+/// `arguments` that are not a JSON object, and the next request is rejected with a
+/// 400 that ends the run. They are dropped here instead, so a truncated turn
+/// costs that turn and not the rest of the run. The ceiling notice above has
+/// already said the arguments were cut.
 fn dropUnusableCalls(gpa: std.mem.Allocator, calls: *std.ArrayList(chat_mod.ToolCall)) void {
     var kept: usize = 0;
     for (calls.items) |*call| {
-        if (call.name.len == 0 or !argumentsAreAnObject(gpa, call.args.items)) {
+        if (call.id.len == 0 or call.name.len == 0 or !argumentsAreAnObject(gpa, call.args.items)) {
             if (call.id.len != 0) gpa.free(call.id);
             if (call.name.len != 0) gpa.free(call.name);
             call.args.deinit(gpa);
@@ -4423,6 +4425,34 @@ test "a tool call cut mid-argument is dropped rather than sent on" {
     var unparsable: usize = 0;
     try applyFrame(arena, arena, cut, &result, &calls, &out_buf, &unparsable);
     try std.testing.expectEqual(@as(usize, 2), calls.items.len);
+
+    dropUnusableCalls(arena, &calls);
+    try std.testing.expectEqual(@as(usize, 1), calls.items.len);
+    try std.testing.expectEqualStrings("call_ok", calls.items[0].id);
+}
+
+// The id is what a tool message is paired to, and it is the third member of the
+// same triple the two cases above already drop on. A stream that carries a name
+// and a whole argument object but no `id` would otherwise go back to the
+// provider as a `tool_calls` entry it has nothing to match, and every tool
+// result for it would name an empty `tool_call_id`.
+test "a tool call with no id is dropped rather than sent on" {
+    const gpa = std.testing.allocator;
+    var run_state = std.heap.ArenaAllocator.init(gpa);
+    defer run_state.deinit();
+    const arena = run_state.allocator();
+
+    const payload = "{\"choices\":[{\"delta\":{\"tool_calls\":[" ++
+        "{\"index\":0,\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\": \\\"ls\\\"}\"}}," ++
+        "{\"index\":1,\"id\":\"call_ok\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\": \\\"ls\\\"}\"}}" ++
+        "]}}]}";
+    var result: chat_mod.ChatResult = .{};
+    var calls: std.ArrayList(chat_mod.ToolCall) = .empty;
+    var out_buf: std.ArrayList(u8) = .empty;
+    var unparsable: usize = 0;
+    try applyFrame(arena, arena, payload, &result, &calls, &out_buf, &unparsable);
+    try std.testing.expectEqual(@as(usize, 2), calls.items.len);
+    try std.testing.expectEqual(@as(usize, 0), calls.items[0].id.len);
 
     dropUnusableCalls(arena, &calls);
     try std.testing.expectEqual(@as(usize, 1), calls.items.len);
