@@ -1559,7 +1559,7 @@ fn applyDeclared(
     // has to land before the delta, because the generic path lands it there
     // and a frame may carry the reason with no delta beside it.
     if (chat_mod.str(choice.finish_reason)) |reason| {
-        const owned = try gpa.dupe(u8, reason);
+        const owned = try chat_mod.ownString(gpa, reason);
         result.deinitFinish(gpa);
         result.finish_reason = owned;
     }
@@ -1663,14 +1663,16 @@ fn applyCallDelta(
     // A provider may resend the id or the name on a later fragment, so the
     // previous copy is released rather than left behind. A slot this frame's
     // index walk filled holds the placeholder rather than a copy, and the
-    // placeholder is not the allocator's to hand back.
+    // placeholder is not the allocator's to hand back. An id or name the
+    // provider emptied is the shared empty slice, so releasing the previous
+    // copy is the whole of what that frame has to do.
     if (id) |v| {
-        const owned = try gpa.dupe(u8, v);
+        const owned = try chat_mod.ownString(gpa, v);
         if (call.id.len != 0) gpa.free(call.id);
         call.id = owned;
     }
     if (name) |v| {
-        const owned = try gpa.dupe(u8, v);
+        const owned = try chat_mod.ownString(gpa, v);
         if (call.name.len != 0) gpa.free(call.name);
         call.name = owned;
     }
@@ -1739,7 +1741,7 @@ fn applyFrame(
     // means the response was cut at `max_tokens`; the caller says so rather
     // than appending a prefix of an answer as if it were the whole one.
     if (chat_mod.str(choice.object.get("finish_reason"))) |reason| {
-        const owned = try gpa.dupe(u8, reason);
+        const owned = try chat_mod.ownString(gpa, reason);
         result.deinitFinish(gpa);
         result.finish_reason = owned;
     }
@@ -2501,6 +2503,43 @@ test "tool call fragments merge by index across frames" {
     try std.testing.expectEqualStrings("call_1", sink.calls.items[0].id);
     try std.testing.expectEqualStrings("read", sink.calls.items[0].name);
     try std.testing.expectEqualStrings("{\"path\":\"a.zig\"}", sink.calls.items[0].args.items);
+}
+
+// A frame can empty a field an earlier frame filled: a provider that sends a
+// finish reason and then `""`, or a call id and name and then blanks. The copy
+// behind the first value is released on the way, and the empty one is the shared
+// slice rather than a fresh allocation, so the fields a long stream empties
+// cost the stream nothing. Fed with the process allocator, this is also the
+// test that notices when one of them does: a copy left behind is the run's, and
+// `std.testing.allocator` reports it at the end of the test.
+test "a frame that empties a field releases the one before it" {
+    const gpa = std.testing.allocator;
+    var scratch_state = std.heap.ArenaAllocator.init(gpa);
+    defer scratch_state.deinit();
+    var result: chat_mod.ChatResult = .{};
+    defer result.deinit(gpa);
+    var calls: std.ArrayList(chat_mod.ToolCall) = .empty;
+    defer chat_mod.deinitCalls(gpa, &calls);
+    var out_buf: std.ArrayList(u8) = .empty;
+    defer out_buf.deinit(gpa);
+    var unparsable: usize = 0;
+
+    const frames = [_][]const u8{
+        \\{"choices":[{"finish_reason":"stop","delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read","arguments":"{}"}}]}}]}
+        ,
+        \\{"choices":[{"finish_reason":"","delta":{"tool_calls":[{"index":0,"id":"","function":{"name":""}}]}}]}
+    };
+    for (frames) |f| {
+        try applyFrame(scratch_state.allocator(), gpa, f, &result, &calls, &out_buf, &unparsable);
+        _ = scratch_state.reset(.retain_capacity);
+    }
+
+    try std.testing.expectEqual(@as(usize, 0), unparsable);
+    try std.testing.expectEqual(@as(usize, 1), calls.items.len);
+    try std.testing.expectEqualStrings("", result.finish_reason);
+    try std.testing.expectEqualStrings("", calls.items[0].id);
+    try std.testing.expectEqualStrings("", calls.items[0].name);
+    try std.testing.expectEqualStrings("{}", calls.items[0].args.items);
 }
 
 // A provider streams one call's `arguments` as many small fragments. Copying
@@ -3446,12 +3485,15 @@ test "a repeated session log writes beside the first and never over it" {
     const dir = try tmp.dir.realPathFileAlloc(io, ".", arena);
 
     const first = createSessionLog(io, arena, dir, 1759000000000000000) orelse return error.TestUnexpectedResult;
+    // Deferred rather than closed after the write: the test returns from the
+    // middle of this one on a failed write, and a handle left open there is a
+    // descriptor nothing closes for the rest of the run.
+    defer first.close(io);
     first.writeStreamingAll(io, "first\n") catch return error.TestUnexpectedResult;
-    first.close(io);
 
     const second = createSessionLog(io, arena, dir, 1759000000000000000) orelse return error.TestUnexpectedResult;
+    defer second.close(io);
     second.writeStreamingAll(io, "second\n") catch return error.TestUnexpectedResult;
-    second.close(io);
 
     const kept = try tmp.dir.readFileAlloc(io, "1759000000000000000.jsonl", alloc, .limited(64));
     defer alloc.free(kept);

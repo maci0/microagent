@@ -217,6 +217,20 @@ pub fn numCount(v: ?std.json.Value) usize {
     return std.math.cast(usize, num(v)) orelse std.math.maxInt(usize);
 }
 
+/// A provider string this run will own, or the shared empty slice when the
+/// provider sent nothing.
+///
+/// Ownership here is carried by emptiness: `deinitFinish` and `deinitCalls`
+/// free a field only when it has bytes, because that is the test for a copy
+/// this run made. Duping an empty string anyway breaks the test in the middle of
+/// a stream: the field keeps its length of zero, so the next frame overwrites
+/// it without releasing it, and the result's own deinit skips it as well. One
+/// allocation per empty field, for every field the stream empties.
+pub fn ownString(gpa: std.mem.Allocator, text: []const u8) ![]u8 {
+    if (text.len == 0) return &.{};
+    return try gpa.dupe(u8, text);
+}
+
 /// The first `max` bytes, cut on a UTF-8 codepoint boundary. Both callers feed
 /// text a model will read back, one of them inside a JSON request body, so a
 /// cut in the middle of a codepoint would put invalid UTF-8 on the wire.
@@ -284,6 +298,17 @@ test "valid multibyte text passes through the escaper unchanged" {
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, buf.items(), .{});
     defer parsed.deinit();
     try std.testing.expectEqualStrings(text, parsed.value.string);
+}
+
+test "an empty provider string is the shared slice, not a copy this run owns" {
+    const gpa = std.testing.allocator;
+    // A field's length is what tells the deinit that it owns the bytes behind
+    // it, so an empty value has to stay the shared slice: a zero-length copy
+    // reads as unowned and is never released.
+    try std.testing.expectEqualStrings("", try ownString(gpa, ""));
+    const owned = try ownString(gpa, "stop");
+    defer gpa.free(owned);
+    try std.testing.expectEqualStrings("stop", owned);
 }
 
 test "clamp keeps short strings intact" {
