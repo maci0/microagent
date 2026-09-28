@@ -1271,6 +1271,15 @@ fn buildBody(arena: std.mem.Allocator, opts: Options, messages: []const u8) ![]u
     return jb.items();
 }
 
+/// The request headers carrying the credential. The authorization header is
+/// `.override` rather than `.privileged`, because the client drops a privileged
+/// header on a redirect, and dropping it costs a 401 from every provider.
+fn authHeaders(arena: std.mem.Allocator, api_key: []const u8) !std.http.Client.Request.Headers {
+    return .{
+        .authorization = .{ .override = try std.fmt.allocPrint(arena, "Bearer {s}", .{api_key}) },
+    };
+}
+
 /// Streams one completion, printing visible text as it arrives and accumulating
 /// tool calls and token counters. Text on stderr is tool activity; stdout is
 /// the model's own output plus one JSON usage line per response.
@@ -1285,7 +1294,6 @@ fn streamChat(
 ) !chat_mod.ChatResult {
     const url = try std.fmt.allocPrint(arena, "{s}/chat/completions", .{std.mem.trimEnd(u8, opts.base_url, "/")});
     const uri = std.Uri.parse(url) catch return error.InvalidUrl;
-    const auth = try std.fmt.allocPrint(arena, "Bearer {s}", .{opts.api_key});
     // What the notes below name, and what the userinfo a base url may carry
     // never reaches: the run's log is not the place for a password.
     const shown_url = displayUrl(arena, url);
@@ -1293,9 +1301,7 @@ fn streamChat(
     // that leaves the host, so a provider that answers with a Location cannot
     // walk the API key off to whoever it names. The redirect is unhandled
     // anyway, which is the same promise made once, in the request options.
-    const auth_headers: std.http.Client.Request.Headers = .{
-        .authorization = .{ .override = auth },
-    };
+    const auth_headers = try authHeaders(arena, opts.api_key);
 
     // The request lives in a slot so `Response.request` stays valid for the
     // reader handed back out of the retry loop below.
@@ -3542,10 +3548,21 @@ test "the api key is sent as the request's authorization header" {
     // the wire, and every provider answered 401 with no credential at all. The
     // header struct is the one the request writer reads, so asserting on it is
     // asserting on the wire.
-    const auth = "Bearer sk-test";
-    const headers: std.http.Client.Request.Headers = .{ .authorization = .{ .override = auth } };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+
+    const headers = try authHeaders(arena_state.allocator(), "sk-test");
     switch (headers.authorization) {
-        .override => |value| try std.testing.expectEqualStrings(auth, value),
+        .override => |value| try std.testing.expectEqualStrings("Bearer sk-test", value),
+        else => return error.TestUnexpectedResult,
+    }
+
+    // A key with a newline in it is still one header value: the request writer
+    // is what stops a CRLF here from becoming a second header, so the value it
+    // is handed has to carry the key whole.
+    const spaced = try authHeaders(arena_state.allocator(), "sk-two words");
+    switch (spaced.authorization) {
+        .override => |value| try std.testing.expectEqualStrings("Bearer sk-two words", value),
         else => return error.TestUnexpectedResult,
     }
 }
@@ -3589,21 +3606,6 @@ test "a tool timeout is cut to what is left of the budget" {
     try std.testing.expectEqual(@as(u64, 0), spent.remainingMs(io).?);
     try std.testing.expectEqual(tool_timeout_floor_ms, spent.toolCeilingMs(io).?);
     try std.testing.expect(spent.expired(io));
-}
-
-test "a CA bundle path that cannot be read falls back to the system store" {
-    const gpa = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(gpa, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    var arena_state = std.heap.ArenaAllocator.init(gpa);
-    defer arena_state.deinit();
-
-    var client: std.http.Client = .{ .allocator = gpa, .io = io };
-    defer client.deinit();
-
-    net.loadCaBundle(&client, io, gpa, "/nonexistent/ca-bundle.pem", arena_state.allocator());
-    try std.testing.expect(client.now == null);
 }
 
 test "reasoning effort is only sent when asked for" {

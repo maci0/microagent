@@ -171,6 +171,56 @@ test "the CA bundle comes from the project's variable first, then the system one
     try std.testing.expectEqualStrings("/etc/ssl/certs/ca-certificates.crt", caBundlePath(&env));
 }
 
+test "a CA bundle that names no certificate leaves the client scanning the system store" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var client: std.http.Client = .{ .allocator = gpa, .io = io };
+    defer client.deinit();
+
+    // No bundle named is not a bundle to read, and the client is left exactly
+    // as it was.
+    loadCaBundle(&client, io, gpa, "", arena);
+    try std.testing.expect(client.now == null);
+    try std.testing.expectEqual(@as(usize, 0), client.ca_bundle.map.count());
+
+    // A path that is not there: a warning, not a failure, so the run scans the
+    // system store rather than dying on the first request.
+    loadCaBundle(&client, io, gpa, "/nonexistent/ca-bundle.pem", arena);
+    try std.testing.expect(client.now == null);
+    try std.testing.expectEqual(@as(usize, 0), client.ca_bundle.map.count());
+
+    // A file that is readable but holds no certificate parses as zero
+    // certificates rather than as an error, and this is the case a missing
+    // guard lets through: `now` is the flag the client reads to decide the
+    // store is already populated, so setting it over an empty bundle skips the
+    // system rescan and leaves every request failing on a machine that ships
+    // certificates.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "empty.pem", .data = "# not a certificate\n" });
+
+    // The same file named relatively goes through the working directory, which
+    // is the form a wrapper exporting a relative path hands over; the guard has
+    // to be the same one on that path.
+    const relative = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}/empty.pem", .{tmp.sub_path});
+    loadCaBundle(&client, io, gpa, relative, arena);
+    try std.testing.expect(client.now == null);
+    try std.testing.expectEqual(@as(usize, 0), client.ca_bundle.map.count());
+
+    // And named absolutely, which takes the other of the two reads.
+    var file_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const absolute = file_buf[0..try tmp.dir.realPathFile(io, "empty.pem", &file_buf)];
+    loadCaBundle(&client, io, gpa, absolute, arena);
+    try std.testing.expect(client.now == null);
+    try std.testing.expectEqual(@as(usize, 0), client.ca_bundle.map.count());
+}
+
 test "a write target follows a symlink, relative or absolute" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
