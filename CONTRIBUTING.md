@@ -124,9 +124,11 @@ are inputs to the Python around the Zig and are refreshed by hand: `lint-require
 gate's linters, and `integrations/harbor/requirements.lock` is uv's output for the Harbor adapter,
 with the command that produces it in the comment at the top of
 `integrations/harbor/requirements.txt`. `make lint-lock` reads both and refuses
-a lock that no longer carries the manifest's pin, or that has an entry with no
-`sha256`, so a lock left behind by an earlier pin fails the gate instead of
-quietly benchmarking a Harbor release the manifest no longer names. The only
+a lock that no longer carries the manifest's pin, that has an entry with no
+`sha256`, or that carries a package no pin in the manifest needs, so a lock left
+behind by an earlier pin fails the gate instead of quietly benchmarking a Harbor
+release the manifest no longer names, and a lock with a package nothing asks for
+is not installed into the venv a score is measured in. The only
 build output is `zig-out/`, and `make clean` removes it along with
 `.zig-cache/`. `make musl` also copies the static binary to
 `integrations/harbor/microagent-<arch>-linux-musl`, named for the host's own

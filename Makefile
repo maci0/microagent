@@ -95,7 +95,7 @@ help:
 	  'check                 preflight, zig-version, fmt --check, the linters, the tests, an optimized build' \
 	  'lint                  the pin checks, then shellcheck, ruff and yamllint' \
 	  'lint-versions         check ruff and yamllint against the versions the gate runs' \
-	  'lint-lock             check the Harbor requirements.txt pins are the ones requirements.lock has' \
+	  'lint-lock             check the Harbor lock carries the manifest pins, a hash each, and nothing else' \
 	  'zig-version           check the local zig against the version the release is built with' \
 	  'bench AGENTS=...      three coding tasks through each harness' \
 	  'gauntlet AGENTS=...   the same gauntlet review on a fresh clone, per harness' \
@@ -239,10 +239,13 @@ lint-versions:
 # hashes every artifact, and still runs the adapter, so the Harbor release a
 # score in BENCHMARK.md was measured against stops being the one the pin names
 # and nothing fails until a number is quietly incomparable. The lock is
-# generated, so it is read here and never written: the two checks are that every
-# pin in the manifest is in the lock at the same version, and that no lock entry
+# generated, so it is read here and never written: the three checks are that every
+# pin in the manifest is in the lock at the same version, that no lock entry
 # arrives without a hash, which is what an artifact installed unverified would
-# be. Regenerating is the `uv pip compile` at the top of requirements.txt.
+# be, and that every lock entry is reachable from a manifest pin, so a lock
+# carrying a package no requirement asks for is refused rather than installed
+# into the venv a score is measured in. Regenerating is the `uv pip compile` at
+# the top of requirements.txt.
 HARBOR_DIR := integrations/harbor
 lint-lock:
 	@set -eu; \
@@ -252,7 +255,9 @@ lint-lock:
 	  test -f "$$file" || { echo "no $$file, so the Harbor adapter's dependency set is undeclared" >&2; exit 1; }; \
 	done; \
 	bad=0; \
-	for pin in $$(sed -n 's/^\([A-Za-z0-9_.-]*==[^ ]*\).*/\1/p' "$$manifest"); do \
+	pins="$$(sed -n 's/^\([A-Za-z0-9_.-]*==[^ ]*\).*/\1/p' "$$manifest" | tr '\n' ' ')"; \
+	test -n "$$pins" || { echo "$$manifest pins no package, so the adapter's dependency set is undeclared" >&2; exit 1; }; \
+	for pin in $$pins; do \
 	  grep -q "^$$pin " "$$lock" || { \
 	    echo "$$manifest pins $$pin, which $$lock does not: the lock is older than the pin, so a benchmark would run against a Harbor the manifest no longer names" >&2; \
 	    echo "regenerate it with the 'uv pip compile' at the top of $$manifest" >&2; \
@@ -267,6 +272,13 @@ lint-lock:
 	if [ -n "$$unhashed" ]; then \
 	  echo "$$lock has entries with no --hash=sha256, which uv installs without verifying them:" >&2; \
 	  echo "$$unhashed" >&2; \
+	  bad=1; \
+	fi; \
+	roots="$$(printf '%s\n' $$pins | sed 's/==.*//' | tr '\n' ' ')"; \
+	orphans="$$(awk -v roots="$$roots" 'function norm(s) { s = tolower(s); gsub(/[._]/, "-", s); return s } /^[A-Za-z0-9_.-]+==/ { name = $$0; sub(/[[:space:]].*/, "", name); sub(/==.*/, "", name); cur = norm(name); names[cur] = 1; seq[++n] = cur; multi = 0; next } /^[[:space:]]*# via[[:space:]]*$$/ { multi = 1; next } /^[[:space:]]*# via[[:space:]]+/ { multi = 0; for (i = 2; i <= NF; i++) if ($$i != "-r") parents[cur] = parents[cur] " " norm($$i); next } /^[[:space:]]*#   [^ ]/ { if (multi) for (i = 1; i <= NF; i++) parents[cur] = parents[cur] " " norm($$i); next } END { nr = split(roots, r, " "); for (i = 1; i <= nr; i++) if (r[i] in names) { seen[r[i]] = 1; queue[++m] = r[i] } for (i = 1; i <= n; i++) { c = seq[i]; k = split(parents[c], p, " "); for (j = 1; j <= k; j++) if (p[j] != "" && (p[j] in names)) rev[p[j]] = rev[p[j]] " " c } for (idx = 1; idx <= m; idx++) { c = queue[idx]; k = split(rev[c], ch, " "); for (j = 1; j <= k; j++) if (ch[j] != "" && !(ch[j] in seen)) { seen[ch[j]] = 1; queue[++m] = ch[j] } } for (i = 1; i <= n; i++) if (!(seq[i] in seen)) print seq[i] }' "$$lock")"; \
+	if [ -n "$$orphans" ]; then \
+	  echo "$$lock carries packages no pin in $$manifest needs, which uv installs into the venv anyway:" >&2; \
+	  echo "$$orphans" >&2; \
 	  bad=1; \
 	fi; \
 	test "$$bad" -eq 0
