@@ -75,6 +75,11 @@ DEFAULT_AGENT_TIMEOUT_SEC = "1500"
 # prevent. ROOM_S is that grace plus a minute for the container teardown.
 FINAL_PUSH_GRACE_S = 300
 FINAL_TURN_ROOM_S = FINAL_PUSH_GRACE_S + 60
+# The status microagent exits with when a run stopped at a ceiling rather than
+# finishing: a budget, a turn limit, or an empty provider response. The work it
+# did is still on disk, so the verifier scores it rather than reading an
+# exception.
+INCOMPLETE_EXIT_CODE = 3
 # The levels the binary accepts for reasoning.effort, kept beside the defaults
 # so a mistyped one is refused before a container is started rather than inside
 # one.
@@ -335,6 +340,18 @@ class Microagent(BaseAgent):
             context.n_output_tokens,
             started,
         )
+        # Exit 3 is the agent saying "I stopped at a ceiling with the answer
+        # unfinished" — a budget, a turn limit, or a provider response that
+        # carried no text and no tool call. The tree it changed is still there
+        # and is exactly what the verifier scores, so raising here would turn a
+        # partial fix into a recorded exception and a zero. Exit 1 and 2 mean
+        # the run failed or was invoked wrongly, which the verifier cannot fix.
+        if result.return_code == INCOMPLETE_EXIT_CODE:
+            self.logger.warning(
+                "microagent stopped incomplete (exit %s); scoring the tree as it stands",
+                result.return_code,
+            )
+            return
         if result.return_code != 0:
             raise RuntimeError(f"microagent exited {result.return_code}: {(result.stderr or '')[-2000:]}")
 
