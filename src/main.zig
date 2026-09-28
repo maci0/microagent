@@ -789,10 +789,6 @@ const Budget = struct {
         return .{ .deadline_ns = started_ns + @as(i96, s) * std.time.ns_per_s };
     }
 
-    fn set(self: Budget) bool {
-        return self.deadline_ns != null;
-    }
-
     fn expired(self: Budget, io: Io) bool {
         const d = self.deadline_ns orelse return false;
         return Io.Timestamp.now(io, .awake).nanoseconds >= d;
@@ -3124,11 +3120,9 @@ test "the time budget is a deadline the turn itself is held to" {
 
     // No budget set is a budget that never runs out, at any point in a turn.
     const none = Budget.of(now, null);
-    try std.testing.expect(!none.set());
     try std.testing.expect(!none.expired(io));
 
     const short = Budget.of(now, 1);
-    try std.testing.expect(short.set());
     try std.testing.expect(!short.expired(io));
 
     // A deadline already in the past is spent, wherever it is read.
@@ -3145,7 +3139,7 @@ test "the time budget is a deadline the turn itself is held to" {
     const push_later = spent.withGraceNs(final_push_grace_s);
     try std.testing.expect(!push_later.expired(io));
     // Grace on a run with no budget is still no budget.
-    try std.testing.expect(!none.withGraceNs(final_push_grace_s).set());
+    try std.testing.expect(!none.withGraceNs(final_push_grace_s).expired(io));
 }
 
 // A generation the provider cut at `max_tokens` arrives with a clean
