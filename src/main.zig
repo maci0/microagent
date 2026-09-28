@@ -202,12 +202,11 @@ pub fn main(init: std.process.Init) !void {
 
     // `--help` and `--version` before the environment is read, so a variable
     // this machine cannot use cannot take away the one command line that
-    // explains the rest. It used to: `MICROAGENT_MAX_TURNS=0 microagent
-    // --help` exited 2 and printed the help text on stderr, which is the one
-    // thing the help text says the exit status table forbids, and left a user
-    // whose variable was wrong with no way to read the variable's own
-    // documentation. `microagent update`, dispatched above, already behaved
-    // this way; the two commands now agree.
+    // explains the rest. `MICROAGENT_MAX_TURNS=0 microagent --help` is the
+    // case: it is the one command whose text names the exit status table
+    // forbids printing help on stderr, so a user whose variable was wrong had
+    // no way left to read that variable's own documentation. `microagent
+    // update`, dispatched above, answers the same way.
     if (earlyAction(args.items[1..])) |action| {
         switch (action) {
             .help => net.writeOut(io, help_text) catch {},
@@ -520,8 +519,8 @@ fn envValue(env: *const std.process.Environ.Map, name: []const u8) ?[]const u8 {
 const env_surrounding = net.env_surrounding;
 
 /// The debugging switch, on unless the variable is set to something that reads
-/// as off. Set-at-all was the old reading, which turned the trace on for a
-/// wrapper that exports the name to pass a flag it has not set yet.
+/// as off. A wrapper that exports the name to pass a flag it has not set yet
+/// must not turn the trace on by exporting the name at all.
 fn debugEnabled(env: *const std.process.Environ.Map) bool {
     const v = envValue(env, "MDEBUG") orelse return false;
     if (std.ascii.eqlIgnoreCase(v, "0") or std.ascii.eqlIgnoreCase(v, "off") or
@@ -3023,10 +3022,10 @@ test "a base url that carries credentials does not print them" {
 }
 
 // The trace is a diagnostic like any other, and every value on it came from
-// the environment or the command line. One that carries a C0 byte used to be
-// written to the terminal as it stood, on the one line whose job is telling an
-// operator which value the run resolved. Escaped, and long enough to still name
-// the value: a path cut to the quote budget names no directory.
+// the environment or the command line. One that carries a C0 byte is written
+// escaped, on the one line whose job is telling an operator which value the run
+// resolved. Escaped, and long enough to still name the value: a path cut to
+// the quote budget names no directory.
 test "every value on the config trace is escaped and left readable" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -3338,11 +3337,11 @@ test "help and version win wherever they appear" {
     try std.testing.expectEqual(Action.version, v.action);
 }
 
-// `microagent help` used to be a coding run whose task was the word "help",
-// billed to the caller, while `microagent update help` printed that
-// subcommand's help. The bare word is now a request, and only a bare word:
-// a prompt already set, a value of --print, and anything after `--` are all
-// still a task, by the rules that were already there.
+// `microagent help` is a request, not a task: `microagent update help` prints
+// that subcommand's help, and a bare word on the agent's own command line must
+// not be billed to the caller as a coding run. Only a bare word, though: a
+// prompt already set, a value of --print, and anything after `--` are all still
+// a task, by the rules that were already there.
 test "a bare help is a request, and only a bare one" {
     var buf: [512]u8 = undefined;
 

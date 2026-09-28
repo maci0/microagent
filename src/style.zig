@@ -33,9 +33,9 @@ pub const CavemanLevel = enum {
 
     /// The spelling that goes in the config file and in the injected header: the
     /// tag name, with `_` written as the `-` the header names. Reading it off
-    /// the enum rather than off a second table means a
-    /// level added above is spelled by the header and accepted by the parser
-    /// without either being told about it.
+    /// the enum rather than off a second table means a level added above is
+    /// spelled by the header and accepted by the parser without either being
+    /// told about it.
     pub fn name(self: CavemanLevel) []const u8 {
         return switch (self) {
             .wenyan_lite => "wenyan-lite",

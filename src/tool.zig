@@ -91,10 +91,9 @@ const ToolChild = struct {
             .stdin = .ignore,
             .stdout = .pipe,
             .stderr = .pipe,
-            // Null inherits this process's environment, which is how a tool
-            // subprocess used to see the provider key. Every call site passes
-            // the scrubbed copy the run builds once instead, so the key is
-            // never in a child's environment to print.
+            // Null inherits this process's environment, so every call site
+            // passes the scrubbed copy the run builds once instead: a child
+            // that inherited it has the provider key to print.
             .environ_map = environ_map,
         });
         return .{
@@ -901,12 +900,12 @@ const read_chunk = 8 * 1024;
 /// The lines of a file in `[offset, offset + limit)`, each with the newline the
 /// model reads them back with.
 ///
-/// The file is streamed rather than read whole. A `read` of fifty lines out of
-/// a four-megabyte artifact used to pull all four megabytes into the turn's
-/// memory, copy fifty lines out of them, and keep reading to the end of the
-/// file to find out there was nothing more; this reads up to the last line
-/// asked for and stops. A file whose last line has no newline is still a line,
-/// and gets the newline the split-based reader gave it.
+/// The file is streamed rather than read whole: a `read` of fifty lines out of
+/// a four-megabyte artifact would otherwise pull all four megabytes into the
+/// turn's memory, copy fifty lines out of them, and keep reading to the end
+/// of the file to find out there was nothing more. This reads up to the last
+/// line asked for and stops. A file whose last line has no newline is still a
+/// line, and gets the newline the split-based reader gave it.
 fn readLines(io: Io, arena: std.mem.Allocator, path: []const u8, offset: usize, limit: usize) ![]const u8 {
     var file = std.Io.Dir.cwd().openFile(io, path, .{ .allow_directory = true }) catch |err|
         return readFailed(arena, path, err);
@@ -1275,9 +1274,9 @@ const Captured = struct {
 ///
 /// It is the same bytes a finished call returns, and the same note about the cap
 /// having been reached, so a timeout does not cost the model the output that
-/// led to it: a build that ran for the whole timeout and printed every error it
-/// had found used to reach the model as a bare "command timed out", and the
-/// errors were the reason the next command was worth running.
+/// led to it: a build that ran for the whole timeout and printed every error
+/// it had found reaches the model whole, because those errors are the reason
+/// the next command is worth running.
 ///
 /// The exit status is deliberately absent. A call that failed never learned one:
 /// a child killed on the deadline has a signal this program sent, and a child
@@ -2814,10 +2813,10 @@ test "git tool refuses a rev that is a bare credentials filename" {
 }
 
 // The credential exclusions and the model's `path` are a conjunction, not a
-// choice: a scoped call is the ordinary one, and it used to arrive instead of
-// them, so `{"cmd":"show","path":"."}` handed back a committed `.env` line by
-// line. The repo is real and the assertion is on git's own output, because the
-// shape of the pathspec is only worth anything if git honors it.
+// choice: a scoped call is the ordinary one, so `{"cmd":"show","path":"."}`
+// must not hand back a committed `.env` line by line. The repo is real and
+// the assertion is on git's own output, because the shape of the pathspec is
+// only worth anything if git honors it.
 test "a scoped git call still leaves the committed credentials out" {
     const gpa = std.testing.allocator;
     var arena_state = std.heap.ArenaAllocator.init(gpa);
@@ -3113,8 +3112,8 @@ test "a child that outruns the capture cap keeps its first bytes instead of fail
     const arena = arena_state.allocator();
 
     const cap: usize = 4096;
-    // `std.process.run` answers this with `error.StreamTooLong` and no output at
-    // all, which is what a chatty build or a broad ripgrep used to hand back.
+    // `std.process.run` answers this with `error.StreamTooLong` and no output
+    // at all, which is what a chatty build or a broad ripgrep would hand back.
     const noisy = try runCapped(std.testing.io, arena, &.{
         "/bin/sh", "-c", "head -c 200000 /dev/zero | tr '\\0' 'a'",
     }, cap, net.durationMs(30_000), null, null);
@@ -3510,9 +3509,9 @@ test "a tool call that times out leaves no process of its own behind" {
 }
 
 // The bytes a command printed before the deadline are the reason the next
-// command is worth running, and the error path used to drop them: a build that
-// printed every error and then hung reached the model as one line naming a
-// timeout, so the next turn read that it had produced nothing at all.
+// command is worth running, and the error path has to carry them: a build that
+// printed every error and then hung must not reach the model as one line
+// naming a timeout, which reads as a turn that produced nothing at all.
 test "a command that times out keeps what it printed before the deadline" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -3619,8 +3618,8 @@ test "bash refuses a command naming a credentials file" {
 }
 
 // The provider key lives in this process's environment, and a tool subprocess
-// used to inherit all of it. The result of `printenv` is a tool result, so the
-// key would have been in the request body of every remaining turn of the run.
+// must not inherit it. The result of `printenv` is a tool result, so an
+// inherited key would be in the request body of every remaining turn of a run.
 test "a tool subprocess cannot see the provider key" {
     var env: std.process.Environ.Map = .init(std.testing.allocator);
     defer env.deinit();
@@ -3667,7 +3666,7 @@ test "a tool subprocess cannot see the provider key" {
 
 // A delegated program that is not installed is the ordinary case on a stock
 // macOS, which ships git and neither ripgrep nor ast-grep. The spawn reports
-// that as `FileNotFound`, and it used to reach the model and the operator as
+// that as `FileNotFound`, which must not reach the model and the operator as
 // `error: ripgrep failed: FileNotFound`: no program to install and no way to
 // install it, on a platform this release publishes for.
 test "a delegated program this machine does not have is named, with a way to install it" {
@@ -3703,10 +3702,10 @@ test "a delegated program this machine does not have is named, with a way to ins
     try std.testing.expect(std.mem.indexOf(u8, git_missing, "brew install git") != null);
 }
 
-// A child that closes its own output streams and keeps running used to hang the
-// whole run: the drain finished on the closed pipes and the bare `child.wait`
-// that followed took no timeout, so the tool call blocked for as long as the
-// command decided and the group reap on the way out never fired. The timeout
+// A child that closes its own output streams and keeps running would hang the
+// whole run: the drain finishes on the closed pipes, and a bare `child.wait`
+// after it takes no timeout, so the tool call blocks for as long as the
+// command decides and the group reap on the way out never fires. The timeout
 // the call was given has to bound the wait as well as the drain.
 test "a command that closes its pipes and keeps running is bounded by the tool timeout" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
