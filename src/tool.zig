@@ -3769,6 +3769,28 @@ test "a tool call that times out leaves no process of its own behind" {
     try expectNoProcessSurvived();
 }
 
+// The tests above read a child's stderr, so a shell that starts by warning
+// about an LC_ALL this host does not have makes them fail on a correct tree.
+// build.zig pins both variables on the test run, so this holds wherever the
+// suite is invoked from rather than only under `make`; a child here reads them
+// back, and an unpinned run leaves a contributor on such a host with six
+// failures that no change in this file explains.
+test "the suite runs a child under a locale and a timezone the host cannot change" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const res = try runCapped(
+        std.testing.io,
+        arena_state.allocator(),
+        &.{ "/bin/sh", "-c", "printf '%s %s' \"$LC_ALL\" \"$TZ\"" },
+        4096,
+        net.durationMs(10_000),
+        null,
+        null,
+    );
+    try std.testing.expectEqualStrings("C UTC", res.stdout);
+    try std.testing.expectEqualStrings("", res.stderr);
+}
+
 // The bytes a command printed before the deadline are the reason the next
 // command is worth running, and the error path has to carry them: a build that
 // printed every error and then hung must not reach the model as one line

@@ -139,6 +139,13 @@ on the result"`. Tests must be hermetic: pass the environment in (the code reads
 an `environ_map`, it does not call `getenv`), and use `std.testing.tmpDir` for
 files. Nothing in the suite reaches the network, the clock's timezone, or
 `$HOME`, so a test that needs any of those must say how it neutralizes them.
+The test run itself sets `LC_ALL=C` and `TZ=UTC` in `build.zig`, for the
+children the suite spawns: several tests assert on the exact bytes a
+`/bin/sh` printed, and a shell started under an `LC_ALL` naming a locale the
+host does not have opens with a `setlocale` warning on stderr, which fails them
+on a tree that is correct. `make test` exported the same two for that reason;
+`zig build test`, which is what this file and `ci.yml` both run, now does it
+too.
 
 There is no generated code, and nothing in the Zig build regenerates a lockfile. The two lockfiles
 are inputs to the Python around the Zig and are refreshed by hand: `lint-requirements.txt` pins the

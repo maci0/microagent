@@ -46,5 +46,15 @@ pub fn build(b: *std.Build) void {
         .filters = if (test_filter) |f| &[_][]const u8{f} else &.{},
     });
     const run_tests = b.addRunArtifact(tests);
+    // The suite spawns real `/bin/sh` children and several tests assert on the
+    // bytes a child printed, so the environment the run inherits has to be one
+    // the host's own settings cannot change: a shell under an LC_ALL naming a
+    // locale this machine does not have prints a `setlocale` warning on stderr
+    // and turns those assertions into failures on a tree that is correct. The
+    // Makefile exports the same two for the release builds, and `zig build
+    // test` is the command the README and ci.yml both run, so the guarantee
+    // belongs here rather than only under `make`.
+    run_tests.setEnvironmentVariable("LC_ALL", "C");
+    run_tests.setEnvironmentVariable("TZ", "UTC");
     b.step("test", "Run unit tests").dependOn(&run_tests.step);
 }
