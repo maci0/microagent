@@ -65,6 +65,17 @@ release, and `microagent update` moves you to it.
   and named on stderr, and the assistant message goes back naming each call
   once, so the tool results still pair one to one. Two calls that happen to be
   identical but carry different ids are still two calls.
+- Tool calls a response carried and the run did not dispatch are now named on
+  stderr. A call with no id, no name, or arguments cut mid-object, and a call
+  at an index past the parallel-call ceiling, were all dropped: the first
+  because it cannot go back to the provider inside the assistant message, the
+  second because the call list is sized by index and an index past the ceiling
+  would size it to billions. Neither was reported. The turn went on and finished
+  as one that had run everything it was asked to, and the assistant message the
+  provider reads next names only the calls that were kept, so the work was
+  smaller than the work the model asked for with nothing on the operator's
+  screen to connect the two. Both counts now travel with the turn and are said
+  on one line, the way the duplicate above already was.
 - A tool call is bounded by its timeout while it waits for the child, not only while it
   drains the child's pipes. Both pipes reach end of stream long before the command does,
   and the wait that followed took no deadline of its own, so

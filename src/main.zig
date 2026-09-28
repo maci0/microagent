@@ -1750,12 +1750,15 @@ fn streamChat(
     if (result.content.items.len > 0) try out_buf.append(gpa, '\n');
     try writeOutPrefix(io, arena, &out_buf, out_buf.items.len, shown_url);
     result.calls = calls;
-    // Named when the stream delivered a call twice: the turn is still complete,
-    // the duplicate is simply not dispatched, and a run that silently ran every
-    // call the response carried would be a run whose side effects a reader
-    // cannot account for from the turn it read.
-    const duplicates = keepRunnableCalls(gpa, &result.calls);
-    if (duplicates > 0) net.note(io, arena, "microagent: the completion stream from {s} carried {d} tool call(s) whose id this response had already delivered; they are not dispatched a second time\n", .{ shown_url, duplicates });
+    // Whatever the filter took out is named, one reason at a time. A turn is
+    // still complete without those calls, and a run that silently ran every call
+    // the response carried would be a run whose side effects a reader cannot
+    // account for from the turn it read; the same is true in the other
+    // direction, where a call the model asked for is not dispatched and the
+    // assistant message that goes back names fewer calls than the stream did.
+    const dropped = keepRunnableCalls(gpa, &result.calls);
+    if (droppedCallNotice(arena, shown_url, dropped, result.over_cap)) |notice| net.note(io, arena, "{s}\n", .{notice});
+    if (dropped.duplicate > 0) net.note(io, arena, "microagent: the completion stream from {s} carried {d} tool call(s) whose id this response had already delivered; they are not dispatched a second time\n", .{ shown_url, dropped.duplicate });
     return result;
 }
 
@@ -1777,6 +1780,39 @@ fn truncatedNotice(
             "content and {d} tool call(s); the turn is not complete",
         .{ url, content_len, calls_len },
     ) catch "microagent: the completion stream ended without [DONE]; the turn is not complete";
+}
+
+/// What the filter below took out of one response, so the caller can say which
+/// of the two reasons applied rather than reporting one number for both.
+pub const DroppedCalls = struct {
+    /// A call the run cannot carry: no id, no name, or arguments that are not a
+    /// JSON object. The caller names this count, because a call that vanished is
+    /// a call the operator watching the run cannot otherwise account for.
+    unusable: usize = 0,
+    /// A call carrying an id the response already delivered under another index.
+    duplicate: usize = 0,
+};
+
+/// Why a response's tool calls were not all dispatched, in the words the
+/// operator reads. Null when every call the stream carried can be run.
+///
+/// The count is what a reader needs: the turn still completes and the model is
+/// asked again, so a run that dropped a call and said nothing is a run whose
+/// work is smaller than the work it asked for, with nothing on the screen to
+/// connect the two. Both reasons are on one line rather than two because they
+/// are the same fact about the same turn, and a turn that lost calls to each of
+/// them is one line that names both.
+fn droppedCallNotice(arena: std.mem.Allocator, url: []const u8, dropped: DroppedCalls, over_cap: usize) ?[]const u8 {
+    if (dropped.unusable == 0 and over_cap == 0) return null;
+    if (dropped.unusable == 0) return std.fmt.allocPrint(arena, "microagent: the completion stream from {s} asked for {d} tool call(s) past the {d} this run dispatches at once; they are not dispatched, and the model is asked again without them", .{
+        url, over_cap, max_tool_calls,
+    }) catch "microagent: some tool calls from the completion stream were past the parallel-call ceiling; they are not dispatched";
+    if (over_cap == 0) return std.fmt.allocPrint(arena, "microagent: {d} tool call(s) from {s} carried no id or no name, or arguments that are not a JSON object; they are not dispatched, and the model is asked again without them", .{
+        dropped.unusable, url,
+    }) catch "microagent: some tool calls from the completion stream could not be dispatched; the model is asked again without them";
+    return std.fmt.allocPrint(arena, "microagent: {d} tool call(s) from {s} could not be dispatched ({d} carried no id or no name, or arguments that are not a JSON object; {d} were past the {d} this run dispatches at once); the model is asked again without them", .{
+        dropped.unusable + over_cap, url, dropped.unusable, over_cap, max_tool_calls,
+    }) catch "microagent: some tool calls from the completion stream could not be dispatched; the model is asked again without them";
 }
 
 /// A provider that skips a tool-call index leaves an empty slot where `applyFrame`
@@ -1806,12 +1842,10 @@ fn truncatedNotice(
 /// call whose fragments arrived twice, which `applyCallDelta` folds into the one
 /// slot that index names. What lands here is the same id under two indexes.
 ///
-/// Returns how many calls it took for want of a second. A call the run cannot
-/// carry outright is not counted: the ceiling and truncation notices above have
-/// already said why a turn is short of its tool calls, so only a repeat the
-/// reader could otherwise count twice is worth a line.
-fn keepRunnableCalls(gpa: std.mem.Allocator, calls: *std.ArrayList(chat_mod.ToolCall)) usize {
-    var duplicates: usize = 0;
+/// Returns what it took out, one reason at a time: a call the run cannot carry
+/// outright, and a second delivery of one it already has.
+fn keepRunnableCalls(gpa: std.mem.Allocator, calls: *std.ArrayList(chat_mod.ToolCall)) DroppedCalls {
+    var dropped: DroppedCalls = .{};
     var kept: usize = 0;
     for (calls.items) |*call| {
         const usable = call.id.len != 0 and call.name.len != 0 and
@@ -1821,13 +1855,13 @@ fn keepRunnableCalls(gpa: std.mem.Allocator, calls: *std.ArrayList(chat_mod.Tool
             kept += 1;
             continue;
         }
-        if (usable) duplicates += 1;
+        if (usable) dropped.duplicate += 1 else dropped.unusable += 1;
         if (call.id.len != 0) gpa.free(call.id);
         if (call.name.len != 0) gpa.free(call.name);
         call.args.deinit(gpa);
     }
     calls.shrinkRetainingCapacity(kept);
-    return duplicates;
+    return dropped;
 }
 
 fn indexOfCallId(calls: []const chat_mod.ToolCall, id: []const u8) ?usize {
@@ -2044,9 +2078,16 @@ fn applyCallDelta(
     // `numCount` clamps rather than casting: a provider index beyond what a
     // `usize` holds saturates, so the cap below sees it and drops the call
     // instead of the cast trapping or wrapping. The index sizes `calls`, so it
-    // is capped before it can ask for billions of empty slots.
+    // is capped before it can ask for billions of empty slots. The cap is
+    // counted rather than applied quietly: a response asking for more parallel
+    // calls than the run dispatches has the rest dropped, and the assistant
+    // message the provider reads next names only the ones that were kept, so
+    // the count is what says what happened to them.
     const idx = chat_mod.numCount(index);
-    if (idx >= max_tool_calls) return;
+    if (idx >= max_tool_calls) {
+        result.over_cap += 1;
+        return;
+    }
     while (calls.items.len <= idx) try calls.append(gpa, .{ .id = "", .name = "" });
     const call = &calls.items[idx];
     // A provider may resend the id or the name on a later fragment, so the
@@ -4497,7 +4538,7 @@ test "a tool call the stream delivered twice is dispatched once" {
     try std.testing.expectEqual(@as(usize, 3), calls.items.len);
 
     const dropped = keepRunnableCalls(arena, &calls);
-    try std.testing.expectEqual(@as(usize, 1), dropped);
+    try std.testing.expectEqual(@as(usize, 1), dropped.duplicate);
     try std.testing.expectEqual(@as(usize, 2), calls.items.len);
     try std.testing.expectEqualStrings("call_1", calls.items[0].id);
     try std.testing.expectEqualStrings("call_2", calls.items[1].id);
@@ -4511,8 +4552,96 @@ test "a tool call the stream delivered twice is dispatched once" {
     var second: std.ArrayList(chat_mod.ToolCall) = .empty;
     try applyFrame(arena, arena, twice, &result, &second, &out_buf, &unparsable);
     const kept = keepRunnableCalls(arena, &second);
-    try std.testing.expectEqual(@as(usize, 0), kept);
+    try std.testing.expectEqual(@as(usize, 0), kept.duplicate);
     try std.testing.expectEqual(@as(usize, 2), second.items.len);
+}
+
+// A call the filter took out is work the run did not do, and the turn carrying
+// it goes on as a finished one. So the count is said, and the notice is null
+// exactly when nothing was dropped: a turn that dispatched everything it was
+// given has nothing to report, and a line on every turn would be one an
+// operator learns to skip.
+test "a dropped tool call is reported, and a turn that dropped none is not" {
+    const gpa = std.testing.allocator;
+    var run_state = std.heap.ArenaAllocator.init(gpa);
+    defer run_state.deinit();
+    const arena = run_state.allocator();
+
+    // Two slots the index walk left behind are dropped as unusable.
+    const gapped = "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":2,\"id\":\"call_1\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}]}}]}";
+    var result: chat_mod.ChatResult = .{};
+    var calls: std.ArrayList(chat_mod.ToolCall) = .empty;
+    var out_buf: std.ArrayList(u8) = .empty;
+    var unparsable: usize = 0;
+    try applyFrame(arena, arena, gapped, &result, &calls, &out_buf, &unparsable);
+    try std.testing.expectEqual(@as(usize, 3), calls.items.len);
+
+    const dropped = keepRunnableCalls(arena, &calls);
+    try std.testing.expectEqual(@as(usize, 2), dropped.unusable);
+    try std.testing.expectEqual(@as(usize, 0), dropped.duplicate);
+    try std.testing.expectEqual(@as(usize, 1), calls.items.len);
+
+    const notice = droppedCallNotice(arena, "http://x/v1/chat/completions", dropped, 0).?;
+    try std.testing.expect(std.mem.indexOf(u8, notice, "http://x/v1/chat/completions") != null);
+    try std.testing.expect(std.mem.indexOf(u8, notice, "2 tool call(s)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, notice, "not dispatched") != null);
+
+    // A second delivery of one call is the other reason, and it is named where
+    // it happens, so the notice stays null for it.
+    const twice = "{\"choices\":[{\"delta\":{\"tool_calls\":[" ++
+        "{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"a.zig\\\"}\"}}," ++
+        "{\"index\":1,\"id\":\"call_1\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"a.zig\\\"}\"}}" ++
+        "]}}]}";
+    var second: std.ArrayList(chat_mod.ToolCall) = .empty;
+    try applyFrame(arena, arena, twice, &result, &second, &out_buf, &unparsable);
+    const kept = keepRunnableCalls(arena, &second);
+    try std.testing.expectEqual(@as(usize, 0), kept.unusable);
+    try std.testing.expect(droppedCallNotice(arena, "http://x/v1/chat/completions", kept, 0) == null);
+    try std.testing.expect(droppedCallNotice(arena, "http://x", .{}, 0) == null);
+}
+
+// The parallel-call ceiling drops a call the model asked for, and the assistant
+// message the provider reads next names only the calls that were kept. So the
+// ceiling counts what it turned away, and a turn that stayed under it says
+// nothing.
+test "a tool call past the parallel-call ceiling is counted and reported" {
+    const gpa = std.testing.allocator;
+    var run_state = std.heap.ArenaAllocator.init(gpa);
+    defer run_state.deinit();
+    const arena = run_state.allocator();
+
+    var buf: [512]u8 = undefined;
+    const past = std.fmt.bufPrint(&buf, "{{\"choices\":[{{\"delta\":{{\"tool_calls\":[" ++
+        "{{\"index\":0,\"id\":\"call_0\",\"function\":{{\"name\":\"read\",\"arguments\":\"{{}}\"}}}}," ++
+        "{{\"index\":{d},\"id\":\"call_past\",\"function\":{{\"name\":\"read\",\"arguments\":\"{{}}\"}}}}" ++
+        "]}}}}]}}", .{max_tool_calls}) catch unreachable;
+    var result: chat_mod.ChatResult = .{};
+    var calls: std.ArrayList(chat_mod.ToolCall) = .empty;
+    var out_buf: std.ArrayList(u8) = .empty;
+    var unparsable: usize = 0;
+    try applyFrame(arena, arena, past, &result, &calls, &out_buf, &unparsable);
+    // The call past the cap is not in the list at all, so it cannot be sized
+    // into it: this is the same count the notice reports.
+    try std.testing.expectEqual(@as(usize, 1), calls.items.len);
+    try std.testing.expectEqual(@as(usize, 1), result.over_cap);
+
+    const notice = droppedCallNotice(arena, "http://x", .{}, result.over_cap).?;
+    try std.testing.expect(std.mem.indexOf(u8, notice, "1 tool call(s)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, notice, "not dispatched") != null);
+
+    // Both reasons at once is one line naming both, and the counts add.
+    const joined = droppedCallNotice(arena, "http://x", .{ .unusable = 3 }, 2).?;
+    try std.testing.expect(std.mem.indexOf(u8, joined, "5 tool call(s)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, joined, "3 carried no id") != null);
+
+    // An index that saturates rather than wrapping is the same case: the cap is
+    // what catches it, and it is counted.
+    result.over_cap = 0;
+    try applyCallDelta(arena, .{ .number_string = "not a number" }, null, null, null, &result, &calls);
+    try std.testing.expectEqual(@as(usize, 0), result.over_cap);
+    try applyCallDelta(arena, .{ .float = 1e30 }, null, null, null, &result, &calls);
+    try std.testing.expectEqual(@as(usize, 1), result.over_cap);
+    try std.testing.expectEqual(@as(usize, 1), calls.items.len);
 }
 
 test "out-of-range numbers from the model saturate instead of trapping" {

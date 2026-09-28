@@ -86,6 +86,13 @@ pub const ChatResult = struct {
     /// mid-character, and the run's notice is what says the turn is not the
     /// whole of what the model meant to send.
     dropped: bool = false,
+    /// Tool calls the response carried at an index past the ceiling the agent
+    /// loop puts on one response's parallel calls, which the caller drops rather
+    /// than size the call list to. The count travels on the response for the
+    /// reason `dropped` does: the calls are gone from the turn, and a turn that
+    /// ran fewer calls than the model asked for with nothing said about it is a
+    /// turn whose work is smaller than the work it asked for.
+    over_cap: usize = 0,
 
     pub fn deinitFinish(self: *ChatResult, gpa: std.mem.Allocator) void {
         if (!std.mem.eql(u8, self.finish_reason, &.{})) gpa.free(self.finish_reason);
