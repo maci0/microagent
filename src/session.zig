@@ -209,7 +209,7 @@ pub fn elapsedMs(io: Io, since: i96) u64 {
 /// One record per response, into the log this run opened.
 ///
 /// A failure to *open* the log is a null and costs the run nothing, which is
-/// why `openSession` can stay quiet. A failure to *write* one is different: the
+/// why `open` can stay quiet. A failure to *write* one is different: the
 /// log was there, the run is producing records, and a store that has gone quiet
 /// (a full disk, a directory removed under the run) would otherwise leave the
 /// monitor reporting a run that stopped long before it did. It is named once and
@@ -263,6 +263,38 @@ fn sessionRecord(
 // A record a monitor reads has to be one JSON object with this response's own
 // counters, the directory that attributes it, and the model time a rate is
 // taken over.
+test "the session directory is the variable, trimmed, and empty means off" {
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    // The caller's arena: the joined default path is owned by the process
+    // init, which outlives every run, so nothing here frees it.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Unset: the store sits beside the other per-run state, and a machine with
+    // no HOME keeps no log rather than naming a directory it cannot make.
+    try env.put("HOME", "/home/me");
+    try std.testing.expectEqualStrings("/home/me/.microagent/sessions", sessionDir(&env, arena));
+    var empty: std.process.Environ.Map = .init(std.testing.allocator);
+    defer empty.deinit();
+    try std.testing.expectEqualStrings("", sessionDir(&empty, arena));
+
+    // Set: the caller's directory, and empty is off rather than a fall through
+    // to the default, which is what makes MICROAGENT_SESSION_DIR one of the two
+    // variables that do not treat an empty value as unset.
+    try env.put("MICROAGENT_SESSION_DIR", "/var/log/agent");
+    try std.testing.expectEqualStrings("/var/log/agent", sessionDir(&env, arena));
+    try env.put("MICROAGENT_SESSION_DIR", "");
+    try std.testing.expectEqualStrings("", sessionDir(&env, arena));
+
+    // A wrapper that populates the environment from a file exports the newline
+    // the file ended with, and a path carrying it names no directory this
+    // filesystem holds: the log is not written and the run says nothing.
+    try env.put("MICROAGENT_SESSION_DIR", "  /var/log/agent \r\n");
+    try std.testing.expectEqualStrings("/var/log/agent", sessionDir(&env, arena));
+}
+
 test "session record carries one response's counters, cwd and model time" {
     var state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer state.deinit();

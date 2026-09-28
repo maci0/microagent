@@ -2845,6 +2845,7 @@ test "a total summed from parts counts the parts a later frame brings" {
     try std.testing.expectEqual(@as(u64, 999), sink.result.total_tokens);
 }
 
+/// The `[` and the system message a run starts from, in the bytes the agent
 /// appends. The tests that build a conversation by hand start here.
 fn conversationHeader(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), system: []const u8) !void {
     try msgs.appendSlice(gpa, "[");
@@ -3712,6 +3713,9 @@ test "the style config path follows flag, then variable, then home" {
     defer bare.deinit();
     try std.testing.expect(styleConfigPath(&bare, arena, "").path == null);
 }
+
+// The name and the id of a streamed tool call are copies the run allocator
+// owns, so releasing the response has to release them with its other buffers.
 test "a response releases the copies it made of a tool call" {
     const gpa = std.testing.allocator;
     // The scratch arena is the one the stream loop resets after every frame;
