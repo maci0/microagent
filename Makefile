@@ -61,8 +61,11 @@ bench: build
 overhead: build
 	PATH="$(BIN_DIR):$$PATH" sh bench/overhead.sh
 
+# `install -D` is GNU coreutils; macOS ships BSD install, so the parent
+# directory is created here instead.
 install: build
-	install -Dm755 $(BIN) $(HOME)/.local/bin/microagent
+	mkdir -p $(HOME)/.local/bin
+	install -m755 $(BIN) $(HOME)/.local/bin/microagent
 
 clean:
 	rm -rf zig-out .zig-cache

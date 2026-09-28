@@ -1,0 +1,4 @@
+# The release ships Linux and macOS binaries, so contributors edit on both. Git
+# core.autocrlf would hand `sh bench/*.sh` a CRLF first line and every script
+# would die on `set -u\r`; normalize text in the repository instead.
+* text=auto eol=lf

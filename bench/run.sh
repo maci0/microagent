@@ -14,8 +14,10 @@ set -u
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bench/monotonic.sh"
+# shellcheck source=bench/portable.sh
+. "$root/bench/portable.sh"
 tasks_dir="$root/bench/tasks"
-work_root="${BENCH_WORK:-/tmp/microagent-bench}"
+work_root="${BENCH_WORK:-${TMPDIR:-/tmp}/microagent-bench}"
 results="$root/bench/results.jsonl"
 timeout_s="${BENCH_TIMEOUT:-600}"
 
@@ -62,8 +64,12 @@ for agent in $agents; do
 		fi
 
 		prompt=$(cat "$task_dir/prompt.txt")
+		# Exported rather than prefixed to the call: a `VAR=x func` prefix
+		# persists after the function in a POSIX shell.
+		PROMPT=$prompt
+		export PROMPT
 		start=$(monotonic_ns)
-		( cd "$work" && PROMPT="$prompt" timeout "$timeout_s" sh -c "$(argv_for "$agent")" ) >"$work/.out" 2>"$work/.err"
+		run_limited "$timeout_s" "$work" sh -c "$(argv_for "$agent")" >"$work/.out" 2>"$work/.err"
 		rc=$?
 		end=$(monotonic_ns)
 		wall=$(echo "$end $start" | awk '{printf "%.1f", ($1-$2)/1000000000}')

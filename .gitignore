@@ -3,3 +3,4 @@ zig-out/
 zig-pkg/
 dist/
 __pycache__/
+.scratch/

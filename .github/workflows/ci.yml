@@ -1,6 +1,10 @@
-# Contributor gate: the same two checks `make check` runs, on the Zig version
+# Contributor gate: the same checks `make check` runs, on the Zig version
 # build.zig.zon declares as its minimum, so a push that would fail here never
-# gets that far. Release assets are built by release.yml on a version tag.
+# gets that far. The tests also run on a macOS runner, and the four binaries
+# the release publishes build on every push, so a macOS-only break
+# (`/bin/sh` differences, a glibc-only call, a path that resolves differently)
+# lands as a failed check rather than as a broken update asset. Release assets
+# are built by release.yml on a version tag.
 name: ci
 
 on:
@@ -16,9 +20,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -45,3 +53,57 @@ jobs:
 
       - name: unit tests pass
         run: zig build test --summary all
+
+      - name: optimized build
+        run: zig build -Doptimize=ReleaseSmall
+
+      # `update` is the one subcommand that names the running executable, so
+      # both paths in it are worth exercising on a real filesystem.
+      - name: the built binary runs on this platform
+        run: |
+          set -euo pipefail
+          ./zig-out/bin/microagent --version
+          ./zig-out/bin/microagent update --help >/dev/null
+
+  release-assets:
+    # Every target the `update` subcommand asks for, built the way release.yml
+    # builds it. A target that stops compiling, or whose asset name drifts from
+    # what update.zig asks for, fails here instead of at a tag.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: read the minimum zig version
+        id: zig
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^[[:space:]]*\.minimum_zig_version = "\([^"]*\)".*/\1/p' build.zig.zon)"
+          if [ -z "$version" ]; then
+            echo "build.zig.zon has no .minimum_zig_version to install" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          zig-version: ${{ steps.zig.outputs.version }}
+
+      - name: build every published target
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for target in x86_64-linux-musl aarch64-linux-musl x86_64-macos aarch64-macos; do
+            zig build -Dtarget="$target" -Doptimize=ReleaseSmall
+            install -m755 zig-out/bin/microagent "dist/microagent-$target"
+          done
+          ls -l dist
+
+      - name: the host binary reports the version in build.zig.zon
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^[[:space:]]*\.version = "\([^"]*\)".*/\1/p' build.zig.zon)"
+          got="$(./dist/microagent-x86_64-linux-musl --version)"
+          test "$got" = "microagent $version"

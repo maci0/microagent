@@ -7,8 +7,11 @@ set -u
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bench/monotonic.sh"
+# shellcheck source=bench/portable.sh
+. "$root/bench/portable.sh"
 agents=${*:-microagent claude gemini codex crush grok kimi opencode cursor-agent clanker dsh}
 prompt="Reply with exactly: pong"
+tmp=${TMPDIR:-/tmp}
 
 printf '%-14s %10s %10s %10s\n' agent startup_ms wall_s tokens
 printf '%s\n' "----------------------------------------------"
@@ -23,9 +26,8 @@ for agent in $agents; do
 		&& awk -F'[:,]' '/"mean"/{printf "%.1f", $2*1000; exit}' "$work/startup.json") || startup=-
 	[ -z "$startup" ] && startup=-
 
-	work=$(mktemp -d)
 	start=$(monotonic_ns)
-	( cd "$work" && timeout 180 "$agent" -p "$prompt" ) >"$work/out" 2>&1
+	run_limited 180 "$work" "$agent" -p "$prompt" >"$work/out" 2>&1
 	end=$(monotonic_ns)
 	wall=$(echo "$end $start" | awk '{printf "%.1f", ($1-$2)/1000000000}')
 	# Only microagent prints a machine-readable cumulative total.
