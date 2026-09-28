@@ -233,6 +233,9 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
     // A rev such as `--output=FILE` would turn a read into a write.
     if (rev) |r| if (std.mem.startsWith(u8, r, "-"))
         return std.fmt.allocPrint(arena, "error: rev must not start with '-'", .{});
+    // `git show <rev> -- .env` prints a committed credentials file as a patch,
+    // so the path gets the refusal `read` gives it rather than a git one.
+    if (path) |p| if (isCredentialPath(p)) return credentialRefusal(arena, p);
 
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(arena, &.{ "git", "--no-pager" });
@@ -452,6 +455,47 @@ fn isCredentialName(name: []const u8) bool {
     return false;
 }
 
+/// The same names, as the ignore globs `search` and `ast` hand their backends.
+///
+/// A search that matches a line of `.env` returns it as a tool result, and a
+/// tool result is re-sent to the provider on every later turn of the run: the
+/// refusal `read` makes is no protection to the operator when the same bytes
+/// come back one tool over. The globs are derived from the tables above rather
+/// than spelled beside them, so a name added to those is excluded here too.
+///
+/// The names are case-sensitive globs, which is why `search` also passes
+/// `--glob-case-insensitive`; `ast-grep` has no such flag, so a tree searched
+/// with `ast` can still match a file whose name is spelled in another case.
+const credential_glob_table: [credential_globs_capacity][]const u8 = blk: {
+    var list: [credential_globs_capacity][]const u8 = undefined;
+    var n: usize = 0;
+    for (credential_names) |c| {
+        list[n] = "!" ++ c;
+        n += 1;
+    }
+    for (credential_extensions) |ext| {
+        list[n] = "!*" ++ ext;
+        n += 1;
+    }
+    // The three spellings `isCredentialName` reads as one family.
+    list[n] = "!.env";
+    n += 1;
+    list[n] = "!.env*";
+    n += 1;
+    list[n] = "!*.env";
+    n += 1;
+    for (credential_dirs) |dir| {
+        list[n] = "!" ++ dir;
+        n += 1;
+    }
+    break :blk list;
+};
+
+/// Every name, extension, directory and `.env` spelling the tables above carry.
+const credential_globs_capacity = credential_names.len + credential_extensions.len + credential_dirs.len + 3;
+
+const credential_globs: []const []const u8 = credential_glob_table[0..credential_globs_capacity];
+
 /// True when a path names a credential file, so `read` refuses it. The path is
 /// model-supplied text and never touches the filesystem before this runs, so
 /// the answer is a decision about the name, not about what opened.
@@ -665,10 +709,14 @@ fn toolSearch(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceilin
     const path = chat.str(args.get("path")) orelse ".";
     const glob = chat.str(args.get("glob"));
     var argv: std.ArrayList([]const u8) = .empty;
-    try argv.appendSlice(arena, &.{ "rg", "--line-number", "--no-heading", "--color", "never", "--max-count", "200" });
+    try argv.appendSlice(arena, &.{ "rg", "--line-number", "--no-heading", "--color", "never", "--max-count", "200", "--glob-case-insensitive" });
     if (glob) |g| {
         try argv.appendSlice(arena, &.{ "--glob", g });
     }
+    // After the model's own glob, because a later `--glob` is the one ripgrep
+    // applies where two match: the exclusions are not a default a `--glob` on
+    // the command line can turn off.
+    for (credential_globs) |g| try argv.appendSlice(arena, &.{ "--glob", g });
     try argv.appendSlice(arena, &.{ "--", pattern, path });
     return runSearchTool(io, arena, argv.items, "ripgrep", ceiling_ms);
 }
@@ -684,6 +732,7 @@ fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
 
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(arena, &.{ "ast-grep", "run", "--pattern", pattern, "--lang", lang });
+    for (credential_globs) |g| try argv.appendSlice(arena, &.{ "--globs", g });
     if (rewrite) |r| try argv.appendSlice(arena, &.{ "--rewrite", r, "--update-all" });
     try argv.appendSlice(arena, &.{ "--", path });
 
@@ -1191,6 +1240,53 @@ test "the read tool refuses a credentials path through dispatch" {
     const refused = try dispatch(arena, "read", "{\"path\":\".env\"}");
     try std.testing.expect(std.mem.startsWith(u8, refused, "refused: .env is a credentials file"));
     try std.testing.expect(std.mem.indexOf(u8, refused, "SECRET=") == null);
+}
+
+// The refusal `read` makes is no protection to the operator when the same
+// bytes come back one tool over: a tool result is re-sent to the provider on
+// every later turn, and a search or a `git show` that matched a credentials
+// file is a way round it.
+test "search and ast skip the files read refuses, and git refuses one by name" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const needle = "sk-do-not-search";
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    try tmp.dir.createDirPath(io, "deploy");
+    // Visible to both backends: ripgrep and ast-grep skip a dotfile on their
+    // own, so the case that has to be excluded here is a plain name beside
+    // ordinary source, including the uppercase spelling a case-insensitive
+    // filesystem resolves to the same file.
+    for ([_][]const u8{ "app.py", "deploy/server.pem", "deploy/KEY.PEM", "deploy/production.env", "notes.txt" }) |name|
+        try tmp.dir.writeFile(io, .{
+            .sub_path = name,
+            .data = try std.fmt.allocPrint(arena, "x = \"{s}\"\n", .{needle}),
+        });
+
+    const search = try std.fmt.allocPrint(arena, "{{\"pattern\":\"{s}\",\"path\":\"{s}\"}}", .{ needle, root });
+    const found = try dispatch(arena, "search", search);
+    try std.testing.expect(std.mem.indexOf(u8, found, "app.py") != null);
+    try std.testing.expect(std.mem.indexOf(u8, found, "notes.txt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, found, "server.pem") == null);
+    try std.testing.expect(std.mem.indexOf(u8, found, "KEY.PEM") == null);
+    try std.testing.expect(std.mem.indexOf(u8, found, "production.env") == null);
+
+    // The git tool reads a committed file as a patch, so it takes the same
+    // refusal `read` gives rather than a git-shaped one.
+    const refused = try dispatch(arena, "git", try std.fmt.allocPrint(
+        arena,
+        "{{\"cmd\":\"show\",\"rev\":\"HEAD\",\"path\":\"{s}/deploy/server.pem\"}}",
+        .{root},
+    ));
+    try std.testing.expect(std.mem.startsWith(u8, refused, "refused: "));
+    try std.testing.expect(std.mem.indexOf(u8, refused, needle) == null);
 }
 
 test "tool output truncation keeps whole lines" {

@@ -260,9 +260,9 @@ Seven tools, all of them thin wrappers over tools you already have:
 | `read` | read a file, optional line offset/limit; refuses credentials (`.env`, key and keystore files, anything under `.secrets` or `.ssh`) |
 | `write` | create or overwrite a file, parents created; refuses a call with no `content` |
 | `edit` | exact string replacement, refuses an ambiguous match unless `replace_all` |
-| `search` | `rg --line-number --no-heading`, optional glob |
-| `ast` | `ast-grep run` for structural match, or `--rewrite --update-all` to apply one |
-| `git` | read-only `status`, `diff`, `log`, `show`, `blame`, capped at 400 lines |
+| `search` | `rg --line-number --no-heading`, optional glob; credentials files excluded |
+| `ast` | `ast-grep run` for structural match, or `--rewrite --update-all` to apply one; credentials files excluded |
+| `git` | read-only `status`, `diff`, `log`, `show`, `blame`, capped at 400 lines; a credentials path is refused |
 
 The system prompt tells the model to search with ripgrep and rewrite structurally with `ast-grep`
 rather than reimplementing either in the harness. `bash` is there for builds and tests; git state
@@ -278,8 +278,10 @@ request: without it a model that fails to stop is billed until something else st
 A credential is the one thing a `read` refuses. Its result goes into the conversation, and the
 conversation is re-sent to the provider on every turn after it, so a `read` of `.env`, a `.pem`,
 an `id_ed25519` or `$HOME/.secrets/openrouter` would ship a key to a third party and keep
-shipping it. The model is told not to ask for one and told what to do instead; `bash` still
-reaches any file, which is where a human at the keyboard would go.
+shipping it. `search` and `ast` leave the same files out of their results and `git` refuses one
+named as a path, because a match or a patch is a tool result too. The model is told not to ask
+for one and told what to do instead; `bash` still reaches any file, which is where a human at the
+keyboard would go.
 
 A transient failure — 429, any 5xx, a connection that dies before the request reached the provider —
 is retried twice with 1 s and 2 s of backoff before the run exits non-zero, so a provider's bad

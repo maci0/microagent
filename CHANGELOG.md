@@ -373,6 +373,12 @@ release, and `microagent update` moves you to it.
 
 ### Security
 
+- `search` and `ast` skip the credential files `read` refuses, and `git` refuses one named as a
+  path. A tool result is re-sent to the provider on every later turn, so a `search` that matched a
+  line of `.env`, a `server.pem` or `$HOME/.secrets/openrouter`, or a `git show` that printed one
+  as a patch, shipped a key exactly as a `read` of it would have. The exclusions are built from
+  the same name, extension and directory tables the refusal reads, and `search` matches them
+  case-insensitively, the way the refusal does.
 - The two stderr notes that end a turn early now print the redacted endpoint. The time-budget note
   and the generation-ceiling note named the raw base url, so a `user:password@` credential a user
   put in one reached the terminal on those two paths, while every other note went through the
