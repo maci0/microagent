@@ -10,8 +10,9 @@ loops. One binary, one loop, OpenAI-compatible APIs only.
 
 ## Build
 
-Zig 0.16.0 or newer, the minimum declared in `build.zig.zon`. Nothing else: no
-dependencies, no services, no runtime.
+Zig 0.16.0 or newer, the minimum declared in `build.zig.zon`, which is the version
+the release binaries are built with. Nothing else: no dependencies, no services,
+no runtime.
 
 ```sh
 zig build -Doptimize=ReleaseFast      # zig-out/bin/microagent

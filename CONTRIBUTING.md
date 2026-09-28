@@ -5,7 +5,9 @@
 Zig 0.16.0 or newer, the minimum declared as `.minimum_zig_version` in
 [build.zig.zon](build.zig.zon). There is no dependency to install, no service to
 start, and no configuration to copy. A clone plus a Zig toolchain builds and
-tests.
+tests. `make check` wants exactly 0.16.0, because that is the version CI installs
+and the one the release assets are built with; `make zig-version` is the check on
+its own, and a newer Zig still builds the project.
 
 ```sh
 make            # zig-out/bin/microagent
@@ -42,9 +44,11 @@ make lint                   # shellcheck, ruff and yamllint on their own
 the same `make lint-versions`, and the same `ReleaseSmall` build whose binary
 it then runs, that
 [.github/workflows/ci.yml](.github/workflows/ci.yml) runs, on the same Zig
-version. Two things it does not stand in for: the release-assets
-cross-build (`make release-assets` runs that, and CI adds a byte-identical
-rebuild check on top of it) and the second runner, where the same gate also
+version (`make zig-version` is that first step, so a laptop on a different
+compiler is told rather than assumed). Two things it does not stand in for: the
+release-assets cross-build (`make release-assets` runs that, and CI adds a
+byte-identical rebuild of every published target on top of it) and the second
+runner, where the same gate also
 runs on macOS. `make help` lists every target.
 Source is formatted with `zig fmt`; `make fmt` applies it, and `ruff format`
 does the same for the Harbor adapter. The three linters cover what `zig fmt`

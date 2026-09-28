@@ -15,7 +15,7 @@ BIN := zig-out/bin/microagent
 export LC_ALL := C
 export TZ := UTC
 
-.PHONY: default help build small musl test test-one fmt fmt-python lint lint-versions lint-shell lint-python lint-yaml check bench overhead install release-assets checksums clean
+.PHONY: default help build small musl test test-one fmt fmt-python lint lint-versions zig-version lint-shell lint-python lint-yaml check bench overhead install release-assets checksums clean
 
 # The targets `microagent update` asks for, in the names release.yml publishes.
 # ci.yml rehearses the same list on every push and release.yml publishes it, so
@@ -49,9 +49,10 @@ help:
 	  'test                  the whole unit test suite' \
 	  'test-one FILTER=...   only tests whose name contains FILTER' \
 	  'fmt                   rewrite src, build.zig and the Harbor adapter in format style' \
-	  'check                 fmt --check, the linters, the tests, an optimized build' \
+	  'check                 zig-version, fmt --check, the linters, the tests, an optimized build' \
 	  'lint                  shellcheck, ruff, and yamllint over the non-Zig sources' \
 	  'lint-versions         check ruff and yamllint against the versions the gate runs' \
+	  'zig-version           check the local zig against the version the release is built with' \
 	  'bench AGENTS=...      three coding tasks through each harness' \
 	  'overhead              startup and first-request cost per harness' \
 	  'install               install the binary into ~/.local/bin' \
@@ -95,7 +96,7 @@ lint: lint-versions lint-shell lint-python lint-yaml
 # A version mismatch is reported by name rather than surfacing later as a
 # formatting diff no one can explain, so the message says what to install.
 lint-versions:
-	@set -e; \
+	@set -eu; \
 	have_ruff="$$(ruff --version | awk '{print $$2}')"; \
 	have_yamllint="$$(yamllint --version | awk '{print $$NF}')"; \
 	bad=0; \
@@ -108,6 +109,22 @@ lint-versions:
 	{ [ "$$ruff_pin" = "$(RUFF_VERSION)" ] && [ "$$yamllint_pin" = "$(YAMLLINT_VERSION)" ]; } || { \
 	  echo "lint-requirements.txt pins ruff==$$ruff_pin and yamllint==$$yamllint_pin, not $(RUFF_VERSION) and $(YAMLLINT_VERSION): CI installs that file, so a bump here has to bump the Makefile too" >&2; bad=1; }; \
 	test "$$bad" -eq 0
+
+# A different zig is a different compiler, and a compiler decides the bytes:
+# codegen, inlining and linker layout all move between releases. setup-zig
+# installs `.minimum_zig_version` on every runner, so CI has always built the
+# release assets with that exact version, and a laptop on a newer one compiles
+# an asset no checksum ever described. A newer zig is not refused by the build
+# (the field is a minimum, and a contributor on one should still be able to
+# work), so the gate asks for the release version by name and says which it is.
+zig-version:
+	@set -eu; \
+	want="$$(sed -n 's/^[[:space:]]*\.minimum_zig_version = "\([^"]*\)".*/\1/p' build.zig.zon)"; \
+	test -n "$$want" || { echo "build.zig.zon has no .minimum_zig_version to check against" >&2; exit 1; }; \
+	have="$$($(ZIG) version)"; \
+	[ "$$have" = "$$want" ] || { \
+	  echo "zig $$have, the release assets are built with $$want: a different compiler produces a different binary, so 'make release-assets' here would not be the one the tag publishes" >&2; \
+	  exit 1; }
 
 lint-shell:
 	shellcheck -x bench/*.sh bench/tasks/*/*.sh
@@ -124,6 +141,7 @@ lint-yaml:
 # job's cross builds are the one part CI does that this does not: they are
 # minutes of work, and `make release-assets` runs them.
 check:
+	$(MAKE) zig-version
 	$(ZIG) fmt --check src build.zig
 	$(MAKE) lint
 	$(ZIG) build test --summary all
@@ -164,7 +182,7 @@ install: build
 release-assets:
 	rm -rf dist
 	mkdir -p dist
-	@set -e; for target in $(RELEASE_TARGETS); do \
+	@set -eu; for target in $(RELEASE_TARGETS); do \
 		$(ZIG) build -Dtarget="$$target" -Doptimize=ReleaseSmall; \
 		install -m755 $(BIN) "dist/$(ASSET_PREFIX)$$target"; \
 	done
@@ -178,7 +196,7 @@ release-assets:
 # so `shasum -a 256` arrives as two words.
 checksums:
 	@test -d dist || { echo "no dist/, run 'make release-assets TAG=v0.2.0' first" >&2; exit 2; }
-	cd dist && set -e && \
+	cd dist && set -eu && \
 	if command -v sha256sum >/dev/null 2>&1; then sum=sha256sum; \
 	elif command -v shasum >/dev/null 2>&1; then sum="shasum -a 256"; \
 	else \
