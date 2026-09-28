@@ -396,9 +396,69 @@ fn fail(io: std.Io, comptime fmt: []const u8, args: anytype) u8 {
     return 1;
 }
 
-/// One GET, body capped. `client` is shared across the three fetches a run
-/// makes so the CA store is loaded once. On an HTTP error `status_out` carries
-/// the code, which is the difference between "no release yet" and "rate limit".
+/// An `Allocating` writer that refuses to hold more than `limit` bytes.
+///
+/// The size has to be capped while the body streams in, not after: `fetch`
+/// hands every byte to the writer before it returns, so a check afterwards
+/// bounds only the error message, not what a hostile or malfunctioning
+/// response endpoint can take out of the machine's memory.
+const CappedBody = struct {
+    inner: std.Io.Writer.Allocating,
+    limit: usize,
+    writer: std.Io.Writer,
+
+    const vtable: std.Io.Writer.VTable = .{ .drain = drain, .rebase = rebase };
+
+    fn init(allocator: std.mem.Allocator, limit: usize) !CappedBody {
+        var self: CappedBody = .{
+            .inner = try std.Io.Writer.Allocating.initCapacity(allocator, @min(limit, 64 * 1024)),
+            .limit = limit,
+            .writer = undefined,
+        };
+        self.writer = .{ .vtable = &vtable, .buffer = &.{} };
+        return self;
+    }
+
+    fn deinit(self: *CappedBody) void {
+        self.inner.deinit();
+    }
+
+    fn written(self: *CappedBody) []const u8 {
+        return self.inner.written();
+    }
+
+    fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        std.debug.assert(data.len != 0);
+        const self: *CappedBody = @fieldParentPtr("writer", w);
+        const pattern = data[data.len - 1];
+        // The last element is written `splat` times in total, or dropped when
+        // splat is zero, so the byte count to check against the cap follows
+        // that rather than counting the pattern once more.
+        const extra = pattern.len *| (splat -| 1);
+        const counted = if (splat == 0) 0 -% pattern.len else extra;
+        var total = self.inner.written().len;
+        for (data) |bytes| total = std.math.add(usize, total, bytes.len) catch return error.WriteFailed;
+        total = std.math.add(usize, total, counted) catch return error.WriteFailed;
+        if (total > self.limit) return error.WriteFailed;
+
+        const start = self.inner.written().len;
+        for (data[0..if (splat == 0) data.len - 1 else data.len]) |bytes|
+            try self.inner.writer.writeAll(bytes);
+        for (0..splat -| 1) |_| try self.inner.writer.writeAll(pattern);
+        return self.inner.written().len - start;
+    }
+
+    fn rebase(w: *std.Io.Writer, preserve: usize, capacity: usize) std.Io.Writer.Error!void {
+        _ = preserve;
+        const self: *CappedBody = @fieldParentPtr("writer", w);
+        self.inner.ensureUnusedCapacity(capacity) catch return error.WriteFailed;
+    }
+};
+
+/// One GET, body capped at `max_size` while it streams. `client` is shared
+/// across the three fetches a run makes so the CA store is loaded once. On an
+/// HTTP error `status_out` carries the code, which is the difference between
+/// "no release yet" and "rate limit".
 fn fetchBody(
     client: *std.http.Client,
     gpa: std.mem.Allocator,
@@ -664,6 +724,17 @@ fn loadCaBundle(
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
+
+test "update: a response body over the cap is refused while it streams, not after" {
+    const gpa = std.testing.allocator;
+    var body = try CappedBody.init(gpa, 8);
+    defer body.deinit();
+    try body.writer.writeAll("12345678");
+    try std.testing.expectEqualStrings("12345678", body.written());
+    // The ninth byte is the one that does not fit, and it never lands.
+    try std.testing.expectError(error.WriteFailed, body.writer.writeAll("9"));
+    try std.testing.expectEqualStrings("12345678", body.written());
+}
 
 const abc_sha = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 const asset_base = "microagent-v0.1.0-x86_64-linux-musl";

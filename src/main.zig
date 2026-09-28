@@ -27,6 +27,12 @@ const conversation_soft_limit = 400 * 1024;
 const max_turns_default = 100;
 /// Parallel tool calls accepted from one response; higher indices are dropped.
 const max_tool_calls = 64;
+/// Ceiling on what one response may add to the run: visible text, and the
+/// arguments of a tool call streamed in fragments. A provider that never sends
+/// `[DONE]` would otherwise grow the run's memory for as long as it keeps
+/// sending, and the caller chose the base url, not the server on the other end
+/// of it. Well past any real completion.
+const max_response_bytes = 16 * 1024 * 1024;
 /// The reply-style config is a handful of keys; a bigger file is not one.
 const max_config_bytes: usize = 64 * 1024;
 
@@ -876,7 +882,10 @@ fn streamChat(
             var err_transfer: [8 * 1024]u8 = undefined;
             const err_reader = response.reader(&err_transfer);
             const err_body = err_reader.allocRemaining(arena, .limited(16 * 1024)) catch "";
-            const msg = try std.fmt.allocPrint(arena, "http {d}: {s}\n", .{ @intFromEnum(response.head.status), err_body });
+            const msg = try std.fmt.allocPrint(arena, "http {d}: {s}\n", .{
+                @intFromEnum(response.head.status),
+                terminalSafe(arena, err_body),
+            });
             std.Io.File.stderr().writeStreamingAll(io, msg) catch {};
             return error.ApiError;
         }
@@ -1052,8 +1061,10 @@ fn applyFrame(
     if (delta != .object) return;
 
     if (str(delta.object.get("content"))) |text| {
-        try result.content.appendSlice(gpa, text);
-        try out_buf.appendSlice(gpa, text);
+        if (result.content.items.len < max_response_bytes) {
+            try result.content.appendSlice(gpa, text);
+            try out_buf.appendSlice(gpa, text);
+        }
     }
     if (delta.object.get("tool_calls")) |tcs| if (tcs == .array) {
         for (tcs.array.items) |tc| {
@@ -1077,7 +1088,9 @@ fn applyFrame(
                     gpa.free(call.name);
                     call.name = owned;
                 }
-                if (str(f.object.get("arguments"))) |v| try call.args.appendSlice(gpa, v);
+                if (str(f.object.get("arguments"))) |v| {
+                    if (call.args.items.len < max_response_bytes) try call.args.appendSlice(gpa, v);
+                }
             };
         }
     };
@@ -1404,6 +1417,29 @@ fn writeGutterText(gpa: std.mem.Allocator, buf: *std.ArrayList(u8), s: []const u
         i += len;
     }
     try buf.appendSlice(gpa, s[start..i]);
+}
+
+/// Bytes a terminal acts on rather than prints: the C0 controls, DEL, and the
+/// C1 range, which UTF-8 spells as C2 80..9F. A tool argument is whatever the
+/// model decided to send, and the model decides that from files in the tree, so
+/// a repository can put an escape sequence on the operator's screen through
+/// the gutter line. A diagnostic note shows them as `.`; the model's own output
+/// on stdout is left alone, because that is the answer the run was asked for.
+fn terminalSafe(arena: std.mem.Allocator, s: []const u8) []const u8 {
+    const out = arena.alloc(u8, s.len) catch return s;
+    var i: usize = 0;
+    while (i < s.len) {
+        const c = s[i];
+        if (c == 0xc2 and i + 1 < s.len and s[i + 1] >= 0x80 and s[i + 1] <= 0x9f) {
+            out[i] = '.';
+            out[i + 1] = '.';
+            i += 2;
+            continue;
+        }
+        out[i] = if (c < 0x20 or c == 0x7f) '.' else c;
+        i += 1;
+    }
+    return out;
 }
 
 fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
@@ -1975,6 +2011,18 @@ test "a real tool result over the cap stays a string the body can carry" {
     try std.testing.expectEqualStrings(result, parsed.value.string);
 }
 
+test "a tool argument cannot repaint the operator's terminal" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    // ESC, the C1 CSI (C2 9B), and BEL are all shown as dots; the rest of the
+    // line, including a multibyte character, is untouched.
+    const got = terminalSafe(arena, "ls\x1b[2Jrm -rf /\u{009b}31m\x07 caf\u{00e9}");
+    try std.testing.expectEqualStrings("ls.[2Jrm -rf /..31m. caf\u{00e9}", got);
+    try std.testing.expectEqualStrings("plain text", terminalSafe(arena, "plain text"));
+}
+
 test "conversation and tool schema serialize as one valid request body" {
     // The body's storage belongs to a JsonBuf, not to the caller, so the test
     // hands it an arena instead of trying to free the slice by hand.
@@ -2130,6 +2178,27 @@ test "streamed argument fragments cost linear arena bytes" {
     // Geometric growth retains at most about twice the final length; the
     // per-frame re-copy retained a multiple of the square of it.
     try std.testing.expect(run_state.queryCapacity() < 4 * total);
+}
+
+test "a response that never stops sending cannot grow the run without bound" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const gpa = state.allocator();
+
+    var result: ChatResult = .{};
+    var full: std.ArrayList(u8) = .empty;
+    try full.appendNTimes(gpa, 'x', max_response_bytes);
+    result.content = full;
+    var calls: std.ArrayList(ToolCall) = .empty;
+    var out_buf: std.ArrayList(u8) = .empty;
+    var unparsable: usize = 0;
+
+    const payload = "{\"choices\":[{\"delta\":{\"content\":\"more\",\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"bash\",\"arguments\":\"{}\"}}]}}]}";
+    try applyFrame(gpa, gpa, payload, &result, &calls, &out_buf, &unparsable);
+    try std.testing.expectEqual(max_response_bytes, result.content.items.len);
+    try std.testing.expectEqual(@as(usize, 0), out_buf.items.len);
+    try std.testing.expectEqualStrings("bash", calls.items[0].name);
+    try std.testing.expectEqualStrings("{}", calls.items[0].args.items);
 }
 
 test "usage counters land on the result" {
