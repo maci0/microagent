@@ -1046,6 +1046,14 @@ test "update: checksum match replaces a copy; mismatch, missing sidecar, and a b
             .in = .{ .running = "0.1.0", .tag = "v0.2.0", .asset_url = good_url, .asset = "abc", .sidecar_url = null, .basename = asset_base },
         },
         .{
+            .want = .missing_asset,
+            .in = .{ .running = "0.1.0", .tag = "v0.2.0", .asset_url = null, .asset = "abc", .sidecar_url = good_side_url, .sidecar = good_side, .basename = asset_base },
+        },
+        .{
+            .want = .missing_asset,
+            .in = .{ .running = "0.1.0", .tag = "v0.2.0", .asset_url = good_url, .asset = null, .sidecar_url = good_side_url, .sidecar = good_side, .basename = asset_base },
+        },
+        .{
             .want = .untrusted_url,
             .in = .{ .running = "0.1.0", .tag = "v0.2.0", .asset_url = "http://github.com/maci0/microagent/releases/download/v0.2.0/" ++ asset_base, .asset = "abc", .sidecar_url = good_side_url, .sidecar = good_side, .basename = asset_base },
         },

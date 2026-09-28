@@ -9,6 +9,8 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bench/monotonic.sh"
 # shellcheck source=bench/portable.sh
 . "$root/bench/portable.sh"
+# shellcheck source=bench/harness.sh
+. "$root/bench/harness.sh"
 agents=${*:-microagent claude gemini codex crush grok kimi opencode cursor-agent clanker dsh}
 prompt="Reply with exactly: pong"
 
@@ -26,7 +28,12 @@ for agent in $agents; do
 	[ -z "$startup" ] && startup=-
 
 	start=$(monotonic_ns)
-	run_limited 180 "$work" "$agent" -p "$prompt" >"$work/out" 2>&1
+	# The harness's own spelling of a one-shot prompt, so a CLI that needs a
+	# subcommand is measured through it instead of through a `-p` it refuses.
+	# Splitting the words apart is the point: the name and its subcommand are
+	# one command line and the prompt is the last of them.
+	# shellcheck disable=SC2046
+	run_limited 180 "$work" $(harness_argv "$agent") "$prompt" >"$work/out" 2>&1
 	end=$(monotonic_ns)
 	wall=$(echo "$end $start" | awk '{printf "%.1f", ($1-$2)/1000000000}')
 	# Only microagent prints a machine-readable cumulative total.

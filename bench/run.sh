@@ -16,6 +16,8 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bench/monotonic.sh"
 # shellcheck source=bench/portable.sh
 . "$root/bench/portable.sh"
+# shellcheck source=bench/harness.sh
+. "$root/bench/harness.sh"
 tasks_dir="$root/bench/tasks"
 work_root="${BENCH_WORK:-${TMPDIR:-/tmp}/microagent-bench}"
 results="$root/bench/results.jsonl"
@@ -23,17 +25,11 @@ timeout_s="${BENCH_TIMEOUT:-600}"
 
 agents=${*:-microagent}
 
-# argvFor AGENT PROMPT -> prints the command line to run
+# argvFor AGENT -> prints the command line to run, with the prompt left to the
+# shell that runs it: the inner shell reads PROMPT from the environment, so the
+# expansion is escaped here and quoted there.
 argv_for() {
-	case "$1" in
-	microagent) printf '%s' "microagent --print \"\$PROMPT\"" ;;
-	claude) printf '%s' "claude -p \"\$PROMPT\"" ;;
-	kimi) printf '%s' "kimi -p \"\$PROMPT\"" ;;
-	codex) printf '%s' "codex exec --skip-git-repo-check \"\$PROMPT\"" ;;
-	crush) printf '%s' "crush run \"\$PROMPT\"" ;;
-	opencode) printf '%s' "opencode run \"\$PROMPT\"" ;;
-	*) printf '%s' "$1 -p \"\$PROMPT\"" ;;
-	esac
+	printf '%s "%s"' "$(harness_argv "$1")" "\$PROMPT"
 }
 
 printf '%-10s %-14s %8s %10s %8s  %s\n' agent task wall_s tokens lines result

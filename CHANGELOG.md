@@ -137,6 +137,10 @@ release, and `microagent update` moves you to it.
   the visible text and to each call's arguments separately, so a provider that streamed the
   full allowance for each of `max_tool_calls` calls could hold a gigabyte in one turn. One
   counter now covers the whole response.
+- `make overhead` drives each harness through the command line it accepts. It passed a bare
+  `-p` to every CLI on PATH, which `codex`, `crush` and `opencode` refuse, so their rows measured
+  a failed invocation rather than a first request. The per-harness spelling now lives in
+  `bench/harness.sh` and both bench scripts read it, where `bench/run.sh` already had it.
 - The session store prunes the logs a re-run wrote beside the first. A run that read the same
   clock stamp opened its log under a `<unix-ns>-N.jsonl` name rather than truncating the one
   already there, and the pruner only recognised `<unix-ns>.jsonl`, so on a machine whose clock
