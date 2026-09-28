@@ -10,6 +10,19 @@
 # bump to that file that forgets the version named in the Makefile, so a bot
 # opening that pull request would produce a red pipeline by construction. That
 # pair moves by hand, as one change, and `make lint-versions` is what says so.
+#
+# The Harbor adapter's set is left out for the same reason, and it is worth
+# saying so here rather than leaving it to be rediscovered: `harbor==0.23.0` in
+# integrations/harbor/requirements.txt resolves to ninety packages in
+# requirements.lock, every artifact hashed, and dependabot's pip ecosystem
+# updates requirements.txt without regenerating that uv lock. `make lint-lock`
+# then refuses the tree, because the lock no longer carries the pin the
+# manifest names, so the pull request is red until somebody runs the
+# `uv pip compile` recorded at the top of the manifest by hand. Ninety
+# transitive packages with no automated bump means an advisory in one of them
+# is found by reading, not by a bot: the Harbor release is a benchmark harness,
+# the versions in BENCHMARK.md were measured against a specific one, and
+# changing it changes a number rather than a binary.
 version: 2
 
 updates:

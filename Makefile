@@ -97,7 +97,7 @@ help:
 	  'fmt-check             what check runs over the same files, without rewriting' \
 	  'check                 preflight, zig-version, fmt-check, the linters, the tests, an optimized build' \
 	  'lint                  the pin checks, then shellcheck, ruff and yamllint' \
-	  'lint-versions         check ruff and yamllint against the versions the gate runs' \
+	  'lint-versions         check ruff and yamllint against the versions the gate runs, and that every pin is hashed' \
 	  'lint-lock             check the Harbor lock carries the manifest pins, a hash each, and nothing else' \
 	  'zig-version           check the local zig against the version the release is built with' \
 	  'bench AGENTS=...      three coding tasks through each harness' \
@@ -246,6 +246,12 @@ lint-versions:
 	yamllint_pin="$$(sed -n 's/^yamllint==\([^ ]*\).*/\1/p' lint-requirements.txt)"; \
 	{ [ "$$ruff_pin" = "$(RUFF_VERSION)" ] && [ "$$yamllint_pin" = "$(YAMLLINT_VERSION)" ]; } || { \
 	  echo "lint-requirements.txt pins ruff==$$ruff_pin and yamllint==$$yamllint_pin, not $(RUFF_VERSION) and $(YAMLLINT_VERSION): CI installs that file, so a bump here has to bump the Makefile too" >&2; bad=1; }; \
+	unhashed="$$(awk '/^[A-Za-z0-9_.-]+==/ { if (name != "" && hashes == 0) print name; name = $$1; sub(/==.*/, "", name); hashes = 0; next } /--hash=sha256:/ { hashes++ } END { if (name != "" && hashes == 0) print name }' lint-requirements.txt)"; \
+	if [ -n "$$unhashed" ]; then \
+	  echo "lint-requirements.txt pins $$unhashed with no --hash=sha256, and setup-linters installs it with --require-hashes:" >&2; \
+	  echo "the install fails on pip's own message rather than this one, naming neither the pin nor the linter that asked for it" >&2; \
+	  bad=1; \
+	fi; \
 	test "$$bad" -eq 0
 
 # The Harbor adapter is the one dependency set here with a manifest and a lock
