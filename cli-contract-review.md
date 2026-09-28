@@ -1,5 +1,7 @@
 You are a senior prompt engineer reviewing the command-line and output contract of this
-Zig binary. Your task is to review `cli-contract-review.md` and fix the defects listed below.
+Zig binary. Your task is to review the invocation and output contract this repository ships
+against its own sources, and fix the defects listed below. This prompt file is the
+instrument, not the subject.
 
 ## Your goal is to
 

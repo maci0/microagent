@@ -25,9 +25,9 @@ tree has been reduced to a fragment with no execution surface to model.
 
 1. **References that no longer resolve.** Every `` `src/file.zig:NNN` `` in the document
    must name a line that still exists and still holds the thing the row claims. Search for
-   the named function (`parseArgs`, `replaceVerified`, `caBundlePath`, `resolveKey`, the
-   gutter writer) and correct the line, because a line number moves on every edit and a
-   function name does not.
+   the named function (`parseArgs`, `replaceVerified`, `caBundlePath`, `resolveKey`,
+   `writeGutterText`) and correct the line, because a line number moves on every edit and
+   a function name does not.
 
 2. **Controls claimed where the code has none.** The "Mitigations in the code" table is
    the load-bearing part of the document. For each row, read the named function and
@@ -37,11 +37,11 @@ tree has been reduced to a fragment with no execution surface to model.
    named function is a new row.
 
 3. **Entry points the document misses.** Walk the whole surface, not the one the last pass
-   saw: every `environ_map` or `getenv` read, every file opened for write, every
+   saw: every `envValue` or `environ_map.get` read, every file opened for write, every
    process spawned, every place a URL is built from user input, every byte printed to a
-   terminal. Search `spawn`, `createFile`, `getenv`, `environ_map`, `http`, `print`, and
-   compare the list with the "Entry points in the code" table. An entry point with no row
-   is a new threat, not a new sentence.
+   terminal. Search `spawn`, `createFile`, `envValue(`, `environ_map`, `base_url`, and
+   `print`, then compare the list with the "Entry points in the code" table. An entry
+   point with no row is a new threat, not a new sentence.
 
 4. **Gaps that have been closed.** "Gaps, ranked by exploitability and impact" and the
    abuse cases are claims about what the binary does not stop. For each, read the code
