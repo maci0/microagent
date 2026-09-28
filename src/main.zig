@@ -385,9 +385,7 @@ const help_text =
 /// gets nothing from a failed invocation. Exit 2, the conventional code for a
 /// usage error.
 fn usageError(io: Io, comptime fmt: []const u8, args: anytype) noreturn {
-    const msg = std.fmt.allocPrint(std.heap.page_allocator, "microagent: " ++ fmt ++ "\n", args) catch
-        "microagent: bad arguments\n";
-    die(io, msg);
+    die(io, "bad arguments", fmt, args);
 }
 
 /// A configuration value the program cannot use, whether it arrived on a flag
@@ -395,12 +393,12 @@ fn usageError(io: Io, comptime fmt: []const u8, args: anytype) noreturn {
 /// argument, but the message names the value and the file or variable it came
 /// from, because a bad env var is otherwise invisible at the call site.
 fn configError(io: Io, comptime fmt: []const u8, args: anytype) noreturn {
-    const msg = std.fmt.allocPrint(std.heap.page_allocator, "microagent: " ++ fmt ++ "\n", args) catch
-        "microagent: bad configuration\n";
-    die(io, msg);
+    die(io, "bad configuration", fmt, args);
 }
 
-fn die(io: Io, msg: []const u8) noreturn {
+fn die(io: Io, comptime fallback: []const u8, comptime fmt: []const u8, args: anytype) noreturn {
+    const msg = std.fmt.allocPrint(std.heap.page_allocator, "microagent: " ++ fmt ++ "\n", args) catch
+        "microagent: " ++ fallback ++ "\n";
     net.writeErr(io, msg);
     net.writeErr(io, help_text);
     std.process.exit(2);
@@ -519,6 +517,86 @@ fn clip(s: []const u8) []const u8 {
     return s[0..@min(s.len, quoted_value_bytes)];
 }
 
+/// The option a flag that takes a value sets.
+const ValuedOption = enum {
+    prompt,
+    model,
+    base_url,
+    api_key,
+    ca_bundle,
+    config,
+    reasoning_effort,
+    budget,
+    max_turns,
+    max_tokens,
+};
+
+const ValuedFlag = struct {
+    /// The short spelling, when the flag has one.
+    short: ?[]const u8,
+    long: []const u8,
+    /// What the missing-value message asks for, so the message names the flag
+    /// and what it wanted rather than one of them alone.
+    noun: []const u8,
+    option: ValuedOption,
+};
+
+/// Every flag that takes a value. The table is what the parse reads and the
+/// switch in `setValued` is what writes, so a flag cannot name one option and
+/// set another: the copy that had drifted is the pair `--ca-bundle` and
+/// `--config`, which were two branches of identical text, and the ceilings,
+/// which differed only in the option they set.
+const valued_flags = [_]ValuedFlag{
+    .{ .short = "-p", .long = "--print", .noun = "a prompt", .option = .prompt },
+    .{ .short = "-m", .long = "--model", .noun = "a model id", .option = .model },
+    .{ .short = "-b", .long = "--base-url", .noun = "a url", .option = .base_url },
+    .{ .short = "-k", .long = "--api-key", .noun = "a key", .option = .api_key },
+    .{ .short = null, .long = "--ca-bundle", .noun = "a file", .option = .ca_bundle },
+    .{ .short = null, .long = "--config", .noun = "a file", .option = .config },
+    .{ .short = null, .long = "--reasoning-effort", .noun = "a level", .option = .reasoning_effort },
+    .{ .short = null, .long = "--budget", .noun = "a number of seconds", .option = .budget },
+    .{ .short = null, .long = "--max-turns", .noun = "a number", .option = .max_turns },
+    .{ .short = null, .long = "--max-tokens", .noun = "a number", .option = .max_tokens },
+};
+
+/// The flag `name` spells, in either form, or null when it is not one.
+fn valuedFlag(name: []const u8) ?ValuedFlag {
+    for (valued_flags) |flag| {
+        if (std.mem.eql(u8, name, flag.long)) return flag;
+        if (flag.short) |short| if (std.mem.eql(u8, name, short)) return flag;
+    }
+    return null;
+}
+
+fn flagNeeds(buf: []u8, flag: ValuedFlag, fallback: []const u8) []const u8 {
+    return std.fmt.bufPrint(buf, "{s} needs {s}", .{ flag.long, flag.noun }) catch fallback;
+}
+
+/// The option one valued flag sets. A value the option refuses says so and
+/// returns the message; null means it was taken.
+fn setValued(
+    io: Io,
+    buf: []u8,
+    opts: *Options,
+    option: ValuedOption,
+    value: []const u8,
+) ?[]const u8 {
+    switch (option) {
+        .prompt => return setPrompt(buf, opts, value),
+        .model => opts.model = value,
+        .base_url => opts.base_url = value,
+        .api_key => opts.api_key = value,
+        .ca_bundle => opts.ca_bundle = value,
+        .config => opts.config = value,
+        .reasoning_effort => opts.reasoning_effort = reasoningEffort(io, value),
+        .budget => opts.budget_s = budgetSeconds(value) orelse
+            return std.fmt.bufPrint(buf, "--budget must be a number of seconds, got '{s}'", .{value}) catch "bad --budget",
+        .max_turns => opts.max_turns = ceiling(usize, io, "--max-turns", value),
+        .max_tokens => opts.max_tokens = ceiling(u32, io, "--max-tokens", value),
+    }
+    return null;
+}
+
 /// Reads the arguments after the program name into `opts`, formatting any
 /// message that names a bad argument into `buf`. Returns null when
 /// they parse, or a message naming what was wrong, which `usageError` prints
@@ -547,56 +625,12 @@ fn parseArgs(io: Io, buf: []u8, argv: []const []const u8, opts: *Options) ?[]con
         } else if (isFlag(name, "-h", "--help")) {
             opts.action = .help;
             return null;
-        } else if (isFlag(name, "-p", "--print")) {
-            const v = joined orelse flagValue(argv, i) orelse return "--print needs a prompt";
-            if (v.len == 0) return "--print needs a prompt";
-            if (setPrompt(buf, opts, v)) |m| return m;
-            if (joined == null) i += 1;
-        } else if (isFlag(name, "-m", "--model")) {
-            const v = joined orelse flagValue(argv, i) orelse return "--model needs a model id";
-            if (v.len == 0) return "--model needs a model id";
-            opts.model = v;
-            if (joined == null) i += 1;
-        } else if (isFlag(name, "-b", "--base-url")) {
-            const v = joined orelse flagValue(argv, i) orelse return "--base-url needs a url";
-            if (v.len == 0) return "--base-url needs a url";
-            opts.base_url = v;
-            if (joined == null) i += 1;
-        } else if (isFlag(name, "-k", "--api-key")) {
-            const v = joined orelse flagValue(argv, i) orelse return "--api-key needs a key";
-            if (v.len == 0) return "--api-key needs a key";
-            opts.api_key = v;
-            if (joined == null) i += 1;
-        } else if (std.mem.eql(u8, name, "--ca-bundle")) {
-            const v = joined orelse flagValue(argv, i) orelse return "--ca-bundle needs a file";
-            if (v.len == 0) return "--ca-bundle needs a file";
-            opts.ca_bundle = v;
-            if (joined == null) i += 1;
-        } else if (std.mem.eql(u8, name, "--config")) {
-            const v = joined orelse flagValue(argv, i) orelse return "--config needs a file";
-            if (v.len == 0) return "--config needs a file";
-            opts.config = v;
-            if (joined == null) i += 1;
-        } else if (std.mem.eql(u8, name, "--reasoning-effort")) {
-            const v = joined orelse flagValue(argv, i) orelse return "--reasoning-effort needs a level";
-            if (v.len == 0) return "--reasoning-effort needs a level";
-            opts.reasoning_effort = reasoningEffort(io, v);
-            if (joined == null) i += 1;
-        } else if (std.mem.eql(u8, name, "--budget")) {
-            const v = joined orelse flagValue(argv, i) orelse return "--budget needs a number of seconds";
-            if (v.len == 0) return "--budget needs a number of seconds";
-            opts.budget_s = budgetSeconds(v) orelse
-                return std.fmt.bufPrint(buf, "--budget must be a number of seconds, got '{s}'", .{v}) catch "bad --budget";
-            if (joined == null) i += 1;
-        } else if (std.mem.eql(u8, name, "--max-turns")) {
-            const v = joined orelse flagValue(argv, i) orelse return "--max-turns needs a number";
-            if (v.len == 0) return "--max-turns needs a number";
-            opts.max_turns = ceiling(usize, io, "--max-turns", v);
-            if (joined == null) i += 1;
-        } else if (std.mem.eql(u8, name, "--max-tokens")) {
-            const v = joined orelse flagValue(argv, i) orelse return "--max-tokens needs a number";
-            if (v.len == 0) return "--max-tokens needs a number";
-            opts.max_tokens = ceiling(u32, io, "--max-tokens", v);
+        } else if (valuedFlag(name)) |flag| {
+            // A flag that ends the command line and one handed an empty value
+            // are the same mistake, so both say the same thing.
+            const v = joined orelse flagValue(argv, i) orelse return flagNeeds(buf, flag, "bad arguments");
+            if (v.len == 0) return flagNeeds(buf, flag, "bad arguments");
+            if (setValued(io, buf, opts, flag.option, v)) |m| return m;
             if (joined == null) i += 1;
         } else if (arg.len > 0 and arg[0] != '-') {
             // A bare argument is the prompt. gauntlet's custom-agent
