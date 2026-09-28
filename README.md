@@ -3,7 +3,7 @@
 A tiny coding agent in Zig, built to be driven by [gauntlet](https://github.com/maci0/gauntlet)
 loops. One binary, one loop, OpenAI-compatible APIs only.
 
-- **Small.** ~690 KB stripped (`-Doptimize=ReleaseSmall`), no runtime, no node, no python.
+- **Small.** ~720 KB stripped (`-Doptimize=ReleaseSmall`), no runtime, no node, no python.
 - **Fast.** ~2.5 ms to start, so a gauntlet loop spends its time in the model, not the harness.
 - **No features you did not ask for.** No subagents, no plugins, no MCP, no TUI. Streaming chat
   completions, seven tools, done.
@@ -15,7 +15,7 @@ dependencies, no services, no runtime.
 
 ```sh
 zig build -Doptimize=ReleaseFast      # zig-out/bin/microagent
-zig build -Doptimize=ReleaseSmall     # smallest binary, ~690 KB
+zig build -Doptimize=ReleaseSmall     # smallest binary, ~720 KB
 zig build test                        # unit tests
 ```
 
@@ -174,7 +174,9 @@ re-launched run writes beside the earlier log rather than over it:
 ```
 
 One response's own counters, not the run's cumulative ones, plus the directory the run works in and
-how long the model spent on that response. `elapsed_ms` is the model's time, so a reader computes
+how long the model spent on that response. The store keeps the 200 most recent runs and prunes the
+older ones, so a machine that runs this in a loop does not accumulate a log per review forever.
+`elapsed_ms` is the model's time, so a reader computes
 tokens per second the model actually generated instead of over a gap that includes tool calls.
 [toktop](https://github.com/maci0/toktop) reads this store by default; the counters and the
 directory are the ordinary OpenAI keys and `cwd`, so any reader of agent transcripts works. Nothing

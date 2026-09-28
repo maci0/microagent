@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const Io = std.Io;
+const builtin = @import("builtin");
 
 const build_options = @import("build_options");
 const net = @import("net.zig");
@@ -139,6 +140,14 @@ const ChatResult = struct {
     reasoning_tokens: u64 = 0,
     total_tokens: u64 = 0,
     cached_tokens: u64 = 0,
+
+    /// The response outlives the turn's arena, so what a turn keeps is
+    /// allocated here and released with the turn rather than at process exit.
+    fn deinit(self: *ChatResult, gpa: std.mem.Allocator) void {
+        for (self.calls.items) |*call| call.args.deinit(gpa);
+        self.calls.deinit(gpa);
+        self.content.deinit(gpa);
+    }
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -594,7 +603,8 @@ fn run(
                 try appendMessage(gpa, msgs, "user", final_push);
                 const body = try buildBody(turn_arena, opts, msgs.items);
                 const asked = Io.Timestamp.now(io, .awake).nanoseconds;
-                var result = try streamChat(client, io, turn_arena, opts, body);
+                var result = try streamChat(client, io, gpa, turn_arena, opts, body);
+                defer result.deinit(gpa);
                 try finishTurn(io, turn_arena, gpa, msgs, &result, &usage);
                 writeSessionRecord(io, turn_arena, session, elapsedMs(io, asked), &result);
                 return;
@@ -608,7 +618,8 @@ fn run(
         try compactMessages(gpa, msgs, turn_arena);
         const body = try buildBody(turn_arena, opts, msgs.items);
         const asked = Io.Timestamp.now(io, .awake).nanoseconds;
-        var result = try streamChat(client, io, turn_arena, opts, body);
+        var result = try streamChat(client, io, gpa, turn_arena, opts, body);
+        defer result.deinit(gpa);
         try finishTurn(io, turn_arena, gpa, msgs, &result, &usage);
         writeSessionRecord(io, turn_arena, session, elapsedMs(io, asked), &result);
         if (result.calls.items.len == 0) return;
@@ -675,7 +686,59 @@ fn openSession(io: Io, arena: std.mem.Allocator, opts: Options) ?Session {
     std.Io.Dir.cwd().createDirPath(io, opts.session_dir) catch return null;
     const stamp = Io.Clock.real.now(io).nanoseconds;
     const file = createSessionLog(io, arena, opts.session_dir, stamp) orelse return null;
+    pruneSessions(io, arena, opts.session_dir);
     return .{ .file = file, .cwd = cwd, .model = opts.model };
+}
+
+/// Session logs kept on disk. The store is a per-run directory that nothing
+/// ever deleted from, so a machine running gauntlet loops accumulated one file
+/// per review forever; a monitor reads the recent runs, not the whole history.
+const max_session_logs = 200;
+
+fn allDigits(text: []const u8) bool {
+    if (text.len == 0) return false;
+    for (text) |c| if (!std.ascii.isDigit(c)) return false;
+    return true;
+}
+
+/// Deletes the oldest logs past `max_session_logs`. The names are unix
+/// nanoseconds, so a plain lexicographic sort is oldest first, and only this
+/// program's own `<digits>.jsonl` files are touched. Every failure is ignored:
+/// a store that cannot be pruned costs a run nothing.
+fn pruneSessions(io: Io, arena: std.mem.Allocator, session_dir: []const u8) void {
+    var dir = std.Io.Dir.openDirAbsolute(io, session_dir, .{ .iterate = true }) catch return;
+    defer dir.close(io);
+
+    var names: std.ArrayList([]u8) = .empty;
+    defer {
+        for (names.items) |name| arena.free(name);
+        names.deinit(arena);
+    }
+    // The walk is scoped: the walker holds the directory handle, and deleting
+    // through `dir` while it is still open closes that handle under it.
+    {
+        var walker = dir.walk(arena) catch return;
+        defer walker.deinit();
+        while (walker.next(io) catch return) |entry| {
+            if (entry.kind != .file) continue;
+            const name = entry.basename;
+            if (!std.mem.endsWith(u8, name, ".jsonl")) continue;
+            if (!allDigits(name[0 .. name.len - ".jsonl".len])) continue;
+            names.append(arena, arena.dupe(u8, name) catch return) catch return;
+        }
+    }
+    if (names.items.len <= max_session_logs) return;
+
+    std.mem.sort([]u8, names.items, {}, struct {
+        fn lessThan(_: void, a: []u8, b: []u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.lessThan);
+
+    var i: usize = 0;
+    while (i < names.items.len - max_session_logs) : (i += 1) {
+        dir.deleteFile(io, names.items[i]) catch {};
+    }
 }
 
 fn closeSession(io: Io, session: ?Session) void {
@@ -751,6 +814,7 @@ fn buildBody(arena: std.mem.Allocator, opts: Options, messages: []const u8) ![]u
 fn streamChat(
     client: *std.http.Client,
     io: Io,
+    gpa: std.mem.Allocator,
     arena: std.mem.Allocator,
     opts: Options,
     body: []const u8,
@@ -820,11 +884,17 @@ fn streamChat(
     };
 
     var result: ChatResult = .{};
+    errdefer result.deinit(gpa);
     var calls: std.ArrayList(ToolCall) = .empty;
+    errdefer {
+        for (calls.items) |*call| call.args.deinit(gpa);
+        calls.deinit(gpa);
+    }
 
     // Frames are parsed in a scratch arena reset after each one, so a long
     // stream costs the size of its largest frame, not the sum of all of them.
     var frame_arena_state = std.heap.ArenaAllocator.init(arena);
+    defer frame_arena_state.deinit();
     const frame_arena = frame_arena_state.allocator();
 
     // stdout is buffered per read chunk rather than written per token: one
@@ -832,11 +902,13 @@ fn streamChat(
     // are drawn in the same tick either way, so streaming latency is unchanged
     // while the syscall count per completion drops by orders of magnitude.
     var out_buf: std.ArrayList(u8) = .empty;
+    defer out_buf.deinit(gpa);
 
     // Chunked reads, split into lines here rather than with the reader's
     // delimiter helpers: those stall on a chunked body reader (they hand back
     // an endless run of empty lines instead of reading on).
     var pending: std.ArrayList(u8) = .empty;
+    defer pending.deinit(gpa);
     var chunk: [8 * 1024]u8 = undefined;
     var done = false;
     var unparsable: usize = 0;
@@ -850,7 +922,7 @@ fn streamChat(
             return err;
         };
         if (n == 0) break;
-        try pending.appendSlice(arena, chunk[0..n]);
+        try pending.appendSlice(gpa, chunk[0..n]);
 
         var start: usize = 0;
         while (std.mem.indexOfScalarPos(u8, pending.items, start, '\n')) |pos| {
@@ -864,7 +936,7 @@ fn streamChat(
                 done = true;
                 break;
             }
-            try applyFrame(frame_arena, arena, payload, &result, &calls, &out_buf, &unparsable);
+            try applyFrame(frame_arena, gpa, payload, &result, &calls, &out_buf, &unparsable);
             _ = frame_arena_state.reset(.retain_capacity);
         }
         // Drop what was consumed, so a long stream does not keep every frame.
@@ -886,7 +958,7 @@ fn streamChat(
         net.note(io, arena, "{s}\n", .{notice});
         return error.StreamTruncated;
     }
-    if (result.content.items.len > 0) try out_buf.append(arena, '\n');
+    if (result.content.items.len > 0) try out_buf.append(gpa, '\n');
     flushOut(io, &out_buf);
     result.calls = calls;
     dropNamelessCalls(&result.calls);
@@ -931,8 +1003,8 @@ fn dropNamelessCalls(calls: *std.ArrayList(ToolCall)) void {
 /// Folds one SSE payload into the response being built.
 ///
 /// `scratch` is reset by the caller after every frame, so nothing parsed out of
-/// it may survive: strings that do are copied into `arena`, which lives for the
-/// whole run.
+/// it may survive: strings that do are copied into `gpa`, which lives as long
+/// as the response they belong to.
 ///
 /// `unparsable` counts the frames that were not JSON. A frame the parser cannot
 /// read holds content and tool-call arguments the turn will not have, so it is
@@ -940,7 +1012,7 @@ fn dropNamelessCalls(calls: *std.ArrayList(ToolCall)) void {
 /// response that is short and looks complete.
 fn applyFrame(
     scratch: std.mem.Allocator,
-    arena: std.mem.Allocator,
+    gpa: std.mem.Allocator,
     payload: []const u8,
     result: *ChatResult,
     calls: *std.ArrayList(ToolCall),
@@ -980,8 +1052,8 @@ fn applyFrame(
     if (delta != .object) return;
 
     if (str(delta.object.get("content"))) |text| {
-        try result.content.appendSlice(arena, text);
-        try out_buf.appendSlice(arena, text);
+        try result.content.appendSlice(gpa, text);
+        try out_buf.appendSlice(gpa, text);
     }
     if (delta.object.get("tool_calls")) |tcs| if (tcs == .array) {
         for (tcs.array.items) |tc| {
@@ -990,18 +1062,22 @@ fn applyFrame(
             // The index sizes `calls`, so a provider-sent index is capped
             // before it can ask for billions of empty slots.
             if (idx >= max_tool_calls) continue;
-            while (calls.items.len <= idx) try calls.append(arena, .{
-                .id = try arena.dupe(u8, ""),
-                .name = try arena.dupe(u8, ""),
-            });
+            while (calls.items.len <= idx) try calls.append(gpa, .{ .id = "", .name = "" });
+            const call = &calls.items[idx];
+            // A provider may resend the id or the name on a later fragment, so
+            // the previous copy is released rather than left behind.
             if (str(tc.object.get("id"))) |v| {
-                if (!std.mem.eql(u8, calls.items[idx].id, v)) calls.items[idx].id = try arena.dupe(u8, v);
+                const owned = try gpa.dupe(u8, v);
+                gpa.free(call.id);
+                call.id = owned;
             }
             if (tc.object.get("function")) |f| if (f == .object) {
                 if (str(f.object.get("name"))) |v| {
-                    if (!std.mem.eql(u8, calls.items[idx].name, v)) calls.items[idx].name = try arena.dupe(u8, v);
+                    const owned = try gpa.dupe(u8, v);
+                    gpa.free(call.name);
+                    call.name = owned;
                 }
-                if (str(f.object.get("arguments"))) |v| try calls.items[idx].args.appendSlice(arena, v);
+                if (str(f.object.get("arguments"))) |v| try call.args.appendSlice(gpa, v);
             };
         }
     };
@@ -1014,25 +1090,71 @@ fn applyFrame(
 const tool_timeout_ms: u64 = 60_000;
 const tool_stderr_limit: usize = 4096;
 
+/// Runs a tool subprocess and reaps it with everything it started.
+///
+/// `std.process.run` signals only the process it spawned, so a tool call that
+/// timed out, or that hit an output cap, left the rest of its process tree
+/// running: the shell died, the build it had launched kept compiling, and the
+/// next turn inherited whatever those orphans held. This puts the child in its
+/// own process group and signals the group, so the tree goes with the call.
 fn runToolProcess(
-    io: Io,
     arena: std.mem.Allocator,
+    io: Io,
     argv: []const []const u8,
+    stdout_limit: usize,
     stderr_limit: usize,
-) !Captured {
-    const res = try runCapped(io, arena, argv, max_tool_output * 4, durationMs(tool_timeout_ms));
+    timeout: Io.Timeout,
+) !std.process.RunResult {
+    var child = try std.process.spawn(io, .{
+        .argv = argv,
+        .pgid = 0, // its own group leader, so the group signal stays ours
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .pipe,
+    });
+    // Every exit path signals the whole group and then reaps the direct child,
+    // so a timeout leaves neither an orphan nor a zombie. A child already
+    // reaped by `wait` is a no-op here, and its group still gets the signal:
+    // a command that backgrounded work and exited must not outlive the call.
+    const pgid: ?std.posix.pid_t = if (builtin.os.tag == .windows) null else @intCast(child.id.?);
+    defer {
+        if (pgid) |group| signalGroup(group);
+        child.kill(io);
+    }
+
+    var multi_buffer: Io.File.MultiReader.Buffer(2) = undefined;
+    var multi: Io.File.MultiReader = undefined;
+    multi.init(arena, io, multi_buffer.toStreams(), &.{ child.stdout.?, child.stderr.? });
+    defer multi.deinit();
+
+    while (multi.fill(64, timeout)) |_| {
+        if (multi.reader(0).bufferedLen() > stdout_limit) return error.StreamTooLong;
+        if (multi.reader(1).bufferedLen() > stderr_limit) return error.StreamTooLong;
+    } else |err| switch (err) {
+        error.EndOfStream => {},
+        else => |e| return e,
+    }
+    try multi.checkAnyError();
+
+    const term = try child.wait(io);
     return .{
-        .stdout = res.stdout,
-        .stderr = @constCast(clamp(res.stderr, stderr_limit)),
-        .term = res.term,
+        .term = term,
+        .stdout = try multi.toOwnedSlice(0),
+        .stderr = try multi.toOwnedSlice(1),
     };
+}
+
+/// SIGKILL to a whole process group. A group that is already gone is the normal
+/// case, not a failure.
+fn signalGroup(pgid: std.posix.pid_t) void {
+    std.posix.kill(-pgid, .KILL) catch {};
 }
 
 /// A tool that delegates to a binary already on PATH: the caller builds the
 /// argv, and the failure text, the empty result and the two output streams are
 /// handled the same way for each of them.
 fn runSearchTool(io: Io, arena: std.mem.Allocator, argv: []const []const u8, what: []const u8) ![]u8 {
-    const res = runToolProcess(io, arena, argv, tool_stderr_limit) catch |err|
+    const res = runToolProcess(arena, io, argv, max_tool_output * 4, tool_stderr_limit, durationMs(tool_timeout_ms)) catch |err|
         return std.fmt.allocPrint(arena, "error: {s} failed: {s}", .{ what, @errorName(err) });
     if (res.stdout.len > 0) return res.stdout;
     if (res.stderr.len > 0) return res.stderr;
@@ -1073,7 +1195,7 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     try argv.append(arena, "--");
     if (path) |p| try argv.append(arena, p);
 
-    const res = runToolProcess(io, arena, argv.items, tool_stderr_limit) catch |err|
+    const res = runToolProcess(arena, io, argv.items, max_tool_output * 4, tool_stderr_limit, durationMs(tool_timeout_ms)) catch |err|
         return std.fmt.allocPrint(arena, "error: git {s} failed: {s}", .{ cmd, @errorName(err) });
     const text = if (res.stdout.len > 0) res.stdout else res.stderr;
     if (text.len == 0) return std.fmt.allocPrint(arena, "(git {s}: no output)", .{cmd});
@@ -2641,4 +2763,103 @@ test "the trace switch is on only for a value that says so" {
     try std.testing.expect(debugEnabled(&env));
     try env.put("MDEBUG", "on");
     try std.testing.expect(debugEnabled(&env));
+}
+
+// A tool call must take its whole process tree down with it. The command
+// backgrounds a grandchild that outlives the shell, writes that grandchild's
+// pid, and then runs past the timeout: without the group signal the
+// grandchild is still alive when the call returns, and every timed-out call
+// leaked one.
+test "a tool call that times out leaves no process of its own behind" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const pid_path = try std.fs.path.join(arena, &.{ path_buf[0..n], "grandchild.pid" });
+    // The grandchild holds the pipe open, so the read only ends when the
+    // timeout fires, which is the path under test.
+    const script = try std.fmt.allocPrint(arena,
+        \\sh -c 'echo $$ > {s}; sleep 30' &
+        \\sleep 30
+    , .{pid_path});
+    try std.testing.expectError(error.Timeout, runToolProcess(arena, io, &.{ "/bin/sh", "-c", script }, 4096, 4096, durationMs(300)));
+
+    const raw = tmp.dir.readFileAlloc(io, "grandchild.pid", arena, .limited(64)) catch return error.GrandchildNotReported;
+    const pid = try std.fmt.parseInt(std.posix.pid_t, std.mem.trim(u8, raw, " \t\r\n"), 10);
+    // The kill is delivered asynchronously and the orphan is reaped by init
+    // afterwards, so "gone" is a short poll rather than an instant check.
+    var attempt: usize = 0;
+    while (attempt < 50) : (attempt += 1) {
+        std.posix.kill(pid, .CONT) catch return;
+        try io.sleep(.{ .nanoseconds = 20 * std.time.ns_per_ms }, .awake);
+    }
+    std.debug.print("grandchild {d} survived the tool call\n", .{pid});
+    return error.GrandchildSurvived;
+}
+
+// The session store is a per-run directory nothing used to delete from, so a
+// long-lived machine accumulated one log per review forever. The bound is the
+// behavior: oldest first, only this program's own files, recent runs kept.
+test "the session store keeps the most recent logs and drops the rest" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_path = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+
+    const total = max_session_logs + 25;
+    var i: usize = 0;
+    while (i < total) : (i += 1) {
+        const name = try std.fmt.allocPrint(arena, "{d}.jsonl", .{i + 1});
+        try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "{}" });
+    }
+    // A file this program did not write is not ours to delete.
+    try tmp.dir.writeFile(io, .{ .sub_path = "notes.jsonl", .data = "keep me" });
+
+    pruneSessions(io, arena, dir_path);
+
+    var dir = try std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true });
+    defer dir.close(io);
+    var walker = try dir.walk(arena);
+    defer walker.deinit();
+    var left: usize = 0;
+    var notes_present = false;
+    while (try walker.next(io)) |entry| {
+        if (!std.mem.endsWith(u8, entry.basename, ".jsonl")) continue;
+        if (std.mem.eql(u8, entry.basename, "notes.jsonl")) {
+            notes_present = true;
+            continue;
+        }
+        left += 1;
+    }
+    try std.testing.expectEqual(max_session_logs, left);
+    try std.testing.expect(notes_present);
+    // The survivors are the newest, so a monitor still sees the current run.
+    const newest = try std.fmt.allocPrint(arena, "{d}.jsonl", .{total});
+    try tmp.dir.access(io, newest, .{});
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "1.jsonl", .{}));
+}
+
+test "a tool call reports the exit status of the command it ran" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const res = try runToolProcess(arena, std.testing.io, &.{ "/bin/sh", "-c", "printf out; printf err 1>&2; exit 3" }, 4096, 4096, durationMs(10_000));
+    try std.testing.expectEqualStrings("out", res.stdout);
+    try std.testing.expectEqualStrings("err", res.stderr);
+    try std.testing.expectEqual(@as(u8, 3), res.term.exited);
 }
