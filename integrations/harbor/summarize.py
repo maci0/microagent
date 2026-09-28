@@ -61,7 +61,8 @@ def main() -> int:
         if not trial_result.is_file():
             continue
         data = json.loads(trial_result.read_text(encoding="utf-8"))
-        reward = (data.get("verifier_result") or {}).get("rewards", {}).get("reward")
+        verifier = data.get("verifier_result") or {}
+        reward = (verifier.get("rewards") or {}).get("reward")
         agent = data.get("agent_result") or {}
         started, finished = data.get("started_at"), data.get("finished_at")
         rows.append((data.get("task_name") or trial.name, reward, agent, started, finished))

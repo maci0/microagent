@@ -777,20 +777,23 @@ const command_word_separators = " \t\n\"'`$&;<>|()[]{}*?!#\\";
 
 /// True when one component of `path` is refused by the name rules above, which
 /// is what `isCredentialPath` answers after its own walk has trimmed the
-/// trailing separators and skipped `.` and `..`. The fuzzer's harness spells
-/// the walk out rather than calling the walk, so a component the walk never
-/// reaches and a rule it never applies both show up as a disagreement.
+/// trailing separators and skipped `.` and `..`.
+///
+/// The components are cut off the front and the rules are applied to each, not
+/// walked back from the leaf, so the two agree only if the rule really is "any
+/// component at any depth". Spelled as a copy of the walk it checks, this
+/// function would return whatever `isCredentialPath` returns for the same input
+/// and the fuzz below would compare a function against itself.
 fn componentNamesCredential(path: []const u8) bool {
-    var component: ?[]const u8 = std.mem.trimEnd(u8, path, &path_sep);
-    while (component) |c| {
-        const name = std.fs.path.basename(c);
-        if (name.len != 0 and !std.mem.eql(u8, name, ".") and !std.mem.eql(u8, name, "..")) {
-            for (credential_dirs) |dir| {
-                if (name.len == dir.len and std.ascii.eqlIgnoreCase(name, dir)) return true;
-            }
-            if (isCredentialName(name)) return true;
+    var parts = std.mem.splitScalar(u8, path, std.fs.path.sep);
+    while (parts.next()) |name| {
+        // The empty component a trailing or doubled separator leaves, and the
+        // two the walk skips, are not names of anything.
+        if (name.len == 0 or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
+        for (credential_dirs) |dir| {
+            if (name.len == dir.len and std.ascii.eqlIgnoreCase(name, dir)) return true;
         }
-        component = std.fs.path.dirname(c);
+        if (isCredentialName(name)) return true;
     }
     return false;
 }

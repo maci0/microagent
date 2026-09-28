@@ -527,7 +527,15 @@ def last_usage(stdout: str) -> dict[str, int]:
         line = raw.strip()
         if line.startswith('{"type":"usage"'):
             try:
-                return json.loads(line).get("usage", {})
+                usage = json.loads(line).get("usage")
             except json.JSONDecodeError:
                 return {}
+            # A JSON value narrowed here rather than at the call site: `usage` is
+            # a count map the binary prints, but it is parsed, so it is a list or
+            # a string as far as the type system knows, and the caller's
+            # `.get` would raise on either. One check at the boundary beats two
+            # call sites guessing.
+            if not isinstance(usage, dict):
+                return {}
+            return {key: value for key, value in usage.items() if isinstance(value, int)}
     return {}

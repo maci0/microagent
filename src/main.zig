@@ -2852,7 +2852,14 @@ fn compactMessages(
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const parsed = std.json.parseFromSlice(std.json.Value, arena, msgs.items, .{}) catch |err| {
+    // The buffer is an array with no closing bracket, because `buildBody` is
+    // what closes it, and every request is built from it that way. `std.json`
+    // reads a complete document, and an array that stops at the end of its
+    // input sends its parser to a token type it has no case for, so the bracket
+    // is added here and taken off again by the rewrite below. Every test that
+    // drove this closed the buffer itself and so never reached that.
+    const closed = try std.mem.concat(arena, u8, &.{ msgs.items, "]" });
+    const parsed = std.json.parseFromSlice(std.json.Value, arena, closed, .{}) catch |err| {
         net.note(io, arena, "microagent: the {d} byte conversation could not be read back for compaction ({s}); it is sent as it stands\n", .{
             msgs.items.len, @errorName(err),
         });
@@ -2898,13 +2905,24 @@ fn compactMessages(
 
     // The elided size is what the message list is about to be rewritten to, so
     // the buffer is sized before the first byte rather than walking the doubling
-    // ladder to reach a size the pass above already computed.
-    var jb = chat_mod.JsonBuf.initCapacity(gpa, @max(size, 1));
+    // ladder to reach a size the pass above already computed. The extra byte is
+    // the closing bracket the parse was given and the rewrite does not keep.
+    var jb = chat_mod.JsonBuf.initCapacity(gpa, @max(size + 1, 1));
     defer jb.list.deinit(gpa);
     try std.json.Stringify.value(parsed.value, .{}, jb.writer());
     // `items()` hands the written bytes out of the writer, so it is asked once:
     // a second call reads the writer after it has given them up.
-    const rewritten = jb.items();
+    const written = jb.items();
+    // The rewrite is a whole array, and what goes back in the buffer is the open
+    // one `buildBody` closes. Leaving the bracket would close the array twice,
+    // and every request after a compaction would be a syntax error at the
+    // provider. A rewrite that is not an array cannot be opened, so it is not
+    // written at all rather than corrupting the buffer for the rest of the run.
+    if (!std.mem.endsWith(u8, written, "]")) {
+        net.note(io, arena, "microagent: the compacted conversation is not a message array; it is sent as it stands\n", .{});
+        return;
+    }
+    const rewritten = written[0 .. written.len - 1];
     // The room is taken before the old conversation is dropped, so the copy
     // below cannot fail. Clearing first and appending second hands the whole
     // conversation to an allocation that had no room for it: the `try` returns
@@ -3996,7 +4014,6 @@ test "a long run keeps the conversation bounded and the cache alive between comp
     try msgs.appendSlice(arena, "[");
     try appendMessage(arena, &msgs, "system", system_prompt);
     try appendMessage(arena, &msgs, "user", "fix the failing test in the parser");
-    try msgs.append(arena, ']');
 
     var previous = try arena.dupe(u8, msgs.items);
     var floor: usize = 0;
@@ -4008,7 +4025,8 @@ test "a long run keeps the conversation bounded and the cache alive between comp
     while (turn < 120) : (turn += 1) {
         // A turn that reads two files and says what it found: an assistant
         // message and two tool results of the size a `read` of source returns.
-        msgs.shrinkRetainingCapacity(msgs.items.len - 1);
+        // The array stays open, as a run's buffer is, because `buildBody` is
+        // what closes it.
         try msgs.appendSlice(arena, ",{\"role\":\"assistant\",\"content\":\"looking at the parser\"}");
         var t: usize = 0;
         while (t < 2) : (t += 1) {
@@ -4016,7 +4034,6 @@ test "a long run keeps the conversation bounded and the cache alive between comp
             try msgs.appendNTimes(arena, 'x', 8 * 1024);
             try msgs.appendSlice(arena, "\"}");
         }
-        try msgs.append(arena, ']');
 
         // Under the soft limit compaction returns before it reads anything, so
         // the turn only appended and shares all of the last one. Measuring that
@@ -4644,6 +4661,11 @@ test "a token count that is not a number is counted, not folded in as zero" {
 /// The `[` and the first two messages a run starts from, in the bytes the
 /// agent appends. `appendToolResults` follows it with the tool results that
 /// push a conversation past the compaction limit.
+///
+/// Neither this nor `appendToolResults` closes the array. A run's buffer is
+/// open, because `buildBody` is what writes the closing bracket into the
+/// request body, and a helper that closed it here tested a shape no run ever
+/// carries.
 fn openConversation(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), system: []const u8, user: []const u8) !void {
     try msgs.appendSlice(gpa, "[");
     try appendMessage(gpa, msgs, "system", system);
@@ -4663,7 +4685,6 @@ fn appendToolResults(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), count: us
         try msgs.appendSlice(gpa, msg.items());
         msg.list.deinit(gpa);
     }
-    try msgs.append(gpa, ']');
 }
 
 // A response may ask for `max_tool_calls` results of `max_tool_output` each, and
@@ -4756,7 +4777,9 @@ test "compaction elides old tool output and keeps the recent turns" {
     try std.testing.expectEqual(conversation_soft_limit, floor);
 
     try std.testing.expect(msgs.items.len < before / 2);
-    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, msgs.items, .{});
+    const closed = try std.mem.concat(gpa, u8, &.{ msgs.items, "]" });
+    defer gpa.free(closed);
+    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, closed, .{});
     defer parsed.deinit();
     const array = parsed.value.array;
     try std.testing.expectEqual(@as(usize, 122), array.items.len);
@@ -4772,6 +4795,44 @@ test "compaction elides old tool output and keeps the recent turns" {
         "[earlier tool output elided: 8192 bytes]",
         array.items[2].object.get("content").?.string,
     );
+}
+
+// A run's conversation has no closing bracket: `buildBody` is what writes it,
+// so the buffer every request is built from is an open array. `appendToolResults`
+// closes it for the tests above, which is why compaction was only ever driven
+// over a complete document and this shape was never reached. The two halves of
+// the contract are pinned together here, because either one alone is silent: a
+// parse that wants a document it does not have aborts the run, and a rewrite
+// that keeps the bracket sends every later request as a closed array followed
+// by the one `buildBody` adds.
+test "compaction reads and rewrites the open array a run carries" {
+    const gpa = std.testing.allocator;
+    var scratch_state = std.heap.ArenaAllocator.init(gpa);
+    defer scratch_state.deinit();
+
+    var msgs: std.ArrayList(u8) = .empty;
+    defer msgs.deinit(gpa);
+
+    try openConversation(gpa, &msgs, "you are a coding agent", "fix the bug");
+    try appendToolResults(gpa, &msgs, 120, "x" ** 8192);
+    try std.testing.expectEqual(@as(u8, '}'), msgs.items[msgs.items.len - 1]);
+
+    const before = msgs.items.len;
+    try std.testing.expect(before > conversation_soft_limit);
+    var floor: usize = 0;
+    try compactMessages(std.testing.io, gpa, &msgs, scratch_state.allocator(), &floor);
+
+    // It elided, and it is still open, and it still parses once the run's own
+    // bracket is written back.
+    try std.testing.expect(msgs.items.len < before);
+    try std.testing.expect(msgs.items[msgs.items.len - 1] == '}');
+    var body_arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer body_arena_state.deinit();
+    const body_arena = body_arena_state.allocator();
+    const body = try buildBody(body_arena, .{ .model = "test/model" }, msgs.items);
+    const parsed = try std.json.parseFromSlice(std.json.Value, body_arena, body, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 122), parsed.value.object.get("messages").?.array.items.len);
 }
 
 // The marker above is this program writing into a tool message, so the model
@@ -4823,7 +4884,9 @@ test "a conversation of small tool results is still bounded" {
     // The bound is the point: a run that cannot elide a large result is still
     // brought under the limit rather than left growing.
     try std.testing.expect(msgs.items.len <= conversation_soft_limit);
-    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, msgs.items, .{});
+    const closed = try std.mem.concat(gpa, u8, &.{ msgs.items, "]" });
+    defer gpa.free(closed);
+    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, closed, .{});
     defer parsed.deinit();
     const array = parsed.value.array;
     // Nothing is dropped, so every tool_call_id still has its message, and the
@@ -4909,7 +4972,6 @@ test "a conversation with nothing to elide is not re-parsed every turn" {
     // No message here carries tool output, so neither pass of compaction has
     // anything to replace and the conversation is well past the soft limit.
     try openConversation(gpa, &msgs, "you are a coding agent", "fix the bug");
-    try msgs.append(gpa, ']');
     var i: usize = 0;
     while (i < 100) : (i += 1) try growConversation(gpa, &msgs, "assistant", "x" ** 8192);
     const before = msgs.items.len;
@@ -4935,14 +4997,11 @@ test "a conversation with nothing to elide is not re-parsed every turn" {
     try std.testing.expect(msgs.items.len < grown);
 }
 
-// Appends a message to an already-closed conversation, the way a turn does:
-// the closing bracket comes off, the message goes on in `appendMessage`'s own
-// spelling, and the bracket goes back, so the test exercises the writer the run
-// writes a request with rather than a second copy of it.
+// Appends a message to a conversation, the way a turn does: the message goes
+// on in `appendMessage`'s own spelling, separator included, and the array stays
+// open because the run's buffer is open.
 fn growConversation(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), role: []const u8, blob: []const u8) !void {
-    msgs.shrinkRetainingCapacity(msgs.items.len - 1);
     try appendMessage(gpa, msgs, role, blob);
-    try msgs.append(gpa, ']');
 }
 
 // Prompt caching keys on the exact bytes of the request prefix. Compaction is
@@ -4973,7 +5032,7 @@ test "compaction leaves the cached prefix byte-identical" {
     try std.testing.expect(msgs.items.len > prefix.len);
     try std.testing.expectEqualStrings(prefix, msgs.items[0..prefix.len]);
     // The prefix is cached, not just unchanged: the newest turn is still whole.
-    try std.testing.expect(std.mem.endsWith(u8, msgs.items, "\"content\":\"" ++ blob ++ "\"}]"));
+    try std.testing.expect(std.mem.endsWith(u8, msgs.items, "\"content\":\"" ++ blob ++ "\"}"));
 }
 
 test "the api key is sent as the request's authorization header" {
