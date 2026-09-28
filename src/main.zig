@@ -1596,15 +1596,22 @@ const UsageFields = struct {
 ///
 /// A provider that sends no total has it summed from the parts, because a
 /// reader that divides tokens by elapsed time reads a missing field as a run
-/// that cost nothing.
+/// that cost nothing. The same reason keeps a frame that carries one counter
+/// from reading as a run of zero for the rest: a stream that spreads its usage
+/// over several frames, or spells a total in one and the parts in another, is
+/// folded counter by counter rather than replaced field by field.
 fn applyUsage(result: *chat_mod.ChatResult, u: UsageFields) void {
-    result.prompt_tokens = chat_mod.num(u.prompt);
-    result.completion_tokens = chat_mod.num(u.completion);
-    result.total_tokens = chat_mod.num(u.total);
-    if (u.reasoning) |v| result.reasoning_tokens = chat_mod.num(v);
-    if (u.cached) |v| result.cached_tokens = chat_mod.num(v);
-    if (result.cached_tokens == 0) result.cached_tokens = chat_mod.num(u.cache_hit);
-    if (result.cached_tokens == 0) result.cached_tokens = chat_mod.num(u.cache_read);
+    if (chat_mod.maybeNum(u.prompt)) |v| result.prompt_tokens = v;
+    if (chat_mod.maybeNum(u.completion)) |v| result.completion_tokens = v;
+    if (chat_mod.maybeNum(u.total)) |v| result.total_tokens = v;
+    if (chat_mod.maybeNum(u.reasoning)) |v| result.reasoning_tokens = v;
+    if (chat_mod.maybeNum(u.cached)) |v| result.cached_tokens = v;
+    if (result.cached_tokens == 0) {
+        if (chat_mod.maybeNum(u.cache_hit)) |v| result.cached_tokens = v;
+    }
+    if (result.cached_tokens == 0) {
+        if (chat_mod.maybeNum(u.cache_read)) |v| result.cached_tokens = v;
+    }
     if (result.total_tokens == 0)
         result.total_tokens = result.prompt_tokens +| result.completion_tokens;
 }
@@ -2783,6 +2790,26 @@ test "cached prompt tokens read every provider spelling" {
 // A record a monitor reads has to be one JSON object with this response's own
 // counters, the directory that attributes it, and the model time a rate is
 // taken over.
+
+// A stream may spread its usage over several frames, and a frame that carries
+// one counter says nothing about the others. Folding field by field is what
+// keeps a second frame's silence from reading as a run that spent no prompt
+// tokens: a run whose usage lines then report a token rate near zero.
+test "a later usage frame does not zero the counters an earlier one set" {
+    var sink = FrameSink.init(std.testing.allocator);
+    defer sink.deinit();
+
+    try sink.feed("{\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":900,\"completion_tokens\":18,\"prompt_tokens_details\":{\"cached_tokens\":768}}}");
+    try std.testing.expectEqual(@as(u64, 900), sink.result.prompt_tokens);
+    try std.testing.expectEqual(@as(u64, 768), sink.result.cached_tokens);
+
+    // The tail frame a provider sends carries the cache spelling alone.
+    try sink.feed("{\"choices\":[{\"delta\":{}}],\"usage\":{\"cache_read_input_tokens\":768}}");
+    try std.testing.expectEqual(@as(u64, 900), sink.result.prompt_tokens);
+    try std.testing.expectEqual(@as(u64, 18), sink.result.completion_tokens);
+    try std.testing.expectEqual(@as(u64, 768), sink.result.cached_tokens);
+    try std.testing.expectEqual(@as(u64, 918), sink.result.total_tokens);
+}
 test "session record carries one response's counters, cwd and model time" {
     var state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer state.deinit();

@@ -193,6 +193,18 @@ pub fn num(v: ?std.json.Value) u64 {
     };
 }
 
+/// A count a frame carried, or null when the frame left it out. `num` answers 0
+/// for both, which is the right answer for a counter that starts at zero and
+/// the wrong one for folding one frame into a total another frame already set:
+/// a frame that carries `cached_tokens` alone must not read as a run that spent
+/// no prompt tokens. A declared field the provider omitted parses as JSON
+/// `null` rather than as an absent optional, so both are null here.
+pub fn maybeNum(v: ?std.json.Value) ?u64 {
+    const value = v orelse return null;
+    if (value == .null) return null;
+    return num(v);
+}
+
 /// A count the model sent, as a `usize`. `num` saturates at the `u64` ceiling,
 /// which a 32-bit build cannot hold, so the cast clamps instead of trapping:
 /// a number too large to be a line count is a number that means "all of them".

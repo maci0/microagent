@@ -211,6 +211,18 @@ fn gitLineLimit(args: std.json.ObjectMap) usize {
     return @max(1, chat.numCount(v));
 }
 
+/// The largest count handed to `git log -n`. Its own argument parser refuses a
+/// number past `INT_MAX` with `fatal: not an integer`, so a model asking for
+/// every line in a large repository was answered with an error and no log at
+/// all. The ceiling is far above what the capture cap lets through anyway, so
+/// a count past it costs nothing to lose.
+const git_log_line_ceiling: usize = 1 << 20;
+
+/// The `-n` argument for `git log`: the model's limit, cut to what git parses.
+fn gitLogLines(limit: usize) usize {
+    return @min(limit, git_log_line_ceiling);
+}
+
 /// Read-only git, with the subcommands fixed here rather than assembled by the
 /// model. Deterministic, no shell quoting, and the output is capped.
 fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64) ![]u8 {
@@ -231,9 +243,11 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
         if (rev) |r| try argv.append(arena, r);
     } else if (std.mem.eql(u8, cmd, "log")) {
         // git counts the lines the model asked for, so a `limit` above the
-        // 400-line default is honored rather than silently cut to 30.
+        // 400-line default is honored rather than silently cut to 30, and one
+        // past what git parses is cut to what it will accept rather than
+        // turned into `fatal: not an integer`.
         try argv.appendSlice(arena, &.{ "log", "--oneline", "--no-color", "-n" });
-        try argv.append(arena, try std.fmt.allocPrint(arena, "{d}", .{limit}));
+        try argv.append(arena, try std.fmt.allocPrint(arena, "{d}", .{gitLogLines(limit)}));
     } else if (std.mem.eql(u8, cmd, "show")) {
         try argv.appendSlice(arena, &.{ "show", "--no-color", "--stat", "--patch" });
         try argv.append(arena, rev orelse "HEAD");
@@ -1329,6 +1343,19 @@ test "each tool refuses a missing required argument" {
         "error: missing pattern",
         try dispatch(arena, "search", "{\"path\":\".\"}"),
     );
+}
+
+// A limit the model can type is a number it chose, and git parses the one it is
+// given: `git log -n 18446744073709551615` answers `fatal: not an integer` and
+// the model gets no log at all. What reaches git is a count it accepts, and
+// what reaches the model is still every line the capture cap let through.
+test "a git line limit past what git parses is cut, not handed over" {
+    try std.testing.expectEqual(@as(usize, 1), gitLogLines(1));
+    try std.testing.expectEqual(git_default_limit, gitLogLines(git_default_limit));
+    try std.testing.expectEqual(git_log_line_ceiling, gitLogLines(std.math.maxInt(usize)));
+    // Nothing past the ceiling is ever spelled for git, on a 32-bit build or
+    // a 64-bit one.
+    try std.testing.expect(gitLogLines(std.math.maxInt(u32)) <= git_log_line_ceiling);
 }
 
 // A missing argument that the model filled with a number is still missing: the
