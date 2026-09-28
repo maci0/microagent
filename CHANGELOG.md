@@ -23,6 +23,15 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- A tool call the completion stream delivers twice is dispatched once. The
+  stream is delivered at least once, and a relay that reconnects replays from
+  the last event it saw, so one response can carry the same call under two
+  indexes. The id is the only thing that says so, and every call was
+  dispatched: `bash` ran the command twice, `write` and `edit` rewrote a file
+  the first pass had already changed. The first is kept, the repeat is dropped
+  and named on stderr, and the assistant message goes back naming each call
+  once, so the tool results still pair one to one. Two calls that happen to be
+  identical but carry different ids are still two calls.
 - A character the transport split across two reads is no longer written to
   stdout in halves. The stream loop flushed each chunk as it arrived, and a
   chunk boundary is a byte boundary rather than a character one: a `日` split

@@ -1737,7 +1737,12 @@ fn streamChat(
     if (result.content.items.len > 0) try out_buf.append(gpa, '\n');
     try flushOut(io, arena, &out_buf, shown_url);
     result.calls = calls;
-    dropUnusableCalls(gpa, &result.calls);
+    // Named when the stream delivered a call twice: the turn is still complete,
+    // the duplicate is simply not dispatched, and a run that silently ran every
+    // call the response carried would be a run whose side effects a reader
+    // cannot account for from the turn it read.
+    const dropped = keepRunnableCalls(gpa, &result.calls);
+    if (dropped.duplicate > 0) net.note(io, arena, "microagent: the completion stream from {s} carried {d} tool call(s) whose id this response had already delivered; they are not dispatched a second time\n", .{ shown_url, dropped.duplicate });
     return result;
 }
 
@@ -1761,6 +1766,16 @@ fn truncatedNotice(
     ) catch "microagent: the completion stream ended without [DONE]; the turn is not complete";
 }
 
+/// What the filter below took out of one response, so the caller can say which
+/// of the two reasons applied rather than reporting one number for both.
+pub const DroppedCalls = struct {
+    /// A call the run cannot carry: no id, no name, or arguments that are not a
+    /// JSON object.
+    unusable: usize = 0,
+    /// A call carrying an id the response already delivered under another index.
+    duplicate: usize = 0,
+};
+
 /// A provider that skips a tool-call index leaves an empty slot where `applyFrame`
 /// sized the list by index, and a response cut at `max_tokens` or at the turn's
 /// byte ceiling leaves a call whose arguments stop mid-object, and a stream whose
@@ -1771,19 +1786,48 @@ fn truncatedNotice(
 /// 400 that ends the run. They are dropped here instead, so a truncated turn
 /// costs that turn and not the rest of the run. The ceiling notice above has
 /// already said the arguments were cut.
-fn dropUnusableCalls(gpa: std.mem.Allocator, calls: *std.ArrayList(chat_mod.ToolCall)) void {
+///
+/// A second call carrying an id the response already carried is dropped for the
+/// other reason. The stream is the transport this program does not control: a
+/// relay that reconnects replays from the last event it saw, a proxy that retries
+/// a chunk re-sends it, and a provider that restarts a call after a dropped
+/// connection delivers it again under the next index. Every such delivery is
+/// at-least-once, and the id is the only thing in it that says the call is one
+/// the run has already got. Dispatching both runs the tool twice over the same
+/// arguments, which for `bash` is the command twice and for `write` and `edit` a
+/// second pass over a file the first pass already changed. The first is kept, so
+/// the assistant message names each call once and the tool results still pair
+/// one to one, which is what the next request needs anyway.
+///
+/// Two calls with the same id and the same index are not this case: they are one
+/// call whose fragments arrived twice, which `applyCallDelta` folds into the one
+/// slot that index names. What lands here is the same id under two indexes.
+fn keepRunnableCalls(gpa: std.mem.Allocator, calls: *std.ArrayList(chat_mod.ToolCall)) DroppedCalls {
+    var dropped: DroppedCalls = .{};
     var kept: usize = 0;
     for (calls.items) |*call| {
         if (call.id.len == 0 or call.name.len == 0 or !argumentsAreAnObject(gpa, call.args.items)) {
-            if (call.id.len != 0) gpa.free(call.id);
-            if (call.name.len != 0) gpa.free(call.name);
-            call.args.deinit(gpa);
+            dropped.unusable += 1;
+        } else if (indexOfCallId(calls.items[0..kept], call.id) != null) {
+            dropped.duplicate += 1;
+        } else {
+            calls.items[kept] = call.*;
+            kept += 1;
             continue;
         }
-        calls.items[kept] = call.*;
-        kept += 1;
+        if (call.id.len != 0) gpa.free(call.id);
+        if (call.name.len != 0) gpa.free(call.name);
+        call.args.deinit(gpa);
     }
     calls.shrinkRetainingCapacity(kept);
+    return dropped;
+}
+
+fn indexOfCallId(calls: []const chat_mod.ToolCall, id: []const u8) ?usize {
+    for (calls, 0..) |call, i| {
+        if (std.mem.eql(u8, call.id, id)) return i;
+    }
+    return null;
 }
 
 /// Whether a call's streamed arguments are an object, which is the only thing
@@ -4356,12 +4400,12 @@ test "a gap in the tool-call indexes leaves no nameless call behind" {
     try applyFrame(arena, arena, payload, &result, &calls, &out_buf, &unparsable);
     try std.testing.expectEqual(@as(usize, 3), calls.items.len);
 
-    dropUnusableCalls(arena, &calls);
+    _ = keepRunnableCalls(arena, &calls);
     try std.testing.expectEqual(@as(usize, 1), calls.items.len);
     try std.testing.expectEqualStrings("read", calls.items[0].name);
 
     // A response whose calls are all named is untouched.
-    dropUnusableCalls(arena, &calls);
+    _ = keepRunnableCalls(arena, &calls);
     try std.testing.expectEqual(@as(usize, 1), calls.items.len);
 }
 
@@ -4392,7 +4436,7 @@ test "a tool call cut mid-argument is dropped rather than sent on" {
     try applyFrame(arena, arena, cut, &result, &calls, &out_buf, &unparsable);
     try std.testing.expectEqual(@as(usize, 2), calls.items.len);
 
-    dropUnusableCalls(arena, &calls);
+    _ = keepRunnableCalls(arena, &calls);
     try std.testing.expectEqual(@as(usize, 1), calls.items.len);
     try std.testing.expectEqualStrings("call_ok", calls.items[0].id);
 }
@@ -4420,9 +4464,57 @@ test "a tool call with no id is dropped rather than sent on" {
     try std.testing.expectEqual(@as(usize, 2), calls.items.len);
     try std.testing.expectEqual(@as(usize, 0), calls.items[0].id.len);
 
-    dropUnusableCalls(arena, &calls);
+    _ = keepRunnableCalls(arena, &calls);
     try std.testing.expectEqual(@as(usize, 1), calls.items.len);
     try std.testing.expectEqualStrings("call_ok", calls.items[0].id);
+}
+
+// A stream is delivered at least once. A relay that reconnects replays from the
+// last event it saw, and a provider that restarts a call after a dropped
+// connection delivers it again under the next index, so one response can carry
+// the same call twice. The id is the only thing that says so, and the tools are
+// exactly the ones where a second dispatch is damage: `bash` runs the command
+// twice, `write` and `edit` rewrite a file the first pass already changed. The
+// first is kept, so the assistant message names each call once and the tool
+// results still pair one to one.
+test "a tool call the stream delivered twice is dispatched once" {
+    const gpa = std.testing.allocator;
+    var run_state = std.heap.ArenaAllocator.init(gpa);
+    defer run_state.deinit();
+    const arena = run_state.allocator();
+
+    // Indexes 0 and 1 under one id: the second delivery of one call, which is
+    // what a restart looks like on the wire.
+    const payload = "{\"choices\":[{\"delta\":{\"tool_calls\":[" ++
+        "{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\": \\\"ls\\\"}\"}}," ++
+        "{\"index\":1,\"id\":\"call_1\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\": \\\"ls\\\"}\"}}," ++
+        "{\"index\":2,\"id\":\"call_2\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"a.zig\\\"}\"}}" ++
+        "]}}]}";
+    var result: chat_mod.ChatResult = .{};
+    var calls: std.ArrayList(chat_mod.ToolCall) = .empty;
+    var out_buf: std.ArrayList(u8) = .empty;
+    var unparsable: usize = 0;
+    try applyFrame(arena, arena, payload, &result, &calls, &out_buf, &unparsable);
+    try std.testing.expectEqual(@as(usize, 3), calls.items.len);
+
+    const dropped = keepRunnableCalls(arena, &calls);
+    try std.testing.expectEqual(@as(usize, 0), dropped.unusable);
+    try std.testing.expectEqual(@as(usize, 1), dropped.duplicate);
+    try std.testing.expectEqual(@as(usize, 2), calls.items.len);
+    try std.testing.expectEqualStrings("call_1", calls.items[0].id);
+    try std.testing.expectEqualStrings("call_2", calls.items[1].id);
+
+    // Two distinct calls that happen to be identical are two calls, and the run
+    // is the one that asked for both.
+    const twice = "{\"choices\":[{\"delta\":{\"tool_calls\":[" ++
+        "{\"index\":0,\"id\":\"call_a\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"a.zig\\\"}\"}}," ++
+        "{\"index\":1,\"id\":\"call_b\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"a.zig\\\"}\"}}" ++
+        "]}}]}";
+    var second: std.ArrayList(chat_mod.ToolCall) = .empty;
+    try applyFrame(arena, arena, twice, &result, &second, &out_buf, &unparsable);
+    const kept = keepRunnableCalls(arena, &second);
+    try std.testing.expectEqual(@as(usize, 0), kept.duplicate);
+    try std.testing.expectEqual(@as(usize, 2), second.items.len);
 }
 
 test "out-of-range numbers from the model saturate instead of trapping" {

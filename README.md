@@ -297,6 +297,12 @@ The system prompt tells the model to search with ripgrep and rewrite structurall
 rather than reimplementing either in the harness. `bash` is there for builds and tests; git state
 has its own tool, with the subcommands fixed here instead of assembled by the model.
 
+The stream is delivered at least once, so a turn's tool calls are deduplicated by the id the
+provider gave them before anything is dispatched: a relay that reconnects replays frames, and a
+replayed call is a `bash` run twice or a `write` over a file the first pass already changed. The
+first delivery is what runs, the repeat is named on stderr, and two calls that are identical but
+carry different ids are two calls.
+
 Everything a tool returns is untrusted text on its way back into the prompt: a file, a diff, a
 build log. The system prompt says so, and tool results ride back as `tool` messages, so a
 repository that ships a file telling the model to run something is data the run reports rather
