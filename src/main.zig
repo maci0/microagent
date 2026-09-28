@@ -83,7 +83,10 @@ const Options = struct {
 const ToolCall = struct {
     id: []u8,
     name: []u8,
-    args: []u8,
+    /// Grown by appending each streamed fragment. A provider splits one
+    /// call's `arguments` across many frames, so this is the buffer that a
+    /// per-frame re-copy made quadratic in the argument length.
+    args: std.ArrayList(u8) = .empty,
 };
 
 /// Token counters as gauntlet wants to read them: cumulative for the run, so
@@ -383,9 +386,19 @@ fn run(
     const started = Io.Timestamp.now(io, .awake).nanoseconds;
     const session = openSession(io, gpa, arena, opts);
     defer closeSession(io, session);
+    // What one turn allocates from the wire down -- the request body (a full
+    // copy of the conversation), the streamed content, the tool results --
+    // is dead once that turn's messages are appended. The run arena is never
+    // freed, so a run arena for all of it would retain one copy of the whole
+    // conversation per turn; a per-turn arena reset at the top of the loop
+    // holds the peak at one turn's worth.
+    var turn_state = std.heap.ArenaAllocator.init(arena);
+    defer turn_state.deinit();
+    const turn_arena = turn_state.allocator();
     var turn: usize = 0;
     var usage: Usage = .{};
     while (turn < opts.max_turns) : (turn += 1) {
+        _ = turn_state.reset(.retain_capacity);
         if (opts.budget_s) |budget| {
             const spent_s = @divTrunc(Io.Timestamp.now(io, .awake).nanoseconds - started, std.time.ns_per_s);
             if (spent_s >= budget) {
@@ -395,20 +408,20 @@ fn run(
                 // with a small diff, and the model has already done the reading.
                 net.note(io, arena, "microagent: budget of {d}s reached after {d} turn(s); one final turn\n", .{ budget, turn });
                 try appendMessage(gpa, msgs, "user", final_push);
-                const body = try buildBody(arena, opts, msgs.items);
+                const body = try buildBody(turn_arena, opts, msgs.items);
                 const asked = Io.Timestamp.now(io, .awake).nanoseconds;
-                var result = try streamChat(client, io, arena, opts, body);
-                try finishTurn(io, arena, gpa, msgs, &result, &usage);
-                writeSessionRecord(io, arena, session, elapsedMs(io, asked), &result);
+                var result = try streamChat(client, io, turn_arena, opts, body);
+                try finishTurn(io, turn_arena, gpa, msgs, &result, &usage);
+                writeSessionRecord(io, turn_arena, session, elapsedMs(io, asked), &result);
                 return turn + 1;
             }
         }
-        try compactMessages(gpa, msgs, arena);
-        const body = try buildBody(arena, opts, msgs.items);
+        try compactMessages(gpa, msgs, turn_arena);
+        const body = try buildBody(turn_arena, opts, msgs.items);
         const asked = Io.Timestamp.now(io, .awake).nanoseconds;
-        var result = try streamChat(client, io, arena, opts, body);
-        try finishTurn(io, arena, gpa, msgs, &result, &usage);
-        writeSessionRecord(io, arena, session, elapsedMs(io, asked), &result);
+        var result = try streamChat(client, io, turn_arena, opts, body);
+        try finishTurn(io, turn_arena, gpa, msgs, &result, &usage);
+        writeSessionRecord(io, turn_arena, session, elapsedMs(io, asked), &result);
         if (result.calls.items.len == 0) return turn + 1;
 
         // One turn left: say so, rather than ending on a truncated answer that
@@ -729,16 +742,16 @@ fn applyFrame(
             while (calls.items.len <= idx) try calls.append(arena, .{
                 .id = try arena.dupe(u8, ""),
                 .name = try arena.dupe(u8, ""),
-                .args = &.{},
             });
-            var args_buf: std.ArrayList(u8) = .empty;
-            try args_buf.appendSlice(arena, calls.items[idx].args);
-            if (str(tc.object.get("id"))) |v| calls.items[idx].id = try arena.dupe(u8, v);
+            if (str(tc.object.get("id"))) |v| {
+                if (!std.mem.eql(u8, calls.items[idx].id, v)) calls.items[idx].id = try arena.dupe(u8, v);
+            }
             if (tc.object.get("function")) |f| if (f == .object) {
-                if (str(f.object.get("name"))) |v| calls.items[idx].name = try arena.dupe(u8, v);
-                if (str(f.object.get("arguments"))) |v| try args_buf.appendSlice(arena, v);
+                if (str(f.object.get("name"))) |v| {
+                    if (!std.mem.eql(u8, calls.items[idx].name, v)) calls.items[idx].name = try arena.dupe(u8, v);
+                }
+                if (str(f.object.get("arguments"))) |v| try calls.items[idx].args.appendSlice(arena, v);
             };
-            calls.items[idx].args = args_buf.items;
         }
     };
 }
@@ -892,7 +905,7 @@ fn finishTurn(
             try msg.writer().writeAll(",\"type\":\"function\",\"function\":{\"name\":");
             try writeJsonString(msg.writer(), call.name);
             try msg.writer().writeAll(",\"arguments\":");
-            try writeJsonString(msg.writer(), call.args);
+            try writeJsonString(msg.writer(), call.args.items);
             try msg.writer().writeAll("}}");
         }
         try msg.writer().writeAll("]}");
@@ -925,7 +938,7 @@ fn finishTurn(
 }
 
 fn runTool(io: Io, arena: std.mem.Allocator, call: ToolCall) ![]u8 {
-    const parsed = std.json.parseFromSlice(std.json.Value, arena, call.args, .{}) catch
+    const parsed = std.json.parseFromSlice(std.json.Value, arena, call.args.items, .{}) catch
         return std.fmt.allocPrint(arena, "error: tool arguments are not valid JSON", .{});
     const args = switch (parsed.value) {
         .object => |o| o,
@@ -1130,20 +1143,33 @@ const JsonBuf = struct {
 
 fn writeJsonString(w: *Io.Writer, s: []const u8) !void {
     try w.writeByte('"');
-    for (s) |c| switch (c) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        '\n' => try w.writeAll("\\n"),
-        '\r' => try w.writeAll("\\r"),
-        '\t' => try w.writeAll("\\t"),
-        0x08 => try w.writeAll("\\b"),
-        0x0c => try w.writeAll("\\f"),
-        else => if (c < 0x20)
-            try w.print("\\u{x:0>4}", .{c})
-        else
-            try w.writeByte(c),
-    };
+    var i: usize = 0;
+    while (i < s.len) {
+        // Copy the run that needs no escaping in one write. Tool results and
+        // the conversation rebuild are mostly plain text, and a per-byte
+        // write for each of them costs a call per byte on the path that
+        // re-serializes the largest payloads the run has.
+        const start = i;
+        while (i < s.len and !jsonNeedsEscape(s[i])) : (i += 1) {}
+        if (i > start) try w.writeAll(s[start..i]);
+        if (i == s.len) break;
+        switch (s[i]) {
+            '"' => try w.writeAll("\\\""),
+            '\\' => try w.writeAll("\\\\"),
+            '\n' => try w.writeAll("\\n"),
+            '\r' => try w.writeAll("\\r"),
+            '\t' => try w.writeAll("\\t"),
+            0x08 => try w.writeAll("\\b"),
+            0x0c => try w.writeAll("\\f"),
+            else => try w.print("\\u{x:0>4}", .{s[i]}),
+        }
+        i += 1;
+    }
     try w.writeByte('"');
+}
+
+fn jsonNeedsEscape(c: u8) bool {
+    return c < 0x20 or c == '"' or c == '\\';
 }
 
 fn str(v: ?std.json.Value) ?[]const u8 {
@@ -1229,6 +1255,23 @@ test "json string escaping" {
     try writeJsonString(buf.writer(), "a\"b\\c\nd\t\u{7}");
     defer buf.list.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("\"a\\\"b\\\\c\\nd\\t\\u0007\"", buf.items());
+}
+
+// Escaping copies unescaped runs in bulk, so every byte has to survive that
+// path: a byte that is neither escaped nor copied comes back short. The
+// range is the ASCII one, which is what the escaper is responsible for; bytes
+// above it are passed through as written, and a lone one is not valid JSON.
+test "every ASCII byte survives escaping" {
+    var all: [128]u8 = undefined;
+    for (&all, 0..) |*c, i| c.* = @intCast(i);
+
+    var buf = JsonBuf.init(std.testing.allocator);
+    defer buf.list.deinit(std.testing.allocator);
+    try writeJsonString(buf.writer(), &all);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, buf.items(), .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualSlices(u8, &all, parsed.value.string);
 }
 
 test "clamp keeps short strings intact" {
@@ -1342,7 +1385,43 @@ test "tool call fragments merge by index across frames" {
     try std.testing.expectEqual(@as(usize, 1), calls.items.len);
     try std.testing.expectEqualStrings("call_1", calls.items[0].id);
     try std.testing.expectEqualStrings("read", calls.items[0].name);
-    try std.testing.expectEqualStrings("{\"path\":\"a.zig\"}", calls.items[0].args);
+    try std.testing.expectEqualStrings("{\"path\":\"a.zig\"}", calls.items[0].args.items);
+}
+
+// A provider streams one call's `arguments` as many small fragments. Copying
+// the whole accumulated string on every fragment made both the copy count and
+// the arena bytes quadratic in the argument length, on the one path that
+// cannot be re-sent cheaply. Appending keeps arena growth geometric, so the
+// run arena costs a small multiple of the final length rather than a multiple
+// of the square of it.
+test "streamed argument fragments cost linear arena bytes" {
+    const gpa = std.testing.allocator;
+    var run_state = std.heap.ArenaAllocator.init(gpa);
+    defer run_state.deinit();
+    var frame_state = std.heap.ArenaAllocator.init(gpa);
+    defer frame_state.deinit();
+
+    var result: ChatResult = .{};
+    var calls: std.ArrayList(ToolCall) = .empty;
+    var out_buf: std.ArrayList(u8) = .empty;
+
+    const fragments: usize = 2000;
+    var i: usize = 0;
+    while (i < fragments) : (i += 1) {
+        const frame = try std.mem.concat(
+            frame_state.allocator(),
+            u8,
+            &.{ "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"", "0123456789abcdef", "\"}}]}}]}" },
+        );
+        try applyFrame(frame_state.allocator(), run_state.allocator(), frame, &result, &calls, &out_buf);
+        _ = frame_state.reset(.retain_capacity);
+    }
+
+    const total = fragments * 16;
+    try std.testing.expectEqual(total, calls.items[0].args.items.len);
+    // Geometric growth retains at most about twice the final length; the
+    // per-frame re-copy retained a multiple of the square of it.
+    try std.testing.expect(run_state.queryCapacity() < 4 * total);
 }
 
 test "usage counters land on the result" {
@@ -1704,11 +1783,12 @@ test "a tool argument sent as a number is missing, not a value" {
 // A tool call as the model produced it: the same mutable slices the frame
 // parser fills in, so the dispatcher tests go through the real entry point.
 fn dispatch(arena: std.mem.Allocator, name: []const u8, args: []const u8) ![]u8 {
-    return runTool(std.testing.io, arena, .{
+    var call: ToolCall = .{
         .id = try arena.dupe(u8, ""),
         .name = try arena.dupe(u8, name),
-        .args = try arena.dupe(u8, args),
-    });
+    };
+    try call.args.appendSlice(arena, args);
+    return runTool(std.testing.io, arena, call);
 }
 
 test "out-of-range numbers from the model saturate instead of trapping" {
