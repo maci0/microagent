@@ -6,9 +6,10 @@ a task. Model latency dominates wall time in any loop, so the harness numbers ar
 comparing.
 
 Machine: x86_64 Linux, Zig 0.16.0, `bench/overhead.sh` and `bench/run.sh` as committed. Every number
-below was produced by those scripts, not by hand. The scripts run on macOS too: the wall clock
-falls back to whole seconds there, because BSD `date` has no `%N`, and the run ceiling is a watchdog
-where `timeout` is not installed.
+below was produced by those scripts, not by hand. The scripts run on macOS too: elapsed time is
+monotonic there as well, read from `perl`'s `Time::HiRes` rather than from `/proc/uptime`, and a
+host carrying neither reports no-clock rather than a wall-clock figure, and the run ceiling is a
+watchdog where `timeout` is not installed.
 
 ## Size
 

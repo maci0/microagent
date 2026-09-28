@@ -94,7 +94,13 @@ for agent in $agents; do
 			"$agent" >>"$root/bench/gauntlet-results.jsonl"
 		continue
 	fi
-	elapsed=$(( (end - start + 500000000) / 1000000000 ))
+	# Subtracted in awk rather than in `$(( ))`, which is what bench/run.sh and
+	# bench/overhead.sh do for the same measurement. Shell arithmetic is only
+	# required to be as wide as `long`, so a 32-bit shell wraps a nanosecond
+	# reading of a long-uptime host and records a nonsense elapsed time; awk's
+	# double carries the value and the two scripts cannot disagree about how a
+	# duration is turned into seconds.
+	elapsed=$(echo "$end $start" | awk '{printf "%.0f", ($1-$2+500000000)/1000000000}')
 
 	passed=$(awk '/^  Passed:/{print $2}' "$dir/.gauntlet.log" | tail -1)
 	failed=$(awk '/^  Failed:/{print $2}' "$dir/.gauntlet.log" | tail -1)

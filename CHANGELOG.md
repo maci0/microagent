@@ -94,6 +94,14 @@ release, and `microagent update` moves you to it.
   the two values a run reached without anybody setting them, and the two a
   reader learns what a run talks to from, so `microagent --help` did not say
   what a run does before it is asked anything.
+- Every tool call in a turn is held to the budget as it stands when that call
+  starts, rather than as it stood when the turn began. A turn's calls run one
+  after another, and the ceiling that cuts a tool's timeout was read once for
+  the whole turn, so a reading taken before the first call was already stale by
+  the time the second one started: three `bash` calls against a two-minute
+  budget were each given the full two minutes, and the run only noticed on the
+  next turn. A call that runs long is exactly what shortens the one after it.
+
 - A tool call whose subprocess failed keeps what the subprocess printed. A
   `git log` that timed out after the last hundred commits, a `bash` build that
   printed every error it had found and then hung, and a `git` command refused

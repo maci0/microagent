@@ -2851,10 +2851,6 @@ fn finishTurn(
     try msgs.appendSlice(gpa, ",");
     try msgs.appendSlice(gpa, try assistantMessage(arena, result));
 
-    // Read once for the whole turn: every call in it starts at the same point
-    // on the budget, and a call that runs long is the reason the next one is
-    // shorter, not a reason to re-read the clock for each of them.
-    const ceiling_ms = budget.toolCeilingMs(io);
     for (result.calls.items) |call| {
         // Both flags only ever go false to true, so once one is set nothing
         // later in the turn can change it. `isTestRun` is the expensive half:
@@ -2870,7 +2866,16 @@ fn finishTurn(
         const output = if (budget.expired(io))
             try std.fmt.allocPrint(arena, "error: not run, the run's time budget is exhausted", .{})
         else
-            tool_mod.runTool(io, arena, call, ceiling_ms, tool_env) catch |err|
+            // The ceiling is read here rather than once for the turn, because a
+            // turn's calls run in sequence: a reading taken before the first of
+            // them is already stale by the time the second starts, and the
+            // budget the ceiling cuts to is the one left, not the one the turn
+            // began with. A call that runs long is exactly the reason the next
+            // one is shorter, so each reads for itself. The clock here is the
+            // run's own, and a tool that takes no time at all costs nothing to
+            // re-read: a `git status` spends its reading on the same syscall
+            // the process spawn beside it already makes.
+            tool_mod.runTool(io, arena, call, budget.toolCeilingMs(io), tool_env) catch |err|
                 // A tool that fails outright (rather than reporting its own
                 // failure as text) is named here, so a result reading
                 // `error: OutOfMemory` says which of the calls ran out.
@@ -4847,6 +4852,36 @@ test "a tool timeout is cut to what is left of the budget" {
     try std.testing.expectEqual(@as(u64, 0), spent.remainingMs(io).?);
     try std.testing.expectEqual(tool_timeout_floor_ms, spent.toolCeilingMs(io).?);
     try std.testing.expect(spent.expired(io));
+}
+
+// A turn's tool calls run one after another, so a ceiling read before the first
+// of them is already stale by the time the second starts. Reading once for the
+// whole turn handed every call the budget as it stood when the turn began, and
+// a turn naming three `bash` calls against a two-minute budget gave each of them
+// the full two minutes: 180s of command on a 120s ceiling, and the run only
+// noticed on the next turn. `finishTurn` reads per call for that reason, and
+// this is what the per-call read buys: the same budget answers a smaller ceiling
+// later, so a call that ran long is what shortens the one after it.
+test "a budget read later is a smaller ceiling for the next call in a turn" {
+    const io = std.testing.io;
+    // A minute, not a second: below `tool_timeout_floor_ms` the ceiling is the
+    // floor however much budget is left, so a short budget would answer the same
+    // number twice and prove nothing about the clock behind it.
+    const budget = Budget.of(Io.Timestamp.now(io, budget_clock).nanoseconds, 60);
+    const first = budget.toolCeilingMs(io).?;
+    // Comfortably inside the second, so a loaded host cannot spend the whole gap
+    // and leave nothing to compare.
+    io.sleep(.{ .nanoseconds = 200 * std.time.ns_per_ms }, .awake) catch |err| {
+        std.debug.print("\nno sleep on this host: {t}\n", .{err});
+        return err;
+    };
+    const second = budget.toolCeilingMs(io).?;
+    try std.testing.expect(second < first);
+    // And by about what was slept, not merely by a millisecond: the ceiling
+    // tracks the budget's own clock, so a second reading 200ms on is 200ms
+    // closer to the deadline. Half the sleep is the bound, so a slow host still
+    // passes and a ceiling that ignored the clock does not.
+    try std.testing.expect(first - second >= 100);
 }
 
 test "reasoning effort is only sent when asked for" {

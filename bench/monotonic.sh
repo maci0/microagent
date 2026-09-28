@@ -16,7 +16,10 @@
 #
 #   /proc/uptime      Linux, 10 ms resolution
 #   perl Time::HiRes  CLOCK_MONOTONIC (macOS ships perl)
-#   date              last resort, and still a wall clock
+#
+# There is no third source. `date` was one and is gone: a wall clock is not a
+# fallback for a measurement, it is a different quantity, so a host with neither
+# source above is told no duration was measured rather than handed one.
 monotonic_ns() {
 	if [ -r /proc/uptime ]; then
 		value=$(awk '{ printf "%.0f\n", $1 * 1000000000 }' /proc/uptime 2>/dev/null)
