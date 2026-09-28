@@ -3592,6 +3592,35 @@ test "the time budget is a deadline the turn itself is held to" {
 // A generation the provider cut at `max_tokens` arrives with a clean
 // terminator, so nothing else in the run knows the answer is a prefix of what
 // the model meant to say. The reason has to survive the frame that carries it.
+// The declared shapes are a speedup, not a filter: a provider is free to send
+// fields neither shape names, and nested junk inside a delta must not cost the
+// frame. Anything the declared shapes cannot hold at all lands on the generic
+// parse behind them, which is still there and still correct.
+test "a frame with fields the shapes do not name still lands" {
+    var sink = FrameSink.init(std.testing.allocator);
+    defer sink.deinit();
+
+    try sink.feed(
+        \\{"id":"gen-1","object":"chat.completion.chunk","created":1,"model":"m","system_fingerprint":"fp","service_tier":"scale",
+        \\ "choices":[{"index":0,"logprobs":null,"finish_reason":null,
+        \\ "delta":{"role":"assistant","content":"caf\u00e9","vendor_extra":{"nested":[1,2,{"deep":null}]}},"extra":true}]}
+    );
+    // The escape is resolved, so the model sees the character and not the
+    // six bytes it was sent as.
+    try std.testing.expectEqualStrings("caf\u{00e9}", sink.result.content.items);
+
+    // A frame the declared shapes cannot hold falls through to the generic
+    // parse, which still reads the content and the tool call out of it.
+    sink.result.content.clearRetainingCapacity();
+    try sink.feed(
+        \\{"choices":[{"delta":{"content":"fallback","tool_calls":[{"index":0,"id":"c1","type":"function",
+        \\ "function":{"name":"read","arguments":"{}"}}]}}],"unknown_top":{"a":[1,2]}}
+    );
+    try std.testing.expectEqualStrings("fallback", sink.result.content.items);
+    try std.testing.expectEqual(@as(usize, 1), sink.calls.items.len);
+    try std.testing.expectEqualStrings("read", sink.calls.items[0].name);
+}
+
 test "a response cut at the generation ceiling says so" {
     var sink = FrameSink.init(std.testing.allocator);
     defer sink.deinit();
