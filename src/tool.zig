@@ -284,6 +284,35 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
     // so the path gets the refusal `read` gives it rather than a git one.
     if (path) |p| if (isCredentialPath(p)) return credentialRefusal(arena, "git", p);
 
+    const argv = gitArgv(arena, cmd, rev, path, limit) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.UnknownCmd => return std.fmt.allocPrint(arena, "error: unknown git cmd '{s}'", .{cmd}),
+    };
+
+    // The cap drains rather than fails, for the reason `runCapped` gives: the
+    // default here is 400 lines, and 400 long diff lines pass the capture cap,
+    // so a call the model asked to be trimmed came back as
+    // `error: git diff failed: StreamTooLong` with no lines at all.
+    const res = runCapped(io, arena, argv, max_tool_output * 4, net.durationMs(boundedMs(tool_timeout_ms, ceiling_ms)), environ_map) catch |err|
+        return std.fmt.allocPrint(arena, "error: git {s} failed: {s}", .{ cmd, @errorName(err) });
+    const text = if (res.stdout.len > 0) res.stdout else res.stderr;
+    if (text.len == 0) return std.fmt.allocPrint(arena, "(git {s}: no output)", .{cmd});
+    return firstLines(arena, text, limit);
+}
+
+/// The command line one `git` call runs, with the subcommand and every flag
+/// fixed here rather than assembled by the model. Its own function because the
+/// pathspecs below are the security property of the tool, and the only way to
+/// hold one to that is to run its output against a repository with a committed
+/// credential in it, which a test cannot do through the tool itself: the tool
+/// spawns `git` in this process's working directory.
+fn gitArgv(
+    arena: std.mem.Allocator,
+    cmd: []const u8,
+    rev: ?[]const u8,
+    path: ?[]const u8,
+    limit: usize,
+) error{ OutOfMemory, UnknownCmd }![]const []const u8 {
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(arena, &.{ "git", "--no-pager" });
     if (std.mem.eql(u8, cmd, "status")) {
@@ -305,32 +334,28 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
         try argv.append(arena, "blame");
         if (rev) |r| try argv.append(arena, r);
     } else {
-        return std.fmt.allocPrint(arena, "error: unknown git cmd '{s}'", .{cmd});
+        return error.UnknownCmd;
     }
     // `--` keeps a path from being read as an option.
     try argv.append(arena, "--");
-    if (path) |p| {
-        try argv.append(arena, p);
-    } else if (std.mem.eql(u8, cmd, "diff") or std.mem.eql(u8, cmd, "show")) {
-        // The refusal above only covers a credential the model named. A
-        // `git show HEAD` with no path prints the whole commit, and a `.env`,
-        // a `.pem` or a `.secrets/` file that was ever committed comes back in
-        // it as a tool result, which is re-sent to the provider on every later
-        // turn. The names come from the same tables `search` and `ast` exclude
-        // by, so a credential is out of the git tool's results as well as out
-        // of the ones it is asked for by name.
+    if (path) |p| try argv.append(arena, p);
+    // The refusal `toolGit` makes covers only a credential the model named.
+    // `show` and `diff` print file contents, and a `.env`, a `.pem` or a
+    // `.secrets/` file that was ever committed comes back in a patch as a tool
+    // result, which is re-sent to the provider on every later turn. Naming a
+    // path does not change that: `git show HEAD -- .` prints the whole commit
+    // just as the pathless call does, so the exclusions go with the path rather
+    // than instead of it. The names come from the same tables `search` and
+    // `ast` exclude by, so a credential is out of the git tool's results as
+    // well as out of the ones it is asked for by name.
+    //
+    // The other three are left alone, because they print no file contents: a
+    // path, a commit subject, and whatever file the model named and the
+    // refusal above has already had its say about.
+    if (std.mem.eql(u8, cmd, "diff") or std.mem.eql(u8, cmd, "show")) {
         try argv.appendSlice(arena, &credential_pathspecs);
     }
-
-    // The cap drains rather than fails, for the reason `runCapped` gives: the
-    // default here is 400 lines, and 400 long diff lines pass the capture cap,
-    // so a call the model asked to be trimmed came back as
-    // `error: git diff failed: StreamTooLong` with no lines at all.
-    const res = runCapped(io, arena, argv.items, max_tool_output * 4, net.durationMs(boundedMs(tool_timeout_ms, ceiling_ms)), environ_map) catch |err|
-        return std.fmt.allocPrint(arena, "error: git {s} failed: {s}", .{ cmd, @errorName(err) });
-    const text = if (res.stdout.len > 0) res.stdout else res.stderr;
-    if (text.len == 0) return std.fmt.allocPrint(arena, "(git {s}: no output)", .{cmd});
-    return firstLines(arena, text, limit);
+    return argv.items;
 }
 
 /// The first `limit` lines, with a note when lines were dropped.
@@ -2237,6 +2262,105 @@ test "git tool refuses a missing or unknown subcommand" {
             try toolGit(std.testing.io, arena, args, null, null),
         );
     }
+}
+
+// The exclusions the git tool appends are the only thing between a committed
+// credential and the provider, because a tool result is re-sent on every later
+// turn. `git show HEAD -- .` prints the whole commit exactly as the pathless
+// call does, so the exclusions have to travel with a path rather than replace
+// it, and asserting on the argv would not say whether git honors them there.
+// The argv the tool builds is run against a repository holding one committed
+// credential and one ordinary file: the credential must not come back, and the
+// ordinary file must, or the pathspec has narrowed the call into silence.
+test "a git path does not switch the credential exclusions off" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, ".secrets");
+    try tmp.dir.createDirPath(io, "src");
+    const needle = "sk-committed-do-not-print";
+    try tmp.dir.writeFile(io, .{ .sub_path = ".secrets/openrouter", .data = needle });
+    try tmp.dir.writeFile(io, .{ .sub_path = ".env", .data = needle });
+    try tmp.dir.writeFile(io, .{ .sub_path = "src/main.zig", .data = "marker\n" });
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+
+    // A real repository, so git's own pathspec handling is what is under test.
+    // The tool spawns `git` in this process's working directory, so the fixture
+    // is built through the same runner and every call below carries `-C root`
+    // where the tool would have inherited the directory instead.
+    const script = try std.fmt.allocPrint(arena,
+        \\git -C '{s}' init -q && git -C '{s}' add -A && git -C '{s}' -c user.email=t@t -c user.name=t commit -qm base
+    , .{ root, root, root });
+    const setup = [_][]const u8{ "/bin/sh", "-c", script };
+    const made = try runCapped(io, arena, &setup, 1 << 20, net.durationMs(60_000), null);
+    if (made.term != .exited or made.term.exited != 0) {
+        std.debug.print("could not build the fixture repository: {s}\n", .{made.stderr});
+        return error.TestUnexpectedResult;
+    }
+    // `git diff` with no rev is the working tree against the index, and a
+    // freshly committed tree has nothing in it. The ordinary file is changed
+    // after the commit so `diff` has a patch to print and cannot pass here by
+    // returning nothing at all.
+    try tmp.dir.writeFile(io, .{ .sub_path = "src/main.zig", .data = "marker\nchanged\n" });
+
+    for ([_][]const u8{ "show", "diff" }) |cmd| {
+        for ([_]?[]const u8{ null, ".", root }) |path| {
+            const res = try runCapped(io, arena, try gitIn(arena, root, cmd, null, path), 1 << 20, net.durationMs(60_000), null);
+            const text = try arena.dupe(u8, res.stdout);
+            if (std.mem.indexOf(u8, text, needle) != null) {
+                std.debug.print("git {s} with path '{s}' leaked the committed key\n", .{ cmd, path orelse "<none>" });
+                return error.TestUnexpectedResult;
+            }
+            // The control: the ordinary file is in the same tree and the same
+            // patch, so exclusions that emptied the result would fail here.
+            if (path != null and std.mem.indexOf(u8, text, "main.zig") == null) {
+                std.debug.print("git {s} with path '{s}' lost the ordinary file\n", .{ cmd, path orelse "<none>" });
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
+
+    // The three that print no file contents keep the command lines they were
+    // given. A credential named as `blame`'s path is refused by `toolGit`
+    // before it gets here, and the other two print a name or a subject rather
+    // than a byte of one, so an exclusion on them buys nothing.
+    for ([_][]const u8{ "status", "log", "blame" }) |cmd| {
+        const argv = try gitArgv(arena, cmd, null, "src/main.zig", git_default_limit);
+        for (argv) |word| {
+            if (std.mem.startsWith(u8, word, ":(exclude)")) {
+                std.debug.print("git {s} was given credential exclusions it does not need\n", .{cmd});
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
+}
+
+/// The argv `gitArgv` builds, pointed at `root` the way the tool's own
+/// subprocess would have been by its working directory. The tool runs `git`
+/// where the process is, and a test cannot move the process, so the one
+/// difference is a `-C` ahead of everything the tool chose.
+fn gitIn(
+    arena: std.mem.Allocator,
+    root: []const u8,
+    cmd: []const u8,
+    rev: ?[]const u8,
+    path: ?[]const u8,
+) error{ OutOfMemory, UnknownCmd }![]const []const u8 {
+    const inner = try gitArgv(arena, cmd, rev, path, git_default_limit);
+    var argv: std.ArrayList([]const u8) = .empty;
+    try argv.appendSlice(arena, &.{ "git", "-C" });
+    try argv.append(arena, root);
+    try argv.appendSlice(arena, inner[1..]);
+    return argv.items;
 }
 
 // The tool arguments are written by the model, so dispatch is the trust

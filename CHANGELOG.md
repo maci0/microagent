@@ -14,6 +14,14 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- The `git` tool keeps its credential exclusions when the call names a path. It
+  appended them only to a pathless `git show` or `git diff`, so `{"cmd":"show",
+  "path":"."}` printed a committed `.env`, `.pem` or `.secrets/` file as a patch
+  and handed the key to the provider. A path selects out of the diff; it does
+  not narrow the commit, so the exclusions now travel with the path.
+
+### Changed
+
 - The harbor adapter checks `MICROAGENT_BASE_URL` before the container starts, the way it
   already checks the ceilings and the reasoning level. A url with no scheme, or an http one
   that is not loopback, is refused by the binary because the api key rides in a header that
