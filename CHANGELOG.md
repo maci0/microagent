@@ -133,6 +133,14 @@ release, and `microagent update` moves you to it.
   sum read each as a number worth zero, so a task whose answer is a new image or
   archive reported `+0/-0` for it: the same false zero an untracked file used to
   cause, reached through a file git did see. The row reads `+1/-0 (1 binary)`.
+- The Harbor adapter refuses a host with no provider key before the container
+  starts. The key is the one value it has no default for, and it was read in
+  `run` alone, so a host that exported none of the four names brought the
+  container up, uploaded the binary, and only then reported the missing key,
+  where every other unusable value is reported at the command line. A run whose
+  `MICROAGENT_BUDGET_SECONDS` was cut to the room the agent timeout leaves now
+  says so on the job log, with both numbers, so a score read from that log is
+  not a score measured under working time nobody chose.
 - `microagent update` no longer installs a pre-release over a newer build. A tag
   with a `-rc1` suffix was not a version the ordering could read, so it ordered
   as equal to everything and past the guard that stops a downgrade: a build on

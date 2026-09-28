@@ -61,7 +61,7 @@ installs. The command that regenerates it is in the comment at the top of
 
 | variable | effect |
 | --- | --- |
-| `MICROAGENT_API_KEY` / `OPENAI_API_KEY` / `OPENROUTER_API_KEY` / `DEEPSEEK_API_KEY` | provider key, passed to the container process only, read in the order the binary reads it |
+| `MICROAGENT_API_KEY` / `OPENAI_API_KEY` / `OPENROUTER_API_KEY` / `DEEPSEEK_API_KEY` | provider key, passed to the container process only, read in the order the binary reads it. One of the four is required, and a host with none is told so before the container starts |
 | `MICROAGENT_BASE_URL` | OpenAI-compatible endpoint (default OpenRouter); https, or http on loopback, because the key goes to it in the clear, and a url the binary refuses stops the run here |
 | `MICROAGENT_BUDGET_SECONDS` | elapsed-time budget inside the container, read from the monotonic clock (default 600), capped at `MICROAGENT_AGENT_TIMEOUT_SEC` less 360 s |
 | `MICROAGENT_MAX_TURNS` | `--max-turns` passed to the binary (default 150, above the binary's own 100) |
@@ -86,7 +86,8 @@ name itself, so either route ends at the same ceiling.
 
 The budget is the agent's working time, so the adapter takes the smaller of
 `MICROAGENT_BUDGET_SECONDS` and `MICROAGENT_AGENT_TIMEOUT_SEC` less 360 s,
-floored at one second. The 360 s is the binary's own 300 s grace on the forced
+floored at one second. A run whose budget was cut says so on the job log, with
+both numbers, because a score is read from that log. The 360 s is the binary's own 300 s grace on the forced
 final push plus a minute for teardown: a run that reaches its budget is allowed
 to keep going for that grace, so a smaller room puts the caller's timeout in the
 middle of the last turn. At the defaults the budget stays 600 against the 1500 s

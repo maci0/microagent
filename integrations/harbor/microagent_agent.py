@@ -264,7 +264,14 @@ def validate_env() -> None:
     container starts", and `setup` is what brings the container up and uploads
     the binary into it, so a value checked only in `run` has already paid for a
     container start and an upload before the reason is printed.
+
+    The provider key is read here too, and it is the one knob `run` alone used
+    to ask for: a host with no key in the environment at all brought the
+    container up, uploaded the binary, and then raised out of the `env` dict it
+    was building, so the one value with no default of its own was reported in
+    the one place where every other unusable value is not.
     """
+    api_key()
     int_env("MICROAGENT_MAX_TURNS", DEFAULT_MAX_TURNS)
     int_env("MICROAGENT_BUDGET_SECONDS", DEFAULT_BUDGET_SECONDS)
     agent_timeout = int_env("MICROAGENT_AGENT_TIMEOUT_SEC", DEFAULT_AGENT_TIMEOUT_SEC)
@@ -418,6 +425,20 @@ class Microagent(BaseAgent):
         # budget refused at the command line is the one this run is given.
         agent_timeout = int_env("MICROAGENT_AGENT_TIMEOUT_SEC", DEFAULT_AGENT_TIMEOUT_SEC)
         budget = str(working_budget(agent_timeout))
+        # The cap is in this directory's README, but a benchmark is read from
+        # the job log and a budget the operator set and did not get is a run
+        # scored under working time nobody chose. Named here, once, with both
+        # numbers, so the log says which knob was cut and to what.
+        asked_for = int_env("MICROAGENT_BUDGET_SECONDS", DEFAULT_BUDGET_SECONDS)
+        if int(budget) < asked_for:
+            self.logger.warning(
+                "MICROAGENT_BUDGET_SECONDS=%d exceeds the working time the %ds agent timeout "
+                "leaves after the %ds last-turn room: running with %ss",
+                asked_for,
+                agent_timeout,
+                FINAL_TURN_ROOM_S,
+                budget,
+            )
         reasoning = reasoning_effort()
         command = " ".join(
             shlex.quote(part)
