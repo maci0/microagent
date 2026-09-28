@@ -12,6 +12,14 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+### Fixed
+
+- The harbor adapter checks `MICROAGENT_BASE_URL` before the container starts, the way it
+  already checks the ceilings and the reasoning level. A url with no scheme, or an http one
+  that is not loopback, is refused by the binary because the api key rides in a header that
+  host reads, and it was refused there: after a container start and a binary upload, in a
+  log the operator was not watching. It is now named at the command line.
+
 ## [0.2.0] - 2026-09-29
 
 ### Added

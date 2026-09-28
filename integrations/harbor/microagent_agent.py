@@ -22,11 +22,13 @@ the container process only, never baked into the image.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import platform
 import shlex
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from harbor.agents.base import BaseAgent
 from harbor.environments.base import BaseEnvironment
@@ -166,6 +168,39 @@ def reasoning_effort() -> str | None:
     return value
 
 
+def is_loopback(host: str) -> bool:
+    """Whether a host is the local machine, as the binary decides it
+    (`isLoopbackHost` in src/main.zig): a name of `localhost` or under it, or an
+    address the ipaddress module calls a loopback one, so 127.0.0.0/8 and ::1
+    answer the same way here as they do there."""
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def base_url() -> str:
+    """The endpoint the container is given, checked for the reason the numeric
+    knobs are. The binary refuses a url it cannot parse, and a plaintext one
+    that is not loopback, because the key rides in a header that host reads; a
+    host that set MICROAGENT_BASE_URL to `openrouter.ai/api/v1` (no scheme) or
+    to an http endpoint therefore learns about it from the container's stderr,
+    after a container start and a binary upload, which is the most expensive
+    place to learn it. Checked here, it stops the run at the command line."""
+    value = trimmed_env("MICROAGENT_BASE_URL") or DEFAULT_BASE_URL
+    parts = urlsplit(value)
+    if parts.scheme not in ("http", "https"):
+        raise RuntimeError(f"MICROAGENT_BASE_URL must be an http or https url, got {value!r}")
+    if parts.scheme == "http" and not is_loopback((parts.hostname or "").lower()):
+        raise RuntimeError(
+            f"MICROAGENT_BASE_URL is {value!r}: the api key would go to it in the clear, "
+            "so it must be https, or http on loopback"
+        )
+    return value
+
+
 def validate_env() -> None:
     """Every knob the binary is handed, read once so a bad one stops the run
     before anything is uploaded or started.
@@ -181,6 +216,7 @@ def validate_env() -> None:
     int_env("MICROAGENT_BUDGET_SECONDS", DEFAULT_BUDGET_SECONDS)
     int_env("MICROAGENT_AGENT_TIMEOUT_SEC", DEFAULT_AGENT_TIMEOUT_SEC)
     reasoning_effort()
+    base_url()
 
 
 def normalize_model(model_name: str | None) -> str:
@@ -298,7 +334,7 @@ class Microagent(BaseAgent):
         )
         env = {
             "MICROAGENT_API_KEY": api_key(),
-            "MICROAGENT_BASE_URL": trimmed_env("MICROAGENT_BASE_URL") or DEFAULT_BASE_URL,
+            "MICROAGENT_BASE_URL": base_url(),
         }
         if self._ca_uploaded:
             env["MICROAGENT_CA_BUNDLE"] = REMOTE_CA_PATH
