@@ -14,6 +14,13 @@ release, and `microagent update` moves you to it.
 
 ### Added
 
+- `make check-unreleased` asks that the `## [Unreleased]` entry uses the five
+  Keep a Changelog sections, each at most once, in the order CONTRIBUTING.md
+  states. The check that reads a changelog section is `check-changelog`, and it
+  reads the section a tag names, so a misspelled heading, a second `### Fixed`
+  or a `### Security` above a `### Fixed` was first found as a release note
+  rendering wrong. It is in `make check` and in the push workflow, and it does
+  not ask whether a change is worth an entry.
 - `--max-spend-tokens <n>` (`MICROAGENT_MAX_SPEND_TOKENS`) stops a run once it has
   billed that many tokens, prompt and completion together. Neither of the ceilings
   already there bounds what a run spends: `--max-turns` counts turns, and a turn
@@ -30,7 +37,6 @@ release, and `microagent update` moves you to it.
   rules it used to enforce only on the runner. Both workflows now call these
   targets, so the release note is written against a command rather than
   against a workflow nobody can run before they have pushed a tag.
-
 - A bare `help` is a request for the usage text, the way `microagent update help`
   already was. It used to be a coding run whose task was the word "help",
   billed to the caller, while the one subcommand that accepted the word printed

@@ -68,6 +68,7 @@ make watch                  # the suite again on every source change, until Ctrl
 make preflight              # name any tool check and lint need that is not on PATH
 make lint                   # the pin checks, shellcheck, ruff and yamllint on their own
 make instructions CHECK=--check   # retired instructions per unit, and a band it must stay inside
+make check-unreleased      # the [Unreleased] entry has the five sections, once each, in order
 ```
 
 `make watch` is `zig build test --watch`, the build system's own mode, so the
@@ -172,7 +173,12 @@ Under `0.y` the minor carries features, anything that changes what a run does by
 default, and anything taken away; the patch carries fixes,
 and a patch must not change what an existing invocation does. A change to the
 flags, the environment variables, or the stdout and session-log JSON names the
-before and the after in its entry.
+before and the after in its entry. `make check-unreleased` is in `make check`
+and in the push workflow, and asks that shape of the entry while it is still
+under `[Unreleased]`: the five sections, each at most once, in that order. It
+does not ask whether the change is worth an entry, which is the writer's call.
+The 0.y policy and the rules a tag is refused for are `make check-changelog`
+and `make check-release`, below.
 
 Releases are tags: the release workflow publishes only when the tag names the
 `build.zig.zon` version, that version has a `CHANGELOG.md` entry, and the bump

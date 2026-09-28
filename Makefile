@@ -15,7 +15,7 @@ BIN := zig-out/bin/microagent
 export LC_ALL := C
 export TZ := UTC
 
-.PHONY: default help preflight version build small musl test test-one watch fmt fmt-check fmt-python lint lint-versions lint-lock zig-version required-zig-version release-targets check-targets check-assets check-changelog check-release check-reproducible lint-shell lint-python lint-yaml check bench gauntlet instructions overhead install release-assets checksums clean
+.PHONY: default help preflight version build small musl test test-one watch fmt fmt-check fmt-python lint lint-versions lint-lock zig-version required-zig-version release-targets check-targets check-assets check-changelog check-unreleased check-release check-reproducible lint-shell lint-python lint-yaml check bench gauntlet instructions overhead install release-assets checksums clean
 
 # The targets `microagent update` asks for, in the names release.yml publishes.
 # ci.yml rehearses the same list on every push and release.yml publishes it, so
@@ -111,6 +111,7 @@ help:
 	  'check-targets         every published target is one `update` asks for' \
 	  'check-assets TAG=...  the assets in dist/ are the ones the tag will publish' \
 	  'check-changelog [VERSION=...]  the changelog entry a tag would publish, and the 0.y policy on it' \
+	  'check-unreleased      the [Unreleased] entry has the five sections, once each, in order' \
 	  'check-release TAG=vX.Y.Z  the tag names build.zig.zon, nothing is stranded unreleased' \
 	  'check-reproducible    every published target rebuilds byte-identical' \
 	  'checksums             sha256 sidecars for dist/ (after a tagged build)' \
@@ -345,11 +346,15 @@ lint-yaml:
 # The CI gate, so a formatting, lint or test failure shows up here rather than
 # after a push. Keep these in step with .github/workflows/ci.yml. The release
 # job's cross builds are the one part CI does that this does not: they are
-# minutes of work, and `make release-assets` runs them.
+# minutes of work, and `make release-assets` runs them. `check-unreleased` is
+# the other direction: ci.yml does not run this target whole, because the
+# linters are installed in the lint job's own step, so it names that target in a
+# step of its own rather than letting it gate a laptop alone.
 check:
 	$(MAKE) preflight
 	$(MAKE) zig-version
 	$(MAKE) check-targets
+	$(MAKE) check-unreleased
 	$(MAKE) fmt-check
 	$(MAKE) lint
 	$(ZIG) build test --summary all
@@ -428,6 +433,46 @@ check-targets:
 	  echo "the release publishes no musl asset for it, so the Harbor adapter has nothing to upload" >&2; \
 	  exit 1; \
 	}
+
+# The shape of the entry a change carries, asked while it is still under
+# [Unreleased]. CONTRIBUTING.md requires the Keep a Changelog sections the file
+# already uses, one of each at most, in their order, and nothing asked it: the
+# check that reads a section is `check-changelog`, and that reads the section a
+# tag names, which by then is a version heading the author no longer sees. A
+# misspelled heading, a second `### Fixed`, or a `### Security` above a
+# `### Fixed` publishes as a release note that renders wrong, and the first
+# person to read it as rendered is whoever pulls the release.
+#
+# Only the structure is asked, never the presence of an entry. Whether a change
+# is worth an entry is a judgement the person writing it makes, and a gate that
+# refused an empty section would be a gate that fails a commit for a policy
+# rather than for a mistake in the entry that is there.
+check-unreleased:
+	@awk ' \
+	  BEGIN { \
+	    split("Added Changed Removed Fixed Security", order, " "); \
+	    for (i = 1; i <= 5; i++) rank[order[i]] = i; \
+	  } \
+	  index($$0, "## [Unreleased]") == 1 { inside = 1; next } \
+	  /^## / { inside = 0 } \
+	  inside && /^### / { \
+	    name = $$0; sub(/^### /, "", name); sub(/[ \t]+$$/, "", name); \
+	    if (!(name in rank)) { \
+	      printf("CHANGELOG.md [Unreleased] has a \"### %s\" section; the five are Added, Changed, Removed, Fixed, Security\n", name) > "/dev/stderr"; \
+	      bad = 1; next; \
+	    } \
+	    if (++seen[name] > 1) { \
+	      printf("CHANGELOG.md [Unreleased] has a second \"### %s\" section, and each of the five is used at most once\n", name) > "/dev/stderr"; \
+	      bad = 1; \
+	    } \
+	    if (name != previous && rank[name] <= last) { \
+	      printf("CHANGELOG.md [Unreleased] has \"### %s\" after \"### %s\"; the order is Added, Changed, Removed, Fixed, Security\n", name, previous) > "/dev/stderr"; \
+	      bad = 1; \
+	    } \
+	    last = rank[name]; previous = name; \
+	  } \
+	  END { exit bad } \
+	' CHANGELOG.md
 
 # The changelog rules release.yml enforces on the tag, and the 0.y policy
 # CONTRIBUTING.md states, runnable before the tag exists. They were shell inside
@@ -587,7 +632,7 @@ release-assets:
 # checksummed as if they were an asset.
 checksums:
 	@test -d dist || { echo "no dist/, run 'make release-assets TAG=v0.2.0' first" >&2; exit 2; }
-	cd dist && set -eu && \
+	@cd dist && set -eu && \
 	sum=$$($(SHA256_CMD)); \
 	test -n "$$sum" || { \
 		echo "neither sha256sum nor shasum is on PATH, so the sidecars update verifies cannot be written" >&2; \

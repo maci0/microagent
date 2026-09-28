@@ -59,6 +59,15 @@ jobs:
       - name: format is clean
         run: make fmt-check
 
+      # `make check` runs this, and CONTRIBUTING.md asks a contributor for the
+      # same entry. This workflow does not run `make check` whole, because the
+      # linters it needs are installed in the lint job's own step, so without a
+      # step here the rule gates a laptop and not a push, and the first person
+      # to read a malformed [Unreleased] section as rendered is whoever pulls
+      # the release. Awk only, so it needs nothing setup-zig installed.
+      - name: the unreleased changelog entry is well formed
+        run: make check-unreleased
+
       - name: unit tests pass
         run: zig build test --summary all
 
