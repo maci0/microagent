@@ -463,10 +463,14 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
     // the model named and never a name it did not: the exclusion set this tool
     // relies on does not reach a rev that is a bare file, and the key came
     // back as a tool result either way.
-    if (rev) |r| if (isCredentialPath(r)) return credentialRefusal(arena, .git, r, false);
+    // Both checks below follow the link, for the reason `credentialPath` gives
+    // and every other tool that opens a model-supplied path follows it: a name
+    // read out of the tree is one half of the check, and this tool has `io` and
+    // `arena` for the other half the way `read` does.
+    if (rev) |r| if (credentialPath(io, arena, r)) |refused| return credentialRefusal(arena, .git, refused, false);
     // `git show <rev> -- .env` prints a committed credentials file as a patch,
     // so the path gets the refusal `read` gives it rather than a git one.
-    if (path) |p| if (isCredentialPath(p)) return credentialRefusal(arena, .git, p, false);
+    if (path) |p| if (credentialPath(io, arena, p)) |refused| return credentialRefusal(arena, .git, refused, false);
 
     const argv = gitArgv(arena, cmd, rev, path, limit) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -636,8 +640,11 @@ fn noteToolCall(io: Io, arena: std.mem.Allocator, tool: chat.Tool, args: std.jso
 
 fn toolCallLine(arena: std.mem.Allocator, buf: []u8, tool: chat.Tool, args: std.json.ObjectMap) ![]const u8 {
     // The interesting argument is not the same one for every tool: a structural
-    // search is identified by its pattern, a bash call by its command.
-    const detail = if (tool == .ast)
+    // search is identified by its pattern, a bash call by its command, a git
+    // call by its subcommand, which `toolGit` reads as `cmd`.
+    const detail = if (tool == .git)
+        (chat.str(args.get("cmd")) orelse "")
+    else if (tool == .ast)
         (chat.str(args.get("pattern")) orelse "")
     else
         (chat.str(args.get("command")) orelse chat.str(args.get("pattern")) orelse chat.str(args.get("path")) orelse "");

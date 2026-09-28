@@ -284,7 +284,13 @@ fn cavemanBody(level: CavemanLevel) []const u8 {
         .full, .wenyan_full => "Drop articles, filler, pleasantries and hedging. Fragments are fine. Short synonyms beat\n" ++
             "long ones. One line per tool result, and no line to narrate a tool call. No preamble, no\n" ++
             "restating the request, no closing summary.\n",
-        else => "Maximum compression. Drop articles, filler, pleasantries, hedging, and conjunctions whose\n" ++
+        // A level off contributes nothing, for the reason `ruleset` gives: the
+        // switch answers for the level it is given, and `.off` is a level like
+        // any other here. The arm is spelled out rather than left to a default
+        // so that a level added to the enum cannot land in the prose of the
+        // strongest one by being forgotten.
+        .off => "",
+        .ultra, .wenyan_ultra => "Maximum compression. Drop articles, filler, pleasantries, hedging, and conjunctions whose\n" ++
             "meaning survives without them. One word where one word is enough. Fragments are fine.\n" ++
             "State each fact once. No preamble, no restating the request, no closing summary, no\n" ++
             "tool-call narration, no decorative tables or emoji.\n",
@@ -302,7 +308,11 @@ fn ponytailBody(level: PonytailLevel) []const u8 {
             "grep every caller of the function you are about to touch. No unrequested abstractions, no\n" ++
             "scaffolding for later, deletion over addition. Mark a deliberate shortcut that has a real\n" ++
             "ceiling with a comment naming that ceiling and the upgrade path.\n",
-        else => "Prefer the laziest correct change, taken as far as it goes. Settle first whether the\n" ++
+        // The arms are spelled out for the reason `cavemanBody` gives: a level
+        // added to the enum cannot land in the prose of the strongest one by
+        // being forgotten, and `.off` answers nothing here as it does there.
+        .off => "",
+        .ultra => "Prefer the laziest correct change, taken as far as it goes. Settle first whether the\n" ++
             "change needs to exist at all; if it does not, say so in one line. Reuse what the repository\n" ++
             "already has, then the standard library, then a native platform feature. Ship the smallest\n" ++
             "diff that fixes the root cause, not the symptom: grep every caller of the function you\n" ++

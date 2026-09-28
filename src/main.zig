@@ -2135,7 +2135,7 @@ fn streamChat(
         // it arrives puts a replacement glyph and then a broken byte on the
         // operator's screen. What is held back is at most three bytes, so
         // nothing waits on it that would not have waited on the next read
-        // anyway, and the run's last flush writes the tail with the rest.
+        // anyway, and the run's last flush holds the same tail back.
         const held = chat_mod.partialTailLen(out_buf.items);
         try writeOutPrefix(io, arena, &out_buf, out_buf.items.len - held, shown_url);
     }
@@ -2180,8 +2180,14 @@ fn streamChat(
         net.note(io, arena, "microagent: the response from {s} hit the generation ceiling (max_tokens {d}) after {d} byte(s) of content and {d} tool call(s); the turn is incomplete\n", .{
             shown_url, opts.max_tokens, result.content.items.len, calls.items.len,
         });
+    // The last flush holds the tail back on the same rule as every read above:
+    // a stream that ends partway through a character leaves that character
+    // unfinished for good, and there is no next read to finish it, so writing
+    // it would put a broken byte on the operator's screen and nothing after it
+    // would replace it. The newline goes on after the count, not before it.
+    const held = chat_mod.partialTailLen(out_buf.items);
     if (result.content.items.len > 0) try out_buf.append(gpa, '\n');
-    try writeOutPrefix(io, arena, &out_buf, out_buf.items.len, shown_url);
+    try writeOutPrefix(io, arena, &out_buf, out_buf.items.len - held, shown_url);
     result.calls = calls;
     // Whatever the filter took out is named, one reason at a time. A turn is
     // still complete without those calls, and a run that silently ran every call
