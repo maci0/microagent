@@ -199,7 +199,12 @@ fn logName(name: []const u8) ?LogName {
     const stamp_text = if (dash) |at| stem[0..at] else stem;
     const attempt_text = if (dash) |at| stem[at + 1 ..] else "";
     if (!allDigits(stamp_text)) return null;
-    if (attempt_text.len != 0 and !allDigits(attempt_text)) return null;
+    // A dash is the start of an attempt number, so it is only a dash this
+    // program wrote when a number follows it: `createSessionLog` never writes
+    // a trailing dash. Without that, `5-.jsonl` parsed as the plain log for
+    // stamp 5 and the retention window deleted it, and a name this program
+    // never wrote is not the pruner's to delete however old it looks.
+    if (dash != null and !allDigits(attempt_text)) return null;
     return .{
         .stamp = std.fmt.parseInt(u128, stamp_text, 10) catch return null,
         .attempt = if (attempt_text.len == 0) 0 else std.fmt.parseInt(usize, attempt_text, 10) catch return null,
@@ -633,6 +638,11 @@ test "the session store keeps the most recent logs and drops the rest" {
     }
     // A file this program did not write is not ours to delete.
     try tmp.dir.writeFile(io, .{ .sub_path = "notes.jsonl", .data = "keep me" });
+    // A dash with no attempt number after it is one of those, and it is the
+    // case a name-shaped check gets wrong: read as a plain log it sorts into
+    // the window as the oldest thing in the store, so a name no run of this
+    // program ever wrote is the first one the retention window removes.
+    try tmp.dir.writeFile(io, .{ .sub_path = "1-.jsonl", .data = "keep me too" });
 
     pruneSessions(io, arena, dir_path);
 
@@ -642,16 +652,22 @@ test "the session store keeps the most recent logs and drops the rest" {
     defer walker.deinit();
     var left: usize = 0;
     var notes_present = false;
+    var dangling_present = false;
     while (try walker.next(io)) |entry| {
         if (!std.mem.endsWith(u8, entry.basename, ".jsonl")) continue;
         if (std.mem.eql(u8, entry.basename, "notes.jsonl")) {
             notes_present = true;
             continue;
         }
+        if (std.mem.eql(u8, entry.basename, "1-.jsonl")) {
+            dangling_present = true;
+            continue;
+        }
         left += 1;
     }
     try std.testing.expectEqual(max_session_logs, left);
     try std.testing.expect(notes_present);
+    try std.testing.expect(dangling_present);
     // The survivors are the newest, so a monitor still sees the current run.
     const newest = try std.fmt.allocPrint(arena, "{d}.jsonl", .{total});
     try tmp.dir.access(io, newest, .{});

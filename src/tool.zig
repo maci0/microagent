@@ -336,26 +336,35 @@ fn gitArgv(
     } else {
         return error.UnknownCmd;
     }
-    // `--` keeps a path from being read as an option.
+    try gitPathspecs(arena, &argv, cmd, path);
+    return argv.items;
+}
+
+/// The `--` that ends the options and the pathspecs that follow it.
+///
+/// The refusal `toolGit` makes only covers a credential the model named. A
+/// `git show HEAD` with no path prints the whole commit, and a `.env`, a `.pem`
+/// or a `.secrets/` file that was ever committed comes back in it as a tool
+/// result, which is re-sent to the provider on every later turn. The names come
+/// from the same tables `search` and `ast` exclude by, so a credential is out of
+/// the git tool's results as well as out of the ones it is asked for by name.
+///
+/// A `path` narrows that output, so for the two commands that print a file's
+/// contents it joins the exclusion set rather than replacing it: a scoped call
+/// is the ordinary one, and `{"cmd":"show","path":"."}` was getting the whole
+/// tree, committed credentials and all. The two are a conjunction, so both are
+/// appended.
+///
+/// `status`, `log` and `blame` get the model's path alone. `status` and `log`
+/// print no file contents, and `git blame` takes exactly one file argument, so
+/// an exclusion set beside it is `usage: git blame ... <file>` rather than a
+/// filtered blame.
+fn gitPathspecs(arena: std.mem.Allocator, argv: *std.ArrayList([]const u8), cmd: []const u8, path: ?[]const u8) !void {
     try argv.append(arena, "--");
-    if (path) |p| try argv.append(arena, p);
-    // The refusal `toolGit` makes covers only a credential the model named.
-    // `show` and `diff` print file contents, and a `.env`, a `.pem` or a
-    // `.secrets/` file that was ever committed comes back in a patch as a tool
-    // result, which is re-sent to the provider on every later turn. Naming a
-    // path does not change that: `git show HEAD -- .` prints the whole commit
-    // just as the pathless call does, so the exclusions go with the path rather
-    // than instead of it. The names come from the same tables `search` and
-    // `ast` exclude by, so a credential is out of the git tool's results as
-    // well as out of the ones it is asked for by name.
-    //
-    // The other three are left alone, because they print no file contents: a
-    // path, a commit subject, and whatever file the model named and the
-    // refusal above has already had its say about.
     if (std.mem.eql(u8, cmd, "diff") or std.mem.eql(u8, cmd, "show")) {
         try argv.appendSlice(arena, &credential_pathspecs);
     }
-    return argv.items;
+    if (path) |p| try argv.append(arena, p);
 }
 
 /// The first `limit` lines, with a note when lines were dropped.
@@ -2214,6 +2223,74 @@ test "git tool refuses a rev that names a file through a tree-ish" {
     try head.put(arena, "rev", .{ .string = "HEAD" });
     const shown = try toolGit(std.testing.io, arena, head, null, null);
     try std.testing.expect(!std.mem.startsWith(u8, shown, "error: rev"));
+}
+
+// The credential exclusions and the model's `path` are a conjunction, not a
+// choice: a scoped call is the ordinary one, and it used to arrive instead of
+// them, so `{"cmd":"show","path":"."}` handed back a committed `.env` line by
+// line. The repo is real and the assertion is on git's own output, because the
+// shape of the pathspec is only worth anything if git honors it.
+test "a scoped git call still leaves the committed credentials out" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const marker = "sk-live-do-not-ship";
+    const committed = try std.fmt.allocPrint(arena, "API_KEY={s}\n", .{marker});
+    const edited = try std.fmt.allocPrint(arena, "API_KEY={s}\nROTATED=1\n", .{marker});
+    try tmp.dir.createDirPath(io, "src");
+    try tmp.dir.createDirPath(io, "deploy");
+    try tmp.dir.writeFile(io, .{ .sub_path = ".env", .data = committed });
+    try tmp.dir.writeFile(io, .{ .sub_path = "deploy/server.pem", .data = try std.fmt.allocPrint(arena, "KEY={s}\n", .{marker}) });
+    try tmp.dir.writeFile(io, .{ .sub_path = "src/main.zig", .data = "pub const x = 1;\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+
+    // `git -C` keeps the test out of whatever directory the runner started in.
+    for ([_][]const []const u8{
+        &.{ "git", "-C", root, "init", "-q" },
+        &.{ "git", "-C", root, "config", "user.email", "a@b.c" },
+        &.{ "git", "-C", root, "config", "user.name", "test" },
+        &.{ "git", "-C", root, "add", "-A" },
+        &.{ "git", "-C", root, "commit", "-qm", "x" },
+    }) |argv| {
+        const res = try runCapped(io, arena, argv, 1 << 20, net.durationMs(30_000), null);
+        if (res.term != .exited or res.term.exited != 0) {
+            std.debug.print("git setup failed: {s}\n", .{res.stderr});
+            return error.TestUnexpectedResult;
+        }
+    }
+    // A credential committed and then rotated, so both `show` (the commit) and
+    // `diff` (the working tree against it) have the marker to leak.
+    try tmp.dir.writeFile(io, .{ .sub_path = ".env", .data = edited });
+    try tmp.dir.writeFile(io, .{ .sub_path = "src/main.zig", .data = "pub const x = 2;\n" });
+
+    // The same argv `toolGit` builds, so the test fails if the pathspec set
+    // and the caller's `path` stop being both passed.
+    for ([_][]const u8{ "show", "diff" }) |cmd| {
+        var argv: std.ArrayList([]const u8) = .empty;
+        try argv.appendSlice(arena, &.{ "git", "-C", root, "--no-pager" });
+        try argv.appendSlice(arena, &.{ cmd, "--no-color" });
+        try argv.append(arena, "HEAD");
+        try gitPathspecs(arena, &argv, cmd, ".");
+        const res = try runCapped(io, arena, argv.items, 1 << 20, net.durationMs(30_000), null);
+        if (std.mem.indexOf(u8, res.stdout, marker) != null) {
+            std.debug.print("git {s} with a path leaked a committed credential\n", .{cmd});
+            return error.TestUnexpectedResult;
+        }
+        // The control: the ordinary source file is still in the patch, so a
+        // guard that emptied every result would fail here instead of passing.
+        if (std.mem.indexOf(u8, res.stdout, "pub const x") == null) {
+            std.debug.print("git {s} with a path returned nothing for src/main.zig\n", .{cmd});
+            return error.TestUnexpectedResult;
+        }
+    }
 }
 
 test "a git line limit is a ceiling, so zero is one line and a huge one is no trap" {

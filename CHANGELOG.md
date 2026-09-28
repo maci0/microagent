@@ -19,6 +19,16 @@ release, and `microagent update` moves you to it.
   "path":"."}` printed a committed `.env`, `.pem` or `.secrets/` file as a patch
   and handed the key to the provider. A path selects out of the diff; it does
   not narrow the commit, so the exclusions now travel with the path.
+- A turn is no longer retried when the request never opened or never sent, unless the failure is
+  one a second connection can answer. `OutOfMemory`, a refused `--ca-bundle` and a URL the client
+  already refused were each attempted three times with a backoff, so a mistake this run made cost
+  three seconds of sleeping before the same answer. `update` drew the line the same way.
+- A session log record is written as soon as the model response lands, not after that turn's tool
+  calls finish. A turn that builds or tests held the log for as long as the tools did, so a monitor
+  following the run read a response minutes stale. The counters and the model time are unchanged.
+- The session store pruner no longer deletes a name ending in a bare dash (`5-.jsonl`). Read as a
+  plain log it sorted into the retention window as the oldest thing in the store, so a file this
+  program never wrote was the first one the window removed.
 
 ### Changed
 

@@ -1313,8 +1313,14 @@ fn runTurn(
     // the record says how long the model generated, and a gap that spans the
     // tools would report a rate for a generation that was never continuous.
     const model_ms = session_mod.elapsedMs(io, asked);
-    try finishTurn(io, arena, gpa, msgs, &result, usage, budget, tool_env, progress);
+    // The record is written before the tools run, not after them. A turn that
+    // builds or tests holds the log for as long as the tools do, and a monitor
+    // following a run is told it is still going while the answer to the last
+    // response it has read is minutes old. The model time is already taken
+    // above, so the record itself is the same either way; only the moment it
+    // lands is not.
     session_mod.writeRecord(io, arena, session, model_ms, &result);
+    try finishTurn(io, arena, gpa, msgs, &result, usage, budget, tool_env, progress);
     if (result.calls.items.len != 0) return .wants_tools;
     // No tool call ends the loop, but only an answer ends the run. A refusal, a
     // provider that stopped generating, a response cut at `max_tokens` and a
@@ -1473,14 +1479,14 @@ fn streamChat(
                 .{ .name = "accept", .value = "text/event-stream" },
             },
         }) catch |err| {
-            if (worthAnotherAttempt(.opened) and waitBeforeRetry(io, arena, shown_url, attempt, "opening the request to", err, budget)) continue;
+            if (worthAnotherAttempt(.opened, err) and waitBeforeRetry(io, arena, shown_url, attempt, "opening the request to", err, budget)) continue;
             return err;
         };
         req_slot = req;
         var open = &req_slot.?;
         open.transfer_encoding = .{ .content_length = body.len };
         open.sendBodyComplete(@constCast(body)) catch |err| {
-            if (worthAnotherAttempt(.sending) and waitBeforeRetry(io, arena, shown_url, attempt, "sending the request body to", err, budget)) continue;
+            if (worthAnotherAttempt(.sending, err) and waitBeforeRetry(io, arena, shown_url, attempt, "sending the request body to", err, budget)) continue;
             return err;
         };
         if (debug_enabled) std.debug.print("[mdebug] request sent, body={d} bytes\n", .{body.len});
@@ -1489,7 +1495,7 @@ fn streamChat(
             // `worthAnotherAttempt` is what says a head is not worth another
             // one; this is the operator's half of that, so a run that lost a
             // billable turn says so rather than reporting a connection fault.
-            if (!worthAnotherAttempt(.head))
+            if (!worthAnotherAttempt(.head, err))
                 net.note(io, arena, "microagent: the request to {s} was sent in full and its response never arrived ({s}); it is not sent again, because a second POST of one turn is a second billable completion\n", .{
                     shown_url, @errorName(err),
                 });
@@ -2344,8 +2350,31 @@ const request_stage = enum {
 /// so the run ends on the error and the operator is told it was not resent.
 /// An idempotency key would settle it, and the OpenAI-shaped completions API
 /// this speaks takes none, so the request cannot be made safe to send twice.
-fn worthAnotherAttempt(stage: request_stage) bool {
-    return stage != .head;
+///
+/// The error decides the rest. The set is the failures a second connection can
+/// answer: the name did not resolve, the connection was refused or reset, the
+/// TLS handshake did not complete. A failed allocation repeats, and everything
+/// else the client can name is a decision it or the URL already made, so three
+/// attempts separated by a backoff only delay the same refusal. `update` draws
+/// the line the same way, for the same reason.
+fn worthAnotherAttempt(stage: request_stage, err: anyerror) bool {
+    if (stage == .head) return false;
+    return switch (err) {
+        error.TemporaryNameServerFailure,
+        error.NameServerFailure,
+        error.UnknownHostName,
+        error.HostLacksNetworkAddresses,
+        error.NetworkDown,
+        error.ConnectionRefused,
+        error.ConnectionResetByPeer,
+        error.ConnectionAborted,
+        error.BrokenPipe,
+        error.ConnectionTimedOut,
+        error.Timeout,
+        error.TlsInitializationFailed,
+        => true,
+        else => false,
+    };
 }
 
 /// Names the endpoint and the step that failed, then sleeps before the next
@@ -4088,11 +4117,16 @@ test "only weather-shaped statuses are retried" {
 // it may already have been generated and billed. Resending it buys a second
 // billable completion for one turn, so a lost head ends the run instead, while
 // the two failures that happen before the request is readable on the far end
-// are the provider's weather and are still retried.
+// are the provider's weather and are still retried. The error narrows that
+// further: a transport fault a second connection can answer, and nothing that
+// this run got wrong, since three attempts at a refused CA bundle only delay
+// the same refusal.
 test "a turn is resent only while the provider cannot have read it" {
-    try std.testing.expect(worthAnotherAttempt(.opened));
-    try std.testing.expect(worthAnotherAttempt(.sending));
-    try std.testing.expect(!worthAnotherAttempt(.head));
+    try std.testing.expect(worthAnotherAttempt(.opened, error.ConnectionRefused));
+    try std.testing.expect(worthAnotherAttempt(.sending, error.ConnectionRefused));
+    try std.testing.expect(!worthAnotherAttempt(.head, error.ConnectionRefused));
+    try std.testing.expect(!worthAnotherAttempt(.opened, error.OutOfMemory));
+    try std.testing.expect(!worthAnotherAttempt(.sending, error.InvalidUrl));
 }
 
 // A stream that ends without the provider's terminator is a dropped
