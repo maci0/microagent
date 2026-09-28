@@ -19,9 +19,10 @@ where `timeout` is not installed.
 | `-Doptimize=ReleaseSafe` (stripped) | 1.37 MB |
 | `Debug` (unstripped) | 31.8 MB |
 
-No runtime, no package manager, no node_modules, no python. Four files under `src/`
-(`main.zig` the agent loop, `style.zig` the reply styles, `update.zig` the self-update, `net.zig` the
-CA-bundle and output-sink helpers the other three share), 6 102 lines.
+No runtime, no package manager, no node_modules, no python. Six files under `src/`
+(`main.zig` the agent loop and its wiring, `tool.zig` the tools and the process runner, `chat.zig`
+the value types a turn is made of, `style.zig` the reply styles, `update.zig` the self-update, and
+`net.zig` the sinks, deadlines and CA bundle the rest share), 6 152 lines.
 The sizes in this table are `ls -l` on a fresh build of this tree; every other number below comes
 from the two bench scripts.
 

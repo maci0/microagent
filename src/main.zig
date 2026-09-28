@@ -4,21 +4,30 @@
 //! for, feed the results back, stop when it stops calling tools. Tool work is
 //! delegated to the real tools on PATH (ripgrep, ast-grep, git, compilers),
 //! so there is no built-in search or patch engine here to keep in sync with them.
+//!
+//! This file is the loop and the wiring around it: the command line, the config
+//! it resolves, the session log, the provider request and the frames that come
+//! back. The parts it leans on are named modules, imported in one direction:
+//! `net` (sinks, deadlines, the CA bundle) and `chat` (the value types a turn is
+//! made of and its JSON writer) are leaves, `tool` sits on them because every
+//! tool call is reached by model-supplied text, and `style` and `update` are the
+//! two subcommands.
 
 const std = @import("std");
 const Io = std.Io;
 const builtin = @import("builtin");
 
 const build_options = @import("build_options");
+const chat_mod = @import("chat.zig");
 const net = @import("net.zig");
 const style_mod = @import("style.zig");
+const tool_mod = @import("tool.zig");
 const update_mod = @import("update.zig");
 
 const version = build_options.version;
 
 const default_base_url = "https://openrouter.ai/api/v1";
 const default_model = "deepseek/deepseek-v4-flash";
-const max_tool_output = 24 * 1024;
 /// Above this many bytes of conversation, the oldest tool results are replaced
 /// with a marker. Every turn re-sends the whole conversation, so without this a
 /// long run pays for every file it has ever read, forever: one Terminal-Bench
@@ -49,12 +58,6 @@ const max_response_bytes = 16 * 1024 * 1024;
 const max_config_bytes: usize = 64 * 1024;
 /// Ceiling on a file `read` returns whole. A source file is kilobytes, so the
 /// cap is what keeps one `read` of a multi-gigabyte artifact out of the
-/// conversation.
-const max_read_bytes: usize = 4 * 1024 * 1024;
-/// `edit` reads the file it rewrites, so it holds the larger of the two.
-const max_edit_bytes: usize = 8 * 1024 * 1024;
-/// A secret file is one key, not a document.
-const max_secret_bytes: usize = 4096;
 /// A provider's error body is a diagnostic, not a payload.
 const max_error_body_bytes: usize = 16 * 1024;
 
@@ -127,89 +130,6 @@ const Options = struct {
     action: Action = .run,
 };
 
-/// `args` grows in place as the provider streams the arguments in fragments.
-/// It is a buffer, not a string that is re-spelled per fragment: a large
-/// `write` arrives as thousands of deltas, and copying what has accumulated so
-/// far on every one of them is quadratic in the size of the call.
-const ToolCall = struct {
-    id: []u8,
-    name: []u8,
-    /// Grown by appending each streamed fragment. A provider splits one
-    /// call's `arguments` across many frames, so this is the buffer that a
-    /// per-frame re-copy made quadratic in the argument length.
-    args: std.ArrayList(u8) = .empty,
-};
-
-/// Token counters as gauntlet wants to read them: cumulative for the run, so
-/// the max it takes from successive usage lines is the final total.
-const Usage = struct {
-    prompt: u64 = 0,
-    completion: u64 = 0,
-    reasoning: u64 = 0,
-    total: u64 = 0,
-    /// Of `prompt`, the part the provider served from its prompt cache. Every
-    /// turn re-sends the whole conversation, so this is the counter that says
-    /// whether the prefix is still being reused: a prompt-sized `prompt_tokens`
-    /// with `cached_tokens` near it is a hit, and near-zero is a full re-read.
-    cached: u64 = 0,
-
-    /// Adds one response's counters. Saturating, because a provider number
-    /// beyond u64 saturates on the way in (`num`) and a second one in the same
-    /// run would otherwise overflow the run total and trap a checked build.
-    fn add(self: *Usage, result: *const ChatResult) void {
-        self.prompt +|= result.prompt_tokens;
-        self.cached +|= result.cached_tokens;
-        self.completion +|= result.completion_tokens;
-        self.reasoning +|= result.reasoning_tokens;
-        self.total +|= result.total_tokens;
-    }
-};
-
-/// The five counters, in the order every JSON usage writer here emits them: a
-/// reader takes them by name, so one place spells the key list.
-const usage_fields = "\"prompt_tokens\":{d},\"cached_tokens\":{d},\"completion_tokens\":{d},\"reasoning_tokens\":{d},\"total_tokens\":{d}";
-
-const ChatResult = struct {
-    content: std.ArrayList(u8) = .empty,
-    calls: std.ArrayList(ToolCall) = .empty,
-    prompt_tokens: u64 = 0,
-    completion_tokens: u64 = 0,
-    reasoning_tokens: u64 = 0,
-    total_tokens: u64 = 0,
-    cached_tokens: u64 = 0,
-    /// Why the provider stopped generating, as the last frame spells it, or the
-    /// empty slice when the stream carried none. `length` is the one that
-    /// matters: it means the response was cut at `max_tokens`, so the turn is a
-    /// prefix of what the model meant to say.
-    finish_reason: []u8 = &.{},
-
-    fn deinitFinish(self: *ChatResult, gpa: std.mem.Allocator) void {
-        if (!std.mem.eql(u8, self.finish_reason, &.{})) gpa.free(self.finish_reason);
-        self.finish_reason = &.{};
-    }
-
-    /// The response outlives the turn's arena, so what a turn keeps is
-    /// allocated here and released with the turn rather than at process exit.
-    /// The name and the id of a call are as much of the response as its
-    /// arguments are, so they go with them.
-    fn deinit(self: *ChatResult, gpa: std.mem.Allocator) void {
-        deinitCalls(gpa, &self.calls);
-        self.content.deinit(gpa);
-        self.deinitFinish(gpa);
-    }
-};
-
-/// Releases the strings and the argument buffers a list of calls owns. A slot
-/// the frame parser filled to reach a later index holds nothing to release.
-fn deinitCalls(gpa: std.mem.Allocator, calls: *std.ArrayList(ToolCall)) void {
-    for (calls.items) |*call| {
-        if (call.id.len != 0) gpa.free(call.id);
-        if (call.name.len != 0) gpa.free(call.name);
-        call.args.deinit(gpa);
-    }
-    calls.deinit(gpa);
-}
-
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -254,7 +174,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (opts.prompt.len == 0) return usageError(io, "no prompt: pass it as an argument or with --print", .{});
-    forwardInterruptsToToolGroup();
+    tool_mod.forwardInterruptsToToolGroup();
     const key = resolveKey(io, init, opts.api_key);
     opts.api_key = key.value;
     // The message names every source, including the file, because a user who
@@ -515,7 +435,7 @@ fn budgetSeconds(value: []const u8) ?u64 {
 const quoted_value_bytes = 80;
 
 fn clip(s: []const u8) []const u8 {
-    return clamp(s, quoted_value_bytes);
+    return chat_mod.clamp(s, quoted_value_bytes);
 }
 
 /// The option a flag that takes a value sets.
@@ -679,7 +599,7 @@ fn resolveKey(io: Io, init: std.process.Init, given: []const u8) Key {
     const fallback = std.fmt.allocPrint(init.arena.allocator(), "{s}/.secrets/openrouter", .{
         init.environ_map.get("HOME") orelse return .{ .value = "", .source = "none" },
     }) catch return .{ .value = "", .source = "none" };
-    if (readSecret(init, "openrouter")) |v| {
+    if (tool_mod.readSecret(init, "openrouter")) |v| {
         if (v.len != 0) return .{ .value = v, .source = fallback };
         net.note(io, init.arena.allocator(), "microagent: {s} is empty; no key in it\n", .{fallback});
     }
@@ -689,13 +609,6 @@ fn resolveKey(io: Io, init: std.process.Init, given: []const u8) Key {
 /// In the order they are tried, and the order the help text and README name
 /// them: the project's own variable first, then the provider's.
 const key_vars = [_][]const u8{ "MICROAGENT_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY" };
-
-fn readSecret(init: std.process.Init, name: []const u8) ?[]const u8 {
-    const home = init.environ_map.get("HOME") orelse return null;
-    const path = std.fmt.allocPrint(init.arena.allocator(), "{s}/.secrets/{s}", .{ home, name }) catch return null;
-    const raw = std.Io.Dir.cwd().readFileAlloc(init.io, path, init.arena.allocator(), .limited(max_secret_bytes)) catch return null;
-    return std.mem.trim(u8, raw, " \t\r\n");
-}
 
 /// The reply-style levels for this run, from the TOML config named by
 /// --config, MICROAGENT_CONFIG or `$HOME/.microagent/config.toml`, then the
@@ -882,6 +795,10 @@ const Budget = struct {
 /// fresh investigation.
 const final_push_grace_s: u64 = 300;
 
+/// The shortest a tool timeout may be cut to, even with the budget spent: a
+/// zero timeout would fail before the tool could even start.
+const tool_timeout_floor_ms: u64 = 5_000;
+
 /// The agent loop: keep asking until the model stops calling tools.
 fn run(
     client: *std.http.Client,
@@ -905,7 +822,7 @@ fn run(
     defer turn_state.deinit();
     const turn_arena = turn_state.allocator();
     var turn: usize = 0;
-    var usage: Usage = .{};
+    var usage: chat_mod.Usage = .{};
     var compaction_floor: usize = 0;
     while (turn < opts.max_turns) : (turn += 1) {
         _ = turn_state.reset(.retain_capacity);
@@ -943,7 +860,7 @@ fn runTurn(
     opts: Options,
     msgs: *std.ArrayList(u8),
     session: *?Session,
-    usage: *Usage,
+    usage: *chat_mod.Usage,
     budget: Budget,
 ) !bool {
     const body = try buildBody(arena, opts, msgs.items);
@@ -1116,7 +1033,7 @@ fn elapsedMs(io: Io, since: i96) u64 {
 /// monitor reporting a run that stopped long before it did. It is named once and
 /// the log is dropped, so the run is not left appending to a file nothing reads
 /// and saying nothing about the gap.
-fn writeSessionRecord(io: Io, arena: std.mem.Allocator, session: *?Session, elapsed_ms: u64, result: *const ChatResult) void {
+fn writeSessionRecord(io: Io, arena: std.mem.Allocator, session: *?Session, elapsed_ms: u64, result: *const chat_mod.ChatResult) void {
     const s = session.* orelse return;
     const ts_ms: i64 = @intCast(@divTrunc(Io.Clock.real.now(io).nanoseconds, std.time.ns_per_ms));
     const line = sessionRecord(arena, ts_ms, s.cwd, s.model, elapsed_ms, result) catch |err| {
@@ -1141,20 +1058,20 @@ fn sessionRecord(
     cwd: []const u8,
     model: []const u8,
     elapsed_ms: u64,
-    result: *const ChatResult,
+    result: *const chat_mod.ChatResult,
 ) ![]u8 {
-    var jb = JsonBuf.init(allocator);
+    var jb = chat_mod.JsonBuf.init(allocator);
     const w = jb.writer();
     try w.print("{{\"ts\":{d},\"cwd\":", .{ts_ms});
-    try writeJsonString(w, cwd);
+    try chat_mod.writeJsonString(w, cwd);
     try w.writeAll(",\"model\":");
-    try writeJsonString(w, model);
+    try chat_mod.writeJsonString(w, model);
     // Why the provider stopped, so a record that was cut at the generation
     // ceiling is distinguishable from one that ran to its own end. The empty
     // string is a stream that carried no finish_reason at all.
     try w.writeAll(",\"finish_reason\":");
-    try writeJsonString(w, result.finish_reason);
-    try w.print(",\"elapsed_ms\":{d},\"usage\":{{" ++ usage_fields, .{
+    try chat_mod.writeJsonString(w, result.finish_reason);
+    try w.print(",\"elapsed_ms\":{d},\"usage\":{{" ++ chat_mod.usage_fields, .{
         elapsed_ms, result.prompt_tokens, result.cached_tokens, result.completion_tokens, result.reasoning_tokens, result.total_tokens,
     });
     try w.writeAll("}}\n");
@@ -1171,10 +1088,10 @@ fn sessionRecord(
 /// order is not significant in JSON, so the constant fields go first and the
 /// conversation ends the body.
 fn buildBody(arena: std.mem.Allocator, opts: Options, messages: []const u8) ![]u8 {
-    var jb = JsonBuf.init(arena);
+    var jb = chat_mod.JsonBuf.init(arena);
     const w = jb.writer();
     try w.print("{{\"model\":", .{});
-    try writeJsonString(w, opts.model);
+    try chat_mod.writeJsonString(w, opts.model);
     try w.writeAll(",\"tools\":");
     try w.writeAll(tools_json);
     try w.writeAll(",\"stream\":true,\"stream_options\":{\"include_usage\":true}");
@@ -1184,7 +1101,7 @@ fn buildBody(arena: std.mem.Allocator, opts: Options, messages: []const u8) ![]u
             try w.writeAll(",\"reasoning\":{\"enabled\":false}");
         } else {
             try w.writeAll(",\"reasoning\":{\"effort\":");
-            try writeJsonString(w, effort);
+            try chat_mod.writeJsonString(w, effort);
             try w.writeAll("}");
         }
     }
@@ -1205,7 +1122,7 @@ fn streamChat(
     opts: Options,
     body: []const u8,
     budget: Budget,
-) !ChatResult {
+) !chat_mod.ChatResult {
     const url = try std.fmt.allocPrint(arena, "{s}/chat/completions", .{std.mem.trimEnd(u8, opts.base_url, "/")});
     const uri = std.Uri.parse(url) catch return error.InvalidUrl;
     const auth = try std.fmt.allocPrint(arena, "Bearer {s}", .{opts.api_key});
@@ -1287,7 +1204,7 @@ fn streamChat(
             const err_body = err_reader.allocRemaining(arena, .limited(max_error_body_bytes)) catch "";
             const msg = try std.fmt.allocPrint(arena, "http {d}: {s}\n", .{
                 @intFromEnum(response.head.status),
-                terminalSafe(arena, err_body),
+                tool_mod.terminalSafe(arena, err_body),
             });
             net.writeErr(io, msg);
             return error.ApiError;
@@ -1295,10 +1212,10 @@ fn streamChat(
         break :retry response.readerDecompressing(&transfer, &decompress, &decompress_buffer);
     };
 
-    var result: ChatResult = .{};
+    var result: chat_mod.ChatResult = .{};
     errdefer result.deinit(gpa);
-    var calls: std.ArrayList(ToolCall) = .empty;
-    errdefer deinitCalls(gpa, &calls);
+    var calls: std.ArrayList(chat_mod.ToolCall) = .empty;
+    errdefer chat_mod.deinitCalls(gpa, &calls);
 
     // Frames are parsed in a scratch arena reset after each one, so a long
     // stream costs the size of its largest frame, not the sum of all of them.
@@ -1381,7 +1298,7 @@ fn streamChat(
     // `length` is the provider saying it stopped at `max_tokens`. The frame
     // arrived and the stream terminated cleanly, so nothing here is broken: the
     // response is simply the prefix of what the model meant to say, and a
-    // truncated tool call's arguments are not JSON the next turn can dispatch.
+    // truncated tool call's arguments are not JSON the next turn can tool_mod.dispatch.
     // A run that printed it as a finished answer would be reporting a cut
     // generation as the review's result.
     if (std.mem.eql(u8, result.finish_reason, "length"))
@@ -1435,7 +1352,7 @@ fn truncatedNotice(
 /// `unknown tool ''` and it goes back to the provider as an assistant message
 /// carrying a function with no name, which the next request rejects. The gap is
 /// dropped here rather than sent on.
-fn dropNamelessCalls(gpa: std.mem.Allocator, calls: *std.ArrayList(ToolCall)) void {
+fn dropNamelessCalls(gpa: std.mem.Allocator, calls: *std.ArrayList(chat_mod.ToolCall)) void {
     var kept: usize = 0;
     for (calls.items) |*call| {
         if (call.name.len == 0) {
@@ -1465,14 +1382,14 @@ fn dropNamelessCalls(gpa: std.mem.Allocator, calls: *std.ArrayList(ToolCall)) vo
 /// A stream sends one frame per token, and the tree measured ~7,200 retired
 /// instructions a frame against ~2,000 for this. Every field the generic path
 /// reads is named here, all three cached-token spellings included, and the
-/// counters stay `Value` so `num` reads them exactly as it did before.
+/// counters stay `Value` so `chat_mod.num` reads them exactly as it did before.
 const StreamFrame = struct {
     usage: ?UsageFrame = null,
     choices: []const Choice = &.{},
 
     const Choice = struct {
         // Read as a Value so a reason that is not a string leaves the last one
-        // standing here, exactly as `str` leaves it on the generic path,
+        // standing here, exactly as `chat_mod.str` leaves it on the generic path,
         // rather than failing the parse and taking the slow one.
         finish_reason: std.json.Value = .null,
         delta: ?Delta = null,
@@ -1511,23 +1428,23 @@ fn applyDeclared(
     scratch: std.mem.Allocator,
     gpa: std.mem.Allocator,
     payload: []const u8,
-    result: *ChatResult,
-    calls: *std.ArrayList(ToolCall),
+    result: *chat_mod.ChatResult,
+    calls: *std.ArrayList(chat_mod.ToolCall),
     out_buf: *std.ArrayList(u8),
 ) !bool {
     const parsed = std.json.parseFromSlice(StreamFrame, scratch, payload, .{ .ignore_unknown_fields = true }) catch return false;
     const frame = parsed.value;
 
     if (frame.usage) |u| {
-        result.prompt_tokens = num(u.prompt_tokens);
-        result.completion_tokens = num(u.completion_tokens);
-        result.total_tokens = num(u.total_tokens);
-        if (u.completion_tokens_details) |d| result.reasoning_tokens = num(d.reasoning_tokens);
+        result.prompt_tokens = chat_mod.num(u.prompt_tokens);
+        result.completion_tokens = chat_mod.num(u.completion_tokens);
+        result.total_tokens = chat_mod.num(u.total_tokens);
+        if (u.completion_tokens_details) |d| result.reasoning_tokens = chat_mod.num(d.reasoning_tokens);
         // Cached prompt tokens, in the three spellings providers actually send:
         // the OpenAI/OpenRouter one, DeepSeek's native one, and Anthropic's.
-        if (u.prompt_tokens_details) |d| result.cached_tokens = num(d.cached_tokens);
-        if (result.cached_tokens == 0) result.cached_tokens = num(u.prompt_cache_hit_tokens);
-        if (result.cached_tokens == 0) result.cached_tokens = num(u.cache_read_input_tokens);
+        if (u.prompt_tokens_details) |d| result.cached_tokens = chat_mod.num(d.cached_tokens);
+        if (result.cached_tokens == 0) result.cached_tokens = chat_mod.num(u.prompt_cache_hit_tokens);
+        if (result.cached_tokens == 0) result.cached_tokens = chat_mod.num(u.cache_read_input_tokens);
         // Not every provider sends the total, and a reader that divides tokens
         // by elapsed time reads a missing field as a run that cost nothing.
         if (result.total_tokens == 0)
@@ -1540,7 +1457,7 @@ fn applyDeclared(
     // than appending a prefix of an answer as if it were the whole one. This
     // has to land before the delta, because the generic path lands it there
     // and a frame may carry the reason with no delta beside it.
-    if (str(choice.finish_reason)) |reason| {
+    if (chat_mod.str(choice.finish_reason)) |reason| {
         const owned = try gpa.dupe(u8, reason);
         result.deinitFinish(gpa);
         result.finish_reason = owned;
@@ -1548,13 +1465,13 @@ fn applyDeclared(
     const delta = choice.delta orelse return true;
 
     if (delta.content) |text| {
-        const kept = clamp(text, max_response_bytes -| result.content.items.len);
+        const kept = chat_mod.clamp(text, max_response_bytes -| result.content.items.len);
         try result.content.appendSlice(gpa, kept);
         try out_buf.appendSlice(gpa, kept);
     }
     if (delta.tool_calls) |tcs| {
         for (tcs) |tc| {
-            const idx: usize = @intCast(num(tc.index));
+            const idx: usize = @intCast(chat_mod.num(tc.index));
             // The index sizes `calls`, so a provider-sent index is capped
             // before it can ask for billions of empty slots.
             if (idx >= max_tool_calls) continue;
@@ -1577,7 +1494,7 @@ fn applyDeclared(
                     call.name = owned;
                 }
                 if (f.arguments) |v| {
-                    try call.args.appendSlice(gpa, clamp(v, max_response_bytes -| call.args.items.len));
+                    try call.args.appendSlice(gpa, chat_mod.clamp(v, max_response_bytes -| call.args.items.len));
                 }
             }
         }
@@ -1589,8 +1506,8 @@ fn applyFrame(
     scratch: std.mem.Allocator,
     gpa: std.mem.Allocator,
     payload: []const u8,
-    result: *ChatResult,
-    calls: *std.ArrayList(ToolCall),
+    result: *chat_mod.ChatResult,
+    calls: *std.ArrayList(chat_mod.ToolCall),
     out_buf: *std.ArrayList(u8),
     unparsable: *usize,
 ) !void {
@@ -1610,19 +1527,19 @@ fn applyFrame(
     }
 
     if (root.object.get("usage")) |u| if (u == .object) {
-        result.prompt_tokens = num(u.object.get("prompt_tokens"));
-        result.completion_tokens = num(u.object.get("completion_tokens"));
-        result.total_tokens = num(u.object.get("total_tokens"));
+        result.prompt_tokens = chat_mod.num(u.object.get("prompt_tokens"));
+        result.completion_tokens = chat_mod.num(u.object.get("completion_tokens"));
+        result.total_tokens = chat_mod.num(u.object.get("total_tokens"));
         if (u.object.get("completion_tokens_details")) |d| {
-            if (d == .object) result.reasoning_tokens = num(d.object.get("reasoning_tokens"));
+            if (d == .object) result.reasoning_tokens = chat_mod.num(d.object.get("reasoning_tokens"));
         }
         // Cached prompt tokens, in the three spellings providers actually send:
         // the OpenAI/OpenRouter one, DeepSeek's native one, and Anthropic's.
         if (u.object.get("prompt_tokens_details")) |d| {
-            if (d == .object) result.cached_tokens = num(d.object.get("cached_tokens"));
+            if (d == .object) result.cached_tokens = chat_mod.num(d.object.get("cached_tokens"));
         }
-        if (result.cached_tokens == 0) result.cached_tokens = num(u.object.get("prompt_cache_hit_tokens"));
-        if (result.cached_tokens == 0) result.cached_tokens = num(u.object.get("cache_read_input_tokens"));
+        if (result.cached_tokens == 0) result.cached_tokens = chat_mod.num(u.object.get("prompt_cache_hit_tokens"));
+        if (result.cached_tokens == 0) result.cached_tokens = chat_mod.num(u.object.get("cache_read_input_tokens"));
         // Not every provider sends the total, and a reader that divides tokens
         // by elapsed time reads a missing field as a run that cost nothing.
         if (result.total_tokens == 0)
@@ -1635,7 +1552,7 @@ fn applyFrame(
     // Why the provider stopped, on the last frame that carries it. `length`
     // means the response was cut at `max_tokens`; the caller says so rather
     // than appending a prefix of an answer as if it were the whole one.
-    if (str(choice.object.get("finish_reason"))) |reason| {
+    if (chat_mod.str(choice.object.get("finish_reason"))) |reason| {
         const owned = try gpa.dupe(u8, reason);
         result.deinitFinish(gpa);
         result.finish_reason = owned;
@@ -1643,15 +1560,16 @@ fn applyFrame(
     const delta = choice.object.get("delta") orelse return;
     if (delta != .object) return;
 
-    if (str(delta.object.get("content"))) |text| {
-        const kept = clamp(text, max_response_bytes -| result.content.items.len);
-        try result.content.appendSlice(gpa, kept);
-        try out_buf.appendSlice(gpa, kept);
+    if (chat_mod.str(delta.object.get("content"))) |text| {
+        if (result.content.items.len < max_response_bytes) {
+            try result.content.appendSlice(gpa, text);
+            try out_buf.appendSlice(gpa, text);
+        }
     }
     if (delta.object.get("tool_calls")) |tcs| if (tcs == .array) {
         for (tcs.array.items) |tc| {
             if (tc != .object) continue;
-            const idx: usize = @intCast(num(tc.object.get("index")));
+            const idx: usize = @intCast(chat_mod.num(tc.object.get("index")));
             // The index sizes `calls`, so a provider-sent index is capped
             // before it can ask for billions of empty slots.
             if (idx >= max_tool_calls) continue;
@@ -1659,7 +1577,7 @@ fn applyFrame(
             const call = &calls.items[idx];
             // A provider may resend the id or the name on a later fragment, so
             // the previous copy is released rather than left behind.
-            if (str(tc.object.get("id"))) |v| {
+            if (chat_mod.str(tc.object.get("id"))) |v| {
                 const owned = try gpa.dupe(u8, v);
                 // A slot this frame's index walk filled holds the placeholder
                 // rather than a copy, and the placeholder is not the
@@ -1668,231 +1586,17 @@ fn applyFrame(
                 call.id = owned;
             }
             if (tc.object.get("function")) |f| if (f == .object) {
-                if (str(f.object.get("name"))) |v| {
+                if (chat_mod.str(f.object.get("name"))) |v| {
                     const owned = try gpa.dupe(u8, v);
                     if (call.name.len != 0) gpa.free(call.name);
                     call.name = owned;
                 }
-                if (str(f.object.get("arguments"))) |v| {
-                    try call.args.appendSlice(gpa, clamp(v, max_response_bytes -| call.args.items.len));
+                if (chat_mod.str(f.object.get("arguments"))) |v| {
+                    if (call.args.items.len < max_response_bytes) try call.args.appendSlice(gpa, v);
                 }
             };
         }
     };
-}
-
-/// Ceilings shared by every tool that shells out: how long a read-only
-/// subprocess may run, and how much of its stderr is worth keeping. stdout gets
-/// `max_tool_output * 4` everywhere, and is trimmed to `max_tool_output` by
-/// `clamp` before it reaches the model.
-const tool_timeout_ms: u64 = 60_000;
-/// The shortest a tool timeout may be cut to, even with the budget spent: a
-/// zero timeout would fail before the tool could even start.
-const tool_timeout_floor_ms: u64 = 5_000;
-const tool_stderr_limit: usize = 4096;
-/// Ceiling on the `timeout_ms` a model may ask `bash` for. The value is model
-/// output, so it arrives with the same trust as a path or a command string: an
-/// unbounded one leaves a build running with no deadline, and the process-group
-/// kill that reaps it never fires. A request past this gets the ceiling.
-const max_bash_timeout_ms: u64 = 600_000;
-/// What `bash` runs under when the model sends no `timeout_ms`.
-const default_bash_timeout_ms: u64 = 120_000;
-
-/// A tool subprocess in its own process group, and the reap that every tool
-/// owes its call.
-///
-/// `std.process.run` signals only the process it spawned, so a tool call that
-/// timed out, or that hit an output cap, left the rest of its process tree
-/// running: the shell died, the build it had launched kept compiling, and the
-/// next turn inherited whatever those orphans held. Every tool subprocess is
-/// therefore its own group leader, so the group signal stays the caller's to
-/// send. One place spells that, because a runner that spawned without it is a
-/// runner that leaks a process tree.
-const ToolChild = struct {
-    child: std.process.Child,
-    pgid: ?std.posix.pid_t,
-
-    fn spawn(io: Io, argv: []const []const u8) !ToolChild {
-        const child = try std.process.spawn(io, .{
-            .argv = argv,
-            .pgid = 0, // its own group leader, so the group signal stays ours
-            .stdin = .ignore,
-            .stdout = .pipe,
-            .stderr = .pipe,
-        });
-        return .{
-            .child = child,
-            .pgid = if (builtin.os.tag == .windows) null else @intCast(child.id.?),
-        };
-    }
-
-    /// Signals the whole group and then reaps the direct child, so a timeout
-    /// leaves neither an orphan nor a zombie. A child already reaped by `wait`
-    /// is a no-op here, and its group still gets the signal: a command that
-    /// backgrounded work and exited must not outlive the call.
-    fn reap(self: *ToolChild, io: Io) void {
-        if (self.pgid) |group| signalGroup(group);
-        self.child.kill(io);
-    }
-};
-
-/// Runs a tool subprocess and reaps it with everything it started.
-fn runToolProcess(
-    io: Io,
-    arena: std.mem.Allocator,
-    argv: []const []const u8,
-    stdout_limit: usize,
-    stderr_limit: usize,
-    timeout: Io.Timeout,
-) !std.process.RunResult {
-    var spawned = try ToolChild.spawn(io, argv);
-    // The group is published while the call runs, so an interrupt reaches it,
-    // and cleared on the way out, so a later signal does not hit a dead group.
-    watchToolGroup(spawned.pgid);
-    defer {
-        watchToolGroup(null);
-        spawned.reap(io);
-    }
-    const child = &spawned.child;
-
-    var multi_buffer: Io.File.MultiReader.Buffer(2) = undefined;
-    var multi: Io.File.MultiReader = undefined;
-    multi.init(arena, io, multi_buffer.toStreams(), &.{ child.stdout.?, child.stderr.? });
-    defer multi.deinit();
-
-    while (multi.fill(64, timeout)) |_| {
-        if (multi.reader(0).bufferedLen() > stdout_limit) return error.StreamTooLong;
-        if (multi.reader(1).bufferedLen() > stderr_limit) return error.StreamTooLong;
-    } else |err| switch (err) {
-        error.EndOfStream => {},
-        else => |e| return e,
-    }
-    try multi.checkAnyError();
-
-    const term = try child.wait(io);
-    return .{
-        .term = term,
-        .stdout = try multi.toOwnedSlice(0),
-        .stderr = try multi.toOwnedSlice(1),
-    };
-}
-
-/// SIGKILL to a whole process group. A group that is already gone is the normal
-/// case, not a failure.
-fn signalGroup(pgid: std.posix.pid_t) void {
-    std.posix.kill(-pgid, .KILL) catch {};
-}
-
-/// The group of the tool subprocess in flight, published for the interrupt
-/// handler. A tool child leads its own group, so the terminal's Ctrl+C never
-/// reaches it: without this the user stops the agent and the build it launched
-/// keeps writing files behind it. Zero means no tool call is running.
-var tool_group: std.atomic.Value(std.posix.pid_t) = .init(0);
-
-/// A signal that ends the run takes the tool subprocess with it, then leaves by
-/// the code the shell reads as an interrupt.
-fn onInterrupt(_: std.posix.SIG) callconv(.c) void {
-    const group = tool_group.load(.monotonic);
-    if (group > 0) signalGroup(group);
-    std.process.exit(130);
-}
-
-fn watchToolGroup(pgid: ?std.posix.pid_t) void {
-    tool_group.store(if (pgid) |group| group else 0, .monotonic);
-}
-
-/// Installed once the run starts, so Ctrl+C and `kill` reach the tools. Help,
-/// the version and the update subcommand own no subprocess and keep the default
-/// disposition.
-fn forwardInterruptsToToolGroup() void {
-    if (builtin.os.tag == .windows) return;
-    var act: std.posix.Sigaction = undefined;
-    act.handler = .{ .handler = onInterrupt };
-    act.mask = std.posix.sigemptyset();
-    act.flags = 0;
-    std.posix.sigaction(.INT, &act, null);
-    std.posix.sigaction(.TERM, &act, null);
-}
-
-/// A tool that delegates to a binary already on PATH: the caller builds the
-/// argv, and the failure text, the empty result and the two output streams are
-/// handled the same way for each of them.
-fn runSearchTool(io: Io, arena: std.mem.Allocator, argv: []const []const u8, what: []const u8, timeout_ms: u64) ![]u8 {
-    const res = runToolProcess(io, arena, argv, max_tool_output * 4, tool_stderr_limit, durationMs(timeout_ms)) catch |err|
-        return std.fmt.allocPrint(arena, "error: {s} failed: {s}", .{ what, @errorName(err) });
-    if (res.stdout.len > 0) return res.stdout;
-    if (res.stderr.len > 0) return res.stderr;
-    return std.fmt.allocPrint(arena, "(no matches)", .{});
-}
-
-/// Lines of git output a call keeps when the model asks for no limit: a raw
-/// `git log` in a big repository is thousands of lines of context nobody reads.
-const git_default_limit: usize = 400;
-
-/// How many lines of git output the model reads. `limit` is a ceiling, so a
-/// limit of zero is one line rather than the whole output, and a limit a 32-bit
-/// `usize` cannot hold is every line rather than a trap.
-fn gitLineLimit(args: std.json.ObjectMap) usize {
-    const v = args.get("limit") orelse return git_default_limit;
-    return @max(1, numCount(v));
-}
-
-/// Read-only git, with the subcommands fixed here rather than assembled by the
-/// model. Deterministic, no shell quoting, and the output is capped.
-fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, budget: Budget) ![]u8 {
-    const cap_ms = budget.toolTimeoutMs(io, tool_timeout_ms);
-    const cmd = str(args.get("cmd")) orelse return std.fmt.allocPrint(arena, "error: missing cmd", .{});
-    const path = str(args.get("path"));
-    const rev = str(args.get("rev"));
-    const limit = gitLineLimit(args);
-    // A rev such as `--output=FILE` would turn a read into a write.
-    if (rev) |r| if (std.mem.startsWith(u8, r, "-"))
-        return std.fmt.allocPrint(arena, "error: rev must not start with '-'", .{});
-
-    var argv: std.ArrayList([]const u8) = .empty;
-    try argv.appendSlice(arena, &.{ "git", "--no-pager" });
-    if (std.mem.eql(u8, cmd, "status")) {
-        try argv.appendSlice(arena, &.{ "status", "--short", "--branch" });
-    } else if (std.mem.eql(u8, cmd, "diff")) {
-        try argv.appendSlice(arena, &.{ "diff", "--no-color" });
-        if (rev) |r| try argv.append(arena, r);
-    } else if (std.mem.eql(u8, cmd, "log")) {
-        try argv.appendSlice(arena, &.{ "log", "--oneline", "--no-color", "-n", "30" });
-    } else if (std.mem.eql(u8, cmd, "show")) {
-        try argv.appendSlice(arena, &.{ "show", "--no-color", "--stat", "--patch" });
-        try argv.append(arena, rev orelse "HEAD");
-    } else if (std.mem.eql(u8, cmd, "blame")) {
-        try argv.append(arena, "blame");
-        if (rev) |r| try argv.append(arena, r);
-    } else {
-        return std.fmt.allocPrint(arena, "error: unknown git cmd '{s}'", .{cmd});
-    }
-    // `--` keeps a path from being read as an option.
-    try argv.append(arena, "--");
-    if (path) |p| try argv.append(arena, p);
-
-    const res = runToolProcess(io, arena, argv.items, max_tool_output * 4, tool_stderr_limit, durationMs(cap_ms)) catch |err|
-        return std.fmt.allocPrint(arena, "error: git {s} failed: {s}", .{ cmd, @errorName(err) });
-    const text = if (res.stdout.len > 0) res.stdout else res.stderr;
-    if (text.len == 0) return std.fmt.allocPrint(arena, "(git {s}: no output)", .{cmd});
-    return firstLines(arena, text, limit);
-}
-
-/// The first `limit` lines, with a note when lines were dropped.
-fn firstLines(arena: std.mem.Allocator, text: []const u8, limit: usize) ![]u8 {
-    var lines: usize = 0;
-    var end: usize = text.len;
-    var i: usize = 0;
-    while (i < text.len) : (i += 1) {
-        if (text[i] != '\n') continue;
-        lines += 1;
-        if (lines == limit) {
-            end = i + 1;
-            break;
-        }
-    }
-    if (end == text.len) return arena.dupe(u8, text);
-    return std.fmt.allocPrint(arena, "{s}... [output truncated at {d} lines]", .{ text[0..end], limit });
 }
 
 /// Replaces the content of the oldest large tool results with a marker once the
@@ -1954,7 +1658,7 @@ fn compactMessages(
             .object => |o| o,
             else => continue,
         };
-        const role = str(object.get("role")) orelse continue;
+        const role = chat_mod.str(object.get("role")) orelse continue;
         if (!std.mem.eql(u8, role, "tool")) continue;
         const content = object.getPtr("content") orelse continue;
         const text = switch (content.*) {
@@ -1974,7 +1678,7 @@ fn compactMessages(
     // and the run compacts on the schedule it did before.
     floor.* = conversation_soft_limit;
 
-    var jb = JsonBuf.init(gpa);
+    var jb = chat_mod.JsonBuf.init(gpa);
     defer jb.list.deinit(gpa);
     try std.json.Stringify.value(parsed.value, .{}, jb.writer());
     msgs.clearRetainingCapacity();
@@ -1996,8 +1700,8 @@ fn finishTurn(
     arena: std.mem.Allocator,
     gpa: std.mem.Allocator,
     msgs: *std.ArrayList(u8),
-    result: *ChatResult,
-    usage: *Usage,
+    result: *chat_mod.ChatResult,
+    usage: *chat_mod.Usage,
     budget: Budget,
 ) !void {
     try msgs.appendSlice(gpa, ",");
@@ -2011,16 +1715,16 @@ fn finishTurn(
         const output = if (budget.expired(io))
             try std.fmt.allocPrint(arena, "error: not run, the run's time budget is exhausted", .{})
         else
-            runTool(io, arena, call, budget) catch |err|
+            tool_mod.runTool(io, arena, call) catch |err|
                 // A tool that fails outright (rather than reporting its own
                 // failure as text) is named here, so a result reading
                 // `error: OutOfMemory` says which of the calls ran out.
                 try std.fmt.allocPrint(arena, "error: {s}: {s}", .{ call.name, @errorName(err) });
-        var tool_msg = JsonBuf.init(arena);
+        var tool_msg = chat_mod.JsonBuf.init(arena);
         try tool_msg.writer().writeAll(",{\"role\":\"tool\",\"tool_call_id\":");
-        try writeJsonString(tool_msg.writer(), call.id);
+        try chat_mod.writeJsonString(tool_msg.writer(), call.id);
         try tool_msg.writer().writeAll(",\"content\":");
-        try writeJsonString(tool_msg.writer(), try toolResult(arena, output));
+        try chat_mod.writeJsonString(tool_msg.writer(), try tool_mod.toolResult(arena, output));
         try tool_msg.writer().writeAll("}");
         try msgs.appendSlice(gpa, tool_msg.items());
     }
@@ -2030,13 +1734,13 @@ fn finishTurn(
 /// The assistant turn as the request body spells it. Plain content when the
 /// response called no tool, else the call list: `arguments` is whatever the
 /// provider streamed, as a string, whether or not it is JSON yet.
-fn assistantMessage(arena: std.mem.Allocator, result: *const ChatResult) ![]u8 {
-    var msg = JsonBuf.init(arena);
+fn assistantMessage(arena: std.mem.Allocator, result: *const chat_mod.ChatResult) ![]u8 {
+    var msg = chat_mod.JsonBuf.init(arena);
     try msg.writer().writeAll("{\"role\":\"assistant\",\"content\":");
     if (result.content.items.len == 0 and result.calls.items.len > 0) {
         try msg.writer().writeAll("null");
     } else {
-        try writeJsonString(msg.writer(), result.content.items);
+        try chat_mod.writeJsonString(msg.writer(), result.content.items);
     }
     if (result.calls.items.len == 0) {
         try msg.writer().writeAll("}");
@@ -2046,11 +1750,11 @@ fn assistantMessage(arena: std.mem.Allocator, result: *const ChatResult) ![]u8 {
     for (result.calls.items, 0..) |call, idx| {
         if (idx > 0) try msg.writer().writeAll(",");
         try msg.writer().writeAll("{\"id\":");
-        try writeJsonString(msg.writer(), call.id);
+        try chat_mod.writeJsonString(msg.writer(), call.id);
         try msg.writer().writeAll(",\"type\":\"function\",\"function\":{\"name\":");
-        try writeJsonString(msg.writer(), call.name);
+        try chat_mod.writeJsonString(msg.writer(), call.name);
         try msg.writer().writeAll(",\"arguments\":");
-        try writeJsonString(msg.writer(), call.args.items);
+        try chat_mod.writeJsonString(msg.writer(), call.args.items);
         try msg.writer().writeAll("}}");
     }
     try msg.writer().writeAll("]}");
@@ -2059,402 +1763,28 @@ fn assistantMessage(arena: std.mem.Allocator, result: *const ChatResult) ![]u8 {
 
 // One machine-readable line per response: gauntlet reads these for live
 // token rates, and they are the only stdout that is not model output.
-fn logUsage(io: Io, arena: std.mem.Allocator, usage: *Usage, result: *const ChatResult) !void {
+fn logUsage(io: Io, arena: std.mem.Allocator, usage: *chat_mod.Usage, result: *const chat_mod.ChatResult) !void {
     usage.add(result);
-    var usage_line = JsonBuf.init(arena);
+    var usage_line = chat_mod.JsonBuf.init(arena);
     const w = usage_line.writer();
     try w.writeAll("{\"type\":\"usage\",\"usage\":{");
-    try w.print(usage_fields, .{
+    try w.print(chat_mod.usage_fields, .{
         usage.prompt, usage.cached, usage.completion, usage.reasoning, usage.total,
     });
     try w.writeAll("}}\n");
     net.writeOut(io, usage_line.items());
 }
 
-fn runTool(io: Io, arena: std.mem.Allocator, call: ToolCall, budget: Budget) ![]u8 {
-    const parsed = std.json.parseFromSlice(std.json.Value, arena, call.args.items, .{}) catch
-        return std.fmt.allocPrint(arena, "error: tool arguments are not valid JSON", .{});
-    const args = switch (parsed.value) {
-        .object => |o| o,
-        else => return std.fmt.allocPrint(arena, "error: tool arguments must be an object", .{}),
-    };
-
-    noteToolCall(io, arena, call.name, args);
-    if (std.mem.eql(u8, call.name, "bash")) return toolBash(io, arena, args, budget);
-    if (std.mem.eql(u8, call.name, "read")) return toolRead(io, arena, args);
-    if (std.mem.eql(u8, call.name, "write")) return toolWrite(io, arena, args);
-    if (std.mem.eql(u8, call.name, "edit")) return toolEdit(io, arena, args);
-    if (std.mem.eql(u8, call.name, "search")) return toolSearch(io, arena, args, budget);
-    if (std.mem.eql(u8, call.name, "ast")) return toolAst(io, arena, args, budget);
-    if (std.mem.eql(u8, call.name, "git")) return toolGit(io, arena, args, budget);
-    return std.fmt.allocPrint(arena, "error: unknown tool '{s}'", .{call.name});
-}
-
-/// A one-line tool gutter on stderr, the shape gauntlet recognizes. The name
-/// and the detail are the provider's own text and may carry a newline or an
-/// escape sequence, either of which breaks the one-line-per-call shape a reader
-/// parses, so control characters are written as their two-character escapes.
-fn noteToolCall(io: Io, arena: std.mem.Allocator, name: []const u8, args: std.json.ObjectMap) void {
-    // The interesting argument is not the same one for every tool: a structural
-    // search is identified by its pattern, a bash call by its command.
-    const detail = if (std.mem.eql(u8, name, "ast"))
-        (str(args.get("pattern")) orelse "")
-    else
-        (str(args.get("command")) orelse str(args.get("pattern")) orelse str(args.get("path")) orelse "");
-    var buf: std.ArrayList(u8) = .empty;
-    buf.appendSlice(arena, "\u{23fa} ") catch return;
-    writeGutterText(arena, &buf, clamp(name, 40)) catch return;
-    buf.append(arena, ' ') catch return;
-    writeGutterText(arena, &buf, clamp(detail, 120)) catch return;
-    buf.append(arena, '\n') catch return;
-    net.writeErr(io, buf.items);
-}
-
-/// Gutter text with every C0 control and DEL written as `\xNN`, and bytes that
-/// are not valid UTF-8 written as U+FFFD, so one call stays one line.
-const hex_digits = "0123456789abcdef";
-
-fn writeGutterText(gpa: std.mem.Allocator, buf: *std.ArrayList(u8), s: []const u8) !void {
-    var i: usize = 0;
-    var start: usize = 0;
-    while (i < s.len) {
-        const c = s[i];
-        if (c < 0x20 or c == 0x7f) {
-            try buf.appendSlice(gpa, s[start..i]);
-            try buf.appendSlice(gpa, &.{ '\\', 'x', hex_digits[c >> 4], hex_digits[c & 0x0f] });
-            i += 1;
-            start = i;
-            continue;
-        }
-        const len: usize = if (c < 0x80) 1 else utf8SequenceLen(s, i);
-        if (len == 0) {
-            try buf.appendSlice(gpa, s[start..i]);
-            try buf.appendSlice(gpa, "\u{fffd}");
-            i += 1;
-            start = i;
-            continue;
-        }
-        i += len;
-    }
-    try buf.appendSlice(gpa, s[start..i]);
-}
-
-/// Bytes a terminal acts on rather than prints: the C0 controls, DEL, and the
-/// C1 range, which UTF-8 spells as C2 80..9F. A tool argument is whatever the
-/// model decided to send, and the model decides that from files in the tree, so
-/// a repository can put an escape sequence on the operator's screen through
-/// the gutter line. A diagnostic note shows them as `.`; the model's own output
-/// on stdout is left alone, because that is the answer the run was asked for.
-fn terminalSafe(arena: std.mem.Allocator, s: []const u8) []const u8 {
-    const out = arena.alloc(u8, s.len) catch return s;
-    var i: usize = 0;
-    while (i < s.len) {
-        const c = s[i];
-        if (c == 0xc2 and i + 1 < s.len and s[i + 1] >= 0x80 and s[i + 1] <= 0x9f) {
-            out[i] = '.';
-            out[i + 1] = '.';
-            i += 2;
-            continue;
-        }
-        out[i] = if (c < 0x20 or c == 0x7f) '.' else c;
-        i += 1;
-    }
-    return out;
-}
-
-/// The deadline one `bash` call runs under: what the model asked for, the
-/// tool's own default when it asked for nothing, and never past the ceiling.
-/// Separated from the tool so the rule is testable without waiting out a
-/// timeout that is ten minutes long.
-fn bashTimeoutMs(requested: ?u64) u64 {
-    return @min(requested orelse default_bash_timeout_ms, max_bash_timeout_ms);
-}
-
-fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, budget: Budget) ![]u8 {
-    const command = str(args.get("command")) orelse return std.fmt.allocPrint(arena, "error: missing command", .{});
-    const timeout_ms: u64 = budget.toolTimeoutMs(io, bashTimeoutMs(if (args.get("timeout_ms")) |v| num(v) else null));
-    const capture_limit = max_tool_output * 4;
-    const res = runCapped(io, arena, &.{ "/bin/sh", "-c", command }, capture_limit, durationMs(timeout_ms)) catch |err| switch (err) {
-        error.Timeout => return std.fmt.allocPrint(arena, "error: command timed out after {d}ms", .{timeout_ms}),
-        else => return std.fmt.allocPrint(arena, "error: {s}", .{@errorName(err)}),
-    };
-    var buf: std.ArrayList(u8) = .empty;
-    if (res.stdout.len > 0) try buf.appendSlice(arena, res.stdout);
-    if (res.stderr.len > 0) {
-        if (buf.items.len > 0) try buf.appendSlice(arena, "\n");
-        try buf.appendSlice(arena, res.stderr);
-    }
-    // Output the model acts on is cut at the cap, so say so rather than letting
-    // a half-read build log or diff read as the whole one.
-    if (atCaptureLimit(res)) {
-        if (buf.items.len > 0) try buf.appendSlice(arena, "\n");
-        try buf.appendSlice(arena, "[output truncated at the tool's cap]");
-    }
-    if (buf.items.len == 0) return std.fmt.allocPrint(arena, "(no output, exit {s})", .{@tagName(res.term)});
-    if (res.term != .exited or res.term.exited != 0) {
-        try buf.appendSlice(arena, "\n(exit: ");
-        try buf.appendSlice(arena, @tagName(res.term));
-        if (res.term == .exited)
-            try buf.appendSlice(arena, try std.fmt.allocPrint(arena, " {d}", .{res.term.exited}));
-        try buf.appendSlice(arena, ")");
-    }
-    return buf.items;
-}
-
-/// Filenames that are credentials whatever they hold, checked on the last
-/// component of the path the model sent.
-const secret_names = [_][]const u8{
-    ".netrc",  "_netrc",  ".pypirc",          ".npmrc",     ".htpasswd",
-    ".pgpass", ".my.cnf", ".git-credentials", ".dockercfg", "master.key",
-    "id_rsa",  "id_dsa",  "id_ecdsa",         "id_ed25519",
-};
-
-/// Extensions a private key or a keystore arrives in, public certificates
-/// excluded: a `.crt` or `.pub` is the half that is meant to be published.
-const secret_suffixes = [_][]const u8{ ".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".ppk", ".kdbx", ".asc" };
-
-/// The `.env` spellings that are templates rather than values, and so are
-/// read and edited freely. Everything else under the `.env.` prefix is a file
-/// that holds live settings.
-const env_samples = [_][]const u8{ ".env.example", ".env.sample", ".env.template", ".env.dist" };
-
-/// Why `path` is a secret file, or null when it is ordinary work. Called
-/// before the file is opened, so the refusal costs a stat rather than a read.
-fn secretPathReason(path: []const u8) ?[]const u8 {
-    const name = basename(path);
-    if (std.mem.eql(u8, name, ".env")) return "an environment file";
-    if (std.mem.startsWith(u8, name, ".env.")) {
-        for (env_samples) |sample| {
-            if (std.mem.eql(u8, name, sample)) return null;
-        }
-        return "an environment file";
-    }
-    for (secret_names) |secret| {
-        if (std.mem.eql(u8, name, secret)) return "a credentials file";
-    }
-    for (secret_suffixes) |suffix| {
-        if (std.mem.endsWith(u8, name, suffix)) return "a key or keystore";
-    }
-    // The directory this program reads its own provider key out of, named in
-    // the README as `$HOME/.secrets/openrouter`. `read` on it would put the
-    // key that authenticates the run into the run.
-    var it = std.mem.tokenizeScalar(u8, path, '/');
-    while (it.next()) |part| {
-        if (std.mem.eql(u8, part, ".secrets")) return "the provider key directory";
-    }
-    return null;
-}
-
-fn basename(path: []const u8) []const u8 {
-    const trimmed = std.mem.trimEnd(u8, path, "/");
-    const at = std.mem.lastIndexOfScalar(u8, trimmed, '/') orelse return trimmed;
-    return trimmed[at + 1 ..];
-}
-
-fn toolRead(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
-    const path = str(args.get("path")) orelse return std.fmt.allocPrint(arena, "error: missing path", .{});
-    if (secretPathReason(path)) |why|
-        return std.fmt.allocPrint(arena, "error: {s} is a secret file and its contents are not read into the conversation, because every later turn would send them to the provider ({s}). Work from the code around it, and ask the operator if the task needs the value.", .{ basename(path), why });
-    const raw = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_read_bytes)) catch |err|
-        return std.fmt.allocPrint(arena, "error: cannot read {s}: {s}", .{ path, @errorName(err) });
-    if (!args.contains("offset") and !args.contains("limit")) return raw;
-
-    const offset: usize = @max(1, numCount(args.get("offset")));
-    const limit: usize = if (args.get("limit")) |v| numCount(v) else std.math.maxInt(usize);
-    var buf: std.ArrayList(u8) = .empty;
-    var lines = std.mem.splitScalar(u8, raw, '\n');
-    var n: usize = 0;
-    var taken: usize = 0;
-    while (lines.next()) |line| : (n += 1) {
-        if (n + 1 < offset) continue;
-        if (taken >= limit) break;
-        try buf.appendSlice(arena, line);
-        try buf.appendSlice(arena, "\n");
-        taken += 1;
-    }
-    return buf.items;
-}
-
-fn toolWrite(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
-    const path = str(args.get("path")) orelse return std.fmt.allocPrint(arena, "error: missing path", .{});
-    const content = str(args.get("content")) orelse "";
-    if (std.fs.path.dirname(path)) |dir| std.Io.Dir.cwd().createDirPath(io, dir) catch {};
-    std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = content }) catch |err|
-        return std.fmt.allocPrint(arena, "error: cannot write {s}: {s}", .{ path, @errorName(err) });
-    return std.fmt.allocPrint(arena, "wrote {d} bytes to {s}", .{ content.len, path });
-}
-
-fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
-    const path = str(args.get("path")) orelse return std.fmt.allocPrint(arena, "error: missing path", .{});
-    const old = str(args.get("old_string")) orelse return std.fmt.allocPrint(arena, "error: missing old_string", .{});
-    const new = str(args.get("new_string")) orelse return std.fmt.allocPrint(arena, "error: missing new_string", .{});
-    const all = if (args.get("replace_all")) |v| v == .bool and v.bool else false;
-
-    const raw = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_edit_bytes)) catch |err|
-        return std.fmt.allocPrint(arena, "error: cannot read {s}: {s}", .{ path, @errorName(err) });
-    if (old.len == 0) return std.fmt.allocPrint(arena, "error: old_string is empty", .{});
-
-    const count = std.mem.count(u8, raw, old);
-    if (count == 0) return std.fmt.allocPrint(arena, "error: old_string not found in {s}", .{path});
-    if (count > 1 and !all) return std.fmt.allocPrint(arena, "error: old_string occurs {d} times in {s}; add context or set replace_all", .{ count, path });
-
-    // The checks above leave either every occurrence replaced or, without
-    // `all`, exactly one to replace, and one match is the loop below run once.
-    var buf: std.ArrayList(u8) = .empty;
-    var rest = raw;
-    while (std.mem.indexOf(u8, rest, old)) |at| {
-        try buf.appendSlice(arena, rest[0..at]);
-        try buf.appendSlice(arena, new);
-        rest = rest[at + old.len ..];
-    }
-    try buf.appendSlice(arena, rest);
-    std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = buf.items }) catch |err|
-        return std.fmt.allocPrint(arena, "error: cannot write {s}: {s}", .{ path, @errorName(err) });
-    return std.fmt.allocPrint(arena, "replaced {d} occurrence(s) in {s}", .{ count, path });
-}
-
-fn toolSearch(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, budget: Budget) ![]u8 {
-    const pattern = str(args.get("pattern")) orelse return std.fmt.allocPrint(arena, "error: missing pattern", .{});
-    const path = str(args.get("path")) orelse ".";
-    const glob = str(args.get("glob"));
-    var argv: std.ArrayList([]const u8) = .empty;
-    try argv.appendSlice(arena, &.{ "rg", "--line-number", "--no-heading", "--color", "never", "--max-count", "200" });
-    if (glob) |g| {
-        try argv.appendSlice(arena, &.{ "--glob", g });
-    }
-    try argv.appendSlice(arena, &.{ "--", pattern, path });
-    return runSearchTool(io, arena, argv.items, "ripgrep", budget.toolTimeoutMs(io, tool_timeout_ms));
-}
-
-/// Structural search/rewrite through ast-grep. `rewrite` set means the change
-/// is applied to every match (`--update-all`), so the next turn reads the
-/// result back rather than trusting the tool's summary.
-fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, budget: Budget) ![]u8 {
-    const pattern = str(args.get("pattern")) orelse return std.fmt.allocPrint(arena, "error: missing pattern", .{});
-    const lang = str(args.get("lang")) orelse return std.fmt.allocPrint(arena, "error: missing lang", .{});
-    const path = str(args.get("path")) orelse ".";
-    const rewrite = str(args.get("rewrite"));
-
-    var argv: std.ArrayList([]const u8) = .empty;
-    try argv.appendSlice(arena, &.{ "ast-grep", "run", "--pattern", pattern, "--lang", lang });
-    if (rewrite) |r| try argv.appendSlice(arena, &.{ "--rewrite", r, "--update-all" });
-    try argv.appendSlice(arena, &.{ "--", path });
-
-    return runSearchTool(io, arena, argv.items, "ast-grep", budget.toolTimeoutMs(io, tool_timeout_ms));
-}
-
 fn appendMessage(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), role: []const u8, content: []const u8) !void {
     if (msgs.items.len > 1) try msgs.append(gpa, ',');
-    var buf = JsonBuf.init(gpa);
+    var buf = chat_mod.JsonBuf.init(gpa);
     defer buf.list.deinit(gpa);
     try buf.writer().writeAll("{\"role\":");
-    try writeJsonString(buf.writer(), role);
+    try chat_mod.writeJsonString(buf.writer(), role);
     try buf.writer().writeAll(",\"content\":");
-    try writeJsonString(buf.writer(), content);
+    try chat_mod.writeJsonString(buf.writer(), content);
     try buf.writer().writeAll("}");
     try msgs.appendSlice(gpa, buf.items());
-}
-
-/// A byte buffer that hands out an `Io.Writer` (the std ArrayList lost its
-/// `writer` method in 0.16, so the adapter lives here once).
-const JsonBuf = struct {
-    list: std.ArrayList(u8) = .empty,
-    allocating: Io.Writer.Allocating,
-
-    fn init(allocator: std.mem.Allocator) JsonBuf {
-        var list: std.ArrayList(u8) = .empty;
-        return .{ .list = list, .allocating = Io.Writer.Allocating.fromArrayList(allocator, &list) };
-    }
-
-    fn writer(self: *JsonBuf) *Io.Writer {
-        return &self.allocating.writer;
-    }
-
-    fn items(self: *JsonBuf) []u8 {
-        self.list = self.allocating.toArrayList();
-        return self.list.items;
-    }
-};
-
-/// Writes `s` as a JSON string. Text reaching here came from outside the
-/// process: a tool result, a file's bytes, a working directory, an argv entry.
-/// Bytes above ASCII are copied when they form a UTF-8 sequence and become
-/// U+FFFD when they do not, because a lone byte is not a JSON string and one
-/// invalid sequence in a tool result fails the whole request with a 400.
-fn writeJsonString(w: *Io.Writer, s: []const u8) !void {
-    try w.writeByte('"');
-    var i: usize = 0;
-    var start: usize = 0;
-    while (i < s.len) {
-        const c = s[i];
-        if (jsonNeedsEscape(c)) {
-            try w.writeAll(s[start..i]);
-            switch (c) {
-                '"' => try w.writeAll("\\\""),
-                '\\' => try w.writeAll("\\\\"),
-                '\n' => try w.writeAll("\\n"),
-                '\r' => try w.writeAll("\\r"),
-                '\t' => try w.writeAll("\\t"),
-                0x08 => try w.writeAll("\\b"),
-                0x0c => try w.writeAll("\\f"),
-                else => try w.print("\\u{x:0>4}", .{c}),
-            }
-            i += 1;
-            start = i;
-            continue;
-        }
-        const len: usize = if (c < 0x80) 1 else utf8SequenceLen(s, i);
-        if (len == 0) {
-            try w.writeAll(s[start..i]);
-            try w.writeAll("\u{fffd}");
-            i += 1;
-            start = i;
-            continue;
-        }
-        i += len;
-    }
-    try w.writeAll(s[start..i]);
-    try w.writeByte('"');
-}
-
-fn jsonNeedsEscape(c: u8) bool {
-    return c < 0x20 or c == '"' or c == '\\';
-}
-
-/// The length of the UTF-8 sequence starting at `i`, or 0 where the bytes are
-/// not one: a bad lead byte, a truncated tail, or an overlong or surrogate
-/// encoding all read as a replacement rather than being copied through.
-fn utf8SequenceLen(s: []const u8, i: usize) usize {
-    const want = std.unicode.utf8ByteSequenceLength(s[i]) catch return 0;
-    const end = i + want;
-    if (end > s.len) return 0;
-    if (!std.unicode.utf8ValidateSlice(s[i..end])) return 0;
-    return want;
-}
-
-fn str(v: ?std.json.Value) ?[]const u8 {
-    const value = v orelse return null;
-    return switch (value) {
-        .string => |s| s,
-        else => null,
-    };
-}
-
-fn num(v: ?std.json.Value) u64 {
-    const value = v orelse return 0;
-    return switch (value) {
-        .integer => |n| if (n > 0) @intCast(n) else 0,
-        .float => |f| std.math.lossyCast(u64, f),
-        .number_string => |s| std.fmt.parseInt(u64, s, 10) catch 0,
-        else => 0,
-    };
-}
-
-/// A count the model sent, as a `usize`. `num` saturates at the `u64` ceiling,
-/// which a 32-bit build cannot hold, so the cast clamps instead of trapping:
-/// a number too large to be a line count is a number that means "all of them".
-fn numCount(v: ?std.json.Value) usize {
-    return std.math.cast(usize, num(v)) orelse std.math.maxInt(usize);
 }
 
 const max_attempts: u32 = 3;
@@ -2528,248 +1858,12 @@ fn waitFor(io: Io, attempt: u32) !void {
     try io.sleep(.{ .nanoseconds = backoffMs(attempt) *| std.time.ns_per_ms }, .awake);
 }
 
-/// A monotonic duration for `Io.Timeout`, from milliseconds.
-fn durationMs(ms: u64) Io.Timeout {
-    return .{ .duration = .{ .raw = .{ .nanoseconds = ms *| std.time.ns_per_ms }, .clock = .awake } };
-}
-
-/// Bytes read from a child pipe per operation. Both pipes are drained in one
-/// batch, so neither can fill up and wedge the child while the other is read.
-const capture_chunk = 8 * 1024;
-
-/// What a capped child produced: the first `limit` bytes of each stream, and the
-/// status it exited with.
-const Captured = struct {
-    stdout: []u8,
-    stderr: []u8,
-    term: std.process.Child.Term,
-    /// Per stream, a byte arrived after the cap was full. A capture that ends
-    /// exactly on the cap dropped nothing, and a reader told otherwise reads a
-    /// complete log as a cut-off one.
-    dropped: [2]bool,
-};
-
-/// Runs `argv` and keeps the first `limit` bytes of each stream.
-///
-/// `std.process.run` answers `error.StreamTooLong` and throws away everything it
-/// had read, so a chatty build, a ripgrep over a large tree or a `git show` of a
-/// big file reached the model as a bare error with no output at all. Here the
-/// bytes past the cap are drained and dropped instead: the child still runs to
-/// its own end, so the exit status and the timeout keep meaning what they did.
-///
-/// The child leads its own process group and the whole group is signalled on the
-/// way out, for the reason `runToolProcess` gives: a model-supplied `bash`
-/// command that backgrounds work and exits leaves that work holding a port, a
-/// build cache or a database lock for every later turn of the run and for
-/// whatever starts next, and a timeout that fires while the shell is still there
-/// leaves the compiler or test server it launched running without it.
-fn runCapped(
-    io: Io,
-    arena: std.mem.Allocator,
-    argv: []const []const u8,
-    limit: usize,
-    timeout: Io.Timeout,
-) !Captured {
-    var spawned = try ToolChild.spawn(io, argv);
-    // The group is published while the call runs, so an interrupt reaches it,
-    // and cleared on the way out, so a later signal does not hit a dead group.
-    watchToolGroup(spawned.pgid);
-    defer {
-        watchToolGroup(null);
-        spawned.reap(io);
-    }
-    const child = &spawned.child;
-
-    const files = [2]Io.File{ child.stdout.?, child.stderr.? };
-    var chunks: [2][capture_chunk]u8 = undefined;
-    var vecs: [2][1][]u8 = .{ .{&chunks[0]}, .{&chunks[1]} };
-    var out: [2]std.ArrayList(u8) = .{ .empty, .empty };
-
-    var storage: [2]Io.Operation.Storage = undefined;
-    var batch: Io.Batch = .init(&storage);
-    defer batch.cancel(io);
-    for (0..2) |i| batch.addAt(@intCast(i), .{ .file_read_streaming = .{
-        .file = files[i],
-        .data = &vecs[i],
-    } });
-
-    var draining: usize = files.len;
-    var read_err: ?anyerror = null;
-    var dropped: [2]bool = .{ false, false };
-    while (draining > 0) {
-        try batch.awaitConcurrent(io, timeout);
-        while (batch.next()) |completion| {
-            const i = completion.index;
-            const n = completion.result.file_read_streaming catch |err| {
-                // EndOfStream and Canceled are how a pipe finishes, not a fault.
-                if (read_err == null and err != error.EndOfStream and err != error.Canceled)
-                    read_err = err;
-                draining -= 1;
-                continue;
-            };
-            if (n > 0) {
-                const taken = @min(n, limit -| out[i].items.len);
-                if (taken < n) dropped[i] = true;
-                if (taken > 0) try out[i].appendSlice(arena, chunks[i][0..taken]);
-            }
-            // A read may legitimately return zero bytes without ending the
-            // stream, so re-arm either way.
-            vecs[i] = .{&chunks[i]};
-            batch.addAt(i, .{ .file_read_streaming = .{
-                .file = files[i],
-                .data = &vecs[i],
-            } });
-        }
-    }
-
-    const term = try child.wait(io);
-    if (read_err) |err| return err;
-    return .{ .stdout = out[0].items, .stderr = out[1].items, .term = term, .dropped = dropped };
-}
-
-/// True when a stream filled the cap with bytes still arriving, so the captured
-/// bytes are the beginning of the output and not all of it.
-fn atCaptureLimit(captured: Captured) bool {
-    return captured.dropped[0] or captured.dropped[1];
-}
-
-/// The first `max` bytes, cut on a UTF-8 codepoint boundary. Both callers feed
-/// text a model will read back, one of them inside a JSON request body, so a
-/// cut in the middle of a codepoint would put invalid UTF-8 on the wire.
-fn clamp(s: []const u8, max: usize) []const u8 {
-    if (s.len <= max) return s;
-    var end = max;
-    while (end > 0 and s[end] & 0xc0 == 0x80) end -= 1;
-    return s[0..end];
-}
-
-/// One tool result as the model reads it: capped, cut on a code point
-/// boundary, and marked when bytes were dropped. Without the marker a
-/// truncated file or a truncated test log is indistinguishable from a complete
-/// one, and the agent reasons about output it never saw.
-fn toolResult(arena: std.mem.Allocator, output: []const u8) ![]const u8 {
-    const kept = clamp(output, max_tool_output);
-    if (kept.len == output.len) return kept;
-    return std.fmt.allocPrint(arena, "{s}\n... [tool output truncated at {d} of {d} bytes]", .{
-        kept, kept.len, output.len,
-    });
-}
-
 // A file's tests are collected only when the root file's test block imports
 // it, so the `update` subcommand's tests and the style levels' tests are
 // pulled in here.
 test {
     _ = style_mod;
     _ = update_mod;
-}
-
-test "json string escaping" {
-    var buf = JsonBuf.init(std.testing.allocator);
-    try writeJsonString(buf.writer(), "a\"b\\c\nd\t\u{7}");
-    defer buf.list.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings("\"a\\\"b\\\\c\\nd\\t\\u0007\"", buf.items());
-}
-
-// Escaping copies unescaped runs in bulk, so every byte has to survive that
-// path: a byte that is neither escaped nor copied comes back short. The
-// range is the ASCII one, which is what the escaper is responsible for; bytes
-// above it are passed through as written, and a lone one is not valid JSON.
-// The escaper decides a byte's width from its lead byte, so an escapable byte
-// or a multi-byte character has to come out right wherever it lands in the
-// string. A miss here is not a wrong escape, it is a byte copied through that
-// had to be rewritten: the body stops being the JSON the API reads, and it
-// fails far from here.
-test "every byte that needs escaping is escaped at every offset" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    const specials = [_][]const u8{ "\"", "\\", "\n", "\r", "\t", "\u{1}", "\u{8}", "\u{c}", "\u{1f}" };
-    const filler = "plain ascii text that must not be touched at all here";
-    for (specials) |sp| {
-        var at: usize = 0;
-        while (at < 24) : (at += 1) {
-            var text: std.ArrayList(u8) = .empty;
-            var pad: usize = 0;
-            while (pad < at) : (pad += 1) try text.append(arena, filler[pad % filler.len]);
-            try text.appendSlice(arena, sp);
-            var tail: usize = 0;
-            while (tail < 20) : (tail += 1) try text.append(arena, filler[tail % filler.len]);
-
-            var buf = JsonBuf.init(arena);
-            try writeJsonString(buf.writer(), text.items);
-            const encoded = buf.items();
-            const parsed = std.json.parseFromSlice(std.json.Value, arena, encoded, .{}) catch {
-                std.debug.print("offset {d}, input {s}\n", .{ at, sp });
-                return error.TestUnexpectedResult;
-            };
-            try std.testing.expectEqualStrings(text.items, parsed.value.string);
-        }
-    }
-}
-
-// The same for a multi-byte character, whose continuation bytes are only safe
-// because the lead byte is what advances the cursor past all of them.
-test "a multi-byte character survives escaping at every offset" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    const marks = [_][]const u8{ "caf\u{00e9}", "\u{1f600}", "\u{65e5}\u{672c}", "a\u{00e9}b", "\u{00e9}\u{00e9}\u{00e9}\u{00e9}" };
-    for (marks) |mark| {
-        var at: usize = 0;
-        while (at < 20) : (at += 1) {
-            var text: std.ArrayList(u8) = .empty;
-            var pad: usize = 0;
-            while (pad < at) : (pad += 1) try text.append(arena, 'x');
-            try text.appendSlice(arena, mark);
-            var tail: usize = 0;
-            while (tail < 12) : (tail += 1) try text.append(arena, 'x');
-
-            var buf = JsonBuf.init(arena);
-            try writeJsonString(buf.writer(), text.items);
-            const encoded = buf.items();
-            const parsed = try std.json.parseFromSlice(std.json.Value, arena, encoded, .{});
-            try std.testing.expectEqualStrings(text.items, parsed.value.string);
-        }
-    }
-}
-
-// And the common case: a long plain run is copied whole, with nothing
-// rewritten, at every length around a boundary.
-test "a long plain run is copied whole" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    for ([_]usize{ 0, 1, 7, 8, 9, 63, 64, 65, 4096 }) |len| {
-        const plain = try arena.alloc(u8, len);
-        for (plain, 0..) |*b, i| b.* = 'a' + @as(u8, @intCast(i % 26));
-
-        var buf = JsonBuf.init(arena);
-        try writeJsonString(buf.writer(), plain);
-        // Two quotes and nothing rewritten.
-        const encoded = buf.items();
-        try std.testing.expectEqual(len + 2, encoded.len);
-        try std.testing.expectEqual(@as(u8, '"'), encoded[0]);
-        try std.testing.expectEqualSlices(u8, plain, encoded[1 .. len + 1]);
-
-        const parsed = try std.json.parseFromSlice(std.json.Value, arena, encoded, .{});
-        try std.testing.expectEqualStrings(plain, parsed.value.string);
-    }
-}
-
-test "every ASCII byte survives escaping" {
-    var all: [128]u8 = undefined;
-    for (&all, 0..) |*c, i| c.* = @intCast(i);
-
-    var buf = JsonBuf.init(std.testing.allocator);
-    defer buf.list.deinit(std.testing.allocator);
-    try writeJsonString(buf.writer(), &all);
-
-    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, buf.items(), .{});
-    defer parsed.deinit();
-    try std.testing.expectEqualSlices(u8, &all, parsed.value.string);
 }
 
 test "the api key is only sent over https, or to a loopback gateway" {
@@ -2867,206 +1961,9 @@ test "help and version win wherever they appear" {
 // 0xFF. Copied through, one of them makes the request body unparseable and the
 // provider refuses the whole turn, so each bad byte becomes U+FFFD and nothing
 // else about the string changes.
-test "a string that is not UTF-8 still serializes as valid JSON" {
-    const cases = [_][]const u8{
-        "\xff", // lone lead byte
-        "caf\xe9", // latin-1 e-acute
-        "\xc3", // truncated two-byte sequence
-        "\xe6\x97", // truncated three-byte sequence, the CJK prefix
-        "\xed\xa0\x80", // UTF-8 encoding of a surrogate half
-        "\xc0\x80", // overlong encoding
-        "ok\xff\xe6\x97\xa5ok",
-    };
-    for (cases) |raw| {
-        var buf = JsonBuf.init(std.testing.allocator);
-        defer buf.list.deinit(std.testing.allocator);
-        try writeJsonString(buf.writer(), raw);
-
-        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, buf.items(), .{});
-        defer parsed.deinit();
-        try std.testing.expect(std.unicode.utf8ValidateSlice(parsed.value.string));
-        // The valid text either side of a bad byte survives unchanged.
-        if (std.mem.indexOf(u8, raw, "ok") != null)
-            try std.testing.expect(std.mem.startsWith(u8, parsed.value.string, "ok"));
-    }
-}
-
-test "valid multibyte text passes through the escaper unchanged" {
-    const text = "日本語 \u{1f1e8}\u{1f1ed} \u{1f469}\u{200d}\u{1f4bb}";
-    var buf = JsonBuf.init(std.testing.allocator);
-    defer buf.list.deinit(std.testing.allocator);
-    try writeJsonString(buf.writer(), text);
-
-    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, buf.items(), .{});
-    defer parsed.deinit();
-    try std.testing.expectEqualStrings(text, parsed.value.string);
-}
-
-test "the tool gutter stays one line whatever the model sent" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    var buf: std.ArrayList(u8) = .empty;
-    try writeGutterText(arena, &buf, "rg -n 'foo'\nnext line\u{1b}[31mred\xff");
-    try std.testing.expectEqualStrings("rg -n 'foo'\\x0anext line\\x1b[31mred\u{fffd}", buf.items);
-    try std.testing.expect(std.mem.indexOfScalar(u8, buf.items, '\n') == null);
-}
-
-test "clamp keeps short strings intact" {
-    try std.testing.expectEqualStrings("abc", clamp("abc", 8));
-    // A string exactly at the limit is kept whole, not cut to one byte short.
-    try std.testing.expectEqualStrings("abc", clamp("abc", 3));
-    try std.testing.expectEqualStrings("ab", clamp("abcd", 2));
-    try std.testing.expectEqualStrings("", clamp("abc", 0));
-}
-
-// A value quoted back in an error is whatever the user typed, and the quote is
-// cut at a fixed length, so the cut has to be on a character boundary like
-// every other one here.
-test "a quoted value keeps whole characters" {
-    try std.testing.expectEqualStrings("plain", clip("plain"));
-    const long = "日本語のテキスト" ** 10;
-    const quoted = clip(long);
-    try std.testing.expect(quoted.len <= quoted_value_bytes);
-    try std.testing.expect(std.unicode.utf8ValidateSlice(quoted));
-    try std.testing.expect(std.mem.startsWith(u8, long, quoted));
-    // Three-byte characters throughout: the cut is on one of them, so the
-    // quote holds whole ones and no more than the byte budget allows.
-    try std.testing.expectEqualStrings("日" ** 26, clip("日" ** 40));
-}
-
-test "a cut never leaves half a code point in the request body" {
-    // The bytes go into the JSON body verbatim, so anything clamp keeps has to
-    // be a whole character: source files are full of multi-byte text and a
-    // cut lands in one often enough to matter.
-    const text = "caf\u{00e9} \u{1f600} fin";
-    var n: usize = 0;
-    while (n <= text.len) : (n += 1) {
-        const kept = clamp(text, n);
-        try std.testing.expect(kept.len <= n);
-        try std.testing.expect(std.unicode.utf8ValidateSlice(kept));
-        try std.testing.expect(std.mem.startsWith(u8, text, kept));
-    }
-    // The cut is at the boundary, not somewhere short of it.
-    try std.testing.expectEqualStrings("caf\u{00e9} ", clamp(text, 7));
-    try std.testing.expectEqualStrings("caf\u{00e9} \u{1f600}", clamp(text, 10));
-    try std.testing.expectEqualStrings("", clamp("\u{1f600}", 2));
-}
-
-test "a capped tool result says how much was dropped" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    const whole = try toolResult(arena, "one line");
-    try std.testing.expectEqualStrings("one line", whole);
-
-    const big = "x" ** (max_tool_output + 500);
-    const cut = try toolResult(arena, big);
-    try std.testing.expect(std.mem.startsWith(u8, cut, "x" ** max_tool_output));
-    try std.testing.expect(std.mem.endsWith(u8, cut, "truncated at 24576 of 25076 bytes]"));
-}
-
-test "a real tool result over the cap stays a string the body can carry" {
-    // The whole path, from a command that prints well past the cap to the
-    // bytes that would be written into the request body.
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    var args: std.json.ObjectMap = .empty;
-    // Five bytes per line, so the cap does not land on a character boundary: a
-    // plain cut here leaves half an e-acute in the string.
-    try args.put(arena, "command", .{ .string = "i=0; while [ $i -lt 5000 ]; do printf '\\303\\251a\\303\\251'; i=$((i+1)); done" });
-    const output = try toolBash(std.testing.io, arena, args, .{});
-    try std.testing.expect(output.len > max_tool_output);
-
-    const result = try toolResult(arena, output);
-    try std.testing.expect(std.unicode.utf8ValidateSlice(result));
-    try std.testing.expect(std.mem.indexOf(u8, result, "tool output truncated at") != null);
-    // It still parses as the JSON string the body is built from.
-    var jb = JsonBuf.init(arena);
-    try writeJsonString(jb.writer(), result);
-    const parsed = std.json.parseFromSlice(std.json.Value, arena, jb.items(), .{}) catch return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings(result, parsed.value.string);
-}
-
-test "a model cannot ask bash for a timeout past the ceiling" {
-    // `timeout_ms` is model output. Taken as sent, a value past anything a run
-    // survives leaves the child with no deadline at all, so the deadline the
-    // tool is built on is the ceiling rather than the number asked for.
-    try std.testing.expectEqual(max_bash_timeout_ms, bashTimeoutMs(@intCast(std.math.maxInt(u64))));
-    try std.testing.expectEqual(max_bash_timeout_ms, bashTimeoutMs(max_bash_timeout_ms + 1));
-    // Inside the ceiling it is what was asked for, and an absent one is the
-    // tool's own default rather than the ceiling.
-    try std.testing.expectEqual(@as(u64, 1000), bashTimeoutMs(1000));
-    try std.testing.expectEqual(default_bash_timeout_ms, bashTimeoutMs(null));
-}
-
-test "read refuses a secret file and says so, and reads the rest" {
-    for ([_][]const u8{
-        ".env",
-        "./.env",
-        "config/.env",
-        "/home/u/app/.env.production",
-        ".secrets/openrouter",
-        "/home/u/.secrets/openrouter",
-        "deploy/server.pem",
-        "id_ed25519",
-        ".netrc",
-        "certs/tls.key",
-    }) |path| {
-        const why = secretPathReason(path) orelse {
-            std.debug.print("read would have leaked {s}\n", .{path});
-            return error.TestUnexpectedResult;
-        };
-        try std.testing.expect(why.len > 0);
-    }
-
-    // The templates and the published half of a key pair are ordinary work,
-    // and a file that merely contains the letters "key" is a source file.
-    for ([_][]const u8{ ".env.example", ".env.sample", "src/main.zig", "README.md", "cert.crt", "id_ed25519.pub", "monkey.zig" }) |path|
-        try std.testing.expectEqual(@as(?[]const u8, null), secretPathReason(path));
-}
-
-test "a read of a secret file returns the refusal, not the key" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{ .sub_path = ".env", .data = "API_KEY=sk-do-not-send" });
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const n = try tmp.dir.realPath(io, &path_buf);
-    const path = try std.fmt.allocPrint(arena, "{s}/.env", .{path_buf[0..n]});
-
-    var args: std.json.ObjectMap = .empty;
-    try args.put(arena, "path", .{ .string = path });
-    const out = try toolRead(io, arena, args);
-    try std.testing.expect(std.mem.indexOf(u8, out, "sk-do-not-send") == null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "secret file") != null);
-}
-
-test "a tool argument cannot repaint the operator's terminal" {
-    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer state.deinit();
-    const arena = state.allocator();
-
-    // ESC, the C1 CSI (C2 9B), and BEL are all shown as dots; the rest of the
-    // line, including a multibyte character, is untouched.
-    const got = terminalSafe(arena, "ls\x1b[2Jrm -rf /\u{009b}31m\x07 caf\u{00e9}");
-    try std.testing.expectEqualStrings("ls.[2Jrm -rf /..31m. caf\u{00e9}", got);
-    try std.testing.expectEqualStrings("plain text", terminalSafe(arena, "plain text"));
-}
 
 test "conversation and tool schema serialize as one valid request body" {
-    // The body's storage belongs to a JsonBuf, not to the caller, so the test
+    // The body's storage belongs to a chat_mod.JsonBuf, not to the caller, so the test
     // hands it an arena instead of trying to free the slice by hand.
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -3096,9 +1993,9 @@ test "conversation and tool schema serialize as one valid request body" {
     try std.testing.expectEqualStrings("system", messages.items[0].object.get("role").?.string);
     try std.testing.expectEqualStrings("say \"hi\"\nplease", messages.items[1].object.get("content").?.string);
 
-    // The advertised names and the dispatch table are two lists that have to
-    // stay the same list: a tool in the schema that `runTool` cannot dispatch
-    // is one the model will call and be told does not exist.
+    // The advertised names and the tool_mod.dispatch table are two lists that have to
+    // stay the same list: a tool in the schema that the dispatcher cannot
+    // dispatch is one the model will call and be told does not exist.
     const advertised = [_][]const u8{ "bash", "read", "write", "edit", "search", "ast", "git" };
     const tools = root.get("tools").?.array;
     try std.testing.expectEqual(advertised.len, tools.items.len);
@@ -3109,7 +2006,7 @@ test "conversation and tool schema serialize as one valid request body" {
         // is a tool the model has no reason to call.
         try std.testing.expect(f.get("description").?.string.len > 0);
         try std.testing.expect(f.get("parameters").?.object.get("required") != null);
-        const err = try dispatch(arena_state.allocator(), name, "{}");
+        const err = try tool_mod.dispatch(arena_state.allocator(), name, "{}");
         // Every tool has a required argument, so `{}` is refused by the tool
         // itself and never reaches "unknown tool".
         try std.testing.expect(!std.mem.startsWith(u8, err, "error: unknown tool"));
@@ -3181,8 +2078,8 @@ test "the tool schema sits inside the cacheable prefix, not behind the conversat
 const FrameSink = struct {
     run: std.heap.ArenaAllocator,
     scratch: std.heap.ArenaAllocator,
-    result: ChatResult = .{},
-    calls: std.ArrayList(ToolCall) = .empty,
+    result: chat_mod.ChatResult = .{},
+    calls: std.ArrayList(chat_mod.ToolCall) = .empty,
     out_buf: std.ArrayList(u8) = .empty,
     unparsable: usize = 0,
 
@@ -3262,8 +2159,8 @@ test "streamed argument fragments cost linear arena bytes" {
     var frame_state = std.heap.ArenaAllocator.init(gpa);
     defer frame_state.deinit();
 
-    var result: ChatResult = .{};
-    var calls: std.ArrayList(ToolCall) = .empty;
+    var result: chat_mod.ChatResult = .{};
+    var calls: std.ArrayList(chat_mod.ToolCall) = .empty;
     var out_buf: std.ArrayList(u8) = .empty;
     var unparsable: usize = 0;
 
@@ -3292,11 +2189,11 @@ test "a response that never stops sending cannot grow the run without bound" {
     defer state.deinit();
     const gpa = state.allocator();
 
-    var result: ChatResult = .{};
+    var result: chat_mod.ChatResult = .{};
     var full: std.ArrayList(u8) = .empty;
     try full.appendNTimes(gpa, 'x', max_response_bytes);
     result.content = full;
-    var calls: std.ArrayList(ToolCall) = .empty;
+    var calls: std.ArrayList(chat_mod.ToolCall) = .empty;
     var out_buf: std.ArrayList(u8) = .empty;
     var unparsable: usize = 0;
 
@@ -3435,7 +2332,7 @@ test "session record carries one response's counters, cwd and model time" {
     defer state.deinit();
     const arena = state.allocator();
 
-    var result: ChatResult = .{};
+    var result: chat_mod.ChatResult = .{};
     result.prompt_tokens = 910;
     result.cached_tokens = 832;
     result.completion_tokens = 18;
@@ -3455,7 +2352,7 @@ test "session record carries one response's counters, cwd and model time" {
 test "session record escapes a directory that needs it" {
     var state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer state.deinit();
-    var result: ChatResult = .{ .completion_tokens = 4 };
+    var result: chat_mod.ChatResult = .{ .completion_tokens = 4 };
     const line = try sessionRecord(state.allocator(), 1, "/tmp/a\"b\\c", "m", 5, &result);
     try std.testing.expectEqualStrings(
         "{\"ts\":1,\"cwd\":\"/tmp/a\\\"b\\\\c\",\"model\":\"m\"," ++
@@ -3464,28 +2361,6 @@ test "session record escapes a directory that needs it" {
             "\"completion_tokens\":4,\"reasoning_tokens\":0,\"total_tokens\":0}}\n",
         line,
     );
-}
-
-test "tool output truncation keeps whole lines" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    const short = try firstLines(arena, "a\nb\n", 10);
-    try std.testing.expectEqualStrings("a\nb\n", short);
-
-    const long = try firstLines(arena, "1\n2\n3\n4\n", 2);
-    try std.testing.expectEqualStrings("1\n2\n... [output truncated at 2 lines]", long);
-
-    // A limit equal to the line count keeps every line and adds no marker.
-    try std.testing.expectEqualStrings("1\n2\n", try firstLines(arena, "1\n2\n", 2));
-    try std.testing.expectEqualStrings("1\n2\n3\n", try firstLines(arena, "1\n2\n3\n", 3));
-    // A last line with no newline still counts, so the cut lands on it.
-    try std.testing.expectEqualStrings("1\n... [output truncated at 1 lines]", try firstLines(arena, "1\n2", 1));
-    try std.testing.expectEqualStrings("1\n2", try firstLines(arena, "1\n2", 2));
-    // No newline at all means one line, which a limit of one keeps whole.
-    try std.testing.expectEqualStrings("solo", try firstLines(arena, "solo", 1));
-    try std.testing.expectEqualStrings("solo\n", try firstLines(arena, "solo\n", 1));
 }
 
 /// The `[` and the system message a run starts from, in the bytes the agent
@@ -3508,11 +2383,11 @@ fn appendToolResults(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), count: us
     var i: usize = 0;
     while (i < count) : (i += 1) {
         if (msgs.items.len > 1) try msgs.append(gpa, ',');
-        var msg = JsonBuf.init(gpa);
+        var msg = chat_mod.JsonBuf.init(gpa);
         try msg.writer().writeAll("{\"role\":\"tool\",\"tool_call_id\":\"call_");
         try msg.writer().print("{d}", .{i});
         try msg.writer().writeAll("\",\"content\":");
-        try writeJsonString(msg.writer(), blob);
+        try chat_mod.writeJsonString(msg.writer(), blob);
         try msg.writer().writeAll("}");
         try msgs.appendSlice(gpa, msg.items());
         msg.list.deinit(gpa);
@@ -3653,9 +2528,9 @@ test "a conversation with nothing to elide is not re-parsed every turn" {
 fn growConversation(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), blob: []const u8) !void {
     msgs.shrinkRetainingCapacity(msgs.items.len - 1);
     try msgs.append(gpa, ',');
-    var msg = JsonBuf.init(gpa);
+    var msg = chat_mod.JsonBuf.init(gpa);
     try msg.writer().writeAll("{\"role\":\"tool\",\"tool_call_id\":\"call_x\",\"content\":");
-    try writeJsonString(msg.writer(), blob);
+    try chat_mod.writeJsonString(msg.writer(), blob);
     try msg.writer().writeAll("}");
     try msgs.appendSlice(gpa, msg.items());
     msg.list.deinit(gpa);
@@ -3751,7 +2626,7 @@ test "a CA bundle path that cannot be read falls back to the system store" {
 }
 
 test "reasoning effort is only sent when asked for" {
-    // JsonBuf owns the storage it hands back, so the test gives it an arena
+    // chat_mod.JsonBuf owns the storage it hands back, so the test gives it an arena
     // rather than trying to free the returned slice.
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -3836,10 +2711,10 @@ test "a frame the parser cannot read is counted, not dropped in silence" {
 }
 
 test "token counters read the OpenAI and OpenRouter spellings" {
-    try std.testing.expectEqual(@as(u64, 42), num(.{ .integer = 42 }));
-    try std.testing.expectEqual(@as(u64, 7), num(.{ .number_string = "7" }));
-    try std.testing.expectEqual(@as(u64, 0), num(.{ .integer = -1 }));
-    try std.testing.expectEqual(@as(u64, 0), num(null));
+    try std.testing.expectEqual(@as(u64, 42), chat_mod.num(.{ .integer = 42 }));
+    try std.testing.expectEqual(@as(u64, 7), chat_mod.num(.{ .number_string = "7" }));
+    try std.testing.expectEqual(@as(u64, 0), chat_mod.num(.{ .integer = -1 }));
+    try std.testing.expectEqual(@as(u64, 0), chat_mod.num(null));
 }
 
 // A tool argument is a model-controlled string, and a model that sends
@@ -3847,12 +2722,12 @@ test "token counters read the OpenAI and OpenRouter spellings" {
 // rather than having the number read as a path. Only a JSON string is a
 // string; every other type, including a number and a bool, is refused.
 test "a tool argument is a string or it is refused" {
-    try std.testing.expectEqualStrings("a.zig", str(.{ .string = "a.zig" }).?);
-    try std.testing.expectEqualStrings("", str(.{ .string = "" }).?);
-    try std.testing.expect(str(null) == null);
-    try std.testing.expect(str(.{ .integer = 42 }) == null);
-    try std.testing.expect(str(.{ .float = 1.5 }) == null);
-    try std.testing.expect(str(.{ .bool = true }) == null);
+    try std.testing.expectEqualStrings("a.zig", chat_mod.str(.{ .string = "a.zig" }).?);
+    try std.testing.expectEqualStrings("", chat_mod.str(.{ .string = "" }).?);
+    try std.testing.expect(chat_mod.str(null) == null);
+    try std.testing.expect(chat_mod.str(.{ .integer = 42 }) == null);
+    try std.testing.expect(chat_mod.str(.{ .float = 1.5 }) == null);
+    try std.testing.expect(chat_mod.str(.{ .bool = true }) == null);
 }
 
 // A level the parser does not have is reported, not fatal: the other knob and
@@ -3878,200 +2753,7 @@ test "one bad style value does not cost the run the levels it did understand" {
 /// before any turn runs.
 var debug_enabled: bool = false;
 
-test "git tool refuses a rev that git would read as an option" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    var args: std.json.ObjectMap = .empty;
-    try args.put(arena, "cmd", .{ .string = "diff" });
-    try args.put(arena, "rev", .{ .string = "--output=pwned" });
-    const out = try toolGit(std.testing.io, arena, args, .{});
-    try std.testing.expectEqualStrings("error: rev must not start with '-'", out);
-}
-
-test "a git line limit is a ceiling, so zero is one line and a huge one is no trap" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    try std.testing.expectEqual(git_default_limit, gitLineLimit(.empty));
-    var one: std.json.ObjectMap = .empty;
-    try one.put(arena, "limit", .{ .integer = 12 });
-    try std.testing.expectEqual(@as(usize, 12), gitLineLimit(one));
-    var zero: std.json.ObjectMap = .empty;
-    try zero.put(arena, "limit", .{ .integer = 0 });
-    try std.testing.expectEqual(@as(usize, 1), gitLineLimit(zero));
-    var negative: std.json.ObjectMap = .empty;
-    try negative.put(arena, "limit", .{ .integer = -5 });
-    try std.testing.expectEqual(@as(usize, 1), gitLineLimit(negative));
-    // A count a 32-bit `usize` cannot hold is every line, not a trap.
-    var huge: std.json.ObjectMap = .empty;
-    try huge.put(arena, "limit", .{ .number_string = "18446744073709551615" });
-    try std.testing.expectEqual(@as(usize, std.math.maxInt(usize)), gitLineLimit(huge));
-    // A count sent as a float saturates the same way rather than truncating.
-    try std.testing.expectEqual(@as(usize, std.math.maxInt(usize)), numCount(.{ .float = 1e30 }));
-
-    var lines: std.json.ObjectMap = .empty;
-    try lines.put(arena, "limit", .{ .integer = 1 });
-    const text = try firstLines(arena, "one\ntwo\nthree\n", gitLineLimit(lines));
-    try std.testing.expectEqualStrings("one\n... [output truncated at 1 lines]", text);
-}
-
-test "git tool refuses a missing or unknown subcommand" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    {
-        const out = try toolGit(std.testing.io, arena, .empty, .{});
-        try std.testing.expectEqualStrings("error: missing cmd", out);
-    }
-    {
-        // The subcommand is what picks the git argv, so an unknown one has to
-        // stop here rather than be handed to git.
-        var args: std.json.ObjectMap = .empty;
-        try args.put(arena, "cmd", .{ .string = "push" });
-        try std.testing.expectEqualStrings(
-            "error: unknown git cmd 'push'",
-            try toolGit(std.testing.io, arena, args, .{}),
-        );
-    }
-}
-
-// The tool arguments are written by the model, so dispatch is the trust
-// boundary: malformed JSON, a non-object payload, and an unrecognized name all
 // have to be refused with the tool's own error text instead of reaching a
-// subprocess.
-test "the tool dispatcher refuses arguments that are not an object" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    try std.testing.expectEqualStrings(
-        "error: tool arguments are not valid JSON",
-        try dispatch(arena, "read", "{"),
-    );
-    try std.testing.expectEqualStrings(
-        "error: tool arguments must be an object",
-        try dispatch(arena, "read", "[]"),
-    );
-    try std.testing.expectEqualStrings(
-        "error: unknown tool 'delete_everything'",
-        try dispatch(arena, "delete_everything", "{}"),
-    );
-}
-
-// Every tool's required argument is checked before it opens a file or spawns a
-// process, so a model that omits one gets "missing <arg>" rather than a
-// confusing error from the kernel.
-test "each tool refuses a missing required argument" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    const cases = [_]struct { tool: []const u8, args: []const u8, want: []const u8 }{
-        .{ .tool = "bash", .args = "{}", .want = "error: missing command" },
-        .{ .tool = "read", .args = "{}", .want = "error: missing path" },
-        .{ .tool = "write", .args = "{}", .want = "error: missing path" },
-        .{ .tool = "edit", .args = "{}", .want = "error: missing path" },
-        .{ .tool = "edit", .args = "{\"path\":\"a.zig\"}", .want = "error: missing old_string" },
-        .{ .tool = "edit", .args = "{\"path\":\"a.zig\",\"old_string\":\"a\"}", .want = "error: missing new_string" },
-        .{ .tool = "search", .args = "{}", .want = "error: missing pattern" },
-        .{ .tool = "ast", .args = "{}", .want = "error: missing pattern" },
-        .{ .tool = "ast", .args = "{\"pattern\":\"a$b\"}", .want = "error: missing lang" },
-        .{ .tool = "git", .args = "{}", .want = "error: missing cmd" },
-    };
-    for (cases) |c| {
-        try std.testing.expectEqualStrings(c.want, try dispatch(arena, c.tool, c.args));
-    }
-    // The same omissions go through dispatch, not only the direct call.
-    try std.testing.expectEqualStrings(
-        "error: missing pattern",
-        try dispatch(arena, "search", "{\"path\":\".\"}"),
-    );
-}
-
-// A missing argument that the model filled with a number is still missing: the
-// tools read their arguments through `str`, which refuses every non-string.
-test "a tool argument sent as a number is missing, not a value" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    try std.testing.expectEqualStrings(
-        "error: missing path",
-        try dispatch(arena, "read", "{\"path\":42}"),
-    );
-    try std.testing.expectEqualStrings(
-        "error: missing command",
-        try dispatch(arena, "bash", "{\"command\":null}"),
-    );
-}
-
-// A tool call as the model produced it: the same mutable slices the frame
-// parser fills in, so the dispatcher tests go through the real entry point.
-fn dispatch(arena: std.mem.Allocator, name: []const u8, args: []const u8) ![]u8 {
-    var call: ToolCall = .{
-        .id = try arena.dupe(u8, ""),
-        .name = try arena.dupe(u8, name),
-    };
-    try call.args.appendSlice(arena, args);
-    return runTool(std.testing.io, arena, call, .{});
-}
-
-test "a child that outruns the capture cap keeps its first bytes instead of failing" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    const cap: usize = 4096;
-    // `std.process.run` answers this with `error.StreamTooLong` and no output at
-    // all, which is what a chatty build or a broad ripgrep used to hand back.
-    const noisy = try runCapped(std.testing.io, arena, &.{
-        "/bin/sh", "-c", "head -c 200000 /dev/zero | tr '\\0' 'a'",
-    }, cap, durationMs(30_000));
-    try std.testing.expectEqual(cap, noisy.stdout.len);
-    try std.testing.expect(atCaptureLimit(noisy));
-    try std.testing.expectEqualStrings("a" ** 8, noisy.stdout[0..8]);
-    // The child still ran to its own end, so the status is the command's.
-    switch (noisy.term) {
-        .exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
-        else => return error.TestUnexpectedResult,
-    }
-
-    const quiet = try runCapped(std.testing.io, arena, &.{
-        "/bin/sh", "-c", "echo hi; echo bye >&2",
-    }, cap, durationMs(30_000));
-    try std.testing.expectEqualStrings("hi\n", quiet.stdout);
-    try std.testing.expectEqualStrings("bye\n", quiet.stderr);
-    try std.testing.expect(!atCaptureLimit(quiet));
-}
-
-// Output that lands exactly on the cap was not cut short, and saying it was
-// makes the model reason about a log it actually has in full.
-test "output ending exactly on the cap is not reported as truncated" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const cap: usize = 4096;
-
-    const exact = try runCapped(std.testing.io, arena_state.allocator(), &.{
-        "/bin/sh", "-c", "head -c 4096 /dev/zero | tr '\\0' 'a'",
-    }, cap, durationMs(30_000));
-    try std.testing.expectEqual(cap, exact.stdout.len);
-    try std.testing.expect(!atCaptureLimit(exact));
-}
-
-test "both pipes past the cap drain together, so the child never wedges" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const cap: usize = 4096;
-
-    const noisy = try runCapped(std.testing.io, arena_state.allocator(), &.{
-        "/bin/sh",
-        "-c",
-        "head -c 200000 /dev/zero | tr '\\0' 'a'; head -c 200000 /dev/zero | tr '\\0' 'b' >&2",
-    }, cap, durationMs(30_000));
-    try std.testing.expectEqual(cap, noisy.stdout.len);
-    try std.testing.expectEqual(cap, noisy.stderr.len);
-    try std.testing.expectEqualStrings("a" ** 8, noisy.stdout[0..8]);
-    try std.testing.expectEqualStrings("b" ** 8, noisy.stderr[0..8]);
-}
 
 test "a gap in the tool-call indexes leaves no nameless call behind" {
     const gpa = std.testing.allocator;
@@ -4079,8 +2761,8 @@ test "a gap in the tool-call indexes leaves no nameless call behind" {
     defer run_state.deinit();
     const arena = run_state.allocator();
 
-    var result: ChatResult = .{};
-    var calls: std.ArrayList(ToolCall) = .empty;
+    var result: chat_mod.ChatResult = .{};
+    var calls: std.ArrayList(chat_mod.ToolCall) = .empty;
     var out_buf: std.ArrayList(u8) = .empty;
     var unparsable: usize = 0;
     // Index 2 arrives with no 0 and no 1, so the frame parser has to size the
@@ -4099,28 +2781,20 @@ test "a gap in the tool-call indexes leaves no nameless call behind" {
 }
 
 test "out-of-range numbers from the model saturate instead of trapping" {
-    try std.testing.expectEqual(std.math.maxInt(u64), num(.{ .float = 1e30 }));
-    try std.testing.expectEqual(@as(u64, 0), num(.{ .float = -5 }));
-    try std.testing.expectEqual(@as(u64, 0), num(.{ .float = std.math.nan(f64) }));
-    _ = durationMs(std.math.maxInt(u64));
+    try std.testing.expectEqual(std.math.maxInt(u64), chat_mod.num(.{ .float = 1e30 }));
+    try std.testing.expectEqual(@as(u64, 0), chat_mod.num(.{ .float = -5 }));
+    try std.testing.expectEqual(@as(u64, 0), chat_mod.num(.{ .float = std.math.nan(f64) }));
+    _ = net.durationMs(std.math.maxInt(u64));
 }
 
 test "a saturated token count does not overflow the run total" {
-    var usage: Usage = .{};
-    const absurd: ChatResult = .{ .prompt_tokens = std.math.maxInt(u64), .total_tokens = std.math.maxInt(u64) };
+    var usage: chat_mod.Usage = .{};
+    const absurd: chat_mod.ChatResult = .{ .prompt_tokens = std.math.maxInt(u64), .total_tokens = std.math.maxInt(u64) };
     usage.add(&absurd);
-    const ordinary: ChatResult = .{ .prompt_tokens = 10 };
+    const ordinary: chat_mod.ChatResult = .{ .prompt_tokens = 10 };
     usage.add(&ordinary);
     try std.testing.expectEqual(std.math.maxInt(u64), usage.prompt);
     try std.testing.expectEqual(std.math.maxInt(u64), usage.total);
-}
-
-test "a truncated tool result keeps whole codepoints" {
-    // "日" is 3 bytes, so a 4- or 5-byte cut lands inside it.
-    try std.testing.expectEqualStrings("abc", clamp("abc日本", 4));
-    try std.testing.expectEqualStrings("ab", clamp("ab日", 4));
-    try std.testing.expectEqualStrings("abc", clamp("abc", 4));
-    try std.testing.expect(std.unicode.utf8ValidateSlice(clamp("abc日本語のテキスト", 8)));
 }
 
 test "backoff doubles, caps, and never overflows an attempt counter" {
@@ -4220,40 +2894,6 @@ test "a response cut at the generation ceiling says so" {
 
 // A model command that backgrounds work and exits is the shape that used to
 // leave a process holding the run's ports after the call returned.
-test "a capped tool call takes its process tree down with it" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const n = try tmp.dir.realPath(io, &path_buf);
-    const pid_path = try std.fs.path.join(arena, &.{ path_buf[0..n], "grandchild.pid" });
-
-    // The shell exits at once; the grandchild holds the pipe open, so the read
-    // only ends at the timeout, which is the path under test. `$!` and not
-    // `$$`: inside a nested `sh -c` the latter is still the outer shell's pid,
-    // which has already exited, so the check below would pass on a process
-    // that was never running.
-    const script = try std.fmt.allocPrint(arena, "sh -c 'sleep 30 & echo $! > {s}; wait' & exit 0", .{pid_path});
-    try std.testing.expectError(error.Timeout, runCapped(io, arena, &.{ "/bin/sh", "-c", script }, 4096, durationMs(300)));
-
-    const raw = tmp.dir.readFileAlloc(io, "grandchild.pid", arena, .limited(64)) catch return error.GrandchildNotReported;
-    const pid = try std.fmt.parseInt(std.posix.pid_t, std.mem.trim(u8, raw, " \t\r\n"), 10);
-    // The kill is delivered asynchronously and the orphan is reaped by init
-    // afterwards, so "gone" is a short poll rather than an instant check.
-    var attempt: usize = 0;
-    while (attempt < 50) : (attempt += 1) {
-        std.posix.kill(pid, .CONT) catch return;
-        try io.sleep(.{ .nanoseconds = 20 * std.time.ns_per_ms }, .awake);
-    }
-    std.debug.print("grandchild {d} survived the tool call\n", .{pid});
-    return error.GrandchildSurvived;
-}
 
 // A run that starts twice, or two runs that start together, can read the same
 // wall-clock stamp. The second one must write beside the first: truncating it
@@ -4318,7 +2958,7 @@ test "a session log that cannot be written is dropped, not written to again" {
     const file = try tmp.dir.openFile(io, "read-only.jsonl", .{ .mode = .read_only });
 
     var session: ?Session = .{ .file = file, .cwd = ".", .model = "test/model", .dir = "/sessions" };
-    var result: ChatResult = .{};
+    var result: chat_mod.ChatResult = .{};
     result.prompt_tokens = 7;
     writeSessionRecord(io, arena, &session, 1, &result);
     try std.testing.expect(session == null);
@@ -4434,11 +3074,11 @@ fn fuzzStream(_: void, smith: *std.testing.Smith) !void {
     try msgs.appendSlice(gpa, ",");
     try msgs.appendSlice(gpa, try assistantMessage(arena, &sink.result));
     for (sink.calls.items) |call| {
-        var tool_msg = JsonBuf.init(arena);
+        var tool_msg = chat_mod.JsonBuf.init(arena);
         try msgs.appendSlice(gpa, ",{\"role\":\"tool\",\"tool_call_id\":");
-        try writeJsonString(tool_msg.writer(), call.id);
+        try chat_mod.writeJsonString(tool_msg.writer(), call.id);
         try tool_msg.writer().writeAll(",\"content\":");
-        try writeJsonString(tool_msg.writer(), "ok");
+        try chat_mod.writeJsonString(tool_msg.writer(), "ok");
         try tool_msg.writer().writeAll("}");
         try msgs.appendSlice(gpa, tool_msg.items());
     }
@@ -4521,144 +3161,6 @@ test "the trace switch is on only for a value that says so" {
     try std.testing.expect(debugEnabled(&env));
     try env.put("MDEBUG", "on");
     try std.testing.expect(debugEnabled(&env));
-}
-
-// The edit tool rewrites a file the model named, and the one-match case has to
-// come out the same whether or not `replace_all` was asked for: the count
-// checks above refuse an ambiguous match, so both paths have exactly the
-// occurrences they are going to replace. The tool resolves paths against the
-// process directory, so the test runs from the temp directory it edits.
-test "edit replaces one match, or every match when asked" {
-    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer state.deinit();
-    const arena = state.allocator();
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const tmp_path = cwd_buf[0..try tmp.dir.realPath(std.testing.io, &cwd_buf)];
-    const orig = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, ".", arena);
-    try std.process.setCurrentPath(std.testing.io, tmp_path);
-    defer std.process.setCurrentPath(std.testing.io, orig) catch {};
-
-    var args: std.json.ObjectMap = .empty;
-    try args.put(arena, "path", .{ .string = "a.txt" });
-    try args.put(arena, "old_string", .{ .string = "x" });
-    try args.put(arena, "new_string", .{ .string = "y" });
-
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.txt", .data = "a x b" });
-    try std.testing.expectEqualStrings("replaced 1 occurrence(s) in a.txt", try toolEdit(std.testing.io, arena, args));
-    try std.testing.expectEqualStrings("a y b", try tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
-
-    // An ambiguous match is refused rather than guessed at, so the file the
-    // model was shown is still the file on disk.
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.txt", .data = "x and x" });
-    try std.testing.expect(std.mem.startsWith(u8, try toolEdit(std.testing.io, arena, args), "error: old_string occurs 2 times"));
-    try std.testing.expectEqualStrings("x and x", try tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
-
-    try args.put(arena, "replace_all", .{ .bool = true });
-    try std.testing.expectEqualStrings("replaced 2 occurrence(s) in a.txt", try toolEdit(std.testing.io, arena, args));
-    try std.testing.expectEqualStrings("y and y", try tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
-}
-
-/// The two runners a tool subprocess can go through, named so the reaping
-/// check below runs against both with one body.
-const ToolRunner = enum {
-    /// `runToolProcess`, behind the search and git tools.
-    tool_process,
-    /// `runCapped`, behind `bash`.
-    capped,
-
-    fn call(self: ToolRunner, arena: std.mem.Allocator, io: Io, argv: []const []const u8) anyerror!void {
-        const timeout = durationMs(300);
-        switch (self) {
-            .tool_process => _ = try runToolProcess(io, arena, argv, 4096, 4096, timeout),
-            .capped => _ = try runCapped(io, arena, argv, 4096, timeout),
-        }
-    }
-};
-
-/// Asserts that a runner took its whole process tree down with it. The command
-/// backgrounds a grandchild that outlives the shell, writes that grandchild's
-/// pid, and then runs past the timeout: without the group signal the grandchild
-/// is still alive when the call returns, and every timed-out call leaked one.
-/// `pid_name` names the file the grandchild reports itself in, so the two
-/// runners leave separate marks and the message says which one leaked.
-fn expectNoProcessSurvived(runner: ToolRunner, pid_name: []const u8) !void {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const n = try tmp.dir.realPath(io, &path_buf);
-    const pid_path = try std.fs.path.join(arena, &.{ path_buf[0..n], pid_name });
-    // The grandchild holds the pipe open, so the read only ends when the
-    // timeout fires, which is the path under test.
-    const script = try std.fmt.allocPrint(arena,
-        \\sh -c 'echo $$ > {s}; sleep 30' &
-        \\sleep 30
-    , .{pid_path});
-    try std.testing.expectError(error.Timeout, runner.call(arena, io, &.{ "/bin/sh", "-c", script }));
-
-    const raw = tmp.dir.readFileAlloc(io, pid_name, arena, .limited(64)) catch return error.GrandchildNotReported;
-    const pid = try std.fmt.parseInt(std.posix.pid_t, std.mem.trim(u8, raw, " \t\r\n"), 10);
-    // The kill is delivered asynchronously and the orphan is reaped by init
-    // afterwards, so "gone" is a short poll rather than an instant check.
-    var attempt: usize = 0;
-    while (attempt < 50) : (attempt += 1) {
-        std.posix.kill(pid, .CONT) catch return;
-        try io.sleep(.{ .nanoseconds = 20 * std.time.ns_per_ms }, .awake);
-    }
-    std.debug.print("grandchild {d} survived {s}\n", .{ pid, @tagName(runner) });
-    return error.GrandchildSurvived;
-}
-
-test "an interrupt during a tool call is forwarded to that call's process group" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    // Read the disposition back rather than raising the signal: a raised
-    // SIGINT ends the run, and this run is the test binary.
-    var before: std.posix.Sigaction = undefined;
-    std.posix.sigaction(.INT, null, &before);
-    forwardInterruptsToToolGroup();
-    var after: std.posix.Sigaction = undefined;
-    std.posix.sigaction(.INT, null, &after);
-    std.posix.sigaction(.INT, &before, null);
-    try std.testing.expect(after.handler.handler == onInterrupt);
-
-    const Thread = std.Thread;
-    const Call = struct {
-        fn go(a: std.mem.Allocator, t: Io) void {
-            // The call outlives nothing here: the handler kills its group, so
-            // a hung call would hang the suite rather than fail it.
-            _ = runToolProcess(t, a, &.{ "/bin/sh", "-c", "sleep 5" }, 4096, 4096, durationMs(3000)) catch {};
-        }
-    };
-    const thread = try Thread.spawn(.{}, Call.go, .{ arena, io });
-    // Published for as long as the call runs, which is what the handler reads.
-    var attempt: usize = 0;
-    while (tool_group.load(.monotonic) == 0 and attempt < 200) : (attempt += 1)
-        try io.sleep(.{ .nanoseconds = 5 * std.time.ns_per_ms }, .awake);
-    try std.testing.expect(tool_group.load(.monotonic) > 0);
-    thread.join();
-    try std.testing.expectEqual(@as(std.posix.pid_t, 0), tool_group.load(.monotonic));
-}
-
-// A tool call must take its whole process tree down with it: without the group
-// signal the grandchild is still alive when the call returns, and every
-// timed-out call leaked one.
-test "a tool call that times out leaves no process of its own behind" {
-    try expectNoProcessSurvived(.tool_process, "grandchild.pid");
 }
 
 // The session store is a per-run directory nothing used to delete from, so a
@@ -4769,24 +3271,6 @@ fn countSessionLogs(io: Io, arena: std.mem.Allocator, session_dir: []const u8) !
     return n;
 }
 
-test "a tool call reports the exit status of the command it ran" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    const res = try runToolProcess(std.testing.io, arena, &.{ "/bin/sh", "-c", "printf out; printf err 1>&2; exit 3" }, 4096, 4096, durationMs(10_000));
-    try std.testing.expectEqualStrings("out", res.stdout);
-    try std.testing.expectEqualStrings("err", res.stderr);
-    try std.testing.expectEqual(@as(u8, 3), res.term.exited);
-}
-
-// `bash` goes through the capped runner, not the search runner, and it is the
-// tool that starts builds, so it carries the same process-group kill: a command
-// that backgrounds work and then outruns its deadline took the whole tree with
-// it only where the search tools already did.
-test "a bash call that times out leaves no process of its own behind" {
-    try expectNoProcessSurvived(.capped, "bash_grandchild.pid");
-}
-
 // The name and the id of a streamed tool call are copies the run allocator
 // owns, so releasing the response has to release them with its other buffers.
 test "a response releases the copies it made of a tool call" {
@@ -4796,8 +3280,8 @@ test "a response releases the copies it made of a tool call" {
     var scratch_state = std.heap.ArenaAllocator.init(gpa);
     defer scratch_state.deinit();
 
-    var result: ChatResult = .{};
-    var calls: std.ArrayList(ToolCall) = .empty;
+    var result: chat_mod.ChatResult = .{};
+    var calls: std.ArrayList(chat_mod.ToolCall) = .empty;
     var out_buf: std.ArrayList(u8) = .empty;
     var unparsable: usize = 0;
     const payload = "{\"choices\":[{\"delta\":{\"tool_calls\":[" ++

@@ -57,6 +57,13 @@ release, and `microagent update` moves you to it.
 
 ### Changed
 
+- The agent loop, the tools and the shared value types are three modules instead of one file.
+  `main.zig` held the command line, the config, the session log, the provider request, the frame
+  parser, the tools and every subprocess it started, which is a 4 400-line file where a change to
+  the tool runner cannot be read without reading the retry policy. `tool.zig` now owns the tools
+  and the capped process runner, `chat.zig` the value types a turn is made of and the JSON writer,
+  and `net.zig` the deadline the two of them share. No behavior changes.
+
 - A turn whose response never arrives is not sent again. A connection that died while the
   response head was being read left the request whole on the wire, so the provider may have
   generated and billed the completion with no response to show for it, and the retry bought a

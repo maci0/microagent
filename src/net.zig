@@ -1,5 +1,6 @@
-//! What the two HTTP clients share: the CA-bundle escape hatch and the two
-//! output sinks, stderr for notes and stdout for the answers a caller parses.
+//! What the three clients over one machine share: the CA-bundle escape hatch, a
+//! deadline, and the two output sinks, stderr for notes and stdout for the
+//! answers a caller parses.
 //!
 //! A leaf module. It imports nothing from the rest of the program, so the
 //! agent run and `update` can both use it without either of them importing
@@ -56,6 +57,13 @@ pub fn caBundlePath(env: *const std.process.Environ.Map) []const u8 {
     if (env.get("MICROAGENT_CA_BUNDLE")) |v| if (v.len > 0) return v;
     if (env.get("SSL_CERT_FILE")) |v| if (v.len > 0) return v;
     return "";
+}
+
+/// A monotonic duration for `Io.Timeout`, from milliseconds. A tool deadline
+/// and a provider read both name one, so the conversion is spelled once here
+/// rather than at each call site.
+pub fn durationMs(ms: u64) Io.Timeout {
+    return .{ .duration = .{ .raw = .{ .nanoseconds = ms *| std.time.ns_per_ms }, .clock = .awake } };
 }
 
 test "the CA bundle comes from the project's variable first, then the system one" {
