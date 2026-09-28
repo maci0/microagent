@@ -332,6 +332,12 @@ pub fn writeRecord(io: Io, arena: std.mem.Allocator, session: *?Session, elapsed
     };
 }
 
+/// The parts of a session record that do not vary with the strings in it: the
+/// keys, the punctuation, and the numbers. Not derived from the format string
+/// so it cannot go stale against it; it is a reservation, and the buffer's
+/// growth ladder still covers a record that outgrows it.
+const session_record_scaffolding_bytes = 512;
+
 /// One response's line: this response's own counters, not the run's cumulative
 /// ones, so a reader sums them; the directory it ran in; and the model time it
 /// took. The keys are the OpenAI-shaped ones toktop already reads by name.
@@ -343,7 +349,11 @@ fn sessionRecord(
     elapsed_ms: u64,
     result: *const chat.ChatResult,
 ) ![]u8 {
-    var jb = chat.JsonBuf.init(allocator);
+    // Sized from the three strings the record carries, so it is allocated once
+    // rather than doubling up to a few hundred bytes on a ladder of copies.
+    // Escape expansion can still push it past this, which the ladder handles.
+    var jb = chat.JsonBuf.initCapacity(allocator, session_record_scaffolding_bytes +
+        cwd.len + model.len + result.finish_reason.len);
     const w = jb.writer();
     try w.print("{{\"ts\":{d},\"cwd\":", .{ts_ms});
     try chat.writeJsonString(w, cwd);

@@ -944,13 +944,19 @@ fn runChecked(
     // The URL the response named is unbounded, and these lines print into a
     // fixed buffer, so the asset name is what identifies the download. The name
     // is the tag inside it, so it is quoted for a reader the way the tag is.
-    var asset = fetchAsset(io, arena, &client, gpa, a_url, bearerFor(a_url, bearer), max_asset_bytes, &status) catch |err|
-        return downloadFailure(io, asset_name_text, status, err);
-    defer asset.deinit();
+    //
+    // The sidecar is fetched first on purpose. It is a digest line of about a
+    // hundred bytes and the asset is up to `max_asset_bytes`, and a release
+    // that published the binary without publishing its checksum is exactly the
+    // case `decide` refuses, so fetching the binary first spends the whole
+    // download to find out the install was never going to happen.
     var side_what_buf: [320]u8 = undefined;
     const side_what = std.fmt.bufPrint(&side_what_buf, "the checksum sidecar for {s}", .{asset_name_text}) catch asset_name_text;
     const sidecar = fetchBody(io, &client, gpa, arena, s_url, bearerFor(s_url, bearer), max_sidecar_bytes, &status) catch |err|
         return downloadFailure(io, side_what, status, err);
+    var asset = fetchAsset(io, arena, &client, gpa, a_url, bearerFor(a_url, bearer), max_asset_bytes, &status) catch |err|
+        return downloadFailure(io, asset_name_text, status, err);
+    defer asset.deinit();
 
     const decision = decide(.{
         .running = version,

@@ -125,6 +125,16 @@ pub const JsonBuf = struct {
         return .{ .list = list, .allocating = Io.Writer.Allocating.fromArrayList(allocator, &list) };
     }
 
+    /// A buffer that already has room for `capacity` bytes. Use it where the
+    /// size is known before the first write, so a record of a few hundred
+    /// bytes does not walk the whole doubling ladder to get there, reallocating
+    /// and copying at every step.
+    pub fn initCapacity(allocator: std.mem.Allocator, capacity: usize) JsonBuf {
+        var list: std.ArrayList(u8) = .empty;
+        list.ensureTotalCapacityPrecise(allocator, capacity) catch return init(allocator);
+        return .{ .list = list, .allocating = Io.Writer.Allocating.fromArrayList(allocator, &list) };
+    }
+
     pub fn writer(self: *JsonBuf) *Io.Writer {
         return &self.allocating.writer;
     }
@@ -184,7 +194,16 @@ pub fn writeJsonString(w: *Io.Writer, s: []const u8) !void {
                 '\t' => try w.writeAll("\\t"),
                 0x08 => try w.writeAll("\\b"),
                 0x0c => try w.writeAll("\\f"),
-                else => try w.print("\\u{x:0>4}", .{c}),
+                // The generic formatter is a lot of machinery to emit six fixed
+                // bytes, and this is the per-byte arm of the loop every byte of
+                // a turn passes through: a binary file or a control-heavy tool
+                // result pays it once per byte. The byte is below 0x20 here, so
+                // the high nibble is zero and the escape is always `\u00xx`.
+                else => {
+                    try w.writeAll("\\u00");
+                    try w.writeByte(hex_digits[c >> 4]);
+                    try w.writeByte(hex_digits[c & 0x0f]);
+                },
             }
             i += 1;
             start = i;

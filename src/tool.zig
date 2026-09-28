@@ -19,7 +19,7 @@ const net = @import("net.zig");
 /// model reading a truncated log knows the tail is missing rather than reading
 /// a build failure as the end of the output. `git` is the exception: it is cut
 /// by line count instead.
-const max_tool_output = 24 * 1024;
+pub const max_tool_output = 24 * 1024;
 
 /// Ceiling on a file `read` returns whole. A source file is kilobytes, so the
 /// cap is what keeps one `read` of a multi-gigabyte artifact out of the
@@ -29,6 +29,17 @@ const max_read_bytes: usize = 4 * 1024 * 1024;
 const max_edit_bytes: usize = 8 * 1024 * 1024;
 /// A secret file is one key, not a document.
 const max_secret_bytes: usize = 4096;
+
+/// The two lines `bash` appends after the output it captured, kept as constants
+/// so the buffer it assembles is sized from the same text it writes. Each
+/// carries its own leading newline; the newline is emitted separately when
+/// there is output for it to separate.
+const bash_truncation_note = "\n[output truncated at the tool's cap]";
+const bash_exit_note = "\n(exit: )";
+/// An exit number is a wait status, so it is three digits at most. Sized here
+/// rather than guessed, because it is the one part of the exit line whose
+/// width is not fixed by the constant around it.
+const exit_status_max_digits = 3;
 
 /// How long a read-only tool subprocess may run: `search`, `ast` and `git`.
 /// `bash` has its own default and ceiling below, because it is the one tool
@@ -361,9 +372,7 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
         // turn. The names come from the same tables `search` and `ast` exclude
         // by, so a credential is out of the git tool's results as well as out
         // of the ones it is asked for by name.
-        for (credential_globs) |glob| {
-            try argv.append(arena, try std.fmt.allocPrint(arena, ":(exclude,icase){s}", .{glob[1..]}));
-        }
+        try argv.appendSlice(arena, &credential_pathspecs);
     }
 
     // The cap drains rather than fails, for the reason `runCapped` gives: the
@@ -532,7 +541,14 @@ fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_
         error.Timeout => return std.fmt.allocPrint(arena, "error: command timed out after {d}ms", .{timeout_ms}),
         else => return std.fmt.allocPrint(arena, "error: {s}", .{@errorName(err)}),
     };
+    // The captured size is known before the first append, so the buffer is
+    // sized once rather than doubling its way up to `capture_limit` on each
+    // stream, copying everything written so far at every step. The two
+    // trailing notes are the only other bytes written to it; they are spelled
+    // as constants so the reservation and the writes cannot drift apart.
     var buf: std.ArrayList(u8) = .empty;
+    try buf.ensureTotalCapacity(arena, res.stdout.len + res.stderr.len +
+        bash_truncation_note.len + bash_exit_note.len + exit_status_max_digits);
     if (res.stdout.len > 0) try buf.appendSlice(arena, res.stdout);
     if (res.stderr.len > 0) {
         if (buf.items.len > 0) try buf.appendSlice(arena, "\n");
@@ -542,11 +558,11 @@ fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_
     // a half-read build log or diff read as the whole one.
     if (atCaptureLimit(res)) {
         if (buf.items.len > 0) try buf.appendSlice(arena, "\n");
-        try buf.appendSlice(arena, "[output truncated at the tool's cap]");
+        try buf.appendSlice(arena, bash_truncation_note[1..]);
     }
     if (buf.items.len == 0) return std.fmt.allocPrint(arena, "(no output, exit {s})", .{@tagName(res.term)});
     if (res.term != .exited or res.term.exited != 0) {
-        try buf.appendSlice(arena, "\n(exit: ");
+        try buf.appendSlice(arena, bash_exit_note[0 .. bash_exit_note.len - 1]);
         try buf.appendSlice(arena, @tagName(res.term));
         if (res.term == .exited)
             try buf.appendSlice(arena, try std.fmt.allocPrint(arena, " {d}", .{res.term.exited}));
@@ -633,6 +649,17 @@ const credential_glob_table: [credential_globs_capacity][]const u8 = blk: {
 const credential_globs_capacity = credential_names.len + credential_extensions.len + credential_dirs.len + 3;
 
 const credential_globs: []const []const u8 = credential_glob_table[0..credential_globs_capacity];
+
+/// The same names as git pathspec exclusions, built at compile time. `git` is
+/// handed a pathspec rather than a glob, so the leading `!` comes off and the
+/// rest is rewritten, and the result is the same on every call: formatting
+/// them per `git diff` and per `git show` was one allocation per name, on
+/// the turn arena, for strings the compiler already knows.
+const credential_pathspecs = blk: {
+    var list: [credential_globs_capacity][]const u8 = undefined;
+    for (credential_globs, 0..) |glob, i| list[i] = ":(exclude,icase)" ++ glob[1..];
+    break :blk list;
+};
 
 test "every credential the name rule refuses is in the exclusion set git carries" {
     // The `git show`/`git diff` exclusions are the globs above rewritten as
@@ -786,10 +813,11 @@ fn readLines(io: Io, arena: std.mem.Allocator, path: []const u8, offset: usize, 
             // of, and truncate it.
             start = pos + 1;
         }
-        // A read that completed no line consumed nothing, and the move below
-        // is then a memmove of the whole pending line onto itself, which on a
-        // file of long lines is the other half of that gigabyte.
-        if (true) {
+        // Nothing was consumed on a read that completed no line, and the
+        // move below is a memmove of the whole pending line onto itself when
+        // `start` is zero, which on a file of long lines is the other half of
+        // that gigabyte.
+        if (start > 0) {
             const left = rest.items.len - start;
             std.mem.copyForwards(u8, rest.items[0..left], rest.items[start..]);
             rest.shrinkRetainingCapacity(left);
@@ -908,7 +936,13 @@ fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
 
     // The checks above leave either every occurrence replaced or, without
     // `all`, exactly one to replace, and one match is the loop below run once.
+    // `count` is in hand, so the rewritten file's exact size is too, and the
+    // buffer is allocated once rather than doubling up to it: `raw` is a file
+    // of up to `max_edit_bytes`, and the arena keeps every intermediate block
+    // a doubling leaves behind.
+    const replacements = if (all) count else 1;
     var buf: std.ArrayList(u8) = .empty;
+    try buf.ensureTotalCapacity(arena, raw.len - replacements * old.len + replacements * new.len);
     var rest = raw;
     while (std.mem.indexOf(u8, rest, old)) |at| {
         try buf.appendSlice(arena, rest[0..at]);
@@ -939,7 +973,14 @@ fn toolSearch(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceilin
     // After the model's own glob, because a later `--glob` is the one ripgrep
     // applies where two match: the exclusions are not a default a `--glob` on
     // the command line can turn off.
-    for (credential_globs) |g| try argv.appendSlice(arena, &.{ "--glob", g });
+    // Reserved once rather than grown through: the loop below pushes two
+    // entries per name, and letting the list reallocate under it copies
+    // everything appended so far on each step.
+    try argv.ensureUnusedCapacity(arena, credential_globs.len * 2);
+    for (credential_globs) |g| {
+        argv.appendAssumeCapacity("--glob");
+        argv.appendAssumeCapacity(g);
+    }
     try argv.appendSlice(arena, &.{ "--", pattern, path });
     return runSearchTool(io, arena, argv.items, "ripgrep", ceiling_ms, environ_map);
 }
@@ -959,7 +1000,11 @@ fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
 
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(arena, &.{ "ast-grep", "run", "--pattern", pattern, "--lang", lang });
-    for (credential_globs) |g| try argv.appendSlice(arena, &.{ "--globs", g });
+    try argv.ensureUnusedCapacity(arena, credential_globs.len * 2);
+    for (credential_globs) |g| {
+        argv.appendAssumeCapacity("--globs");
+        argv.appendAssumeCapacity(g);
+    }
     if (rewrite) |r| try argv.appendSlice(arena, &.{ "--rewrite", r, "--update-all" });
     try argv.appendSlice(arena, &.{ "--", path });
 

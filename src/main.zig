@@ -34,6 +34,15 @@ const default_model = "deepseek/deepseek-v4-flash";
 /// long run pays for every file it has ever read, forever: one Terminal-Bench
 /// task reached 1.7M cumulative input tokens that way.
 const conversation_soft_limit = 400 * 1024;
+/// Room for one whole tool message: the capped result plus the keys, the id
+/// and the JSON punctuation around it. A result is escaped as it is written,
+/// so this is the common case rather than a bound; the buffer still grows if a
+/// result needs more, which is what a control byte in the output does.
+const tool_result_message_bytes = tool_mod.max_tool_output + tool_result_message_scaffolding_bytes;
+/// Everything in a tool message that is not the result: the role, the
+/// tool_call_id, the content key and the braces. An id is a provider-assigned
+/// string of no stated width, so this is headroom rather than a bound.
+const tool_result_message_scaffolding_bytes = 512;
 /// The smallest tool result compaction will replace with a marker. Below it
 /// the marker is not worth the rewrite, so such a result stays whole and the
 /// conversation grows instead.
@@ -860,7 +869,12 @@ fn childEnviron(gpa: std.mem.Allocator, env: *const std.process.Environ.Map) !st
     while (it.next()) |entry| {
         var skip = false;
         for (key_vars) |name| {
-            if (std.mem.eql(u8, entry.key_ptr.*, name)) skip = true;
+            // A match is the answer, so the remaining names are not compared
+            // against the same key.
+            if (std.mem.eql(u8, entry.key_ptr.*, name)) {
+                skip = true;
+                break;
+            }
         }
         if (!skip) try copy.put(entry.key_ptr.*, entry.value_ptr.*);
     }
@@ -888,12 +902,11 @@ fn loadStyle(io: Io, init: std.process.Init, arena: std.mem.Allocator, config: [
     // is true of a path a directory name was spelled with. The two untrusted
     // byte paths this program already has normalize what they print, and a
     // diagnostic is the third.
-    const path_text = chat_mod.safeText(arena, source.path orelse "", quoted_value_bytes);
     var text: ?[]const u8 = null;
     if (source.path) |p| {
         text = std.Io.Dir.cwd().readFileAlloc(io, p, arena, .limited(max_config_bytes)) catch |err| blk: {
             if (configReadWorthReporting(source.named, err))
-                net.note(io, arena, "microagent: config {s}: {s}; using the built-in levels\n", .{ path_text, @errorName(err) });
+                net.note(io, arena, "microagent: config {s}: {s}; using the built-in levels\n", .{ configPathText(arena, source), @errorName(err) });
             break :blk null;
         };
     }
@@ -901,14 +914,22 @@ fn loadStyle(io: Io, init: std.process.Init, arena: std.mem.Allocator, config: [
         const key = chat_mod.safeText(arena, unknown.key, quoted_value_bytes);
         if (unknown.from_config) {
             if (unknown.bad_value)
-                net.note(io, arena, "microagent: config {s}: '{s}' is not a level; keeping the default\n", .{ path_text, key })
+                net.note(io, arena, "microagent: config {s}: '{s}' is not a level; keeping the default\n", .{ configPathText(arena, source), key })
             else
-                net.note(io, arena, "microagent: config {s}: '{s}' is not a key this file uses; keeping the default\n", .{ path_text, key });
+                net.note(io, arena, "microagent: config {s}: '{s}' is not a key this file uses; keeping the default\n", .{ configPathText(arena, source), key });
         } else {
             net.note(io, arena, "microagent: {s} is not a level; keeping the default\n", .{key});
         }
     }
     return .{ .style = style, .source = source.path };
+}
+
+/// The config path as a diagnostic should spell it. Built where a diagnostic
+/// is about to be written rather than once for the run: every use of it is an
+/// error path, and most runs take none of them, so computing it up front meant
+/// walking the path byte by byte into a fresh allocation that was then dropped.
+fn configPathText(arena: std.mem.Allocator, source: StyleSource) []const u8 {
+    return chat_mod.safeText(arena, source.path orelse "", quoted_value_bytes);
 }
 
 /// The configuration this run resolved, on stderr when MDEBUG is on. Precedence
@@ -1327,8 +1348,19 @@ fn incompleteAnswer(arena: std.mem.Allocator, result: *const chat_mod.ChatResult
 /// on every turn of every run, so the provider re-read it each time. Member
 /// order is not significant in JSON, so the constant fields go first and the
 /// conversation ends the body.
+/// Everything in a request body that is not the conversation: the tool schema
+/// is 3.0 KB, and the rest is the model, the token ceiling and the keys. A
+/// reservation rather than a bound, and the buffer still grows if it does not
+/// cover the body, which a long model name would do.
+const body_scaffolding_bytes = tools_json.len + 1024;
+
 fn buildBody(arena: std.mem.Allocator, opts: Options, messages: []const u8) ![]u8 {
-    var jb = chat_mod.JsonBuf.init(arena);
+    // The body is the conversation plus the constant fields, and both sizes are
+    // in hand before the first write. Reserving them costs one allocation:
+    // starting from zero walks the doubling ladder up to the conversation's
+    // size, reallocating and copying the whole thing at every step, once per
+    // turn, on an arena that keeps each intermediate block.
+    var jb = chat_mod.JsonBuf.initCapacity(arena, messages.len + body_scaffolding_bytes);
     const w = jb.writer();
     try w.print("{{\"model\":", .{});
     try chat_mod.writeJsonString(w, opts.model);
@@ -2147,8 +2179,13 @@ fn finishTurn(
     // shorter, not a reason to re-read the clock for each of them.
     const ceiling_ms = budget.toolCeilingMs(io);
     for (result.calls.items) |call| {
-        if (isEdit(call.name)) progress.edited = true;
-        if (isTestRun(call.name, call.args.items)) progress.tested = true;
+        // Both flags only ever go false to true, so once one is set nothing
+        // later in the turn can change it. `isTestRun` is the expensive half:
+        // it scans the call's whole argument string once per test-runner name,
+        // and a multi-kilobyte `bash` command pays that every time. The check
+        // is what records the fact, so it is skipped rather than repeated.
+        if (!progress.edited and isEdit(call.name)) progress.edited = true;
+        if (!progress.tested and isTestRun(call.name, call.args.items)) progress.tested = true;
         // A call the budget will not pay for still gets a tool message. An
         // assistant turn that names calls the conversation never answers is one
         // the next request rejects, so the loop below would spend a turn on a
@@ -2161,7 +2198,11 @@ fn finishTurn(
                 // failure as text) is named here, so a result reading
                 // `error: OutOfMemory` says which of the calls ran out.
                 try std.fmt.allocPrint(arena, "error: {s}: {s}", .{ call.name, @errorName(err) });
-        var tool_msg = chat_mod.JsonBuf.init(arena);
+        // A tool result is capped at `max_tool_output`, so the message holding
+        // it is bounded before the first byte is written. Reserving that now
+        // keeps a full-size result from walking the doubling ladder, which on
+        // the turn arena leaves every intermediate block behind.
+        var tool_msg = chat_mod.JsonBuf.initCapacity(arena, tool_result_message_bytes);
         try tool_msg.writer().writeAll(",{\"role\":\"tool\",\"tool_call_id\":");
         try chat_mod.writeJsonString(tool_msg.writer(), call.id);
         try tool_msg.writer().writeAll(",\"content\":");
