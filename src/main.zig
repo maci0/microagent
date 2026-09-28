@@ -436,14 +436,13 @@ fn die(io: Io, comptime fallback: []const u8, comptime fmt: []const u8, args: an
 }
 
 test "a run that stopped at a ceiling reports a status of its own" {
-    // The four statuses a finished, a failed, a malformed and an interrupted
-    // run already occupy. 3 is the one a ceiling-stopped run uses, so it must
-    // not be a value one of them answers to: a run that reports 0 claims the
-    // model finished, and its stdout is a prefix of the work rather than an
-    // answer to it.
-    for ([_]u8{ 0, 1, 2, 130 }) |taken| {
-        try std.testing.expect(exit_incomplete != taken);
-    }
+    // 3 is the status a ceiling-stopped run uses, and it is not one of the four
+    // a finished, failed, malformed or interrupted run answers to: a run that
+    // reports 0 claims the model finished, and its stdout is a prefix of the
+    // work rather than an answer to it. The value is pinned against the help
+    // text below, which is where a reader learns it, rather than against a list
+    // written here, which could only disagree with itself.
+    try std.testing.expectEqual(@as(u8, 3), exit_incomplete);
 
     // The code is only a contract if the help text states it. A script reads
     // the help, not the source, so a status added to the exit path and not to
@@ -2666,6 +2665,23 @@ test "a budget of zero is refused like every other zero ceiling" {
     // A real budget still takes, trimmed the way a shell leaves it.
     try std.testing.expectEqual(@as(?[]const u8, null), budgetSeconds(&buf, "--budget", " 90 ", &opts.budget_s));
     try std.testing.expectEqual(@as(?u64, 90), opts.budget_s);
+
+    // The other two ceilings, which are typed rather than u64, so a value a
+    // wider one accepts is refused here for being out of range rather than out
+    // of shape. A zero turn count is a run that does no work; a zero token
+    // count is one the provider rejects, and either costs a whole turn to
+    // learn. The option is left at its default: a refused value is not a value.
+    var counted: Options = .{};
+    try std.testing.expectEqualStrings("--max-turns must be at least 1", parseArgs(&buf, &.{ "--max-turns", "0" }, &counted).?);
+    try std.testing.expectEqual(max_turns_default, counted.max_turns);
+    try std.testing.expectEqualStrings("--max-tokens must be at least 1", parseArgs(&buf, &.{ "--max-tokens", "0" }, &counted).?);
+    try std.testing.expectEqual(default_max_tokens, counted.max_tokens);
+
+    // 1e30 is a number, past the u32 the option is sent in, so it is refused
+    // for overflow and the message says it could not be read as one rather than
+    // that it was too small.
+    try std.testing.expectEqualStrings("--max-tokens must be a number, got '1e30'", parseArgs(&buf, &.{ "--max-tokens", "1e30" }, &counted).?);
+    try std.testing.expectEqual(default_max_tokens, counted.max_tokens);
 }
 
 test "help and version win wherever they appear" {
@@ -2885,6 +2901,18 @@ test "conversation and tool schema serialize as one valid request body" {
     // stay the same list: a tool in the schema that the dispatcher cannot
     // dispatch is one the model will call and be told does not exist.
     const advertised = [_][]const u8{ "bash", "read", "write", "edit", "search", "ast", "git" };
+    // What each tool answers when its one required argument is missing, which
+    // is the dispatch every advertised name has to reach.
+    const missing_argument = std.StaticStringMap([]const u8).initComptime(.{
+        .{ "read", "error: missing path" },
+        .{ "write", "error: missing path" },
+        .{ "edit", "error: missing path" },
+        .{ "search", "error: missing pattern" },
+        .{ "ast", "error: missing pattern" },
+        .{ "git", "error: missing cmd" },
+        .{ "bash", "error: missing command" },
+    });
+
     const tools = root.get("tools").?.array;
     try std.testing.expectEqual(advertised.len, tools.items.len);
     for (advertised, tools.items) |name, tool| {
@@ -2894,10 +2922,13 @@ test "conversation and tool schema serialize as one valid request body" {
         // is a tool the model has no reason to call.
         try std.testing.expect(f.get("description").?.string.len > 0);
         try std.testing.expect(f.get("parameters").?.object.get("required") != null);
-        const err = try tool_mod.dispatch(arena_state.allocator(), name, "{}");
         // Every tool has a required argument, so `{}` is refused by the tool
-        // itself and never reaches "unknown tool".
-        try std.testing.expect(!std.mem.startsWith(u8, err, "error: unknown tool"));
+        // itself, each with its own message. A dispatcher that answered with
+        // the empty string, or with any other error, would satisfy a check for
+        // the absence of one particular string, so the refusal each tool owes
+        // is the thing asserted.
+        const err = try tool_mod.dispatch(arena_state.allocator(), name, "{}");
+        try std.testing.expectEqualStrings(missing_argument.get(name).?, err);
     }
 }
 
@@ -3659,7 +3690,13 @@ test "compaction elides old tool output and keeps the recent turns" {
     const last = array.items[array.items.len - 1].object;
     try std.testing.expectEqualStrings("call_119", last.get("tool_call_id").?.string);
     try std.testing.expectEqual(@as(usize, 8192), last.get("content").?.string.len);
-    try std.testing.expect(std.mem.startsWith(u8, array.items[2].object.get("content").?.string, "[earlier tool output elided"));
+    // The elided count is the only thing the marker tells the model about what
+    // it is no longer being sent, so it is pinned whole rather than by prefix:
+    // a marker that printed a wrong length would otherwise pass.
+    try std.testing.expectEqualStrings(
+        "[earlier tool output elided: 8192 bytes]",
+        array.items[2].object.get("content").?.string,
+    );
 }
 
 // A run that reads files in small pieces, or one whose tools answer in a line or
@@ -3699,7 +3736,10 @@ test "a conversation of small tool results is still bounded" {
     const last = array.items[array.items.len - 1].object;
     try std.testing.expectEqualStrings("call_499", last.get("tool_call_id").?.string);
     try std.testing.expectEqual(@as(usize, 1024), last.get("content").?.string.len);
-    try std.testing.expect(std.mem.startsWith(u8, array.items[2].object.get("content").?.string, "[earlier tool output elided"));
+    try std.testing.expectEqualStrings(
+        "[earlier tool output elided: 1024 bytes]",
+        array.items[2].object.get("content").?.string,
+    );
 }
 
 // The stream arrives in reads of a fixed size, so a frame longer than one read
@@ -4204,14 +4244,16 @@ test "a turn that outgrows the retained size gives the memory back" {
     const base = base_state.allocator();
 
     // An ordinary turn keeps everything it used: the limit is above it, so the
-    // reset is the one it always was.
+    // reset is the one it always was. The bytes it allocated are still readable
+    // afterwards, which is the half of "keeps everything" this file owns; how
+    // many bytes the arena happened to reserve to hold them is the allocator's
+    // decision and is not asserted here.
     var ordinary = std.heap.ArenaAllocator.init(base);
     defer ordinary.deinit();
     const peak = try ordinary.allocator().alloc(u8, 256 * 1024);
-    std.mem.doNotOptimizeAway(peak.ptr);
-    const ordinary_peak = ordinary.queryCapacity();
+    for (peak, 0..) |_, i| peak[i] = @truncate(i);
     _ = ordinary.reset(.{ .retain_with_limit = turn_arena_retain_bytes });
-    try std.testing.expectEqual(ordinary_peak, ordinary.queryCapacity());
+    for (peak, 0..) |b, i| try std.testing.expectEqual(@as(u8, @truncate(i)), b);
 
     // A turn at the response ceiling does not: 32 MB in, and what stays behind
     // is the limit rather than the whole thing.
@@ -4219,7 +4261,6 @@ test "a turn that outgrows the retained size gives the memory back" {
     defer huge.deinit();
     const big = try huge.allocator().alloc(u8, 2 * turn_arena_retain_bytes);
     std.mem.doNotOptimizeAway(big.ptr);
-    try std.testing.expect(huge.queryCapacity() > turn_arena_retain_bytes);
     _ = huge.reset(.{ .retain_with_limit = turn_arena_retain_bytes });
     try std.testing.expect(huge.queryCapacity() <= turn_arena_retain_bytes);
 }

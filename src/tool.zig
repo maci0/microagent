@@ -2503,14 +2503,24 @@ test "an interrupt during a tool call is forwarded to that call's process group"
     const io = threaded.io();
 
     // Read the disposition back rather than raising the signal: a raised
-    // SIGINT ends the run, and this run is the test binary.
+    // SIGINT ends the run, and this run is the test binary. Both dispositions
+    // the installer writes are read and both are put back, because
+    // `onInterrupt` exits the process: a SIGTERM left aimed at it for the rest
+    // of the binary means a cancelled CI job, or a harness that timed out, is
+    // answered by the test runner exiting 130 where it should report a failure.
     var before: std.posix.Sigaction = undefined;
+    var before_term: std.posix.Sigaction = undefined;
     std.posix.sigaction(.INT, null, &before);
+    std.posix.sigaction(.TERM, null, &before_term);
     forwardInterruptsToToolGroup();
     var after: std.posix.Sigaction = undefined;
+    var after_term: std.posix.Sigaction = undefined;
     std.posix.sigaction(.INT, null, &after);
+    std.posix.sigaction(.TERM, null, &after_term);
     std.posix.sigaction(.INT, &before, null);
+    std.posix.sigaction(.TERM, &before_term, null);
     try std.testing.expect(after.handler.handler == onInterrupt);
+    try std.testing.expect(after_term.handler.handler == onInterrupt);
 
     const Thread = std.Thread;
     const Call = struct {

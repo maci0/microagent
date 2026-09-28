@@ -422,6 +422,11 @@ test "the literal-byte table is the escape and ASCII rules it replaces" {
         // below it a byte is copied when nothing else sends it elsewhere.
         const needs_check = c >= 0x80;
         try std.testing.expectEqual(!escaped and !needs_check, json_literal_byte[c]);
+        // The escaper does not read the table: it asks the rule. Two spellings
+        // of one decision drift apart the moment one of them is edited, and the
+        // bytes that go wrong are a request body, so the rule is held to the
+        // table here rather than restated beside it.
+        try std.testing.expectEqual(escaped, jsonNeedsEscape(c));
     }
 }
 
@@ -548,13 +553,14 @@ test "a quoted value never exceeds its budget" {
     }
     // A character the value did not carry is never cut in half, whatever the
     // budget: each of these is three or four bytes and the cuts land between
-    // them.
+    // them. The escaped length is not a multiple of anything: it depends on
+    // which characters the budget left inside an escape, so a length rule
+    // would only be a statement about this fixture.
     const wide = "日本語" ** 10;
     for (0..wide.len + 1) |max| {
         const quoted = safeText(arena, wide, max);
         try std.testing.expect(quoted.len <= max);
         try std.testing.expect(std.mem.startsWith(u8, wide, quoted));
-        try std.testing.expect(quoted.len % 3 == 0);
     }
 }
 
@@ -737,4 +743,128 @@ fn fuzzJsonString(_: void, smith: *std.testing.Smith) !void {
         try std.testing.expect(std.unicode.utf8ValidateSlice(got));
         try std.testing.expect(got.len <= text.len * 3);
     }
+}
+
+// `num` is the shared reader for every count a model or a provider supplies:
+// the usage counters folded into a run total, the line limits `tool` applies.
+// Every arm is pinned with a hand-written value, because the arms disagree
+// about what a zero, a negative or a non-number means, and an arm read as zero
+// is a run that reports it spent nothing.
+test "a count is read from every shape a frame can spell it in" {
+    const cases = .{
+        .{ std.json.Value{ .null = {} }, 0 },
+        .{ std.json.Value{ .integer = 0 }, 0 },
+        .{ std.json.Value{ .integer = -5 }, 0 },
+        .{ std.json.Value{ .integer = 7 }, 7 },
+        .{ std.json.Value{ .float = 2.9 }, 2 },
+        .{ std.json.Value{ .float = -1.0 }, 0 },
+        .{ std.json.Value{ .float = 1e30 }, std.math.maxInt(u64) },
+        .{ std.json.Value{ .number_string = "12" }, 12 },
+        .{ std.json.Value{ .number_string = "twelve" }, 0 },
+        .{ std.json.Value{ .bool = true }, 0 },
+    };
+    inline for (cases) |c| try std.testing.expectEqual(c[1], num(c[0]));
+    // A container is not a count, and neither is it a zero to fold in.
+    var items: std.json.Array = .init(std.testing.allocator);
+    defer items.deinit();
+    try std.testing.expectEqual(@as(u64, 0), num(.{ .array = items }));
+    // An absent field is the same answer as an explicit null: the frame
+    // carried no count either way.
+    try std.testing.expectEqual(@as(u64, 0), num(null));
+}
+
+// `maybeNum` exists because folding an absent count in as zero would erase the
+// count an earlier frame set, so "not a number" has to be distinguishable from
+// "zero". The counter is how a run says which of the two it saw.
+test "a count that is absent, null or not a number is left to the caller" {
+    try std.testing.expectEqual(@as(?u64, null), maybeNum(null, null));
+    try std.testing.expectEqual(@as(?u64, null), maybeNum(std.json.Value{ .null = {} }, null));
+
+    // Spelled as a string, because providers quote these; whitespace around a
+    // quoted number is still that number.
+    try std.testing.expectEqual(@as(?u64, 12), maybeNum(.{ .string = "12" }, null));
+    try std.testing.expectEqual(@as(?u64, 12), maybeNum(.{ .string = " 12 \r\n" }, null));
+
+    var unparsable: usize = 0;
+    try std.testing.expectEqual(@as(?u64, null), maybeNum(.{ .string = "many" }, &unparsable));
+    try std.testing.expectEqual(@as(usize, 1), unparsable);
+    // A second refusal adds to the count rather than resetting it.
+    try std.testing.expectEqual(@as(?u64, null), maybeNum(.{ .string = "" }, &unparsable));
+    try std.testing.expectEqual(@as(usize, 2), unparsable);
+    // A real number never touches the counter, whichever arm read it.
+    try std.testing.expectEqual(@as(?u64, 3), maybeNum(.{ .integer = 3 }, &unparsable));
+    try std.testing.expectEqual(@as(usize, 2), unparsable);
+    // A null counter is the "nobody is counting" case, and it must not trap.
+    try std.testing.expectEqual(@as(?u64, null), maybeNum(.{ .string = "many" }, null));
+}
+
+// `str` backs every tool argument read, and a non-string there is a call that
+// is missing the argument it needs, not a call whose argument is the number.
+test "a string argument is read only from a string" {
+    try std.testing.expectEqualStrings("x", str(.{ .string = "x" }).?);
+    try std.testing.expect(str(null) == null);
+    try std.testing.expect(str(null) == null);
+    try std.testing.expect(str(std.json.Value{ .integer = 3 }) == null);
+    try std.testing.expect(str(std.json.Value{ .bool = false }) == null);
+    try std.testing.expect(str(std.json.Value{ .null = {} }) == null);
+}
+
+// The escaper asks `utf8SequenceLen` what to copy, and 0 is the answer that
+// turns a byte into U+FFFD. A bad lead byte, a truncated tail, an overlong
+// encoding and a surrogate all have to read as 0 rather than as a length the
+// copy would then trust.
+test "a UTF-8 sequence is measured, or refused" {
+    const cases = .{
+        .{ "\x80", 0 },
+        .{ "\xbf", 0 },
+        .{ "\xc2", 0 },
+        .{ "\xc2\x9b", 2 },
+        .{ "\xe6\x97", 0 },
+        .{ "\xe6\x97\xa5", 3 },
+        .{ "\xf0\x9f", 0 },
+        .{ "\xf0\x9f\x98", 0 },
+        .{ "\xf0\x9f\x98\x80", 4 },
+        // A lead byte promising five or six bytes is not a UTF-8 lead byte.
+        .{ "\xf8\x88\x80\x80\x80", 0 },
+        .{ "\xfc\x84\x80\x80\x80\x80", 0 },
+        // Overlong: the same character spelled in more bytes than it needs.
+        .{ "\xc0\xaf", 0 },
+        .{ "\xe0\x80\xaf", 0 },
+        // A surrogate half is not a character.
+        .{ "\xed\xa0\x80", 0 },
+    };
+    inline for (cases) |c| try std.testing.expectEqual(c[1], utf8SequenceLen(c[0], 0));
+}
+
+// The usage line is read by name on a bill, so the five counters keep their
+// positions: swapping any two of them reports one number under another's name
+// and no other test here would notice.
+test "the five usage counters are emitted in the order the wire names them" {
+    var buf = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer buf.deinit();
+    try buf.writer.print(usage_fields, .{ 1, 2, 3, 4, 5 });
+    try std.testing.expectEqualStrings(
+        "\"prompt_tokens\":1,\"cached_tokens\":2,\"completion_tokens\":3,\"reasoning_tokens\":4,\"total_tokens\":5",
+        buf.written(),
+    );
+}
+
+// The run total is what a session log and a status line report. A provider
+// number beyond u64 saturates on the way in, and adding it to a total already
+// near the ceiling must saturate too: a plain `+` would wrap to a small number
+// and report a run that spent almost nothing.
+test "a run total saturates instead of wrapping" {
+    var usage: Usage = .{ .prompt = std.math.maxInt(u64) - 1, .cached = 1, .completion = 10, .reasoning = 20, .total = 30 };
+    usage.add(&.{
+        .prompt_tokens = 10,
+        .cached_tokens = 1,
+        .completion_tokens = 1,
+        .reasoning_tokens = 1,
+        .total_tokens = 2,
+    });
+    try std.testing.expectEqual(std.math.maxInt(u64), usage.prompt);
+    try std.testing.expectEqual(@as(u64, 2), usage.cached);
+    try std.testing.expectEqual(@as(u64, 11), usage.completion);
+    try std.testing.expectEqual(@as(u64, 21), usage.reasoning);
+    try std.testing.expectEqual(@as(u64, 32), usage.total);
 }

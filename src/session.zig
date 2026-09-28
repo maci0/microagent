@@ -806,17 +806,21 @@ test "a log in a subdirectory is pruned where it is, not by its bare name" {
     var i: usize = 0;
     while (i < total) : (i += 1) {
         const nested = i == 0;
-        const name = if (nested) "0archive/1.jsonl" else try std.fmt.allocPrint(arena, "{d}.jsonl", .{i + 1});
+        const name = if (nested) "0archive/1.jsonl" else try std.fmt.allocPrint(arena, "{d}.jsonl", .{i});
         try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "log" });
     }
 
     pruneSessions(io, arena, dir_path);
 
     // The oldest is the nested one, and it goes where it is: counted, deleted,
-    // and the root's own `1.jsonl` is still a name the store holds.
+    // and the root's own `1.jsonl` is still a name the store holds. That root
+    // name is the case the pruner can get wrong, a delete addressed by basename
+    // alone taking it out along with the nested log, so the root names run from
+    // `1` and the nested log is the only one past the limit. Seeded any other
+    // way the assertion about it holds whether or not the two were told apart.
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "0archive/1.jsonl", .{}));
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "1.jsonl", .{}));
-    try tmp.dir.access(io, try std.fmt.allocPrint(arena, "{d}.jsonl", .{total}), .{});
+    try tmp.dir.access(io, "1.jsonl", .{});
+    try tmp.dir.access(io, try std.fmt.allocPrint(arena, "{d}.jsonl", .{total - 1}), .{});
     var left: usize = 0;
     {
         var dir = try std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true });
