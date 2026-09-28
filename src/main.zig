@@ -2055,6 +2055,22 @@ fn writeGutterText(gpa: std.mem.Allocator, buf: *std.ArrayList(u8), s: []const u
     var i: usize = 0;
     var start: usize = 0;
     while (i < s.len) {
+        // Eight bytes at a time while they are plain ASCII with nothing to
+        // escape. A tool result is mostly plain text and this runs over every
+        // one of them plus every message a conversation rebuild copies, so the
+        // per-byte branch was the loop the body cost hung on.
+        while (i + word_bytes <= s.len) {
+            const mask = needsAttention(std.mem.readInt(u64, s[i..][0..word_bytes], .little));
+            if (mask == 0) {
+                i += word_bytes;
+                continue;
+            }
+            // The mask holds a high bit for every byte that needs looking at,
+            // so the lowest one is the first such byte. Never zero in here.
+            i += @ctz(mask) / 8;
+            break;
+        }
+        if (i >= s.len) break;
         const c = s[i];
         if (c < 0x20 or c == 0x7f) {
             try buf.appendSlice(gpa, s[start..i]);
@@ -2304,6 +2320,30 @@ fn writeJsonString(w: *Io.Writer, s: []const u8) !void {
 
 fn jsonNeedsEscape(c: u8) bool {
     return c < 0x20 or c == '"' or c == '\\';
+}
+
+const word_bytes = @sizeOf(u64);
+const byte_ones: u64 = 0x0101010101010101;
+const byte_high: u64 = 0x8080808080808080;
+
+/// Zero when all eight bytes can be copied through untouched, otherwise the
+/// high bit of every byte that cannot: a control byte, a quote, a backslash,
+/// or anything outside ASCII, which is length checked before it is written.
+/// One compare per eight bytes instead of a branch per byte, and the byte it
+/// lands on is the one the per-byte path would have found anyway.
+fn needsAttention(x: u64) u64 {
+    if (x & byte_high != 0) return x & byte_high;
+    const below_space = (x -% (0x20 *% byte_ones)) & ~x;
+    if (below_space & byte_high != 0) return below_space & byte_high;
+    const quotes = byteEquals(x, 0x22);
+    if (quotes != 0) return quotes;
+    return byteEquals(x, 0x5c);
+}
+
+/// The high bit of every byte of `x` that equals `c`, zero when there is none.
+fn byteEquals(x: u64, c: u8) u64 {
+    const v = x ^ (@as(u64, c) *% byte_ones);
+    return (v -% byte_ones) & ~v & byte_high;
 }
 
 /// The length of the UTF-8 sequence starting at `i`, or 0 where the bytes are
@@ -2559,6 +2599,90 @@ test "json string escaping" {
 // path: a byte that is neither escaped nor copied comes back short. The
 // range is the ASCII one, which is what the escaper is responsible for; bytes
 // above it are passed through as written, and a lone one is not valid JSON.
+// The escaper skips eight bytes at a time, so anything it cannot copy has to
+// be found out of a word, at every offset a word can begin it. A miss is not
+// a wrong escape, it is a byte copied through that had to be rewritten: the
+// body stops being the JSON the API reads, and it fails far from here.
+test "every byte that needs attention is found at every word offset" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const specials = [_][]const u8{ "\"", "\\", "\n", "\r", "\t", "\u{1}", "\u{8}", "\u{c}", "\u{1f}" };
+    const filler = "plain ascii text that must not be touched at all here";
+    for (specials) |sp| {
+        var at: usize = 0;
+        while (at < 24) : (at += 1) {
+            var text: std.ArrayList(u8) = .empty;
+            var pad: usize = 0;
+            while (pad < at) : (pad += 1) try text.append(arena, filler[pad % filler.len]);
+            try text.appendSlice(arena, sp);
+            var tail: usize = 0;
+            while (tail < 20) : (tail += 1) try text.append(arena, filler[tail % filler.len]);
+
+            var buf = JsonBuf.init(arena);
+            try writeJsonString(buf.writer(), text.items);
+            const encoded = buf.items();
+            const parsed = std.json.parseFromSlice(std.json.Value, arena, encoded, .{}) catch {
+                std.debug.print("offset {d}, input {s}\n", .{ at, sp });
+                return error.TestUnexpectedResult;
+            };
+            try std.testing.expectEqualStrings(text.items, parsed.value.string);
+        }
+    }
+}
+
+// The same for a multi-byte character: the scan has to stop on the lead byte
+// rather than copy the continuation bytes through, wherever it lands.
+test "a multi-byte character survives escaping at every word offset" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const marks = [_][]const u8{ "caf\u{00e9}", "\u{1f600}", "\u{65e5}\u{672c}", "a\u{00e9}b", "\u{00e9}\u{00e9}\u{00e9}\u{00e9}" };
+    for (marks) |mark| {
+        var at: usize = 0;
+        while (at < 20) : (at += 1) {
+            var text: std.ArrayList(u8) = .empty;
+            var pad: usize = 0;
+            while (pad < at) : (pad += 1) try text.append(arena, 'x');
+            try text.appendSlice(arena, mark);
+            var tail: usize = 0;
+            while (tail < 12) : (tail += 1) try text.append(arena, 'x');
+
+            var buf = JsonBuf.init(arena);
+            try writeJsonString(buf.writer(), text.items);
+            const encoded = buf.items();
+            const parsed = try std.json.parseFromSlice(std.json.Value, arena, encoded, .{});
+            try std.testing.expectEqualStrings(text.items, parsed.value.string);
+        }
+    }
+}
+
+// The common case, and the one the word scan exists for: a long plain run is
+// copied whole, with nothing rewritten.
+test "a long plain run is copied whole" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    for ([_]usize{ 0, 1, 7, 8, 9, 63, 64, 65, 4096 }) |len| {
+        const plain = try arena.alloc(u8, len);
+        for (plain, 0..) |*b, i| b.* = 'a' + @as(u8, @intCast(i % 26));
+
+        var buf = JsonBuf.init(arena);
+        try writeJsonString(buf.writer(), plain);
+        // Two quotes and nothing rewritten.
+        const encoded = buf.items();
+        try std.testing.expectEqual(len + 2, encoded.len);
+        try std.testing.expectEqual(@as(u8, '"'), encoded[0]);
+        try std.testing.expectEqualSlices(u8, plain, encoded[1 .. len + 1]);
+
+        const parsed = try std.json.parseFromSlice(std.json.Value, arena, encoded, .{});
+        try std.testing.expectEqualStrings(plain, parsed.value.string);
+    }
+}
+
 test "every ASCII byte survives escaping" {
     var all: [128]u8 = undefined;
     for (&all, 0..) |*c, i| c.* = @intCast(i);
