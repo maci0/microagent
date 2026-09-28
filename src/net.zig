@@ -68,12 +68,8 @@ pub fn note(io: Io, arena: std.mem.Allocator, comptime fmt: []const u8, args: an
 /// already uses. Empty means no bundle was named, and so does a value that is
 /// nothing but whitespace, which is not a path any filesystem holds.
 pub fn caBundlePath(env: *const std.process.Environ.Map) []const u8 {
-    if (env.get("MICROAGENT_CA_BUNDLE")) |v| {
-        const p = std.mem.trim(u8, v, env_surrounding);
-        if (p.len > 0) return p;
-    }
-    if (env.get("SSL_CERT_FILE")) |v| {
-        const p = std.mem.trim(u8, v, env_surrounding);
+    for ([_][]const u8{ "MICROAGENT_CA_BUNDLE", "SSL_CERT_FILE" }) |name| {
+        const p = std.mem.trim(u8, env.get(name) orelse continue, env_surrounding);
         if (p.len > 0) return p;
     }
     return "";

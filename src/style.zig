@@ -30,37 +30,18 @@ pub const CavemanLevel = enum {
     wenyan_full,
     wenyan_ultra,
 
-    /// The spelling that goes in the config file and in the injected header,
-    /// paired with the level it names. The one place a level's spelling is
-    /// written: `name` and `parseCaveman` both read it, so a level cannot be
-    /// added to the enum and forgotten by one of them.
-    const levels = [_]struct { name: []const u8, level: CavemanLevel }{
-        .{ .name = "off", .level = .off },
-        .{ .name = "lite", .level = .lite },
-        .{ .name = "full", .level = .full },
-        .{ .name = "ultra", .level = .ultra },
-        .{ .name = "wenyan-lite", .level = .wenyan_lite },
-        .{ .name = "wenyan-full", .level = .wenyan_full },
-        .{ .name = "wenyan-ultra", .level = .wenyan_ultra },
-    };
-
-    // Every level the enum has, spelled, exactly once. A count alone would
-    // still let a duplicated level stand in for a missing one.
-    comptime {
-        if (levels.len != @typeInfo(CavemanLevel).@"enum".fields.len)
-            @compileError("every CavemanLevel needs an entry in `levels`");
-        for (levels, 0..) |row, i| {
-            for (levels, 0..) |other, j| {
-                if (i != j and row.level == other.level)
-                    @compileError("a CavemanLevel is listed twice in `levels`");
-            }
-        }
-    }
-
-    /// The spelling that goes in the config file and in the injected header.
+    /// The spelling that goes in the config file and in the injected header: the
+    /// tag name, with the underscore a config value cannot carry written as a
+    /// dash. Reading it off the enum rather than off a second table means a
+    /// level added above is spelled by the header and accepted by the parser
+    /// without either being told about it.
     pub fn name(self: CavemanLevel) []const u8 {
-        for (levels) |row| if (row.level == self) return row.name;
-        unreachable; // the comptime check above rules this out
+        return switch (self) {
+            .wenyan_lite => "wenyan-lite",
+            .wenyan_full => "wenyan-full",
+            .wenyan_ultra => "wenyan-ultra",
+            else => @tagName(self),
+        };
     }
 };
 
@@ -72,30 +53,10 @@ pub const PonytailLevel = enum {
     full,
     ultra,
 
-    /// The spelling the config file and the injected header use, paired with
-    /// the level it names. One source for both, as `CavemanLevel.levels` is.
-    const levels = [_]struct { name: []const u8, level: PonytailLevel }{
-        .{ .name = "off", .level = .off },
-        .{ .name = "lite", .level = .lite },
-        .{ .name = "full", .level = .full },
-        .{ .name = "ultra", .level = .ultra },
-    };
-
-    comptime {
-        if (levels.len != @typeInfo(PonytailLevel).@"enum".fields.len)
-            @compileError("every PonytailLevel needs an entry in `levels`");
-        for (levels, 0..) |row, i| {
-            for (levels, 0..) |other, j| {
-                if (i != j and row.level == other.level)
-                    @compileError("a PonytailLevel is listed twice in `levels`");
-            }
-        }
-    }
-
-    /// The spelling that goes in the config file and in the injected header.
+    /// The spelling the config file and the injected header use, the tag name
+    /// again: every level here is spelled the same way in the enum.
     pub fn name(self: PonytailLevel) []const u8 {
-        for (levels) |row| if (row.level == self) return row.name;
-        unreachable; // the comptime check above rules this out
+        return @tagName(self);
     }
 };
 
@@ -206,8 +167,8 @@ fn unquote(raw: []const u8) []const u8 {
 /// `wenyan-full`.
 pub fn parseCaveman(value: []const u8) ?CavemanLevel {
     const v = std.mem.trim(u8, value, " \t\r\n");
-    for (CavemanLevel.levels) |row| {
-        if (std.ascii.eqlIgnoreCase(v, row.name)) return row.level;
+    for (std.enums.values(CavemanLevel)) |level| {
+        if (std.ascii.eqlIgnoreCase(v, level.name())) return level;
     }
     if (std.ascii.eqlIgnoreCase(v, "wenyan")) return .wenyan_full;
     return null;
@@ -215,8 +176,8 @@ pub fn parseCaveman(value: []const u8) ?CavemanLevel {
 
 pub fn parsePonytail(value: []const u8) ?PonytailLevel {
     const v = std.mem.trim(u8, value, " \t\r\n");
-    for (PonytailLevel.levels) |row| {
-        if (std.ascii.eqlIgnoreCase(v, row.name)) return row.level;
+    for (std.enums.values(PonytailLevel)) |level| {
+        if (std.ascii.eqlIgnoreCase(v, level.name())) return level;
     }
     return null;
 }
