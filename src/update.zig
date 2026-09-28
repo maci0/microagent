@@ -165,8 +165,12 @@ pub fn releaseApiUrl(buf: []u8, repo: []const u8) error{ BadRepo, NameTooLong }!
         return error.NameTooLong;
 }
 
+/// The longest a DNS name may be, so the buffer that lowercases one cannot be
+/// sized by a guess. Anything longer is not a host a url names.
+const max_host_len: usize = 253;
+
 fn hostTrusted(host: []const u8) bool {
-    var lower: [253]u8 = undefined;
+    var lower: [max_host_len]u8 = undefined;
     if (host.len == 0 or host.len > lower.len) return false;
     for (host, 0..) |c, i| lower[i] = std.ascii.toLower(c);
     const h = lower[0..host.len];
@@ -237,10 +241,14 @@ pub fn checksumMatches(asset: []const u8, sidecar: []const u8, basename: []const
     const line_end = std.mem.findScalar(u8, sidecar, '\n') orelse sidecar.len;
     var line = sidecar[0..line_end];
     if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
-    if (line.len < 66) return false;
-    const hex = line[0..64];
-    if (!std.mem.eql(u8, line[64..66], "  ")) return false;
-    if (!std.mem.eql(u8, line[66..], basename)) return false;
+    const hex_len = std.crypto.hash.sha2.Sha256.digest_length * 2;
+    // Two spaces separate the digest from the name, so the name starts one
+    // past the digest's two hex digits per byte.
+    const name_at = hex_len + 2;
+    if (line.len < name_at) return false;
+    const hex = line[0..hex_len];
+    if (!std.mem.eql(u8, line[hex_len..name_at], "  ")) return false;
+    if (!std.mem.eql(u8, line[name_at..], basename)) return false;
     for (hex) |c| if (!std.ascii.isHex(c)) return false;
     var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(asset, &digest, .{});

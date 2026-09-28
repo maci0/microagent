@@ -457,7 +457,7 @@ const reasoning_effort_names = "minimal, low, medium, high, none";
 /// The caller decides what a message does with it, because the flag path
 /// hands it back as a usage error while the environment path exits on it.
 fn reasoningEffort(buf: []u8, value: []const u8, out: *?[]const u8) ?[]const u8 {
-    const v = std.mem.trim(u8, value, " \t\r\n");
+    const v = std.mem.trim(u8, value, env_surrounding);
     for (reasoning_efforts) |level| if (std.mem.eql(u8, v, level)) {
         out.* = v;
         return null;
@@ -475,7 +475,7 @@ fn reasoningEffort(buf: []u8, value: []const u8, out: *?[]const u8) ?[]const u8 
 /// number is written through `out` and a bad value is a message, for the same
 /// reason `reasoningEffort` returns one.
 fn ceiling(comptime T: type, buf: []u8, from: []const u8, value: []const u8, out: *T) ?[]const u8 {
-    const n = std.fmt.parseInt(T, std.mem.trim(u8, value, " \t\r\n"), 10) catch
+    const n = std.fmt.parseInt(T, std.mem.trim(u8, value, env_surrounding), 10) catch
         return std.fmt.bufPrint(buf, "{s} must be a number, got '{s}'", .{ from, clip(value) }) catch
             "must be a number";
     if (n == 0) return std.fmt.bufPrint(buf, "{s} must be at least 1", .{from}) catch
@@ -645,6 +645,23 @@ fn setValued(
     return null;
 }
 
+/// An argument's name and the value joined to it, as `--flag=value` spells
+/// them. `joined` is null for every other argument, and for a short flag: `-p=x`
+/// stays the unknown argument it is, because a single dash never joins.
+///
+/// Both walks of the command line ask this, so the rule that decides which
+/// arguments are a flag with a value lives here once.
+const SplitArg = struct { name: []const u8, joined: ?[]const u8 };
+
+fn splitArg(arg: []const u8) SplitArg {
+    if (arg.len > 2 and arg[0] == '-' and arg[1] == '-') {
+        if (std.mem.indexOfScalar(u8, arg, '=')) |eq| {
+            return .{ .name = arg[0..eq], .joined = arg[eq + 1 ..] };
+        }
+    }
+    return .{ .name = arg, .joined = null };
+}
+
 /// Reads the arguments after the program name into `opts`, formatting any
 /// message that names a bad argument into `buf`. Returns null when
 /// they parse, or a message naming what was wrong, which `usageError` prints
@@ -657,16 +674,9 @@ fn parseArgs(buf: []u8, argv: []const []const u8, opts: *Options) ?[]const u8 {
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
         const arg = argv[i];
-        // `--flag=value` splits into a name and an joined value; a short flag
-        // never does, so `-p=x` stays the unknown argument it is.
-        var name = arg;
-        var joined: ?[]const u8 = null;
-        if (arg.len > 2 and arg[0] == '-' and arg[1] == '-') {
-            if (std.mem.indexOfScalar(u8, arg, '=')) |eq| {
-                name = arg[0..eq];
-                joined = arg[eq + 1 ..];
-            }
-        }
+        const split = splitArg(arg);
+        const name = split.name;
+        const joined = split.joined;
         if (isFlag(name, "-V", "--version")) {
             opts.action = .version;
             return null;
@@ -700,25 +710,17 @@ fn parseArgs(buf: []u8, argv: []const []const u8, opts: *Options) ?[]const u8 {
 
 /// The action `--help` or `--version` asks for, or null when the command line
 /// asks for neither. Read over the same arguments, and with the same rules,
-/// as `parseArgs` below: a value a flag takes is stepped over, so
+/// as `parseArgs` above: a value a flag takes is stepped over, so
 /// `microagent -p --help` is a run whose prompt is the words `--help` and not
 /// a request for help, in both places. A change to how one walks the command
 /// line is a change to both.
 fn earlyAction(argv: []const []const u8) ?Action {
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
-        const arg = argv[i];
-        var name = arg;
-        var joined: ?[]const u8 = null;
-        if (arg.len > 2 and arg[0] == '-' and arg[1] == '-') {
-            if (std.mem.indexOfScalar(u8, arg, '=')) |eq| {
-                name = arg[0..eq];
-                joined = arg[eq + 1 ..];
-            }
-        }
-        if (isFlag(name, "-V", "--version")) return .version;
-        if (isFlag(name, "-h", "--help")) return .help;
-        if (valuedFlag(name) != null and joined == null) i += 1;
+        const split = splitArg(argv[i]);
+        if (isFlag(split.name, "-V", "--version")) return .version;
+        if (isFlag(split.name, "-h", "--help")) return .help;
+        if (valuedFlag(split.name) != null and split.joined == null) i += 1;
     }
     return null;
 }
@@ -2084,10 +2086,6 @@ fn backoffMs(attempt: u32) u64 {
     if (attempt == 0) return retry_backoff_base_ms;
     const shift: u6 = @intCast(@min(attempt - 1, max_backoff_shift));
     return @min(retry_backoff_base_ms *| (@as(u64, 1) << shift), max_backoff_ms);
-}
-
-fn waitFor(io: Io, attempt: u32) !void {
-    try waitMs(io, backoffMs(attempt));
 }
 
 fn waitMs(io: Io, ms: u64) !void {

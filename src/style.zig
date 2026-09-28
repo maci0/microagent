@@ -169,23 +169,26 @@ fn unquote(raw: []const u8) []const u8 {
     return raw[1..end];
 }
 
-/// Case- and whitespace-insensitive, with a bare `wenyan` shorthand for
-/// `wenyan-full`.
-pub fn parseCaveman(value: []const u8) ?CavemanLevel {
+/// A level named case- and whitespace-insensitively, or null when the value is
+/// not one of the enum's names. Both levels are read this way, so a spelling one
+/// of them accepts and the other does not is a drift this makes impossible.
+fn parseLevel(comptime Level: type, value: []const u8) ?Level {
     const v = std.mem.trim(u8, value, " \t\r\n");
-    for (std.enums.values(CavemanLevel)) |level| {
+    for (std.enums.values(Level)) |level| {
         if (std.ascii.eqlIgnoreCase(v, level.name())) return level;
     }
-    if (std.ascii.eqlIgnoreCase(v, "wenyan")) return .wenyan_full;
+    return null;
+}
+
+/// As `parseLevel`, with a bare `wenyan` shorthand for `wenyan-full`.
+pub fn parseCaveman(value: []const u8) ?CavemanLevel {
+    if (parseLevel(CavemanLevel, value)) |level| return level;
+    if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, value, " \t\r\n"), "wenyan")) return .wenyan_full;
     return null;
 }
 
 pub fn parsePonytail(value: []const u8) ?PonytailLevel {
-    const v = std.mem.trim(u8, value, " \t\r\n");
-    for (std.enums.values(PonytailLevel)) |level| {
-        if (std.ascii.eqlIgnoreCase(v, level.name())) return level;
-    }
-    return null;
+    return parseLevel(PonytailLevel, value);
 }
 
 fn isWenyan(level: CavemanLevel) bool {
