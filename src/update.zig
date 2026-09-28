@@ -810,7 +810,7 @@ fn runChecked(
 
     // The URL the response named is unbounded, and these lines print into a
     // fixed buffer, so the asset name is what identifies the download.
-    var asset = fetchAsset(&client, gpa, a_url, bearer, max_asset_bytes, &status) catch |err|
+    var asset = fetchAsset(&client, gpa, a_url, bearerFor(a_url, bearer), max_asset_bytes, &status) catch |err|
         return downloadFailure(io, asset_name, status, err);
     defer asset.deinit();
     var side_what_buf: [320]u8 = undefined;

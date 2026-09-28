@@ -142,6 +142,10 @@ release, and `microagent update` moves you to it.
   is. A token a wrapper read from a file arrived carrying that file's trailing newline, and GitHub
   refused it as an invalid credential rather than as a whitespace mistake. `microagent update --help`
   now names the two CA-bundle variables it already read.
+- The Harbor adapter validates every knob it hands the binary in `setup`, so a mistyped
+  `MICROAGENT_MAX_TURNS`, `MICROAGENT_BUDGET_SECONDS`, `MICROAGENT_AGENT_TIMEOUT_SEC` or
+  `MICROAGENT_REASONING_EFFORT` is named before the binary is looked for and uploaded, rather than
+  after a container start and an upload have already been paid for.
 - The Harbor adapter validates `MICROAGENT_BUDGET_SECONDS` before the container starts, and refuses
   a zero value for every ceiling it reads, which is what its README already promised.
 - CI restores the Zig build caches between runs, from the shared toolchain action, so a push no

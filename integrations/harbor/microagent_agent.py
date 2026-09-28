@@ -154,6 +154,23 @@ def reasoning_effort() -> str | None:
     return value
 
 
+def validate_env() -> None:
+    """Every knob the binary is handed, read once so a bad one stops the run
+    before anything is uploaded or started.
+
+    `run` reads these again, so this is not a second source of truth: it is the
+    same readers, called where the failure is cheap. The adapter's own README
+    promises a mistyped ceiling or reasoning level stops the run "before the
+    container starts", and `setup` is what brings the container up and uploads
+    the binary into it, so a value checked only in `run` has already paid for a
+    container start and an upload before the reason is printed.
+    """
+    int_env("MICROAGENT_MAX_TURNS", "150")
+    int_env("MICROAGENT_BUDGET_SECONDS", DEFAULT_BUDGET_SECONDS)
+    int_env("MICROAGENT_AGENT_TIMEOUT_SEC", "1500")
+    reasoning_effort()
+
+
 def normalize_model(model_name: str | None) -> str:
     """harbor model names carry a provider prefix ('openrouter/x/y'); microagent
     speaks to whatever base URL it is given, so the prefix is dropped."""
@@ -181,6 +198,10 @@ class Microagent(BaseAgent):
         return trimmed_env("MICROAGENT_VERSION")
 
     async def setup(self, environment: BaseEnvironment) -> None:
+        # The knobs are checked before the binary is looked for, so a mistyped
+        # one is reported as the mistyped one rather than as a missing binary on
+        # a host that has both problems.
+        validate_env()
         source = binary_path()
         if not source.is_file():
             raise RuntimeError(
