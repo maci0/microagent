@@ -109,28 +109,17 @@ pub const Style = struct {
         return std.mem.concat(allocator, u8, parts[0..n]);
     }
 
-    /// Apply a run's environment over what the document already set. The env
-    /// vars are the more explicit statement, so they win over a file on disk;
-    /// a var naming no level is ignored and leaves the document's level in
-    /// force, the same way a bad key in the document keeps its default.
-    pub fn applyEnv(self: *Style, caveman: ?[]const u8, ponytail: ?[]const u8) void {
-        if (caveman) |v| {
-            if (parseCaveman(v)) |level| self.caveman = level;
-        }
-        if (ponytail) |v| {
-            if (parsePonytail(v)) |level| self.ponytail = level;
-        }
-    }
-
     /// Read the levels out of a TOML document. A missing key keeps the
     /// default, and an unrecognized level keeps the default too: the first
-    /// offending key is returned so the caller can say so on stderr rather
-    /// than silently running a level the user did not ask for.
+    /// offending line is returned so the caller can say so on stderr rather
+    /// than silently running a level the user did not ask for. A key the file
+    /// does not define is returned the same way, because a misspelled
+    /// `caveman` would otherwise leave the default in force with nothing said.
     ///
     /// Only `key = "value"` is understood, at the top level or under `[style]`.
     /// That is the whole config, so it does not need a TOML parser: the rest of
     /// the format (numbers, arrays, dates, nested tables) has nowhere to go.
-    pub fn applyToml(self: *Style, text: []const u8) ?[]const u8 {
+    pub fn applyToml(self: *Style, text: []const u8) ?Problem {
         var ours = true;
         var lines = std.mem.splitScalar(u8, text, '\n');
         while (lines.next()) |raw| {
@@ -150,18 +139,30 @@ pub const Style = struct {
                 if (parseCaveman(value)) |level| {
                     self.caveman = level;
                 } else {
-                    return "caveman";
+                    return .{ .key = key, .bad_value = true };
                 }
             } else if (std.mem.eql(u8, key, "ponytail")) {
                 if (parsePonytail(value)) |level| {
                     self.ponytail = level;
                 } else {
-                    return "ponytail";
+                    return .{ .key = key, .bad_value = true };
                 }
+            } else {
+                return .{ .key = key, .bad_value = false };
             }
         }
         return null;
     }
+};
+
+/// A line of the config the reader could not use, so the caller can name it
+/// instead of running with a level the file did not ask for.
+pub const Problem = struct {
+    /// The key as written in the file.
+    key: []const u8,
+    /// The key is one this file defines and the value names no level; false
+    /// when the key itself is not one of them.
+    bad_value: bool,
 };
 
 /// A quoted TOML value without its quotes, stopping at the closing quote so a
@@ -319,9 +320,19 @@ test "the config sets levels and leaves absent or bad keys alone" {
     try std.testing.expectEqual(PonytailLevel.ultra, style.ponytail);
 
     // An absent key keeps the default; a bad one keeps it and is named.
-    try std.testing.expectEqualStrings("ponytail", style.applyToml("ponytail = 'lazy'").?);
+    const bad = style.applyToml("ponytail = 'lazy'").?;
+    try std.testing.expectEqualStrings("ponytail", bad.key);
+    try std.testing.expect(bad.bad_value);
     try std.testing.expectEqual(PonytailLevel.ultra, style.ponytail);
     try std.testing.expect(style.applyToml("this is not a config") == null);
+    try std.testing.expectEqual(CavemanLevel.lite, style.caveman);
+
+    // A key this file does not define is a misspelling until proven otherwise,
+    // and staying quiet about it leaves the default in force with the user
+    // believing the file set it.
+    const typo = style.applyToml("cavmen = \"off\"\n").?;
+    try std.testing.expectEqualStrings("cavmen", typo.key);
+    try std.testing.expect(!typo.bad_value);
     try std.testing.expectEqual(CavemanLevel.lite, style.caveman);
 }
 
@@ -336,29 +347,19 @@ test "the config reads either root or [style] keys, and nothing else" {
     try std.testing.expectEqual(CavemanLevel.lite, style.caveman);
 
     // An empty value is a value the levels do not have.
-    try std.testing.expectEqualStrings("caveman", style.applyToml("caveman =\n").?);
+    const empty = style.applyToml("caveman =\n").?;
+    try std.testing.expectEqualStrings("caveman", empty.key);
+    try std.testing.expect(empty.bad_value);
 }
 
-test "the environment overrides the config file, and a bad var changes nothing" {
-    var style: Style = .{};
-    try std.testing.expect(style.applyToml("caveman = \"off\"\nponytail = \"lite\"\n") == null);
-
-    // A var naming a level is the run's explicit statement, so it beats the file.
-    style.applyEnv("ultra", "off");
-    try std.testing.expectEqual(CavemanLevel.ultra, style.caveman);
-    try std.testing.expectEqual(PonytailLevel.off, style.ponytail);
-
-    // A var naming no level leaves the file's level alone rather than
-    // resetting it to the built-in default.
-    style.applyEnv("brief", null);
-    try std.testing.expectEqual(CavemanLevel.ultra, style.caveman);
-    try std.testing.expectEqual(PonytailLevel.off, style.ponytail);
-
-    // With no file at all, the vars are the only statement there is.
-    var bare: Style = .{};
-    bare.applyEnv("wenyan", "ultra");
-    try std.testing.expectEqual(CavemanLevel.wenyan_full, bare.caveman);
-    try std.testing.expectEqual(PonytailLevel.ultra, bare.ponytail);
+test "the levels the environment accepts are the levels the config accepts" {
+    // The variables name a level, not a file, so what a var may say is what a
+    // key may say. Precedence between the two is main's business.
+    try std.testing.expectEqual(CavemanLevel.off, parseCaveman("off").?);
+    try std.testing.expectEqual(CavemanLevel.wenyan_full, parseCaveman("wenyan").?);
+    try std.testing.expect(parseCaveman("brief") == null);
+    try std.testing.expectEqual(PonytailLevel.ultra, parsePonytail("ultra").?);
+    try std.testing.expect(parsePonytail("review") == null);
 }
 
 test "the wenyan levels ask for classical Chinese" {

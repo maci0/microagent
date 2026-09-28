@@ -41,13 +41,20 @@ Harbor's registry work the same way; only the dataset name changes.
 
 | variable | effect |
 | --- | --- |
-| `MICROAGENT_API_KEY` / `OPENROUTER_API_KEY` / `OPENAI_API_KEY` | provider key, passed to the container process only |
+| `MICROAGENT_API_KEY` / `OPENROUTER_API_KEY` / `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` | provider key, passed to the container process only |
 | `MICROAGENT_BASE_URL` | OpenAI-compatible endpoint (default OpenRouter) |
 | `MICROAGENT_BUDGET_SECONDS` | elapsed-time budget inside the container, read from the monotonic clock (default 600) |
 | `MICROAGENT_MAX_TURNS` | `--max-turns` passed to the binary (default 150, above the binary's own 100) |
 | `MICROAGENT_REASONING_EFFORT` | `none`/`low`/... — reasoning models otherwise spend the whole budget thinking |
 | `MICROAGENT_AGENT_TIMEOUT_SEC` | hard cap on the in-container process (default 1500) |
 | `MICROAGENT_BINARY` | path to the static binary, if not next to this file |
+| `MICROAGENT_VERSION` | version string reported to harbor, if not the binary's own |
+
+An empty value is the same as an unset one for every variable here, and a
+non-numeric `MICROAGENT_MAX_TURNS`, `MICROAGENT_BUDGET_SECONDS` or
+`MICROAGENT_AGENT_TIMEOUT_SEC` stops the run before the container starts, naming
+the variable. `MICROAGENT_MAX_TURNS` is passed as `--max-turns` and the binary
+reads the same name itself, so either route ends at the same ceiling.
 
 ## Two things the containers forced
 

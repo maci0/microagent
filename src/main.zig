@@ -150,7 +150,7 @@ pub fn main(init: std.process.Init) !void {
     var it = init.minimal.args.iterate();
     while (it.next()) |arg| try args.append(gpa, arg);
 
-    debug_enabled = init.environ_map.get("MDEBUG") != null;
+    debug_enabled = debugEnabled(init.environ_map);
 
     // `microagent update` is a subcommand, not a prompt: it is dispatched
     // before the agent's own flags so it never needs an API key.
@@ -159,17 +159,18 @@ pub fn main(init: std.process.Init) !void {
     }
 
     var opts: Options = .{};
-    if (init.environ_map.get("MICROAGENT_MODEL")) |v| opts.model = v;
-    if (init.environ_map.get("MICROAGENT_BASE_URL")) |v| opts.base_url = v;
-    if (init.environ_map.get("MICROAGENT_REASONING_EFFORT")) |v| opts.reasoning_effort = v;
+    if (envValue(init.environ_map, "MICROAGENT_MODEL")) |v| opts.model = v;
+    if (envValue(init.environ_map, "MICROAGENT_BASE_URL")) |v| opts.base_url = v;
+    if (envValue(init.environ_map, "MICROAGENT_REASONING_EFFORT")) |v| opts.reasoning_effort = reasoningEffort(io, v);
+    if (envValue(init.environ_map, "MICROAGENT_MAX_TURNS")) |v| opts.max_turns = turnCeiling(io, "MICROAGENT_MAX_TURNS", v);
     opts.ca_bundle = net.caBundlePath(init.environ_map);
-    if (init.environ_map.get("MICROAGENT_BUDGET_SECONDS")) |v|
+    if (envValue(init.environ_map, "MICROAGENT_BUDGET_SECONDS")) |v|
         opts.budget_s = std.fmt.parseInt(u64, v, 10) catch
-            return usageError(io, "MICROAGENT_BUDGET_SECONDS must be a number, got '{s}'", .{v});
+            return configError(io, "MICROAGENT_BUDGET_SECONDS must be a number of seconds, got '{s}'", .{v});
     opts.session_dir = sessionDir(init);
 
     var err_buf: [512]u8 = undefined;
-    if (parseArgs(&err_buf, args.items[1..], &opts)) |msg| return usageError(io, "{s}", .{msg});
+    if (parseArgs(io, &err_buf, args.items[1..], &opts)) |msg| return usageError(io, "{s}", .{msg});
     switch (opts.action) {
         .help => {
             std.Io.File.stdout().writeStreamingAll(io, help_text) catch {};
@@ -184,8 +185,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (opts.prompt.len == 0) return usageError(io, "no prompt: pass it as an argument or with --print", .{});
     opts.api_key = resolveKey(init, opts.api_key);
-    if (opts.api_key.len == 0)
-        return usageError(io, "no API key: pass --api-key or set MICROAGENT_API_KEY / OPENAI_API_KEY / OPENROUTER_API_KEY / DEEPSEEK_API_KEY", .{});
+    if (opts.api_key.len == 0) return configError(io, "no API key: pass --api-key or set {s}", .{key_var_names});
 
     var client: std.http.Client = .{ .allocator = gpa, .io = io };
     defer client.deinit();
@@ -228,7 +228,8 @@ const help_text =
     \\  -b, --base-url <url>   OpenAI-compatible base url (env MICROAGENT_BASE_URL)
     \\  -k, --api-key <key>    api key (env MICROAGENT_API_KEY, OPENAI_API_KEY,
     \\                         OPENROUTER_API_KEY, DEEPSEEK_API_KEY)
-    \\      --max-turns <n>    tool-loop turn ceiling (default 100)
+    \\      --max-turns <n>    tool-loop turn ceiling, at least 1
+    \\                         (env MICROAGENT_MAX_TURNS, default 100)
     \\      --config <file>    reply-style TOML config (env MICROAGENT_CONFIG,
     \\                         default ~/.microagent/config.toml)
     \\      --ca-bundle <file>
@@ -269,6 +270,14 @@ const help_text =
     \\exit status: 0 the run finished, 1 the run failed, 2 the command line was
     \\wrong.
     \\
+    \\MDEBUG=1                 trace a stuck stream on stderr. 0, off, no,
+    \\                         false and an empty value all leave it off.
+    \\
+    \\A variable set to an empty string is not a value: MICROAGENT_MODEL,
+    \\MICROAGENT_BASE_URL, MICROAGENT_REASONING_EFFORT, MICROAGENT_BUDGET_SECONDS,
+    \\MICROAGENT_MAX_TURNS and MDEBUG keep their defaults, and MICROAGENT_CA_BUNDLE
+    \\and MICROAGENT_CAVEMAN/PONYTAIL fall through to whatever comes next.
+    \\
 ;
 
 /// A command line that does not parse: one line saying which argument was
@@ -278,10 +287,69 @@ const help_text =
 fn usageError(io: Io, comptime fmt: []const u8, args: anytype) noreturn {
     const msg = std.fmt.allocPrint(std.heap.page_allocator, "microagent: " ++ fmt ++ "\n", args) catch
         "microagent: bad arguments\n";
+    die(io, msg);
+}
+
+/// A configuration value the program cannot use, whether it arrived on a flag
+/// or in the environment. Same exit code and the same help text as a bad
+/// argument, but the message names the value and the file or variable it came
+/// from, because a bad env var is otherwise invisible at the call site.
+fn configError(io: Io, comptime fmt: []const u8, args: anytype) noreturn {
+    const msg = std.fmt.allocPrint(std.heap.page_allocator, "microagent: " ++ fmt ++ "\n", args) catch
+        "microagent: bad configuration\n";
+    die(io, msg);
+}
+
+fn die(io: Io, msg: []const u8) noreturn {
     std.Io.File.stderr().writeStreamingAll(io, msg) catch {};
     std.Io.File.stderr().writeStreamingAll(io, help_text) catch {};
     std.process.exit(2);
 }
+
+/// The value of an environment variable, or null when it is not set or is set
+/// to an empty string. A wrapper that builds its own environment exports the
+/// name with nothing behind it, and an empty string read as a value sends
+/// `"model": ""` to the provider and loses the default; every other variable
+/// here already treats empty as unset.
+fn envValue(env: *const std.process.Environ.Map, name: []const u8) ?[]const u8 {
+    const v = env.get(name) orelse return null;
+    return if (v.len == 0) null else v;
+}
+
+/// The debugging switch, on unless the variable is set to something that reads
+/// as off. Set-at-all was the old reading, which turned the trace on for a
+/// wrapper that exports the name to pass a flag it has not set yet.
+fn debugEnabled(env: *const std.process.Environ.Map) bool {
+    const v = envValue(env, "MDEBUG") orelse return false;
+    if (std.ascii.eqlIgnoreCase(v, "0") or std.ascii.eqlIgnoreCase(v, "off") or
+        std.ascii.eqlIgnoreCase(v, "no") or std.ascii.eqlIgnoreCase(v, "false")) return false;
+    return true;
+}
+
+/// The levels the help text names for reasoning.effort, checked where the
+/// value is set. An unknown level reaches the provider as a 400 and costs a
+/// whole turn to learn that a level was mistyped.
+const reasoning_efforts = [_][]const u8{ "minimal", "low", "medium", "high", "none" };
+const reasoning_effort_names = "minimal, low, medium, high, none";
+
+fn reasoningEffort(io: Io, value: []const u8) []const u8 {
+    const v = std.mem.trim(u8, value, " \t\r\n");
+    for (reasoning_efforts) |level| if (std.mem.eql(u8, v, level)) return v;
+    return configError(io, "reasoning effort '{s}' is not one of: {s}", .{ value, reasoning_effort_names });
+}
+
+/// The tool-loop ceiling from a flag or a variable, checked the same way on
+/// both paths. Zero is refused: a run with no turns sends no request, prints no
+/// answer and no usage line, and exits 0, which a harness reads as a finished
+/// review rather than as a ceiling that was set wrong.
+fn turnCeiling(io: Io, from: []const u8, value: []const u8) usize {
+    const n = std.fmt.parseInt(usize, std.mem.trim(u8, value, " \t\r\n"), 10) catch
+        return configError(io, "{s} must be a number, got '{s}'", .{ from, value });
+    if (n == 0) return configError(io, "{s} must be at least 1", .{from});
+    return n;
+}
+
+const key_var_names = "MICROAGENT_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY or DEEPSEEK_API_KEY";
 
 fn clip(s: []const u8) []const u8 {
     return s[0..@min(s.len, 80)];
@@ -290,11 +358,12 @@ fn clip(s: []const u8) []const u8 {
 /// Reads the arguments after the program name into `opts`, formatting any
 /// message that names a bad argument into `buf`. Returns null when
 /// they parse, or a message naming what was wrong, which `usageError` prints
-/// with the help text before exiting 2. Every long flag also takes
+/// with the help text before exiting 2. A reasoning level and a turn ceiling are
+/// refused where they are set, through `configError`. Every long flag also takes
 /// `--flag=value`, the form `microagent update` already took, so both commands
 /// spell an option the same way. `--help` and `--version` win wherever they
 /// appear, and stop the parse there.
-fn parseArgs(buf: []u8, argv: []const []const u8, opts: *Options) ?[]const u8 {
+fn parseArgs(io: Io, buf: []u8, argv: []const []const u8, opts: *Options) ?[]const u8 {
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
         const arg = argv[i];
@@ -347,7 +416,7 @@ fn parseArgs(buf: []u8, argv: []const []const u8, opts: *Options) ?[]const u8 {
         } else if (std.mem.eql(u8, name, "--reasoning-effort")) {
             const v = joined orelse flagValue(argv, i) orelse return "--reasoning-effort needs a level";
             if (v.len == 0) return "--reasoning-effort needs a level";
-            opts.reasoning_effort = v;
+            opts.reasoning_effort = reasoningEffort(io, v);
             if (joined == null) i += 1;
         } else if (std.mem.eql(u8, name, "--budget")) {
             const v = joined orelse flagValue(argv, i) orelse return "--budget needs a number of seconds";
@@ -358,8 +427,7 @@ fn parseArgs(buf: []u8, argv: []const []const u8, opts: *Options) ?[]const u8 {
         } else if (std.mem.eql(u8, name, "--max-turns")) {
             const v = joined orelse flagValue(argv, i) orelse return "--max-turns needs a number";
             if (v.len == 0) return "--max-turns needs a number";
-            opts.max_turns = std.fmt.parseInt(usize, v, 10) catch
-                return std.fmt.bufPrint(buf, "--max-turns must be a number, got '{s}'", .{v}) catch "bad --max-turns";
+            opts.max_turns = turnCeiling(io, "--max-turns", v);
             if (joined == null) i += 1;
         } else if (arg.len > 0 and arg[0] != '-') {
             // A bare argument is the prompt. gauntlet's custom-agent
@@ -396,13 +464,16 @@ fn setPrompt(buf: []u8, opts: *Options, value: []const u8) ?[]const u8 {
 
 fn resolveKey(init: std.process.Init, given: []const u8) []const u8 {
     if (given.len > 0) return given;
-    const names = [_][]const u8{ "MICROAGENT_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY" };
-    for (names) |n| {
-        if (init.environ_map.get(n)) |v| if (v.len > 0) return v;
+    for (key_vars) |n| {
+        if (envValue(init.environ_map, n)) |v| return v;
     }
     if (readSecret(init, "openrouter")) |v| return v;
     return "";
 }
+
+/// In the order they are tried, and the order the help text and README name
+/// them: the project's own variable first, then the provider's.
+const key_vars = [_][]const u8{ "MICROAGENT_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY" };
 
 fn readSecret(init: std.process.Init, name: []const u8) ?[]const u8 {
     const home = init.environ_map.get("HOME") orelse return null;
@@ -423,11 +494,15 @@ fn loadStyle(io: Io, init: std.process.Init, arena: std.mem.Allocator, config: [
         std.Io.Dir.cwd().readFileAlloc(io, p, arena, .limited(max_config_bytes)) catch null
     else
         null;
-    if (resolveStyle(&style, text, init.environ_map.get("MICROAGENT_CAVEMAN"), init.environ_map.get("MICROAGENT_PONYTAIL"))) |unknown| {
-        if (unknown.from_config)
-            net.note(io, arena, "microagent: config {s}: '{s}' is not a level; keeping the default\n", .{ path.?, unknown.key })
-        else
+    if (resolveStyle(&style, text, envValue(init.environ_map, "MICROAGENT_CAVEMAN"), envValue(init.environ_map, "MICROAGENT_PONYTAIL"))) |unknown| {
+        if (unknown.from_config) {
+            if (unknown.bad_value)
+                net.note(io, arena, "microagent: config {s}: '{s}' is not a level; keeping the default\n", .{ path.?, unknown.key })
+            else
+                net.note(io, arena, "microagent: config {s}: '{s}' is not a key this file uses; keeping the default\n", .{ path.?, unknown.key });
+        } else {
             net.note(io, arena, "microagent: {s} is not a level; keeping the default\n", .{unknown.key});
+        }
     }
     return style;
 }
@@ -452,6 +527,9 @@ const UnknownLevel = struct {
     key: []const u8,
     /// The value came from the config file, so the message can name the file.
     from_config: bool,
+    /// The value is what names no level, rather than the key naming no
+    /// setting; a variable can only be the former.
+    bad_value: bool,
 };
 
 /// The levels, in the order the doc comment names: the config file, then the
@@ -464,13 +542,14 @@ fn resolveStyle(
     ponytail_env: ?[]const u8,
 ) ?UnknownLevel {
     if (config) |text| {
-        if (style.applyToml(text)) |key| return .{ .key = key, .from_config = true };
+        if (style.applyToml(text)) |problem|
+            return .{ .key = problem.key, .from_config = true, .bad_value = problem.bad_value };
     }
     if (caveman_env) |v| {
-        if (style_mod.parseCaveman(v)) |level| style.caveman = level else return .{ .key = "MICROAGENT_CAVEMAN", .from_config = false };
+        if (style_mod.parseCaveman(v)) |level| style.caveman = level else return .{ .key = "MICROAGENT_CAVEMAN", .from_config = false, .bad_value = true };
     }
     if (ponytail_env) |v| {
-        if (style_mod.parsePonytail(v)) |level| style.ponytail = level else return .{ .key = "MICROAGENT_PONYTAIL", .from_config = false };
+        if (style_mod.parsePonytail(v)) |level| style.ponytail = level else return .{ .key = "MICROAGENT_PONYTAIL", .from_config = false, .bad_value = true };
     }
     return null;
 }
@@ -1516,7 +1595,7 @@ test "the command line parses in either flag form and in any order" {
     var opts: Options = .{};
     var buf: [512]u8 = undefined;
     const argv = [_][]const u8{ "fix it", "--model=some/model", "--budget=90", "--max-turns", "7" };
-    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &argv, &opts));
+    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(std.testing.io, &buf, &argv, &opts));
     try std.testing.expectEqualStrings("fix it", opts.prompt);
     try std.testing.expectEqualStrings("some/model", opts.model);
     try std.testing.expectEqual(@as(?u64, 90), opts.budget_s);
@@ -1524,7 +1603,7 @@ test "the command line parses in either flag form and in any order" {
 
     var short: Options = .{};
     const short_argv = [_][]const u8{ "-m", "some/model", "-b", "http://localhost:1234/v1", "-p", "fix it" };
-    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &short_argv, &short));
+    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(std.testing.io, &buf, &short_argv, &short));
     try std.testing.expectEqualStrings("some/model", short.model);
     try std.testing.expectEqualStrings("http://localhost:1234/v1", short.base_url);
     try std.testing.expectEqualStrings("fix it", short.prompt);
@@ -1533,22 +1612,22 @@ test "the command line parses in either flag form and in any order" {
 test "a wrong command line names the flag and the value it was given" {
     var opts: Options = .{};
     var buf: [512]u8 = undefined;
-    try std.testing.expectEqualStrings("unknown or incomplete argument '--nope'", parseArgs(&buf, &.{"--nope"}, &opts).?);
-    try std.testing.expectEqualStrings("--model needs a model id", parseArgs(&buf, &.{"--model"}, &opts).?);
-    try std.testing.expectEqualStrings("--budget must be a number of seconds, got 'soon'", parseArgs(&buf, &.{ "--budget", "soon" }, &opts).?);
-    try std.testing.expectEqualStrings("prompt given twice: 'one' and 'two'", parseArgs(&buf, &.{ "one", "two" }, &opts).?);
+    try std.testing.expectEqualStrings("unknown or incomplete argument '--nope'", parseArgs(std.testing.io, &buf, &.{"--nope"}, &opts).?);
+    try std.testing.expectEqualStrings("--model needs a model id", parseArgs(std.testing.io, &buf, &.{"--model"}, &opts).?);
+    try std.testing.expectEqualStrings("--budget must be a number of seconds, got 'soon'", parseArgs(std.testing.io, &buf, &.{ "--budget", "soon" }, &opts).?);
+    try std.testing.expectEqualStrings("prompt given twice: 'one' and 'two'", parseArgs(std.testing.io, &buf, &.{ "one", "two" }, &opts).?);
     var joined: Options = .{};
-    try std.testing.expectEqualStrings("prompt given twice: 'one' and 'two'", parseArgs(&buf, &.{ "-p", "one", "--print=two" }, &joined).?);
+    try std.testing.expectEqualStrings("prompt given twice: 'one' and 'two'", parseArgs(std.testing.io, &buf, &.{ "-p", "one", "--print=two" }, &joined).?);
 }
 
 test "help and version win wherever they appear" {
     var opts: Options = .{};
     var buf: [512]u8 = undefined;
-    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &.{ "a prompt", "--help" }, &opts));
+    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(std.testing.io, &buf, &.{ "a prompt", "--help" }, &opts));
     try std.testing.expectEqual(Action.help, opts.action);
 
     var v: Options = .{};
-    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &.{ "-V", "--model" }, &v));
+    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(std.testing.io, &buf, &.{ "-V", "--model" }, &v));
     try std.testing.expectEqual(Action.version, v.action);
 }
 
@@ -2326,5 +2405,45 @@ test "the env levels override the config file's, and a bad one is named" {
     const bad_file = resolveStyle(&style, "ponytail = \"lazy\"\n", "lite", null).?;
     try std.testing.expectEqualStrings("ponytail", bad_file.key);
     try std.testing.expect(bad_file.from_config);
+    try std.testing.expect(bad_file.bad_value);
     try std.testing.expectEqual(style_mod.PonytailLevel.ultra, style.ponytail);
+
+    // A misspelled key is named as a key, not as a level, and the default it
+    // would have replaced stands.
+    const typo = resolveStyle(&style, "cavmen = \"off\"\n", "lite", null).?;
+    try std.testing.expectEqualStrings("cavmen", typo.key);
+    try std.testing.expect(typo.from_config);
+    try std.testing.expect(!typo.bad_value);
+    try std.testing.expectEqual(style_mod.CavemanLevel.lite, style.caveman);
+}
+
+test "an environment variable set to nothing is not a value" {
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+
+    try std.testing.expect(envValue(&env, "MICROAGENT_MODEL") == null);
+    try env.put("MICROAGENT_MODEL", "");
+    try std.testing.expect(envValue(&env, "MICROAGENT_MODEL") == null);
+
+    // A value that is there is the value, and a wrapper that wants "no model"
+    // has --model to say so with.
+    try env.put("MICROAGENT_MODEL", "gpt-5");
+    try std.testing.expectEqualStrings("gpt-5", envValue(&env, "MICROAGENT_MODEL").?);
+}
+
+test "the trace switch is on only for a value that says so" {
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+
+    try std.testing.expect(!debugEnabled(&env));
+    try env.put("MDEBUG", "");
+    try std.testing.expect(!debugEnabled(&env));
+    try env.put("MDEBUG", "0");
+    try std.testing.expect(!debugEnabled(&env));
+    try env.put("MDEBUG", "false");
+    try std.testing.expect(!debugEnabled(&env));
+    try env.put("MDEBUG", "1");
+    try std.testing.expect(debugEnabled(&env));
+    try env.put("MDEBUG", "on");
+    try std.testing.expect(debugEnabled(&env));
 }

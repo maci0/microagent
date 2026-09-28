@@ -34,7 +34,7 @@ the Zig version `build.zig.zon` names, so run it before pushing.
 ## Use
 
 ```sh
-export MICROAGENT_API_KEY=sk-or-...             # or OPENAI_API_KEY / OPENROUTER_API_KEY
+export MICROAGENT_API_KEY=sk-or-...             # or OPENAI_API_KEY / OPENROUTER_API_KEY / DEEPSEEK_API_KEY
 export MICROAGENT_BASE_URL=https://openrouter.ai/api/v1
 export MICROAGENT_MODEL=deepseek/deepseek-v4-flash
 
@@ -45,8 +45,10 @@ microagent -p "fix the failing test and run it"
 -p, --print <prompt>   task to run (also accepted as a bare argument)
 -m, --model <model>    model id        (env MICROAGENT_MODEL)
 -b, --base-url <url>   OpenAI-compatible base url (env MICROAGENT_BASE_URL)
--k, --api-key <key>    api key         (env MICROAGENT_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY)
-    --max-turns <n>    tool-loop turn ceiling (default 100)
+-k, --api-key <key>    api key         (env MICROAGENT_API_KEY, OPENAI_API_KEY,
+                       OPENROUTER_API_KEY, DEEPSEEK_API_KEY)
+    --max-turns <n>    tool-loop turn ceiling, at least 1
+                       (env MICROAGENT_MAX_TURNS, default 100)
     --config <file>    reply-style TOML config (env MICROAGENT_CONFIG)
     --ca-bundle <file>
                        PEM file to trust instead of the system store
@@ -74,12 +76,25 @@ subcommand:
                          release after verifying its .sha256 sidecar
                          (--check only reports; GITHUB_TOKEN lifts the
                          API rate limit)
+
+MDEBUG=1                trace a stuck stream on stderr. 0, off, no, false and
+                        an empty value all leave it off.
 ```
 
 Every long flag also takes `--flag=value`, a flag wins over the environment variable for the same
 option, and the exit status is 0 for a finished run, 1 for a failed one and 2 for a wrong command
 line. `microagent --help` and `microagent update --help` are the full text; a wrong flag prints the
 reason and that help on stderr, so a script reading stdout gets nothing from a failed invocation.
+
+Every value is checked where it is set, so a mistyped level, a ceiling of zero
+or a non-numeric budget is refused before the first request rather than becoming
+a 400 or an empty run. A variable set to an empty string is not a value:
+`MICROAGENT_MODEL`, `MICROAGENT_BASE_URL`, `MICROAGENT_REASONING_EFFORT`,
+`MICROAGENT_BUDGET_SECONDS`, `MICROAGENT_MAX_TURNS` and `MDEBUG` keep their
+defaults, `MICROAGENT_CA_BUNDLE` falls through to `SSL_CERT_FILE`, and
+`MICROAGENT_CAVEMAN`/`MICROAGENT_PONYTAIL` fall through to the config file.
+`MICROAGENT_SESSION_DIR` is the one variable where empty means something else:
+it turns the session log off.
 
 The prompt may also be the last bare argument. That matters for gauntlet: a custom-agent
 definition inserts the model flags immediately after `-p`, so an agent defined as
@@ -122,9 +137,10 @@ parser.
 The file is `MICROAGENT_CONFIG`, else `~/.microagent/config.toml`; a missing or unreadable file just
 means the defaults. `MICROAGENT_CAVEMAN` and `MICROAGENT_PONYTAIL` set a level for one run without
 touching the file and win over it, since naming a level in the environment is the more explicit
-statement. A level that is not recognized is reported on stderr with that key's default kept. With
-`caveman = "off"` and `ponytail = "off"`, the system prompt is exactly the one the harness sent
-before styles existed.
+statement. A level that is not recognized is reported on stderr with that key's default kept, and so
+is a key this file does not define, so a misspelled `caveman` cannot leave the default in force
+quietly. With `caveman = "off"` and `ponytail = "off"`, the system prompt is exactly the one the
+harness sent before styles existed.
 
 ### Output contract
 

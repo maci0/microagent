@@ -22,6 +22,33 @@ release, and `microagent update` moves you to it.
 - The stderr tool gutter stays one line. A model that puts a newline or an escape sequence in a path,
   pattern or command broke the `⏺ tool detail` shape a reader parses; control characters are now written
   as `\xNN`.
+- A configuration value that is set to an empty string is no longer read as a value. `MICROAGENT_MODEL`,
+  `MICROAGENT_BASE_URL`, `MICROAGENT_REASONING_EFFORT`, `MICROAGENT_BUDGET_SECONDS` and `MDEBUG` keep
+  their defaults, and `MICROAGENT_CAVEMAN`/`MICROAGENT_PONYTAIL` fall through to the config file
+  instead of reporting a level that is not one. `MICROAGENT_CA_BUNDLE` and the api-key variables
+  already worked this way. Before, an exported-but-empty `MICROAGENT_MODEL` sent `"model": ""`.
+- `--reasoning-effort` and `MICROAGENT_REASONING_EFFORT` are checked against the documented levels
+  where they are set. An unknown level used to reach the provider and come back as a 400 after a turn
+  had been spent.
+- `--max-turns 0` and `MICROAGENT_MAX_TURNS=0` are refused. A ceiling of zero started no turn at all:
+  no request, no answer, no usage line, exit 0, which a harness reads as a finished review.
+- The numbers a flag and a variable share are read through one check, and the message names the
+  offending value: `--budget`, `--max-turns`, `MICROAGENT_BUDGET_SECONDS`, `MICROAGENT_MAX_TURNS`.
+- A key the reply-style config does not define is reported on stderr, the way a value that is not a
+  level already was. A misspelled `caveman` used to leave the default in force with nothing said.
+- `MDEBUG=0` (also `off`, `no`, `false`, and empty) no longer turns the stream trace on. The variable
+  was set-at-all, so a wrapper that exports the name to pass a flag it has not set got the trace.
+- The missing-api-key message named two of the four variables that satisfy it, and the harbor adapter
+  read three of the four; both now name the same list, `DEEPSEEK_API_KEY` included.
+- The harbor adapter treats an empty `MICROAGENT_BASE_URL`, `MICROAGENT_BUDGET_SECONDS` or
+  `MICROAGENT_MAX_TURNS` as unset, and a non-numeric one names the variable instead of raising a
+  `ValueError` out of `int()`.
+
+### Added
+
+- `MICROAGENT_MAX_TURNS` is read by the binary itself, so the variable works for a plain container run
+  and not only through the harbor adapter. The flag still wins where both are given.
+- `MDEBUG` is documented in `--help` and in the README, with the values that count as on.
 
 ## [0.2.0] - 2026-09-29
 

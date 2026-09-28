@@ -63,7 +63,7 @@ def host_ca_bundle() -> Path | None:
 
 
 def api_key() -> str:
-    for name in ("MICROAGENT_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY"):
+    for name in ("MICROAGENT_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY"):
         value = os.environ.get(name)
         if value:
             return value
@@ -71,6 +71,17 @@ def api_key() -> str:
         "no model provider key in the host environment: set MICROAGENT_API_KEY "
         "or OPENROUTER_API_KEY before running harbor"
     )
+
+
+def int_env(name: str, default: str) -> int:
+    """A whole-number knob read from the host environment. An empty value is
+    not a value, and a bad one names the variable instead of surfacing as a
+    ValueError from int() with no indication of which knob it was."""
+    raw = os.environ.get(name) or default
+    try:
+        return int(raw)
+    except ValueError:
+        raise RuntimeError(f"{name} must be a whole number, got {raw!r}") from None
 
 
 def normalize_model(model_name: str | None) -> str:
@@ -139,7 +150,7 @@ class Microagent(BaseAgent):
         context: AgentContext,
     ) -> None:
         model = normalize_model(self.model_name)
-        budget = os.environ.get("MICROAGENT_BUDGET_SECONDS", DEFAULT_BUDGET_SECONDS)
+        budget = os.environ.get("MICROAGENT_BUDGET_SECONDS") or DEFAULT_BUDGET_SECONDS
         command = " ".join(
             shlex.quote(part)
             for part in (
@@ -149,13 +160,13 @@ class Microagent(BaseAgent):
                 "--budget",
                 budget,
                 "--max-turns",
-                os.environ.get("MICROAGENT_MAX_TURNS", "150"),
+                str(int_env("MICROAGENT_MAX_TURNS", "150")),
                 instruction,
             )
         )
         env = {
             "MICROAGENT_API_KEY": api_key(),
-            "MICROAGENT_BASE_URL": os.environ.get("MICROAGENT_BASE_URL", DEFAULT_BASE_URL),
+            "MICROAGENT_BASE_URL": os.environ.get("MICROAGENT_BASE_URL") or DEFAULT_BASE_URL,
         }
         if getattr(self, "_ca_uploaded", False):
             env["MICROAGENT_CA_BUNDLE"] = REMOTE_CA_PATH
@@ -167,7 +178,7 @@ class Microagent(BaseAgent):
         result = await environment.exec(
             command=command,
             env=env,
-            timeout_sec=int(os.environ.get("MICROAGENT_AGENT_TIMEOUT_SEC", "1500")),
+            timeout_sec=int_env("MICROAGENT_AGENT_TIMEOUT_SEC", "1500"),
         )
         (self.logs_dir / "microagent-stdout.txt").write_text(result.stdout or "")
         (self.logs_dir / "microagent-stderr.txt").write_text(result.stderr or "")
