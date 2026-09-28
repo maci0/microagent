@@ -12,6 +12,10 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 # shellcheck source=bench/harness.sh
 . "$root/bench/harness.sh"
 agents=${*:-microagent claude gemini codex crush grok kimi opencode cursor-agent clanker dsh}
+# A "reply with one word" turn is seconds of provider time, not minutes, so the
+# ceiling is well above what a live harness needs and well below the point where
+# a hung one would hold the sweep.
+timeout_s=180
 prompt="Reply with exactly: pong"
 
 printf '%-14s %10s %10s %10s\n' agent startup_ms wall_s tokens
@@ -28,12 +32,11 @@ for agent in $agents; do
 	[ -z "$startup" ] && startup=-
 
 	start=$(monotonic_ns)
-	# The harness's own spelling of a one-shot prompt, so a CLI that needs a
-	# subcommand is measured through it instead of through a `-p` it refuses.
-	# Splitting the words apart is the point: the name and its subcommand are
-	# one command line and the prompt is the last of them.
+	# The words are left unquoted so the prompt lands as its own argument after
+	# a subcommand `harness_argv` may have named; a quoted expansion would hand
+	# the CLI a single argument it refuses.
 	# shellcheck disable=SC2046
-	run_limited 180 "$work" $(harness_argv "$agent") "$prompt" >"$work/out" 2>&1
+	run_limited "$timeout_s" "$work" $(harness_argv "$agent") "$prompt" >"$work/out" 2>&1
 	end=$(monotonic_ns)
 	wall=$(echo "$end $start" | awk '{printf "%.1f", ($1-$2)/1000000000}')
 	# Only microagent prints a machine-readable cumulative total.

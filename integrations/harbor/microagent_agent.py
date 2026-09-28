@@ -82,7 +82,7 @@ def api_key() -> str:
     )
 
 
-def int_env(name: str, default: str, minimum: int = 1) -> int:
+def int_env(name: str, default: str) -> int:
     """A whole-number knob read from the host environment. An empty value is
     not a value, and a bad one names the variable instead of surfacing as a
     ValueError from int() with no indication of which knob it was. A knob the
@@ -93,8 +93,8 @@ def int_env(name: str, default: str, minimum: int = 1) -> int:
         value = int(raw)
     except ValueError:
         raise RuntimeError(f"{name} must be a whole number, got {raw!r}") from None
-    if value < minimum:
-        raise RuntimeError(f"{name} must be at least {minimum}, got {raw!r}")
+    if value < 1:
+        raise RuntimeError(f"{name} must be at least 1, got {raw!r}")
     return value
 
 
@@ -111,6 +111,10 @@ def normalize_model(model_name: str | None) -> str:
 
 class Microagent(BaseAgent):
     """microagent as a harbor agent: uploaded, run once, output kept."""
+
+    # Set by `setup`, which harbor runs before `run`: the CA bundle only
+    # reaches the container when one was uploaded and verified.
+    _ca_uploaded: bool = False
 
     @staticmethod
     def name() -> str:
@@ -131,10 +135,8 @@ class Microagent(BaseAgent):
         bundle = host_ca_bundle()
         self._ca_uploaded = False
         if bundle is not None:
-            # A verified copy rather than a link: docker cp would land the host
-            # symlink itself, and the container would have a dangling path where
-            # a PEM should be. The upload lands under /usr/local/bin, which a
-            # minimal image has, so no directory has to be created first.
+            # The upload lands under /usr/local/bin, which a minimal image has,
+            # so no directory has to be created first.
             await environment.upload_file(source_path=bundle, target_path=REMOTE_CA_PATH)
             check = await environment.exec(
                 command=f"test -s {REMOTE_CA_PATH} && wc -c < {REMOTE_CA_PATH}",
@@ -182,7 +184,7 @@ class Microagent(BaseAgent):
             "MICROAGENT_API_KEY": api_key(),
             "MICROAGENT_BASE_URL": os.environ.get("MICROAGENT_BASE_URL") or DEFAULT_BASE_URL,
         }
-        if getattr(self, "_ca_uploaded", False):
+        if self._ca_uploaded:
             env["MICROAGENT_CA_BUNDLE"] = REMOTE_CA_PATH
         reasoning = os.environ.get("MICROAGENT_REASONING_EFFORT")
         if reasoning:

@@ -63,7 +63,6 @@ for agent in $agents; do
 	changed=$(git -C "$dir" diff HEAD --numstat | wc -l)
 	[ -z "${passed:-}" ] && passed=0
 	[ -z "${failed:-}" ] && failed=0
-	[ -z "${changed:-}" ] && changed=0
 	[ -z "${tokens:-}" ] && tokens=-
 
 	# A diff is not the same as a working diff: run the project's own check.

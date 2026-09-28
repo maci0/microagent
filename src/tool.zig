@@ -196,7 +196,7 @@ fn runSearchTool(io: Io, arena: std.mem.Allocator, argv: []const []const u8, wha
         return std.fmt.allocPrint(arena, "error: {s} failed: {s}", .{ what, @errorName(err) });
     if (res.stdout.len > 0) return res.stdout;
     if (res.stderr.len > 0) return res.stderr;
-    return std.fmt.allocPrint(arena, "(no matches)", .{});
+    return arena.dupe(u8, "(no matches)");
 }
 
 /// Lines of git output a call keeps when the model asks for no limit: a raw
@@ -226,13 +226,13 @@ fn gitLogLines(limit: usize) usize {
 /// Read-only git, with the subcommands fixed here rather than assembled by the
 /// model. Deterministic, no shell quoting, and the output is capped.
 fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64) ![]u8 {
-    const cmd = chat.str(args.get("cmd")) orelse return std.fmt.allocPrint(arena, "error: missing cmd", .{});
+    const cmd = chat.str(args.get("cmd")) orelse return arena.dupe(u8, "error: missing cmd");
     const path = chat.str(args.get("path"));
     const rev = chat.str(args.get("rev"));
     const limit = gitLineLimit(args);
     // A rev such as `--output=FILE` would turn a read into a write.
     if (rev) |r| if (std.mem.startsWith(u8, r, "-"))
-        return std.fmt.allocPrint(arena, "error: rev must not start with '-'", .{});
+        return arena.dupe(u8, "error: rev must not start with '-'");
     // `git show <rev> -- .env` prints a committed credentials file as a patch,
     // so the path gets the refusal `read` gives it rather than a git one.
     if (path) |p| if (isCredentialPath(p)) return credentialRefusal(arena, p);
@@ -290,10 +290,10 @@ fn firstLines(arena: std.mem.Allocator, text: []const u8, limit: usize) ![]u8 {
 
 pub fn runTool(io: Io, arena: std.mem.Allocator, call: chat.ToolCall, ceiling_ms: ?u64) ![]u8 {
     const parsed = std.json.parseFromSlice(std.json.Value, arena, call.args.items, .{}) catch
-        return std.fmt.allocPrint(arena, "error: tool arguments are not valid JSON", .{});
+        return arena.dupe(u8, "error: tool arguments are not valid JSON");
     const args = switch (parsed.value) {
         .object => |o| o,
-        else => return std.fmt.allocPrint(arena, "error: tool arguments must be an object", .{}),
+        else => return arena.dupe(u8, "error: tool arguments must be an object"),
     };
 
     noteToolCall(io, arena, call.name, args);
@@ -327,10 +327,10 @@ fn noteToolCall(io: Io, arena: std.mem.Allocator, name: []const u8, args: std.js
     net.writeErr(io, buf.items);
 }
 
-/// Gutter text with every C0 control and DEL written as `\xNN`, and bytes that
-/// are not valid UTF-8 written as U+FFFD, so one call stays one line.
 const hex_digits = "0123456789abcdef";
 
+/// Gutter text with every C0 control and DEL written as `\xNN`, and bytes that
+/// are not valid UTF-8 written as U+FFFD, so one call stays one line.
 fn writeGutterText(gpa: std.mem.Allocator, buf: *std.ArrayList(u8), s: []const u8) !void {
     var i: usize = 0;
     var start: usize = 0;
@@ -388,7 +388,7 @@ fn bashTimeoutMs(requested: ?u64, ceiling_ms: ?u64) u64 {
 }
 
 fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64) ![]u8 {
-    const command = chat.str(args.get("command")) orelse return std.fmt.allocPrint(arena, "error: missing command", .{});
+    const command = chat.str(args.get("command")) orelse return arena.dupe(u8, "error: missing command");
     const timeout_ms: u64 = bashTimeoutMs(if (args.get("timeout_ms")) |v| chat.num(v) else null, ceiling_ms);
     const capture_limit = max_tool_output * 4;
     const res = runCapped(io, arena, &.{ "/bin/sh", "-c", command }, capture_limit, net.durationMs(timeout_ms)) catch |err| switch (err) {
@@ -532,7 +532,7 @@ fn credentialRefusal(arena: std.mem.Allocator, path: []const u8) error{OutOfMemo
 }
 
 fn toolRead(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
-    const path = chat.str(args.get("path")) orelse return std.fmt.allocPrint(arena, "error: missing path", .{});
+    const path = chat.str(args.get("path")) orelse return arena.dupe(u8, "error: missing path");
     if (isCredentialPath(path)) return try credentialRefusal(arena, path);
     if (!args.contains("offset") and !args.contains("limit"))
         return std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_read_bytes)) catch |err|
@@ -618,14 +618,14 @@ fn readLines(io: Io, arena: std.mem.Allocator, path: []const u8, offset: usize, 
 }
 
 fn toolWrite(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
-    const path = chat.str(args.get("path")) orelse return std.fmt.allocPrint(arena, "error: missing path", .{});
+    const path = chat.str(args.get("path")) orelse return arena.dupe(u8, "error: missing path");
     // A call that names a path and no content is a call the model got cut
     // short on, not one asking for an empty file: a `write` is the one tool
     // result a run cannot undo, and emptying a source file is worse than
     // reporting the missing argument. A model that means an empty file says
     // so, as `"content": ""`.
     const content = chat.str(args.get("content")) orelse
-        return std.fmt.allocPrint(arena, "error: missing content", .{});
+        return arena.dupe(u8, "error: missing content");
     writeFileAtomic(io, std.Io.Dir.cwd(), path, content) catch |err|
         return std.fmt.allocPrint(arena, "error: cannot write {s}: {s}", .{ path, @errorName(err) });
     return std.fmt.allocPrint(arena, "wrote {d} bytes to {s}", .{ content.len, path });
@@ -676,14 +676,14 @@ pub fn writeFileAtomic(io: Io, dir: std.Io.Dir, path: []const u8, bytes: []const
 }
 
 fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
-    const path = chat.str(args.get("path")) orelse return std.fmt.allocPrint(arena, "error: missing path", .{});
-    const old = chat.str(args.get("old_string")) orelse return std.fmt.allocPrint(arena, "error: missing old_string", .{});
-    const new = chat.str(args.get("new_string")) orelse return std.fmt.allocPrint(arena, "error: missing new_string", .{});
+    const path = chat.str(args.get("path")) orelse return arena.dupe(u8, "error: missing path");
+    const old = chat.str(args.get("old_string")) orelse return arena.dupe(u8, "error: missing old_string");
+    const new = chat.str(args.get("new_string")) orelse return arena.dupe(u8, "error: missing new_string");
     const all = if (args.get("replace_all")) |v| v == .bool and v.bool else false;
 
     const raw = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_edit_bytes)) catch |err|
         return std.fmt.allocPrint(arena, "error: cannot read {s}: {s}", .{ path, @errorName(err) });
-    if (old.len == 0) return std.fmt.allocPrint(arena, "error: old_string is empty", .{});
+    if (old.len == 0) return arena.dupe(u8, "error: old_string is empty");
 
     const count = std.mem.count(u8, raw, old);
     if (count == 0) return std.fmt.allocPrint(arena, "error: old_string not found in {s}", .{path});
@@ -705,7 +705,7 @@ fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
 }
 
 fn toolSearch(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64) ![]u8 {
-    const pattern = chat.str(args.get("pattern")) orelse return std.fmt.allocPrint(arena, "error: missing pattern", .{});
+    const pattern = chat.str(args.get("pattern")) orelse return arena.dupe(u8, "error: missing pattern");
     const path = chat.str(args.get("path")) orelse ".";
     const glob = chat.str(args.get("glob"));
     var argv: std.ArrayList([]const u8) = .empty;
@@ -725,8 +725,8 @@ fn toolSearch(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceilin
 /// is applied to every match (`--update-all`), so the next turn reads the
 /// result back rather than trusting the tool's summary.
 fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64) ![]u8 {
-    const pattern = chat.str(args.get("pattern")) orelse return std.fmt.allocPrint(arena, "error: missing pattern", .{});
-    const lang = chat.str(args.get("lang")) orelse return std.fmt.allocPrint(arena, "error: missing lang", .{});
+    const pattern = chat.str(args.get("pattern")) orelse return arena.dupe(u8, "error: missing pattern");
+    const lang = chat.str(args.get("lang")) orelse return arena.dupe(u8, "error: missing lang");
     const path = chat.str(args.get("path")) orelse ".";
     const rewrite = chat.str(args.get("rewrite"));
 

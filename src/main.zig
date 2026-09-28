@@ -67,9 +67,8 @@ const max_response_bytes = 16 * 1024 * 1024;
 const max_frame_bytes: usize = 1024 * 1024;
 /// The reply-style config is a handful of keys; a bigger file is not one.
 const max_config_bytes: usize = 64 * 1024;
-/// Ceiling on a file `read` returns whole. A source file is kilobytes, so the
-/// cap is what keeps one `read` of a multi-gigabyte artifact out of the
-/// A provider's error body is a diagnostic, not a payload.
+/// Ceiling on a provider's error body. An error body is a diagnostic, not a
+/// payload.
 const max_error_body_bytes: usize = 16 * 1024;
 
 const system_prompt =
@@ -604,7 +603,7 @@ fn parseArgs(buf: []u8, argv: []const []const u8, opts: *Options) ?[]const u8 {
         } else if (valuedFlag(name)) |flag| {
             // A flag that ends the command line and one handed an empty value
             // are the same mistake, so both say the same thing.
-            const v = joined orelse flagValue(argv, i) orelse return flagNeeds(buf, flag, "bad arguments");
+            const v = joined orelse flagValue(argv, i) orelse "";
             if (v.len == 0) return flagNeeds(buf, flag, "bad arguments");
             if (setValued(buf, opts, flag.option, v)) |m| return m;
             if (joined == null) i += 1;
@@ -1887,7 +1886,7 @@ fn finishTurn(
         // the next request rejects, so the loop below would spend a turn on a
         // 400 instead of on the answer.
         const output = if (budget.expired(io))
-            try std.fmt.allocPrint(arena, "error: not run, the run's time budget is exhausted", .{})
+            try arena.dupe(u8, "error: not run, the run's time budget is exhausted")
         else
             tool_mod.runTool(io, arena, call, ceiling_ms) catch |err|
                 // A tool that fails outright (rather than reporting its own

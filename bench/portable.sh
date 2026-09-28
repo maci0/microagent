@@ -47,7 +47,7 @@ check_secs() {
 if [ -n "$limiter" ]; then
 	# `-k` is the escalation: without it GNU timeout TERMs and then waits for
 	# the child however long it takes, which is the same hang the watchdog
-	# branch above is written to avoid.
+	# branch below is written to avoid.
 	run_limited() {
 		secs=$1 dir=$2
 		shift 2
