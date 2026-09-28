@@ -88,7 +88,9 @@ microagent update --repo you/microagent   # track a fork
 ```
 
 The release publishes `microagent-<tag>-<triple>` for `x86_64-linux-musl`, `aarch64-linux-musl`,
-`x86_64-macos` and `aarch64-macos`, each with a `.sha256` sidecar. The download is verified against
+`x86_64-macos` and `aarch64-macos`, each with a `.sha256` sidecar. Linux has one asset per arch and
+not one per libc: the static musl binary runs on a glibc host, so a `-gnu` build updates to it. The
+download is verified against
 that sidecar and the running binary is replaced (atomically, following a symlink to the real file)
 only when the digest matches: a mismatch, a missing asset, or a release page that is not a GitHub
 https URL leaves the binary untouched. `GITHUB_TOKEN` lifts the anonymous API rate limit. Exit 1

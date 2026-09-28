@@ -67,8 +67,17 @@ pub fn targetTriple(buf: []u8, arch: []const u8, os_name: []const u8, abi: []con
     return std.fmt.bufPrint(buf, "{s}-{s}-{s}", .{ arch, os_name, abi }) catch buf[0..0];
 }
 
-pub fn thisTarget(buf: []u8) []const u8 {
-    return targetTriple(buf, @tagName(builtin.cpu.arch), @tagName(builtin.os.tag), @tagName(builtin.abi));
+/// The asset to ask for. Linux ships one static musl binary per arch, and a
+/// static musl binary runs on a glibc host, so a `-gnu` build asks for the
+/// musl asset instead of one the release does not publish. macOS has no abi
+/// tag in its asset name.
+pub fn assetTriple(buf: []u8, arch: []const u8, os_name: []const u8, abi: []const u8) []const u8 {
+    if (std.mem.eql(u8, os_name, "linux")) return targetTriple(buf, arch, "linux", "musl");
+    return targetTriple(buf, arch, os_name, abi);
+}
+
+pub fn thisAssetTriple(buf: []u8) []const u8 {
+    return assetTriple(buf, @tagName(builtin.cpu.arch), @tagName(builtin.os.tag), @tagName(builtin.abi));
 }
 
 pub fn writeAssetName(buf: []u8, tag: []const u8, target: []const u8) error{NameTooLong}![]const u8 {
@@ -464,7 +473,7 @@ pub fn run(
     }
 
     var target_buf: [64]u8 = undefined;
-    const target = thisTarget(&target_buf);
+    const target = thisAssetTriple(&target_buf);
     var name_buf: [192]u8 = undefined;
     const asset_name = writeAssetName(&name_buf, rel.tag, target) catch
         return fail(io, "release asset name does not fit", .{});
@@ -580,12 +589,19 @@ test "update: this target is the name the release matrix publishes" {
         const asset = try writeAssetName(&name_buf, "v0.1.0", triple);
         try std.testing.expectEqualStrings("microagent-v0.1.0-" ++ row[3], asset);
     }
+    // A glibc build asks for the static musl asset; macOS keeps its own name.
+    var gnu_buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("x86_64-linux-musl", assetTriple(&gnu_buf, "x86_64", "linux", "gnu"));
+    try std.testing.expectEqualStrings("aarch64-linux-musl", assetTriple(&gnu_buf, "aarch64", "linux", "gnu"));
+    try std.testing.expectEqualStrings("x86_64-macos", assetTriple(&gnu_buf, "x86_64", "macos", "none"));
+
     var live_buf: [64]u8 = undefined;
     var via_buf: [64]u8 = undefined;
-    const want = targetTriple(&via_buf, @tagName(builtin.cpu.arch), @tagName(builtin.os.tag), @tagName(builtin.abi));
-    const got = thisTarget(&live_buf);
+    const want = assetTriple(&via_buf, @tagName(builtin.cpu.arch), @tagName(builtin.os.tag), @tagName(builtin.abi));
+    const got = thisAssetTriple(&live_buf);
     try std.testing.expectEqualStrings(want, got);
     try std.testing.expect(!std.mem.endsWith(u8, got, "-none"));
+    if (builtin.os.tag == .linux) try std.testing.expect(std.mem.endsWith(u8, got, "-linux-musl"));
 }
 
 test "update: a repo that is not owner/name is refused before a release url exists" {
