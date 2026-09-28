@@ -61,8 +61,15 @@ DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 # Keep the agent's own budget under harbor's per-task agent timeout, so
 # microagent stops deliberately instead of being killed mid-turn.
 DEFAULT_BUDGET_SECONDS = "600"
-# Room left inside the caller's timeout for the last turn to finish.
-FINAL_TURN_ROOM_S = 90
+# How far past its budget the binary's final push may run (`final_push_grace_s`
+# in src/main.zig). A budget derived from the caller's timeout has to leave this
+# much room, or the push that is supposed to land the last edit is the turn
+# harbor kills.
+FINAL_PUSH_GRACE_S = 300
+# The grace plus room to settle: the push is a turn's worth of tool calls, and
+# a budget stopping at the timeout minus only the grace still gets killed with
+# the push in flight.
+FINAL_TURN_ROOM_S = FINAL_PUSH_GRACE_S + 30
 # The levels the binary accepts for reasoning.effort, kept beside the defaults
 # so a mistyped one is refused before a container is started rather than inside
 # one.
@@ -219,12 +226,20 @@ class Microagent(BaseAgent):
         # The budget is the agent's working time, so it is as large as the
         # caller's timeout allows, less room for the last turn to land. A
         # budget equal to the timeout is a run killed mid-turn; a budget far
-        # below it is working time thrown away.
+        # below it is working time thrown away. A timeout too small to hold the
+        # room is refused rather than floored: a floor under the subtraction
+        # hands back a budget larger than the timeout it was derived from, and
+        # every run under it is killed in the turn the budget exists to protect.
         agent_timeout = int_env("MICROAGENT_AGENT_TIMEOUT_SEC", "1500")
+        if agent_timeout <= FINAL_TURN_ROOM_S:
+            raise RuntimeError(
+                f"MICROAGENT_AGENT_TIMEOUT_SEC must be more than {FINAL_TURN_ROOM_S}s for microagent "
+                f"to stop inside it, got {agent_timeout}"
+            )
         budget = str(
             min(
                 int_env("MICROAGENT_BUDGET_SECONDS", DEFAULT_BUDGET_SECONDS),
-                max(60, agent_timeout - FINAL_TURN_ROOM_S),
+                agent_timeout - FINAL_TURN_ROOM_S,
             )
         )
         reasoning = reasoning_effort()

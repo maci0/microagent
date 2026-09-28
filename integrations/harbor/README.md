@@ -63,18 +63,19 @@ installs. The command that regenerates it is in the comment at the top of
 | --- | --- |
 | `MICROAGENT_API_KEY` / `OPENROUTER_API_KEY` / `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` | provider key, passed to the container process only |
 | `MICROAGENT_BASE_URL` | OpenAI-compatible endpoint (default OpenRouter) |
-| `MICROAGENT_BUDGET_SECONDS` | elapsed-time budget inside the container, read from the monotonic clock (default 600) |
+| `MICROAGENT_BUDGET_SECONDS` | elapsed-time budget inside the container, read from the monotonic clock (default 600, never above the agent timeout less its final-turn room) |
 | `MICROAGENT_MAX_TURNS` | `--max-turns` passed to the binary (default 150, above the binary's own 100) |
 | `MICROAGENT_REASONING_EFFORT` | `none`/`low`/... — reasoning models otherwise spend the whole budget thinking; a level the binary does not have stops the run here |
 | `MICROAGENT_CA_BUNDLE` | PEM file to upload as the container's trust store, else `SSL_CERT_FILE`, else the host's system store |
-| `MICROAGENT_AGENT_TIMEOUT_SEC` | hard cap on the in-container process (default 1500) |
+| `MICROAGENT_AGENT_TIMEOUT_SEC` | hard cap on the in-container process (default 1500, minimum 331: the binary's final push may run 300 s past its budget, and a budget that leaves less is a run killed mid-turn) |
 | `MICROAGENT_BINARY` | path to the static binary, if not next to this file |
 | `MICROAGENT_VERSION` | version string reported to harbor, if not the binary's own |
 
 An empty value is the same as an unset one for every variable here, and a value
 is trimmed before it is read, so a wrapper that exports one from a file leaves
 no newline on a path or a key. A non-numeric or zero `MICROAGENT_MAX_TURNS`,
-`MICROAGENT_BUDGET_SECONDS` or `MICROAGENT_AGENT_TIMEOUT_SEC`, and a
+`MICROAGENT_BUDGET_SECONDS` or `MICROAGENT_AGENT_TIMEOUT_SEC`, a
+`MICROAGENT_AGENT_TIMEOUT_SEC` too small to hold the final-turn room, and a
 `MICROAGENT_REASONING_EFFORT` that is not one of `minimal`, `low`, `medium`,
 `high`, `none`, stop the run before the container starts, naming the variable.
 `MICROAGENT_MAX_TURNS` is passed as `--max-turns` and the binary reads the same

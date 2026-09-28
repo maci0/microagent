@@ -494,7 +494,7 @@ fn displayUrl(arena: std.mem.Allocator, url: []const u8) []const u8 {
     return std.fmt.allocPrint(arena, "{s}[redacted]@{s}", .{ url[0 .. scheme_end + "://".len], rest[at + 1 ..] }) catch url;
 }
 
-/// The wall-clock budget in seconds, from a flag or a variable, or the message
+/// The budget in seconds, from a flag or a variable, or the message
 /// saying it is not one. It goes through `ceiling` like the turn and token
 /// limits, so a zero budget is refused the same way: zero is not "no limit" to
 /// the loop, it is a deadline that has already passed, so the first turn the run
