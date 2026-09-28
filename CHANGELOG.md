@@ -12,6 +12,17 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+### Fixed
+
+- Bytes that are not UTF-8 no longer corrupt a request. Text from a tool result, a file, the working
+  directory or `argv` is written into JSON as-is, so one latin-1 source file or stray `0xFF` byte made
+  the whole request body unparseable and the provider answered 400, failing the turn over output the
+  agent had already collected. Each bad byte is now written as U+FFFD and the rest of the string is
+  unchanged.
+- The stderr tool gutter stays one line. A model that puts a newline or an escape sequence in a path,
+  pattern or command broke the `⏺ tool detail` shape a reader parses; control characters are now written
+  as `\xNN`.
+
 ## [0.2.0] - 2026-09-29
 
 ### Added

@@ -1084,7 +1084,10 @@ fn runTool(io: Io, arena: std.mem.Allocator, call: ToolCall) ![]u8 {
     return std.fmt.allocPrint(arena, "error: unknown tool '{s}'", .{call.name});
 }
 
-/// A one-line tool gutter on stderr, the shape gauntlet recognizes.
+/// A one-line tool gutter on stderr, the shape gauntlet recognizes. The name
+/// and the detail are the provider's own text and may carry a newline or an
+/// escape sequence, either of which breaks the one-line-per-call shape a reader
+/// parses, so control characters are written as their two-character escapes.
 fn noteToolCall(io: Io, arena: std.mem.Allocator, name: []const u8, args: std.json.ObjectMap) void {
     // The interesting argument is not the same one for every tool: a structural
     // search is identified by its pattern, a bash call by its command.
@@ -1092,8 +1095,42 @@ fn noteToolCall(io: Io, arena: std.mem.Allocator, name: []const u8, args: std.js
         (str(args.get("pattern")) orelse "")
     else
         (str(args.get("command")) orelse str(args.get("pattern")) orelse str(args.get("path")) orelse "");
-    const line = std.fmt.allocPrint(arena, "\u{23fa} {s} {s}\n", .{ name, clamp(detail, 120) }) catch return;
-    std.Io.File.stderr().writeStreamingAll(io, line) catch {};
+    var buf: std.ArrayList(u8) = .empty;
+    buf.appendSlice(arena, "\u{23fa} ") catch return;
+    writeGutterText(arena, &buf, clamp(name, 40)) catch return;
+    buf.append(arena, ' ') catch return;
+    writeGutterText(arena, &buf, clamp(detail, 120)) catch return;
+    buf.append(arena, '\n') catch return;
+    std.Io.File.stderr().writeStreamingAll(io, buf.items) catch {};
+}
+
+/// Gutter text with every C0 control and DEL written as `\xNN`, and bytes that
+/// are not valid UTF-8 written as U+FFFD, so one call stays one line.
+const hex_digits = "0123456789abcdef";
+
+fn writeGutterText(gpa: std.mem.Allocator, buf: *std.ArrayList(u8), s: []const u8) !void {
+    var i: usize = 0;
+    var start: usize = 0;
+    while (i < s.len) {
+        const c = s[i];
+        if (c < 0x20 or c == 0x7f) {
+            try buf.appendSlice(gpa, s[start..i]);
+            try buf.appendSlice(gpa, &.{ '\\', 'x', hex_digits[c >> 4], hex_digits[c & 0x0f] });
+            i += 1;
+            start = i;
+            continue;
+        }
+        const len: usize = if (c < 0x80) 1 else utf8SequenceLen(s, i);
+        if (len == 0) {
+            try buf.appendSlice(gpa, s[start..i]);
+            try buf.appendSlice(gpa, "\u{fffd}");
+            i += 1;
+            start = i;
+            continue;
+        }
+        i += len;
+    }
+    try buf.appendSlice(gpa, s[start..i]);
 }
 
 fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
@@ -1253,35 +1290,60 @@ const JsonBuf = struct {
     }
 };
 
+/// Writes `s` as a JSON string. Text reaching here came from outside the
+/// process: a tool result, a file's bytes, a working directory, an argv entry.
+/// Bytes above ASCII are copied when they form a UTF-8 sequence and become
+/// U+FFFD when they do not, because a lone byte is not a JSON string and one
+/// invalid sequence in a tool result fails the whole request with a 400.
 fn writeJsonString(w: *Io.Writer, s: []const u8) !void {
     try w.writeByte('"');
     var i: usize = 0;
+    var start: usize = 0;
     while (i < s.len) {
-        // Copy the run that needs no escaping in one write. Tool results and
-        // the conversation rebuild are mostly plain text, and a per-byte
-        // write for each of them costs a call per byte on the path that
-        // re-serializes the largest payloads the run has.
-        const start = i;
-        while (i < s.len and !jsonNeedsEscape(s[i])) : (i += 1) {}
-        if (i > start) try w.writeAll(s[start..i]);
-        if (i == s.len) break;
-        switch (s[i]) {
-            '"' => try w.writeAll("\\\""),
-            '\\' => try w.writeAll("\\\\"),
-            '\n' => try w.writeAll("\\n"),
-            '\r' => try w.writeAll("\\r"),
-            '\t' => try w.writeAll("\\t"),
-            0x08 => try w.writeAll("\\b"),
-            0x0c => try w.writeAll("\\f"),
-            else => try w.print("\\u{x:0>4}", .{s[i]}),
+        const c = s[i];
+        if (jsonNeedsEscape(c)) {
+            try w.writeAll(s[start..i]);
+            switch (c) {
+                '"' => try w.writeAll("\\\""),
+                '\\' => try w.writeAll("\\\\"),
+                '\n' => try w.writeAll("\\n"),
+                '\r' => try w.writeAll("\\r"),
+                '\t' => try w.writeAll("\\t"),
+                0x08 => try w.writeAll("\\b"),
+                0x0c => try w.writeAll("\\f"),
+                else => try w.print("\\u{x:0>4}", .{c}),
+            }
+            i += 1;
+            start = i;
+            continue;
         }
-        i += 1;
+        const len: usize = if (c < 0x80) 1 else utf8SequenceLen(s, i);
+        if (len == 0) {
+            try w.writeAll(s[start..i]);
+            try w.writeAll("\u{fffd}");
+            i += 1;
+            start = i;
+            continue;
+        }
+        i += len;
     }
+    try w.writeAll(s[start..i]);
     try w.writeByte('"');
 }
 
 fn jsonNeedsEscape(c: u8) bool {
     return c < 0x20 or c == '"' or c == '\\';
+}
+
+/// The length of the UTF-8 sequence starting at `i`, or 0 where the bytes are
+/// not one: a bad lead byte, a truncated tail, or an overlong or surrogate
+/// encoding all read as a replacement rather than being copied through.
+fn utf8SequenceLen(s: []const u8, i: usize) usize {
+    const want = std.unicode.utf8ByteSequenceLength(s[i]) catch return 0;
+    const end = i + want;
+    if (end > s.len) return 0;
+    if (!std.unicode.utf8ValidateSlice(s[i..end])) return 0;
+    return want;
 }
 
 fn str(v: ?std.json.Value) ?[]const u8 {
@@ -1436,6 +1498,57 @@ test "help and version win wherever they appear" {
     var v: Options = .{};
     try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &.{ "-V", "--model" }, &v));
     try std.testing.expectEqual(Action.version, v.action);
+}
+
+// A tool result, a filename or a working directory may hold bytes that are not
+// UTF-8: a latin-1 source file, a binary read, a directory named with a stray
+// 0xFF. Copied through, one of them makes the request body unparseable and the
+// provider refuses the whole turn, so each bad byte becomes U+FFFD and nothing
+// else about the string changes.
+test "a string that is not UTF-8 still serializes as valid JSON" {
+    const cases = [_][]const u8{
+        "\xff", // lone lead byte
+        "caf\xe9", // latin-1 e-acute
+        "\xc3", // truncated two-byte sequence
+        "\xe6\x97", // truncated three-byte sequence, the CJK prefix
+        "\xed\xa0\x80", // UTF-8 encoding of a surrogate half
+        "\xc0\x80", // overlong encoding
+        "ok\xff\xe6\x97\xa5ok",
+    };
+    for (cases) |raw| {
+        var buf = JsonBuf.init(std.testing.allocator);
+        defer buf.list.deinit(std.testing.allocator);
+        try writeJsonString(buf.writer(), raw);
+
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, buf.items(), .{});
+        defer parsed.deinit();
+        try std.testing.expect(std.unicode.utf8ValidateSlice(parsed.value.string));
+        // The valid text either side of a bad byte survives unchanged.
+        if (std.mem.indexOf(u8, raw, "ok") != null)
+            try std.testing.expect(std.mem.startsWith(u8, parsed.value.string, "ok"));
+    }
+}
+
+test "valid multibyte text passes through the escaper unchanged" {
+    const text = "日本語 \u{1f1e8}\u{1f1ed} \u{1f469}\u{200d}\u{1f4bb}";
+    var buf = JsonBuf.init(std.testing.allocator);
+    defer buf.list.deinit(std.testing.allocator);
+    try writeJsonString(buf.writer(), text);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, buf.items(), .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(text, parsed.value.string);
+}
+
+test "the tool gutter stays one line whatever the model sent" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var buf: std.ArrayList(u8) = .empty;
+    try writeGutterText(arena, &buf, "rg -n 'foo'\nnext line\u{1b}[31mred\xff");
+    try std.testing.expectEqualStrings("rg -n 'foo'\\x0anext line\\x1b[31mred\u{fffd}", buf.items);
+    try std.testing.expect(std.mem.indexOfScalar(u8, buf.items, '\n') == null);
 }
 
 test "clamp keeps short strings intact" {

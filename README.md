@@ -136,7 +136,8 @@ stdout carries the model's own text, one JSON usage line per response, and nothi
 
 Token counters are cumulative for the run, which is the shape gauntlet's usage reader takes its
 maximum from. Tool activity goes to stderr as a one-line gutter (`⏺ read src/main.zig`) so it never
-pollutes the agent's answer.
+pollutes the agent's answer. Control characters in a path or command are written as `\xNN`, so a line
+stays one line whatever the model sent.
 
 `cached_tokens` is the part of the prompt the provider served from its prompt cache. The whole
 conversation is re-sent every turn, byte for byte: messages are only ever appended, and the system
