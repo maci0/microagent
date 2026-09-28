@@ -844,6 +844,28 @@ const Budget = struct {
         return Io.Timestamp.now(io, .awake).nanoseconds >= d;
     }
 
+    /// Milliseconds left on the budget, or null when there is no budget. Zero
+    /// means expired; callers that only care about that use `expired`.
+    fn remainingMs(self: Budget, io: Io) ?u64 {
+        const d = self.deadline_ns orelse return null;
+        const now = Io.Timestamp.now(io, .awake).nanoseconds;
+        if (now >= d) return 0;
+        return @intCast(@divTrunc(d - now, std.time.ns_per_ms));
+    }
+
+    /// A tool's own timeout, cut down to what is left of the budget.
+    ///
+    /// Without this the budget is a promise the tools do not keep: a bash call
+    /// with a two-minute timeout starts happily at second 779 of a 780-second
+    /// budget and the caller kills the run mid-command, which is what the budget
+    /// exists to prevent. The floor stops a nearly-spent budget from handing a
+    /// tool a zero timeout, which fails instantly and reads as a broken tool
+    /// rather than a spent budget.
+    fn toolTimeoutMs(self: Budget, io: Io, wanted_ms: u64) u64 {
+        const left = self.remainingMs(io) orelse return wanted_ms;
+        return @min(wanted_ms, @max(left, tool_timeout_floor_ms));
+    }
+
     /// The same budget with `seconds` more to run. The final push is the one
     /// turn that is allowed past the budget, and the grace is what keeps that
     /// turn bounded too: it lands or it is cut off with a reason, never left
@@ -1664,6 +1686,9 @@ fn applyFrame(
 /// `max_tool_output * 4` everywhere, and is trimmed to `max_tool_output` by
 /// `clamp` before it reaches the model.
 const tool_timeout_ms: u64 = 60_000;
+/// The shortest a tool timeout may be cut to, even with the budget spent: a
+/// zero timeout would fail before the tool could even start.
+const tool_timeout_floor_ms: u64 = 5_000;
 const tool_stderr_limit: usize = 4096;
 /// Ceiling on the `timeout_ms` a model may ask `bash` for. The value is model
 /// output, so it arrives with the same trust as a path or a command string: an
@@ -1792,8 +1817,8 @@ fn forwardInterruptsToToolGroup() void {
 /// A tool that delegates to a binary already on PATH: the caller builds the
 /// argv, and the failure text, the empty result and the two output streams are
 /// handled the same way for each of them.
-fn runSearchTool(io: Io, arena: std.mem.Allocator, argv: []const []const u8, what: []const u8) ![]u8 {
-    const res = runToolProcess(io, arena, argv, max_tool_output * 4, tool_stderr_limit, durationMs(tool_timeout_ms)) catch |err|
+fn runSearchTool(io: Io, arena: std.mem.Allocator, argv: []const []const u8, what: []const u8, timeout_ms: u64) ![]u8 {
+    const res = runToolProcess(io, arena, argv, max_tool_output * 4, tool_stderr_limit, durationMs(timeout_ms)) catch |err|
         return std.fmt.allocPrint(arena, "error: {s} failed: {s}", .{ what, @errorName(err) });
     if (res.stdout.len > 0) return res.stdout;
     if (res.stderr.len > 0) return res.stderr;
@@ -1814,7 +1839,8 @@ fn gitLineLimit(args: std.json.ObjectMap) usize {
 
 /// Read-only git, with the subcommands fixed here rather than assembled by the
 /// model. Deterministic, no shell quoting, and the output is capped.
-fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
+fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, budget: Budget) ![]u8 {
+    const cap_ms = budget.toolTimeoutMs(io, tool_timeout_ms);
     const cmd = str(args.get("cmd")) orelse return std.fmt.allocPrint(arena, "error: missing cmd", .{});
     const path = str(args.get("path"));
     const rev = str(args.get("rev"));
@@ -1845,7 +1871,7 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     try argv.append(arena, "--");
     if (path) |p| try argv.append(arena, p);
 
-    const res = runToolProcess(io, arena, argv.items, max_tool_output * 4, tool_stderr_limit, durationMs(tool_timeout_ms)) catch |err|
+    const res = runToolProcess(io, arena, argv.items, max_tool_output * 4, tool_stderr_limit, durationMs(cap_ms)) catch |err|
         return std.fmt.allocPrint(arena, "error: git {s} failed: {s}", .{ cmd, @errorName(err) });
     const text = if (res.stdout.len > 0) res.stdout else res.stderr;
     if (text.len == 0) return std.fmt.allocPrint(arena, "(git {s}: no output)", .{cmd});
@@ -1985,7 +2011,7 @@ fn finishTurn(
         const output = if (budget.expired(io))
             try std.fmt.allocPrint(arena, "error: not run, the run's time budget is exhausted", .{})
         else
-            runTool(io, arena, call) catch |err|
+            runTool(io, arena, call, budget) catch |err|
                 // A tool that fails outright (rather than reporting its own
                 // failure as text) is named here, so a result reading
                 // `error: OutOfMemory` says which of the calls ran out.
@@ -2045,7 +2071,7 @@ fn logUsage(io: Io, arena: std.mem.Allocator, usage: *Usage, result: *const Chat
     net.writeOut(io, usage_line.items());
 }
 
-fn runTool(io: Io, arena: std.mem.Allocator, call: ToolCall) ![]u8 {
+fn runTool(io: Io, arena: std.mem.Allocator, call: ToolCall, budget: Budget) ![]u8 {
     const parsed = std.json.parseFromSlice(std.json.Value, arena, call.args.items, .{}) catch
         return std.fmt.allocPrint(arena, "error: tool arguments are not valid JSON", .{});
     const args = switch (parsed.value) {
@@ -2054,13 +2080,13 @@ fn runTool(io: Io, arena: std.mem.Allocator, call: ToolCall) ![]u8 {
     };
 
     noteToolCall(io, arena, call.name, args);
-    if (std.mem.eql(u8, call.name, "bash")) return toolBash(io, arena, args);
+    if (std.mem.eql(u8, call.name, "bash")) return toolBash(io, arena, args, budget);
     if (std.mem.eql(u8, call.name, "read")) return toolRead(io, arena, args);
     if (std.mem.eql(u8, call.name, "write")) return toolWrite(io, arena, args);
     if (std.mem.eql(u8, call.name, "edit")) return toolEdit(io, arena, args);
-    if (std.mem.eql(u8, call.name, "search")) return toolSearch(io, arena, args);
-    if (std.mem.eql(u8, call.name, "ast")) return toolAst(io, arena, args);
-    if (std.mem.eql(u8, call.name, "git")) return toolGit(io, arena, args);
+    if (std.mem.eql(u8, call.name, "search")) return toolSearch(io, arena, args, budget);
+    if (std.mem.eql(u8, call.name, "ast")) return toolAst(io, arena, args, budget);
+    if (std.mem.eql(u8, call.name, "git")) return toolGit(io, arena, args, budget);
     return std.fmt.allocPrint(arena, "error: unknown tool '{s}'", .{call.name});
 }
 
@@ -2092,22 +2118,6 @@ fn writeGutterText(gpa: std.mem.Allocator, buf: *std.ArrayList(u8), s: []const u
     var i: usize = 0;
     var start: usize = 0;
     while (i < s.len) {
-        // Eight bytes at a time while they are plain ASCII with nothing to
-        // escape. A tool result is mostly plain text and this runs over every
-        // one of them plus every message a conversation rebuild copies, so the
-        // per-byte branch was the loop the body cost hung on.
-        while (i + word_bytes <= s.len) {
-            const mask = needsAttention(std.mem.readInt(u64, s[i..][0..word_bytes], .little));
-            if (mask == 0) {
-                i += word_bytes;
-                continue;
-            }
-            // The mask holds a high bit for every byte that needs looking at,
-            // so the lowest one is the first such byte. Never zero in here.
-            i += @ctz(mask) / 8;
-            break;
-        }
-        if (i >= s.len) break;
         const c = s[i];
         if (c < 0x20 or c == 0x7f) {
             try buf.appendSlice(gpa, s[start..i]);
@@ -2160,9 +2170,9 @@ fn bashTimeoutMs(requested: ?u64) u64 {
     return @min(requested orelse default_bash_timeout_ms, max_bash_timeout_ms);
 }
 
-fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
+fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, budget: Budget) ![]u8 {
     const command = str(args.get("command")) orelse return std.fmt.allocPrint(arena, "error: missing command", .{});
-    const timeout_ms: u64 = bashTimeoutMs(if (args.get("timeout_ms")) |v| num(v) else null);
+    const timeout_ms: u64 = budget.toolTimeoutMs(io, bashTimeoutMs(if (args.get("timeout_ms")) |v| num(v) else null));
     const capture_limit = max_tool_output * 4;
     const res = runCapped(io, arena, &.{ "/bin/sh", "-c", command }, capture_limit, durationMs(timeout_ms)) catch |err| switch (err) {
         error.Timeout => return std.fmt.allocPrint(arena, "error: command timed out after {d}ms", .{timeout_ms}),
@@ -2303,7 +2313,7 @@ fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     return std.fmt.allocPrint(arena, "replaced {d} occurrence(s) in {s}", .{ count, path });
 }
 
-fn toolSearch(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
+fn toolSearch(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, budget: Budget) ![]u8 {
     const pattern = str(args.get("pattern")) orelse return std.fmt.allocPrint(arena, "error: missing pattern", .{});
     const path = str(args.get("path")) orelse ".";
     const glob = str(args.get("glob"));
@@ -2313,13 +2323,13 @@ fn toolSearch(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 
         try argv.appendSlice(arena, &.{ "--glob", g });
     }
     try argv.appendSlice(arena, &.{ "--", pattern, path });
-    return runSearchTool(io, arena, argv.items, "ripgrep");
+    return runSearchTool(io, arena, argv.items, "ripgrep", budget.toolTimeoutMs(io, tool_timeout_ms));
 }
 
 /// Structural search/rewrite through ast-grep. `rewrite` set means the change
 /// is applied to every match (`--update-all`), so the next turn reads the
 /// result back rather than trusting the tool's summary.
-fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
+fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, budget: Budget) ![]u8 {
     const pattern = str(args.get("pattern")) orelse return std.fmt.allocPrint(arena, "error: missing pattern", .{});
     const lang = str(args.get("lang")) orelse return std.fmt.allocPrint(arena, "error: missing lang", .{});
     const path = str(args.get("path")) orelse ".";
@@ -2330,7 +2340,7 @@ fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     if (rewrite) |r| try argv.appendSlice(arena, &.{ "--rewrite", r, "--update-all" });
     try argv.appendSlice(arena, &.{ "--", path });
 
-    return runSearchTool(io, arena, argv.items, "ast-grep");
+    return runSearchTool(io, arena, argv.items, "ast-grep", budget.toolTimeoutMs(io, tool_timeout_ms));
 }
 
 fn appendMessage(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), role: []const u8, content: []const u8) !void {
@@ -2409,30 +2419,6 @@ fn writeJsonString(w: *Io.Writer, s: []const u8) !void {
 
 fn jsonNeedsEscape(c: u8) bool {
     return c < 0x20 or c == '"' or c == '\\';
-}
-
-const word_bytes = @sizeOf(u64);
-const byte_ones: u64 = 0x0101010101010101;
-const byte_high: u64 = 0x8080808080808080;
-
-/// Zero when all eight bytes can be copied through untouched, otherwise the
-/// high bit of every byte that cannot: a control byte, a quote, a backslash,
-/// or anything outside ASCII, which is length checked before it is written.
-/// One compare per eight bytes instead of a branch per byte, and the byte it
-/// lands on is the one the per-byte path would have found anyway.
-fn needsAttention(x: u64) u64 {
-    if (x & byte_high != 0) return x & byte_high;
-    const below_space = (x -% (0x20 *% byte_ones)) & ~x;
-    if (below_space & byte_high != 0) return below_space & byte_high;
-    const quotes = byteEquals(x, 0x22);
-    if (quotes != 0) return quotes;
-    return byteEquals(x, 0x5c);
-}
-
-/// The high bit of every byte of `x` that equals `c`, zero when there is none.
-fn byteEquals(x: u64, c: u8) u64 {
-    const v = x ^ (@as(u64, c) *% byte_ones);
-    return (v -% byte_ones) & ~v & byte_high;
 }
 
 /// The length of the UTF-8 sequence starting at `i`, or 0 where the bytes are
@@ -2688,11 +2674,12 @@ test "json string escaping" {
 // path: a byte that is neither escaped nor copied comes back short. The
 // range is the ASCII one, which is what the escaper is responsible for; bytes
 // above it are passed through as written, and a lone one is not valid JSON.
-// The escaper skips eight bytes at a time, so anything it cannot copy has to
-// be found out of a word, at every offset a word can begin it. A miss is not
-// a wrong escape, it is a byte copied through that had to be rewritten: the
-// body stops being the JSON the API reads, and it fails far from here.
-test "every byte that needs attention is found at every word offset" {
+// The escaper decides a byte's width from its lead byte, so an escapable byte
+// or a multi-byte character has to come out right wherever it lands in the
+// string. A miss here is not a wrong escape, it is a byte copied through that
+// had to be rewritten: the body stops being the JSON the API reads, and it
+// fails far from here.
+test "every byte that needs escaping is escaped at every offset" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -2721,9 +2708,9 @@ test "every byte that needs attention is found at every word offset" {
     }
 }
 
-// The same for a multi-byte character: the scan has to stop on the lead byte
-// rather than copy the continuation bytes through, wherever it lands.
-test "a multi-byte character survives escaping at every word offset" {
+// The same for a multi-byte character, whose continuation bytes are only safe
+// because the lead byte is what advances the cursor past all of them.
+test "a multi-byte character survives escaping at every offset" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -2748,8 +2735,8 @@ test "a multi-byte character survives escaping at every word offset" {
     }
 }
 
-// The common case, and the one the word scan exists for: a long plain run is
-// copied whole, with nothing rewritten.
+// And the common case: a long plain run is copied whole, with nothing
+// rewritten, at every length around a boundary.
 test "a long plain run is copied whole" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -2977,7 +2964,7 @@ test "a real tool result over the cap stays a string the body can carry" {
     // Five bytes per line, so the cap does not land on a character boundary: a
     // plain cut here leaves half an e-acute in the string.
     try args.put(arena, "command", .{ .string = "i=0; while [ $i -lt 5000 ]; do printf '\\303\\251a\\303\\251'; i=$((i+1)); done" });
-    const output = try toolBash(std.testing.io, arena, args);
+    const output = try toolBash(std.testing.io, arena, args, .{});
     try std.testing.expect(output.len > max_tool_output);
 
     const result = try toolResult(arena, output);
@@ -3775,7 +3762,7 @@ test "git tool refuses a rev that git would read as an option" {
     var args: std.json.ObjectMap = .empty;
     try args.put(arena, "cmd", .{ .string = "diff" });
     try args.put(arena, "rev", .{ .string = "--output=pwned" });
-    const out = try toolGit(std.testing.io, arena, args);
+    const out = try toolGit(std.testing.io, arena, args, .{});
     try std.testing.expectEqualStrings("error: rev must not start with '-'", out);
 }
 
@@ -3812,7 +3799,7 @@ test "git tool refuses a missing or unknown subcommand" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     {
-        const out = try toolGit(std.testing.io, arena, .empty);
+        const out = try toolGit(std.testing.io, arena, .empty, .{});
         try std.testing.expectEqualStrings("error: missing cmd", out);
     }
     {
@@ -3902,7 +3889,7 @@ fn dispatch(arena: std.mem.Allocator, name: []const u8, args: []const u8) ![]u8 
         .name = try arena.dupe(u8, name),
     };
     try call.args.appendSlice(arena, args);
-    return runTool(std.testing.io, arena, call);
+    return runTool(std.testing.io, arena, call, .{});
 }
 
 test "a child that outruns the capture cap keeps its first bytes instead of failing" {
