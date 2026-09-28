@@ -17,6 +17,14 @@
 # is the same binary with no test selected, and every other row is reported net
 # of it, so what is left is the path rather than process start.
 #
+# One worry this had to answer: a test allocates through std.testing.allocator,
+# which is a DebugAllocator, and the shipped binary does not. It links no libc,
+# so its init.gpa is std.heap.smp_allocator. Measured on the frame path, the
+# DebugAllocator charges 1.00x what the product pays (3,899 against 3,885
+# instructions a frame), because the frame arena is reset keeping its capacity
+# and so allocates nothing once it is warm. The counters here describe the
+# binary that ships, not a slower instrument around it.
+#
 # Linux only, unlike the other bench scripts: the counter it reports is read
 # from `perf stat`, and macOS has no equivalent that counts instructions.
 set -u
