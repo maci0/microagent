@@ -11,6 +11,11 @@ const Io = std.Io;
 const default_base_url = "https://openrouter.ai/api/v1";
 const default_model = "deepseek/deepseek-v4-flash";
 const max_tool_output = 24 * 1024;
+/// Above this many bytes of conversation, the oldest tool results are replaced
+/// with a marker. Every turn re-sends the whole conversation, so without this a
+/// long run pays for every file it has ever read, forever: one Terminal-Bench
+/// task reached 1.7M cumulative input tokens that way.
+const conversation_soft_limit = 400 * 1024;
 const max_turns_default = 60;
 
 const system_prompt =
@@ -291,6 +296,7 @@ fn run(
                 return turn + 1;
             }
         }
+        try compactMessages(gpa, msgs, arena);
         const body = try buildBody(arena, opts, msgs.items);
         var result = try streamChat(client, io, arena, opts, body);
         try finishTurn(io, arena, gpa, msgs, &result, &usage);
@@ -519,6 +525,56 @@ fn applyFrame(
             calls.items[idx].args = args_buf.items;
         }
     };
+}
+
+/// Replaces the content of the oldest large tool results with a marker once the
+/// conversation outgrows `conversation_soft_limit`, down to half of it.
+///
+/// Tool results are surgical targets: the assistant messages and the task
+/// instruction stay verbatim, so the agent keeps its plan and its recent
+/// evidence while the pile of file dumps it already acted on stops being
+/// re-sent every turn. Messages are never dropped, so `tool_call_id` pairing
+/// stays valid.
+fn compactMessages(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), scratch: std.mem.Allocator) !void {
+    if (msgs.items.len <= conversation_soft_limit) return;
+
+    var arena_state = std.heap.ArenaAllocator.init(scratch);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const parsed = std.json.parseFromSlice(std.json.Value, arena, msgs.items, .{}) catch return;
+    const array = switch (parsed.value) {
+        .array => |a| a,
+        else => return,
+    };
+
+    const target = conversation_soft_limit / 2;
+    var size = msgs.items.len;
+    for (array.items) |*message| {
+        if (size <= target) break;
+        const object = switch (message.*) {
+            .object => |o| o,
+            else => continue,
+        };
+        const role = str(object.get("role")) orelse continue;
+        if (!std.mem.eql(u8, role, "tool")) continue;
+        const content = object.getPtr("content") orelse continue;
+        const text = switch (content.*) {
+            .string => |t| t,
+            else => continue,
+        };
+        if (text.len < 4096) continue;
+        const marker = try std.fmt.allocPrint(arena, "[earlier tool output elided: {d} bytes]", .{text.len});
+        size -= text.len - marker.len;
+        content.* = .{ .string = marker };
+    }
+    if (size == msgs.items.len) return;
+
+    var jb = JsonBuf.init(gpa);
+    defer jb.list.deinit(gpa);
+    try std.json.Stringify.value(parsed.value, .{}, jb.writer());
+    msgs.clearRetainingCapacity();
+    try msgs.appendSlice(gpa, jb.items());
 }
 
 /// Hands the buffered tokens to stdout. A failed write is ignored: a closed
@@ -986,6 +1042,50 @@ test "usage counters land on the result" {
     try std.testing.expectEqual(@as(u64, 22), result.completion_tokens);
     try std.testing.expectEqual(@as(u64, 33), result.total_tokens);
     try std.testing.expectEqual(@as(u64, 7), result.reasoning_tokens);
+}
+
+test "compaction elides old tool output and keeps the recent turns" {
+    const gpa = std.testing.allocator;
+    var scratch_state = std.heap.ArenaAllocator.init(gpa);
+    defer scratch_state.deinit();
+
+    var msgs: std.ArrayList(u8) = .empty;
+    defer msgs.deinit(gpa);
+
+    // A conversation well past the limit: 120 tool results of 8 KB each.
+    const blob = "x" ** 8192;
+    try msgs.appendSlice(gpa, "[");
+    try appendMessage(gpa, &msgs, "system", "you are a coding agent");
+    try appendMessage(gpa, &msgs, "user", "fix the bug");
+    var i: usize = 0;
+    while (i < 120) : (i += 1) {
+        if (msgs.items.len > 1) try msgs.append(gpa, ',');
+        var msg = JsonBuf.init(gpa);
+        try msg.writer().writeAll("{\"role\":\"tool\",\"tool_call_id\":\"call_");
+        try msg.writer().print("{d}", .{i});
+        try msg.writer().writeAll("\",\"content\":");
+        try writeJsonString(msg.writer(), blob);
+        try msg.writer().writeAll("}");
+        try msgs.appendSlice(gpa, msg.items());
+        msg.list.deinit(gpa);
+    }
+    try msgs.append(gpa, ']');
+    const before = msgs.items.len;
+    try std.testing.expect(before > conversation_soft_limit);
+
+    try compactMessages(gpa, &msgs, scratch_state.allocator());
+
+    try std.testing.expect(msgs.items.len < before / 2);
+    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, msgs.items, .{});
+    defer parsed.deinit();
+    const array = parsed.value.array;
+    try std.testing.expectEqual(@as(usize, 122), array.items.len);
+    // Roles and ids survive; the newest tool result is untouched.
+    try std.testing.expectEqualStrings("system", array.items[0].object.get("role").?.string);
+    const last = array.items[array.items.len - 1].object;
+    try std.testing.expectEqualStrings("call_119", last.get("tool_call_id").?.string);
+    try std.testing.expectEqual(@as(usize, 8192), last.get("content").?.string.len);
+    try std.testing.expect(std.mem.startsWith(u8, array.items[2].object.get("content").?.string, "[earlier tool output elided"));
 }
 
 test "a CA bundle path that cannot be read falls back to the system store" {

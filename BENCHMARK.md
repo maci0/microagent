@@ -220,23 +220,69 @@ does not solve them inside the budget — which is the honest result and is left
 
 The canonical measure for a coding agent. Harbor's `swebench-verified@1.0` registry dataset (500
 instances), same adapter and binary as above, `deepseek/deepseek-v4-flash`, reasoning off, 1200 s
-budget, `-n 4`.
+budget, `-n 4`. Instances are a deterministic stride sample — every 40th of the 500, sorted by name
+— chosen before the run, not after it.
 
-First four instances:
+| instance | resolved | in/out tokens | wall |
+| --- | --- | --- | --- |
+| astropy__astropy-12907 | 1.0 | 341k / 5.8k | 465 s |
+| django__django-11211 | 0.0 | 615k / 7.9k | 167 s |
+| django__django-12308 | 0.0 | 157k / 3.2k | 176 s |
+| django__django-13568 | 0.0 | 280k / 4.4k | 159 s |
+| django__django-14559 | 1.0 | 123k / 3.0k | 106 s |
+| django__django-15572 | 0.0 | 41k / 1.5k | 98 s |
+| django__django-16667 | 0.0 | 82k / 2.4k | 90 s |
+| matplotlib__matplotlib-25775 | 0.0 | 1784k / 10.6k | 296 s |
+| pylint-dev__pylint-4551 | 0.0 | 925k / 9.2k | 246 s |
+| scikit-learn__scikit-learn-13328 | 1.0 | 121k / 2.1k | 85 s |
+| sphinx-doc__sphinx-8120 | 1.0 | 234k / 3.3k | 104 s |
+| sympy__sympy-13877 | 1.0 | 610k / 17.7k | 228 s |
+| sympy__sympy-21379 | 0.0 | 789k / 13.4k | 229 s |
+| **stride sample of 13** | **0.385** | 6.10M / 84k total | 11m45s |
 
-| instance | resolved |
-| --- | --- |
-| pytest-dev__pytest-5809 | 1.0 |
-| sphinx-doc__sphinx-8593 | 1.0 |
-| pydata__xarray-3095 | 1.0 |
-| sympy__sympy-13852 | 0.0 |
-| **mean** | **0.750** (3/4) |
+Zero exceptions. A separate first sample of four instances scored 0.750 (pytest-5809,
+sphinx-8593, xarray-3095 resolved; sympy-13852 not); four instances is noise, which is exactly
+what the larger sample shows.
 
-No exceptions, 6m19s wall for the four, 908k input and 17k output tokens in total. That sample is
-far too small to call a score — it is four instances out of five hundred — and the numbers a reader
-should compare against are published full-set results, not this.
+### Same thirteen, after conversation compaction
 
-## Streaming profile
+The same 13 instances, same model and budget, with `compactMessages` in the binary:
+
+| | before | after |
+| --- | --- | --- |
+| resolved | 5/13 (0.385) | 7/13 (0.538) |
+| input tokens | 6.10 M | 5.44 M (-11%) |
+| output tokens | 84 k | 80 k |
+| wall | 11m45s | 13m15s |
+
+Read this as noise, not as a win. Individual instances moved both ways — `sympy-13877` fell from
+610k to 122k input tokens while `django-12308` rose from 157k to 343k — and instances flipped
+between resolved and not in both directions, because the model is sampled and the loop length is
+not fixed. Thirteen instances carry roughly +/-13% standard error at this rate, so 5/13 and 7/13
+are the same result. The change is kept because it bounds how large a single conversation can grow
+and because the bound is unit-tested, not because the table proves a saving.
+
+### What a full run would take
+
+500 instances at this rate is roughly 8 hours of wall time and a few hundred GB of image pulls;
+the 13 above are the honest sample this machine was given, not a substitute for the full set.
+
+Two things the run says beyond the score:
+
+- **The input token column is the harness's own doing.** Every turn re-sends the whole
+  conversation, so the 1.78M-token instance is not a hard task, it is the same files being paid for
+  over and over. `compactMessages` now elides the content of the oldest large tool results once the
+  conversation passes 400 KB, keeping assistant messages, the task instruction and every
+  `tool_call_id` intact. The column above is the before side of that change.
+- **Repos beat prompts.** The failures are spread across django/matplotlib/pylint, not concentrated
+  in one review-shaped weakness, which is what a small harness should expect: microagent has no
+  repo-specific tooling and no language server, so SWE-bench scores come from the model plus search
+  and edit.
+
+The numbers a reader should compare against are published full-set (500-instance) results, not this
+sample; 13 instances carry roughly +/-13% standard error at this rate.
+
+## Streaming profile## Streaming profile
 
 The harness's only real hot loop is the SSE reader: every token delta is parsed and printed. It was
 profiled against a local OpenAI-compatible endpoint emitting a fixed 5000-frame stream
