@@ -98,7 +98,7 @@ help:
 	  'lint-lock             check the Harbor requirements.txt pins are the ones requirements.lock has' \
 	  'zig-version           check the local zig against the version the release is built with' \
 	  'bench AGENTS=...      three coding tasks through each harness' \
-	  'instructions [CHECK=--check]  retired instructions per unit of work, per path' \
+	  'instructions [CHECK=--check]  retired instructions per unit, against bench/instructions.baseline' \
 	  'overhead              startup and first-request cost per harness' \
 	  'install               install the binary into ~/.local/bin' \
 	  'release-assets        cross-build every published target into dist/' \
@@ -317,6 +317,10 @@ BIN_DIR := $(dir $(abspath $(BIN)))
 bench: build
 	PATH="$(BIN_DIR):$$PATH" sh bench/run.sh $(or $(AGENTS),microagent)
 
+# Startup latency and first-request cost per installed harness.
+overhead: build
+	PATH="$(BIN_DIR):$$PATH" sh bench/overhead.sh
+
 # Retired instructions per unit of work, per path a run walks. Not in `check`:
 # it needs Linux `perf`, and a gate that cannot measure on a macOS laptop or a
 # runner with the counters off is a gate that fails for reasons unrelated to
@@ -329,10 +333,6 @@ bench: build
 # gate on a tree where nothing is wrong.
 instructions: test
 	sh bench/instructions.sh $(CHECK)
-
-# Startup latency and first-request cost per installed harness.
-overhead: build
-	PATH="$(BIN_DIR):$$PATH" sh bench/overhead.sh
 
 # `install -D` is GNU coreutils; macOS ships BSD install, so the parent
 # directory is created here instead.

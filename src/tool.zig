@@ -6,7 +6,6 @@
 //! arguments, so it is capped, reaped and reported from one place.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const Io = std.Io;
 
 const chat = @import("chat.zig");
@@ -65,7 +64,7 @@ fn boundedMs(wanted_ms: u64, ceiling_ms: ?u64) u64 {
 /// runner that leaks a process tree.
 const ToolChild = struct {
     child: std.process.Child,
-    pgid: ?std.posix.pid_t,
+    pgid: std.posix.pid_t,
 
     pub fn spawn(io: Io, argv: []const []const u8, environ_map: ?*const std.process.Environ.Map) !ToolChild {
         const child = try std.process.spawn(io, .{
@@ -82,7 +81,7 @@ const ToolChild = struct {
         });
         return .{
             .child = child,
-            .pgid = if (builtin.os.tag == .windows) null else @intCast(child.id.?),
+            .pgid = @intCast(child.id.?),
         };
     }
 
@@ -91,7 +90,7 @@ const ToolChild = struct {
     /// is a no-op here, and its group still gets the signal: a command that
     /// backgrounded work and exited must not outlive the call.
     pub fn reap(self: *ToolChild, io: Io) void {
-        if (self.pgid) |group| signalGroup(group);
+        signalGroup(self.pgid);
         self.child.kill(io);
     }
 };
@@ -126,7 +125,7 @@ pub fn runToolProcess(
     // and cleared on the way out, so a later signal does not hit a dead group.
     watchToolGroup(spawned.pgid);
     defer {
-        watchToolGroup(null);
+        watchToolGroup(0);
         spawned.reap(io);
     }
     const child = &spawned.child;
@@ -185,15 +184,16 @@ fn onInterrupt(_: std.posix.SIG) callconv(.c) void {
     std.process.exit(130);
 }
 
-fn watchToolGroup(pgid: ?std.posix.pid_t) void {
-    tool_group.store(if (pgid) |group| group else 0, .monotonic);
+fn watchToolGroup(pgid: std.posix.pid_t) void {
+    tool_group.store(pgid, .monotonic);
 }
 
 /// Installed once the run starts, so Ctrl+C and `kill` reach the tools. Help,
 /// the version and the update subcommand own no subprocess and keep the default
-/// disposition.
+/// disposition. The disposition below is POSIX, which is every platform the
+/// release ships: a target without `sigaction` fails to compile here rather
+/// than building a binary that quietly leaves a tool's process group behind.
 pub fn forwardInterruptsToToolGroup() void {
-    if (builtin.os.tag == .windows) return;
     var act: std.posix.Sigaction = undefined;
     act.handler = .{ .handler = onInterrupt };
     act.mask = std.posix.sigemptyset();
@@ -963,7 +963,7 @@ pub fn runCapped(
     // and cleared on the way out, so a later signal does not hit a dead group.
     watchToolGroup(spawned.pgid);
     defer {
-        watchToolGroup(null);
+        watchToolGroup(0);
         spawned.reap(io);
     }
     const child = &spawned.child;
