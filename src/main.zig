@@ -3809,7 +3809,7 @@ test "git tool refuses a missing or unknown subcommand" {
         try args.put(arena, "cmd", .{ .string = "push" });
         try std.testing.expectEqualStrings(
             "error: unknown git cmd 'push'",
-            try toolGit(std.testing.io, arena, args),
+            try toolGit(std.testing.io, arena, args, .{}),
         );
     }
 }
