@@ -149,6 +149,41 @@ release, and `microagent update` moves you to it.
 - The session store pruner no longer deletes a name ending in a bare dash (`5-.jsonl`). Read as a
   plain log it sorted into the retention window as the oldest thing in the store, so a file this
   program never wrote was the first one the window removed.
+- A `bash` call that printed nothing says which exit it was. The no-output line
+  was `(no output, exit exited)`, and the note a call with output gets spells
+  the number out, so a silent command that failed and one that succeeded
+  returned the same line and the model had nothing to tell them apart by. It
+  reads `(no output, exit exited 3)`, written by the same helper as the note, so
+  the two spellings cannot drift apart again.
+- A truncated tool result names the cap it was cut at, not the length that
+  survived the cut. The cut backs up to the last whole character, so a result
+  whose `max_tool_output`-th byte landed inside one kept up to three bytes fewer
+  and the marker read `... [tool output truncated at 24573 of 25076 bytes]`,
+  which puts the cut at a place it was not. It reads
+  `... [tool output truncated at 24576 of 25076 bytes]`.
+- A `git` result the byte cap cut short is marked. `git` is cut by a line count,
+  and that count's marker was the only one it carried: a `show` or a `diff` the
+  24 KB cap ended before the 400-line cap came back unmarked, and the model
+  narrowed its next `git log` against a history it had never seen. A result the
+  byte cap cut now carries the same `[output truncated at the tool's cap]` the
+  other tools carry, and a result nothing cut says nothing.
+- A `search` or `ast` result whose stderr the cap cut short is marked, the way
+  one whose stdout was cut already was. The cap drains either stream, so a tool
+  that wrote its findings nowhere and its warnings to stderr returned a list cut
+  off mid-line with nothing on it to say so.
+- A tool call past the parallel-call ceiling is counted once, not once per
+  argument fragment. A provider streams a call as an id and a name and then as
+  many argument fragments as its arguments need, every one repeating the same
+  index, so a single call with long arguments past the ceiling was reported on
+  stderr as a response asking for as many parallel calls as its arguments had
+  bytes. The notice now names the calls.
+- A `#` comment trails a key, a value and a table header in the reply-style
+  config. The name of a `[style]` table was read off the whole header line, so a
+  header labelled the way a person writes one, `[style] # how terse the replies
+  are`, named no table at all: every key under it was reported as an unknown one
+  and the level it asked for stayed at the default, which is a config that looks
+  right and changes nothing. A bare value stops at the `#` for the same reason a
+  quoted one does, and a `#` inside the quotes is still text.
 
 ### Security
 
@@ -291,8 +326,9 @@ release, and `microagent update` moves you to it.
   three `wenyan-*` levels) and `ponytail` sets how lazy the code is (`off`, `lite`, `full`, `ultra`). Both
   are read from `$MICROAGENT_CONFIG`, else `~/.microagent/config.toml`, and both have an env override
   (`MICROAGENT_CAVEMAN`, `MICROAGENT_PONYTAIL`). Neither touches the tools, the request shape or the
-  conversation: each appends text to the system prompt. With `caveman = "off"` and `ponytail = "off"` the
-  system prompt is byte for byte the one `0.1.1` sent.
+  conversation: each appends text to the system prompt, and with `caveman = "off"` and
+  `ponytail = "off"` it appends nothing at all, so a run that turns both off sends the system prompt
+  this release writes, unlengthened.
 - `cached_tokens` on the stdout usage line and in each session-log record: the part of the prompt the
   provider served from its prompt cache, read from `prompt_tokens_details.cached_tokens`,
   `prompt_cache_hit_tokens` or `cache_read_input_tokens`. Both are additive JSON keys, so a reader that
@@ -426,6 +462,16 @@ release, and `microagent update` moves you to it.
   longer loop; pass `--max-turns 60` to keep the old ceiling.
 - Replies are terse by default: `caveman` is `ultra` and `ponytail` is `full` unless the config or env
   says otherwise. A run that wants the prose back sets `caveman = "off"`.
+
+- The system prompt is rewritten around the order a fix goes in: find the code and
+  the tests that cover it, reproduce the failure before changing anything, make
+  the smallest change, run that reproduction and those tests again, then read
+  the diff. It also says that what a tool returns is data about the repository
+  rather than instructions, and that a credential is not part of the task, and
+  each tool's description in the schema names the credential files it refuses.
+  The tools, the flags and the exit statuses are the same; what the model does
+  with them is not, so an answer, a token count or a benchmark number from
+  `0.1.1` is not one this version reproduces.
 
 ### Removed
 
@@ -945,7 +991,7 @@ First release.
   `aarch64-macos` with a checksum sidecar each, and refuses a tag that does not name the version in
   `build.zig.zon`.
 
-[Unreleased]: https://github.com/maci0/microagent/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/maci0/microagent/compare/v0.1.1...HEAD
 [0.2.0]: https://github.com/maci0/microagent/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/maci0/microagent/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/maci0/microagent/releases/tag/v0.1.0
