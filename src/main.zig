@@ -353,12 +353,14 @@ const help_text =
     \\      --reasoning-effort <level>
     \\                         reasoning.effort sent to the provider: minimal, low,
     \\                         medium, high, or none to disable (env MICROAGENT_REASONING_EFFORT)
-    \\  -h, --help             this text
+    \\  -h, --help             this text ("help" as the only argument too)
     \\  -V, --version          version
     \\
     \\every long flag also takes --flag=value. A flag wins over the environment
     \\variable for the same option. A bare -- ends the flags, so a task that
-    \\begins with a dash is passed after it.
+    \\begins with a dash is passed after it. A bare "help" asks for this text
+    \\when the prompt is still empty, the way "microagent update help" does; any
+    \\other bare word, a later one, or a value of --print is a task.
     \\
     \\reply style (MICROAGENT_CAVEMAN / MICROAGENT_PONYTAIL, or the same two keys
     \\in the config named above):
@@ -797,6 +799,15 @@ fn parseArgs(buf: []u8, argv: []const []const u8, opts: *Options) ?[]const u8 {
             // definitions insert the model flags before the prompt, so
             // "microagent -p {prompt}" would hand the model flag to -p;
             // taking the prompt positionally makes the order irrelevant.
+            // The one bare word that is a request rather than a task is the
+            // same word `microagent update help` already answers to, and it
+            // only answers while the prompt is still empty, so
+            // `microagent "help me find the leak"` is a task and
+            // `microagent -p help` is a task, both by the existing rules.
+            if (opts.prompt.len == 0 and std.mem.eql(u8, arg, help_word)) {
+                opts.action = .help;
+                return null;
+            }
             if (setPrompt(buf, opts, arg)) |m| return m;
         } else if (arg.len == 0) {
             return empty_prompt_message;
@@ -821,15 +832,30 @@ const empty_prompt_message = "the prompt is empty: pass the task as an argument 
 /// change to how one walks the command line is a change to both.
 fn earlyAction(argv: []const []const u8) ?Action {
     var i: usize = 0;
+    var prompt_seen = false;
     while (i < argv.len) : (i += 1) {
         const split = splitArg(argv[i]);
         if (std.mem.eql(u8, split.name, "--")) return null;
         if (isFlag(split.name, "-V", "--version")) return .version;
         if (isFlag(split.name, "-h", "--help")) return .help;
-        if (valuedFlag(split.name) != null and split.joined == null) i += 1;
+        if (valuedFlag(split.name) != null and split.joined == null) {
+            i += 1;
+            continue;
+        }
+        // The first bare word is the prompt, and `help` as that word is the
+        // request `parseArgs` answers to below, so this walk reaches the same
+        // answer. A word after it is a second prompt the parser refuses, and
+        // the flag decides what is printed, not the word.
+        if (split.name.len == 0 or split.name[0] == '-') continue;
+        if (!prompt_seen and std.mem.eql(u8, split.name, help_word)) return .help;
+        prompt_seen = true;
     }
     return null;
 }
+
+/// The one bare word that asks for the help text rather than naming a task,
+/// spelled the same way `microagent update help` already spells it.
+const help_word = "help";
 
 fn isFlag(name: []const u8, short: []const u8, long: []const u8) bool {
     return std.mem.eql(u8, name, short) or std.mem.eql(u8, name, long);
@@ -2808,6 +2834,41 @@ test "help and version win wherever they appear" {
     try std.testing.expectEqual(Action.version, v.action);
 }
 
+// `microagent help` used to be a coding run whose task was the word "help",
+// billed to the caller, while `microagent update help` printed that
+// subcommand's help. The bare word is now a request, and only a bare word:
+// a prompt already set, a value of --print, and anything after `--` are all
+// still a task, by the rules that were already there.
+test "a bare help is a request, and only a bare one" {
+    var buf: [512]u8 = undefined;
+
+    var asked: Options = .{};
+    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &.{"help"}, &asked));
+    try std.testing.expectEqual(Action.help, asked.action);
+    try std.testing.expectEqualStrings("", asked.prompt);
+
+    // A flags line in front of it changes nothing, and the walk that runs
+    // before the environment is read reaches the same answer.
+    var after_flag: Options = .{};
+    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &.{ "--model", "some/model", "help" }, &after_flag));
+    try std.testing.expectEqual(Action.help, after_flag.action);
+    try std.testing.expectEqual(@as(?Action, .help), earlyAction(&.{"help"}));
+    try std.testing.expectEqual(@as(?Action, .help), earlyAction(&.{ "--budget", "30", "help" }));
+
+    // The three ways of asking for the word as a task, each already spelled.
+    var given: Options = .{};
+    try std.testing.expectEqualStrings("prompt given twice: 'hi' and 'help'", parseArgs(&buf, &.{ "hi", "help" }, &given).?);
+    var valued: Options = .{};
+    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &.{ "-p", "help" }, &valued));
+    try std.testing.expectEqualStrings("help", valued.prompt);
+    try std.testing.expectEqual(Action.run, valued.action);
+    var after: Options = .{};
+    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &.{ "--", "help" }, &after));
+    try std.testing.expectEqualStrings("help", after.prompt);
+    try std.testing.expectEqual(Action.run, after.action);
+    try std.testing.expectEqual(@as(?Action, null), earlyAction(&.{ "--", "help" }));
+}
+
 // The walk that runs before the environment is read has to reach the same
 // answer as the walk that runs after it, on the arguments both of them are
 // given, and it has to leave a command line that asks for no help and no
@@ -2825,6 +2886,12 @@ test "the walk that answers help before reading the environment agrees with the 
         .{ .argv = &.{ "--print", "--help" }, .want = null },
         .{ .argv = &.{ "-p", "hi", "-h" }, .want = .help },
         .{ .argv = &.{"hi"}, .want = null },
+        .{ .argv = &.{"help"}, .want = .help },
+        // The word is a request only while it is the first bare word, and only
+        // outside a value a flag took.
+        .{ .argv = &.{ "hi", "help" }, .want = null },
+        .{ .argv = &.{ "-p", "help" }, .want = null },
+        .{ .argv = &.{ "--", "help" }, .want = null },
         .{ .argv = &.{"--nope"}, .want = null },
         .{ .argv = &.{}, .want = null },
     };
@@ -2878,6 +2945,10 @@ const args_corpus = [_][]const u8{
     "--max-tokens 0",
     "--max-tokens 1e30",
     "one two",
+    "help",
+    "one help",
+    "--print help",
+    "-- help",
     "-p one --print two",
     "--nope",
     "-x",

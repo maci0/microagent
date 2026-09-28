@@ -77,7 +77,7 @@ The flags, abridged; `microagent --help` is the full text.
     --reasoning-effort <level>
                        reasoning.effort sent to the provider: minimal, low,
                        medium, high, or none to disable (env MICROAGENT_REASONING_EFFORT)
--h, --help             the full usage text
+-h, --help             the full usage text ("help" as the only argument too)
 -V, --version          version
 
 A bare -- ends the flags, so a task that begins with a dash goes after it:
@@ -113,9 +113,9 @@ option, and a bare `--` ends the flags, so a task that begins with a dash is pas
 (`microagent -- "explain why -Werror fails"`). The exit status is 0 for a finished run, 1 for a
 failed one, 2 for a wrong command line, 3 for a run that stopped at a ceiling (`--max-turns`, or a
 budget that ran out) so the text on stdout is a prefix of the work rather than an answer, and 130
-for an interrupt, which takes the tool subprocess with it. `microagent --help` and
-`microagent update --help` are the full text; a wrong flag prints the reason and that help on
-stderr, so a script reading stdout gets nothing from a failed invocation.
+for an interrupt, which takes the tool subprocess with it. `microagent --help`, a bare
+`microagent help`, and `microagent update --help` are the full text; a wrong flag prints the reason
+and that help on stderr, so a script reading stdout gets nothing from a failed invocation.
 
 Every value is checked where it is set, so a mistyped level, a ceiling of zero
 or a non-numeric budget is refused before the first request rather than becoming

@@ -12,6 +12,15 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+### Added
+
+- A bare `help` is a request for the usage text, the way `microagent update help`
+  already was. It used to be a coding run whose task was the word "help",
+  billed to the caller, while the one subcommand that accepted the word printed
+  its help. Only a bare word answers: a prompt already set, a value of
+  `--print`, and anything after `--` are still a task, by the rules that were
+  already there, so `microagent -- "help"` and `microagent -p help` run.
+
 ### Fixed
 
 - A character the transport split across two reads is no longer written to

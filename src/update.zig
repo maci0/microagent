@@ -707,9 +707,13 @@ const usage_text =
     \\                         no ca-certificates). An empty value is not one.
     \\
     \\With --check, stdout is the release page URL and the version comparison
-    \\goes to stderr; nothing is downloaded. Exit 0 means the check ran;
-    \\exit 1 means it did not, exit 2 is a usage error, and a usage error
-    \\writes both its reason and this text to stderr so stdout stays clean.
+    \\goes to stderr; nothing is downloaded. Without --check, stdout is the one
+    \\line naming the version installed and the path it was installed to, and
+    \\nothing at all when this build is already the latest release, so a script
+    \\reads the outcome from the exit status and the stderr notes either way.
+    \\Exit 0 means the check ran or the binary was replaced; exit 1 means it
+    \\did not, exit 2 is a usage error, and a usage error writes both its
+    \\reason and this text to stderr so stdout stays clean.
     \\
 ;
 
