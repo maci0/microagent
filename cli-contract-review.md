@@ -114,7 +114,8 @@ a fragment with no invocation surface to hold a contract.
   changes, and a change to behaviour belongs in the CHANGELOG.
 - Do not touch the network, the API key handling, the update download path, or anything in
   `bench/`, `integrations/`, or `.github/`. This review reads those at most to confirm a
-  documented flag is passed correctly.
+  documented flag is passed correctly; the numbers those scripts publish belong to
+  `benchmark-accuracy-review.md`.
 - Do not rewrite the CHANGELOG's history or its release entries. Add an entry under
   `## [Unreleased]` only when your edit changes what an existing invocation does.
 - Stop after the findings you can prove. A pass that reports a contradiction in four
@@ -144,7 +145,8 @@ count of fixes applied and the gate result.
 ## Important:
 
 - This review owns the invocation and output contract. The threat model's accuracy
-  belongs to `threat-model-review.md`, prompt files, skills, agent rule files, PRDs, ADRs,
+  belongs to `threat-model-review.md`, the published measurements to
+  `benchmark-accuracy-review.md`, prompt files, skills, agent rule files, PRDs, ADRs,
   and general prose review belong to their own reviews, and code quality belongs to the
   standard gate; none of them are in scope here.
 - Judge the contract as a caller meets it: what a script, a CI job, or the model harness

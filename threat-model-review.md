@@ -101,11 +101,13 @@ surface to model.
   that keeps re-reading the same table is not making progress.
 - If available, use the evidence tools over assumption: `rg` for the entry-point and
   process-spawn inventories and for every file reference in the document; `zig build test`
-  and `make check` for the gate, before and after; a locally built binary for what the
-  tool actually does where a claim is about runtime behaviour. Locate code by name
-  (`fn` and the call sites), never by a line number copied from the document, since a
-  stale reference is the defect this review exists to find. Never install tools, and never
-  let a check reach the network.
+  and `make check` for the gate, before and after; a locally built binary's `--help`,
+  `--version` and `update --help` for the surface a control claim names, and a real
+  run of the named code path where a claim is about what it accepts or refuses, since
+  neither the gate nor a read of the source settles a claim about the bytes a control
+  lets through. Locate code by name (`fn` and the call sites), never by a line number
+  copied from the document, since a stale reference is the defect this review exists to
+  find. Never install tools, and never let a check reach the network.
 
 ## For each finding include:
 
@@ -122,9 +124,12 @@ applied and the gate result.
 
 ## Important:
 
-- This review owns the threat model's accuracy, not the binary's security. A model that
-  records every weakness faithfully is a correct deliverable even when the weaknesses are
-  severe; do not pad it, and do not remove a threat to make the document look better.
+- This review owns the threat model's accuracy, not the binary's security, and it edits
+  `THREAT_MODEL.md` alone: the invocation contract belongs to
+  `cli-contract-review.md`, the published measurements to
+  `benchmark-accuracy-review.md`, and code quality to the standard gate. A model that
+  records every weakness faithfully is a correct deliverable even when the weaknesses
+  are severe; do not pad it, and do not remove a threat to make the document look better.
 - Judge each claim as the next reader meets it: the row has to name code that exists, or
   the whole document becomes a set of assertions.
 - Prefer a few proven corrections over a speculative sweep. A document rewritten wholesale
