@@ -26,7 +26,8 @@ const tools_json =
     \\{"type":"function","function":{"name":"read","description":"Read a file as text.","parameters":{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","description":"1-based first line"},"limit":{"type":"integer","description":"Max lines"}},"required":["path"]}}},
     \\{"type":"function","function":{"name":"write","description":"Create or overwrite a file. Parent directories are created.","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}},
     \\{"type":"function","function":{"name":"edit","description":"Replace an exact string in a file. old_string must occur exactly once unless replace_all is true.","parameters":{"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean"}},"required":["path","old_string","new_string"]}}},
-    \\{"type":"function","function":{"name":"search","description":"Search file contents with ripgrep. Returns file:line:text matches.","parameters":{"type":"object","properties":{"pattern":{"type":"string","description":"Regular expression"},"path":{"type":"string","description":"Directory or file, default ."},"glob":{"type":"string","description":"Glob filter, e.g. *.zig"}},"required":["pattern"]}}}
+    \\{"type":"function","function":{"name":"search","description":"Search file contents with ripgrep. Returns file:line:text matches.","parameters":{"type":"object","properties":{"pattern":{"type":"string","description":"Regular expression"},"path":{"type":"string","description":"Directory or file, default ."},"glob":{"type":"string","description":"Glob filter, e.g. *.zig"}},"required":["pattern"]}}},
+    \\{"type":"function","function":{"name":"ast","description":"Structural search or rewrite with ast-grep, matched on syntax rather than text. Set rewrite to apply the change to every match.","parameters":{"type":"object","properties":{"pattern":{"type":"string","description":"ast-grep pattern with metavariables, e.g. $A == $A"},"lang":{"type":"string","description":"Language, e.g. python, javascript, go, rust"},"path":{"type":"string","description":"Directory or file, default ."},"rewrite":{"type":"string","description":"Replacement pattern; when set the matches are rewritten in place"}},"required":["pattern","lang"]}}}
     \\]
 ;
 
@@ -417,12 +418,18 @@ fn runTool(io: Io, arena: std.mem.Allocator, call: ToolCall) ![]u8 {
     if (std.mem.eql(u8, call.name, "write")) return toolWrite(io, arena, args);
     if (std.mem.eql(u8, call.name, "edit")) return toolEdit(io, arena, args);
     if (std.mem.eql(u8, call.name, "search")) return toolSearch(io, arena, args);
+    if (std.mem.eql(u8, call.name, "ast")) return toolAst(io, arena, args);
     return std.fmt.allocPrint(arena, "error: unknown tool '{s}'", .{call.name});
 }
 
 /// A one-line tool gutter on stderr, the shape gauntlet recognizes.
 fn note(io: Io, arena: std.mem.Allocator, name: []const u8, args: std.json.ObjectMap) void {
-    const detail = str(args.get("command")) orelse str(args.get("path")) orelse str(args.get("pattern")) orelse "";
+    // The interesting argument is not the same one for every tool: a structural
+    // search is identified by its pattern, a bash call by its command.
+    const detail = if (std.mem.eql(u8, name, "ast"))
+        (str(args.get("pattern")) orelse "")
+    else
+        (str(args.get("command")) orelse str(args.get("pattern")) orelse str(args.get("path")) orelse "");
     const line = std.fmt.allocPrint(arena, "\u{23fa} {s} {s}\n", .{ name, clamp(detail, 120) }) catch return;
     std.Io.File.stderr().writeStreamingAll(io, line) catch {};
 }
@@ -537,6 +544,31 @@ fn toolSearch(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 
         .stderr_limit = .limited(4096),
         .timeout = durationMs(60_000),
     }) catch |err| return std.fmt.allocPrint(arena, "error: ripgrep failed: {s}", .{@errorName(err)});
+    if (res.stdout.len > 0) return res.stdout;
+    if (res.stderr.len > 0) return res.stderr;
+    return std.fmt.allocPrint(arena, "(no matches)", .{});
+}
+
+/// Structural search/rewrite through ast-grep. `rewrite` set means the change
+/// is applied to every match (`-U`), so the next turn reads the result back
+/// rather than trusting the tool's summary.
+fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
+    const pattern = str(args.get("pattern")) orelse return std.fmt.allocPrint(arena, "error: missing pattern", .{});
+    const lang = str(args.get("lang")) orelse return std.fmt.allocPrint(arena, "error: missing lang", .{});
+    const path = str(args.get("path")) orelse ".";
+    const rewrite = str(args.get("rewrite"));
+
+    var argv: std.ArrayList([]const u8) = .empty;
+    try argv.appendSlice(arena, &.{ "ast-grep", "run", "--pattern", pattern, "--lang", lang });
+    if (rewrite) |r| try argv.appendSlice(arena, &.{ "--rewrite", r, "--update-all" });
+    try argv.append(arena, path);
+
+    const res = std.process.run(arena, io, .{
+        .argv = argv.items,
+        .stdout_limit = .limited(max_tool_output * 4),
+        .stderr_limit = .limited(4096),
+        .timeout = durationMs(60_000),
+    }) catch |err| return std.fmt.allocPrint(arena, "error: ast-grep failed: {s}", .{@errorName(err)});
     if (res.stdout.len > 0) return res.stdout;
     if (res.stderr.len > 0) return res.stderr;
     return std.fmt.allocPrint(arena, "(no matches)", .{});
@@ -658,7 +690,7 @@ test "conversation and tool schema serialize as one valid request body" {
     try std.testing.expectEqualStrings("say \"hi\"\nplease", messages.items[1].object.get("content").?.string);
 
     const tools = root.get("tools").?.array;
-    try std.testing.expectEqual(@as(usize, 5), tools.items.len);
+    try std.testing.expectEqual(@as(usize, 6), tools.items.len);
     for (tools.items) |tool| {
         const f = tool.object.get("function").?.object;
         try std.testing.expect(f.get("name").?.string.len > 0);

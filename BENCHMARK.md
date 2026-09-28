@@ -17,7 +17,7 @@ below was produced by those scripts, not by hand.
 | `-Doptimize=ReleaseSafe` (stripped) | 1.34 MB |
 | `Debug` (unstripped) | 31 MB |
 
-No runtime, no package manager, no node_modules, no python. One file, 681 lines.
+No runtime, no package manager, no node_modules, no python. One file, ~700 lines.
 
 ## Startup
 
@@ -43,7 +43,7 @@ First request of a run, from the usage line microagent prints:
 
 | | tokens |
 | --- | --- |
-| system prompt + 5 tool schemas + one-line user prompt | **789** |
+| system prompt + 6 tool schemas + one-line user prompt | **933** |
 
 That is the entire fixed cost of the harness, measured rather than estimated. Competitor CLIs in
 one-shot mode did not report a comparable number on this machine, so none is claimed for them.
@@ -58,19 +58,17 @@ tool, and the prompt says not to touch the test.
 
 | harness | model | task | wall | tokens | diff | result |
 | --- | --- | --- | --- | --- | --- | --- |
-| microagent | deepseek/deepseek-v4-flash (OpenRouter) | cli-flag | 30.5 s | 8221 | +4/-1 | pass |
-| microagent | " | empty-mean | 10.6 s | 4533 | +2/-0 | pass |
-| microagent | " | parse-bug | 10.9 s | 7219 | +2/-2 | pass |
-| kimi | kimi default | cli-flag | 11.5 s | n/a | +7/-1 | pass |
-| kimi | " | empty-mean | 8.5 s | n/a | +2/-0 | pass |
-| kimi | " | parse-bug | 12.0 s | n/a | +2/-2 | pass |
+| microagent | deepseek/deepseek-v4-flash (OpenRouter) | cli-flag | 12.0 s | 5835 | +4/-1 | pass |
+| microagent | " | empty-mean | 9.3 s | 5212 | +2/-0 | pass |
+| microagent | " | parse-bug | 9.3 s | 6566 | +2/-2 | pass |
+| kimi | kimi default | cli-flag | 12.7 s | n/a | +4/-1 | pass |
+| kimi | " | empty-mean | 14.3 s | n/a | +2/-0 | pass |
+| kimi | " | parse-bug | 12.2 s | n/a | +3/-8 | pass |
 
-Repeated runs of the same task vary by several seconds and by a few thousand tokens, because the
-provider routes deepseek-v4-flash to different upstreams; the pass/fail column is the stable one.
-
-Both harnesses solved 3/3 with the same minimal diffs; wall time tracks the model behind each
-harness, not the harness. Tokens are run-cumulative for microagent (summed over every turn) and
-unavailable for kimi, which prints no machine-readable counters.
+Both harnesses solved 3/3; wall time tracks the model behind each harness, not the harness. Tokens
+are run-cumulative for microagent (summed over every turn) and unavailable for kimi, which prints no
+machine-readable counters. Repeated runs vary by several seconds and a few thousand tokens because
+the provider routes `deepseek-v4-flash` to different upstreams; pass/fail is the stable column.
 
 Other installed harnesses could not be compared cleanly on this machine: `claude` is rate-limited
 until the weekly reset, `grok` returns HTTP 402 (balance exhausted), `codex` refuses to run outside
@@ -91,6 +89,7 @@ Two independent runs on scratch repositories:
 | --- | --- | --- | --- | --- | --- |
 | `calc.py` (empty-iterable crash) | code-review | passed | 2m41s | 1,833 reported | +5/-1 |
 | `duration.py` (wrong unit math) | code-review | passed | 1m00s | 3,173 reported | +2/-2 |
+| `calc.py` (empty-iterable crash) | code-review | passed | 1m04s | 3,012 reported | +2/-0 |
 
 Both diffs were the correct fix, and gauntlet read the token counts out of microagent's stdout
 usage lines with no `usage.roots` session-store entry configured.

@@ -4,9 +4,9 @@ A tiny coding agent in Zig, built to be driven by [gauntlet](https://github.com/
 loops. One binary, one loop, OpenAI-compatible APIs only.
 
 - **Small.** ~600 KB stripped (`-Doptimize=ReleaseSmall`), no runtime, no node, no python.
-- **Fast.** ~1.6 ms to start, so a gauntlet loop spends its time in the model, not the harness.
+- **Fast.** ~2 ms to start, so a gauntlet loop spends its time in the model, not the harness.
 - **No features you did not ask for.** No subagents, no plugins, no MCP, no TUI. Streaming chat
-  completions, five tools, done.
+  completions, six tools, done.
 
 ## Build
 
@@ -54,7 +54,7 @@ pollutes the agent's answer.
 
 ## Tools
 
-Five tools, all of them thin wrappers over tools you already have:
+Six tools, all of them thin wrappers over tools you already have:
 
 | tool | what it does |
 | --- | --- |
@@ -63,9 +63,12 @@ Five tools, all of them thin wrappers over tools you already have:
 | `write` | create or overwrite a file, parents created |
 | `edit` | exact string replacement, refuses an ambiguous match unless `replace_all` |
 | `search` | `rg --line-number --no-heading`, optional glob |
+| `ast` | `ast-grep run` for structural match, or `--rewrite --update-all` to apply one |
 
 The system prompt tells the model to search with ripgrep and rewrite structurally with `ast-grep`
-rather than reimplementing either in the harness. `bash` is there for builds, tests and git.
+rather than reimplementing either in the harness. `bash` is there for builds, tests and git. Retries
+and session resume are gauntlet's job (`--retries`, `--continue-sessions`), not the harness's, so a
+failed request is reported and exits non-zero.
 
 ## gauntlet
 
