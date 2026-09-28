@@ -8,6 +8,11 @@
 const std = @import("std");
 const Io = std.Io;
 
+const build_options = @import("build_options");
+const update_mod = @import("update.zig");
+
+const version = build_options.version;
+
 const default_base_url = "https://openrouter.ai/api/v1";
 const default_model = "deepseek/deepseek-v4-flash";
 const max_tool_output = 24 * 1024;
@@ -98,6 +103,13 @@ pub fn main(init: std.process.Init) !void {
     while (it.next()) |arg| try args.append(gpa, arg);
 
     debug_enabled = init.environ_map.get("MDEBUG") != null;
+
+    // `microagent update` is a subcommand, not a prompt: it is dispatched
+    // before the agent's own flags so it never needs an API key.
+    if (args.items.len > 1 and std.mem.eql(u8, args.items[1], "update")) {
+        std.process.exit(update_mod.run(io, gpa, init.arena.allocator(), init.environ_map, args.items[2..]));
+    }
+
     var opts: Options = .{};
     if (init.environ_map.get("MICROAGENT_MODEL")) |v| opts.model = v;
     if (init.environ_map.get("MICROAGENT_BASE_URL")) |v| opts.base_url = v;
@@ -148,7 +160,7 @@ pub fn main(init: std.process.Init) !void {
             opts.max_turns = std.fmt.parseInt(usize, args.items[i], 10) catch
                 return usageError(io, "max turns must be a number");
         } else if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-V")) {
-            std.Io.File.stdout().writeStreamingAll(io, "microagent 0.1.0\n") catch {};
+            std.Io.File.stdout().writeStreamingAll(io, "microagent " ++ version ++ "\n") catch {};
             return;
         } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             std.Io.File.stdout().writeStreamingAll(io, help_text) catch {};
@@ -224,6 +236,13 @@ const help_text =
     \\  -h, --help             this text
     \\  -V, --version          version
     \\
+    \\subcommand:
+    \\  update [--check] [--repo owner/name]
+    \\                         replace this binary with the latest GitHub
+    \\                         release after verifying its .sha256 sidecar
+    \\                         (--check only reports; GITHUB_TOKEN lifts the
+    \\                         API rate limit)
+    \\
 ;
 
 fn usageError(io: Io, arg: []const u8) noreturn {
@@ -238,8 +257,9 @@ fn usageError(io: Io, arg: []const u8) noreturn {
 /// images (bare ubuntu, distroless) ship no ca-certificates at all, and the
 /// client's own rescan then fails with TlsInitializationFailed before a single
 /// request is sent. A path that cannot be read is a warning, not a failure: the
-/// client falls back to scanning the system store.
-fn loadCaBundle(
+/// client falls back to scanning the system store. `update.zig` calls this for
+/// its own GitHub client.
+pub fn loadCaBundle(
     client: *std.http.Client,
     io: Io,
     gpa: std.mem.Allocator,
@@ -1009,6 +1029,12 @@ fn durationMs(ms: u64) Io.Timeout {
 
 fn clamp(s: []const u8, max: usize) []const u8 {
     return if (s.len <= max) s else s[0..max];
+}
+
+// A file's tests are collected only when the root file's test block imports
+// it, so the `update` subcommand's tests are pulled in here.
+test {
+    _ = update_mod;
 }
 
 test "json string escaping" {

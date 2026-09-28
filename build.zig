@@ -15,6 +15,11 @@ pub fn build(b: *std.Build) void {
             .strip = b.option(bool, "strip", "strip debug info") orelse (optimize != .Debug),
         }),
     });
+    // The release version comes from build.zig.zon, so `--version` and the
+    // update check compare against the same number the release was tagged with.
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "version", @import("build.zig.zon").version);
+    exe.root_module.addImport("build_options", build_options.createModule());
     b.installArtifact(exe);
 
     const run = b.addRunArtifact(exe);
