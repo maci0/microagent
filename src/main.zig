@@ -2393,6 +2393,43 @@ test "conversation and tool schema serialize as one valid request body" {
 // turn may add is the tail. Asserted as a byte count, because that is the whole
 // point: a field moved back behind `messages` costs the provider a re-read of
 // its bytes on every turn of every run, and nothing else here would notice.
+// The same quadratic the ranged read had, one module up: a line longer than
+// the tool's 8 KB read means nothing is consumed until the far end of the file,
+// so a scan that restarts at the front of the buffer and a copy of the whole
+// buffer cost a full pass per read. This lives in main rather than in the tool
+// module on purpose: `--test-filter` does not reach tests declared in an
+// imported module, so a test over there is not something the instruction gate
+// can measure, which is how a multi-billion-instruction regression stayed
+// unmeasured for two rounds.
+test "a ranged read of a long line comes back whole" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_path = dir_buf[0..try tmp.dir.realPath(std.testing.io, &dir_buf)];
+    const path = try std.fs.path.join(arena, &.{ dir_path, "long-line.txt" });
+
+    // Four reads plus a bit, so the line straddles the read boundary several
+    // times and no read before the last one can end it.
+    const width = 8 * 1024 * 4 + 137;
+    var text: std.ArrayList(u8) = .empty;
+    try text.appendSlice(arena, "before\n");
+    try text.appendNTimes(arena, 'z', width);
+    try text.appendSlice(arena, "\nafter\n");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "long-line.txt", .data = text.items });
+
+    const args = try std.fmt.allocPrint(arena, "{{\"path\":\"{s}\",\"offset\":2,\"limit\":1}}", .{path});
+    const got = try tool_mod.dispatch(arena, "read", args);
+
+    var want: std.ArrayList(u8) = .empty;
+    try want.appendNTimes(arena, 'z', width);
+    try want.append(arena, '\n');
+    try std.testing.expectEqualStrings(want.items, got);
+}
+
 test "one request body is the previous one plus its new messages" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
