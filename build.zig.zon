@@ -7,6 +7,7 @@
         "build.zig",
         "build.zig.zon",
         "CHANGELOG.md",
+        "config.example.toml",
         "LICENSE",
         "README.md",
         "src",

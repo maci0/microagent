@@ -1173,13 +1173,26 @@ test "update: this target is the name the release matrix publishes" {
     // target it builds for, not by asking the same function twice: a
     // comparison between two calls of the wrapper under test is true whatever
     // the wrapper returns.
+    //
+    // The name is compared to the whole string the release matrix publishes for
+    // the host, not to a shape. `!endsWith(got, "-none")` is true for
+    // `aarch64-macos` and for `aarch64-macos-macos` alike, so on the two macOS
+    // runners it was a guard that passed whatever the function returned: a
+    // stray abi, or a dropped arch, shipped an asset name no release publishes
+    // and the update asked for nothing. The expected value is the row above,
+    // chosen by the host's own os tag.
     var live_buf: [64]u8 = undefined;
     const got = try thisAssetTriple(&live_buf);
-    try std.testing.expect(!std.mem.endsWith(u8, got, "-none"));
-    if (builtin.os.tag == .linux) {
-        try std.testing.expect(std.mem.endsWith(u8, got, "-linux-musl"));
-        try std.testing.expect(std.mem.startsWith(u8, got, @tagName(builtin.cpu.arch)));
-    }
+    const arch = @tagName(builtin.cpu.arch);
+    const want_live = switch (builtin.os.tag) {
+        .linux => arch ++ "-linux-musl",
+        // Zig's abi tag for a macOS build is `none` (checked against every
+        // published target's own `-Dtarget` triple), and the release names
+        // macOS with no abi at all.
+        .macos => arch ++ "-macos",
+        else => arch ++ "-" ++ @tagName(builtin.os.tag),
+    };
+    try std.testing.expectEqualStrings(want_live, got);
 }
 
 test "update: a repo that is not owner/name is refused before a release url exists" {
