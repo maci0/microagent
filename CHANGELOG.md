@@ -56,12 +56,20 @@ release, and `microagent update` moves you to it.
 - A streamed tool call whose `index` skipped a slot left a nameless call in the list, which was sent
   back as an assistant tool call with no function name and rejected by the next request. The gap is
   dropped.
+- `microagent update` compares the running version and the published tag with one leading `v` ignored on
+  both sides. It ignored the prefix on the tag only, so a `v`-prefixed running version never matched a
+  `v`-prefixed tag.
 
 ### Added
 
 - `MICROAGENT_MAX_TURNS` is read by the binary itself, so the variable works for a plain container run
   and not only through the harbor adapter. The flag still wins where both are given.
 - `MDEBUG` is documented in `--help` and in the README, with the values that count as on.
+- Fuzz harnesses for the two parsers that take untrusted bytes: the provider's streamed response, frame
+  by frame, and the GitHub release body the updater acts on. Both run their seed corpus on every
+  `zig build test` through `std.testing.fuzz`, and both assert the invariants a crash-only harness
+  misses: the turn a stream produces still serializes as a valid request body, and a release body only
+  reaches `.replaced` when both download URLs are trusted and the published checksum matches the bytes.
 
 ## [0.2.0] - 2026-09-29
 

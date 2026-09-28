@@ -39,6 +39,16 @@ appends its own line to the committed `bench/results.jsonl`; that file is
 results, not code, so leave the appended line out of a change that did not run a
 benchmark.
 
+### Fuzz targets
+
+A parser that reads bytes it did not write gets a `std.testing.fuzz` harness and
+a corpus beside it, in the same file. The corpus is what the harness asserts on
+during an ordinary `zig build test`; build the test binary in fuzz mode to run
+the fuzzer's mutations from the same seeds. A harness asserts the invariants,
+not just the absence of a crash: a turn assembled from a fuzzed provider stream
+has to serialize as a valid request body, and a release body has to earn the
+verdict that installs it.
+
 ## Version and changelog
 
 The version is `.version` in `build.zig.zon` and nowhere else. Every change that

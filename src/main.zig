@@ -1301,45 +1301,55 @@ fn finishTurn(
     usage: *Usage,
 ) !void {
     try msgs.appendSlice(gpa, ",");
-    if (result.calls.items.len == 0) {
-        try appendMessage(gpa, msgs, "assistant", result.content.items);
-    } else {
-        var msg = JsonBuf.init(arena);
-        try msg.writer().writeAll("{\"role\":\"assistant\",\"content\":");
-        if (result.content.items.len == 0) {
-            try msg.writer().writeAll("null");
-        } else {
-            try writeJsonString(msg.writer(), result.content.items);
-        }
-        try msg.writer().writeAll(",\"tool_calls\":[");
-        for (result.calls.items, 0..) |call, idx| {
-            if (idx > 0) try msg.writer().writeAll(",");
-            try msg.writer().writeAll("{\"id\":");
-            try writeJsonString(msg.writer(), call.id);
-            try msg.writer().writeAll(",\"type\":\"function\",\"function\":{\"name\":");
-            try writeJsonString(msg.writer(), call.name);
-            try msg.writer().writeAll(",\"arguments\":");
-            try writeJsonString(msg.writer(), call.args.items);
-            try msg.writer().writeAll("}}");
-        }
-        try msg.writer().writeAll("]}");
-        try msgs.appendSlice(gpa, msg.items());
+    try msgs.appendSlice(gpa, try assistantMessage(arena, result));
 
-        for (result.calls.items) |call| {
-            const output = runTool(io, arena, call) catch |err|
-                try std.fmt.allocPrint(arena, "error: {s}", .{@errorName(err)});
-            var tool_msg = JsonBuf.init(arena);
-            try tool_msg.writer().writeAll(",{\"role\":\"tool\",\"tool_call_id\":");
-            try writeJsonString(tool_msg.writer(), call.id);
-            try tool_msg.writer().writeAll(",\"content\":");
-            try writeJsonString(tool_msg.writer(), try toolResult(arena, output));
-            try tool_msg.writer().writeAll("}");
-            try msgs.appendSlice(gpa, tool_msg.items());
-        }
+    for (result.calls.items) |call| {
+        const output = runTool(io, arena, call) catch |err|
+            try std.fmt.allocPrint(arena, "error: {s}", .{@errorName(err)});
+        var tool_msg = JsonBuf.init(arena);
+        try tool_msg.writer().writeAll(",{\"role\":\"tool\",\"tool_call_id\":");
+        try writeJsonString(tool_msg.writer(), call.id);
+        try tool_msg.writer().writeAll(",\"content\":");
+        try writeJsonString(tool_msg.writer(), try toolResult(arena, output));
+        try tool_msg.writer().writeAll("}");
+        try msgs.appendSlice(gpa, tool_msg.items());
     }
+    try logUsage(io, arena, usage, result);
+}
 
-    // One machine-readable line per response: gauntlet reads these for live
-    // token rates, and they are the only stdout that is not model output.
+/// The assistant turn as the request body spells it. Plain content when the
+/// response called no tool, else the call list: `arguments` is whatever the
+/// provider streamed, as a string, whether or not it is JSON yet.
+fn assistantMessage(arena: std.mem.Allocator, result: *const ChatResult) ![]u8 {
+    var msg = JsonBuf.init(arena);
+    try msg.writer().writeAll("{\"role\":\"assistant\",\"content\":");
+    if (result.content.items.len == 0 and result.calls.items.len > 0) {
+        try msg.writer().writeAll("null");
+    } else {
+        try writeJsonString(msg.writer(), result.content.items);
+    }
+    if (result.calls.items.len == 0) {
+        try msg.writer().writeAll("}");
+        return msg.items();
+    }
+    try msg.writer().writeAll(",\"tool_calls\":[");
+    for (result.calls.items, 0..) |call, idx| {
+        if (idx > 0) try msg.writer().writeAll(",");
+        try msg.writer().writeAll("{\"id\":");
+        try writeJsonString(msg.writer(), call.id);
+        try msg.writer().writeAll(",\"type\":\"function\",\"function\":{\"name\":");
+        try writeJsonString(msg.writer(), call.name);
+        try msg.writer().writeAll(",\"arguments\":");
+        try writeJsonString(msg.writer(), call.args.items);
+        try msg.writer().writeAll("}}");
+    }
+    try msg.writer().writeAll("]}");
+    return msg.items();
+}
+
+// One machine-readable line per response: gauntlet reads these for live
+// token rates, and they are the only stdout that is not model output.
+fn logUsage(io: Io, arena: std.mem.Allocator, usage: *Usage, result: *const ChatResult) !void {
     usage.add(result);
     var usage_line = JsonBuf.init(arena);
     const w = usage_line.writer();
@@ -2769,6 +2779,97 @@ test "a tool call index past the cap is dropped, not allocated" {
     defer sink.deinit();
     try sink.feed("{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":4000000000,\"function\":{\"name\":\"bash\"}}]}}]}");
     try std.testing.expectEqual(@as(usize, 0), sink.calls.items.len);
+}
+
+// The provider stream is the largest untrusted input the binary parses: every
+// byte of it arrives over the network, and every visible part of it is copied
+// straight into the next request body. `std.testing.fuzz` runs this corpus
+// through the harness on every `zig build test`, and through the fuzzer's
+// mutations when the test binary is built in fuzz mode. Real OpenRouter and
+// DeepSeek frames, a usage-only trailer, the terminator, and the shapes that
+// break a line-oriented reader: a frame with no newline, CRLF, a payload that
+// is not JSON, a `data:` line with nothing after it.
+const stream_corpus = [_][]const u8{
+    "",
+    "\n",
+    "\r\n",
+    "data:\n",
+    "data: [DONE]\n",
+    "data: [DONE]",
+    ": ping\n",
+    "event: message\ndata: {}\n",
+    "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n",
+    "data: {\"choices\":[{\"delta\":{\"content\":\" wor\"}}]}\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"ld\"}}]}\n",
+    "data: {\"choices\":[{\"delta\":{\"content\":\"a\\u0000b\\u001fc\\\"d\\\\e\"}}]}\n",
+    "data: {\"choices\":[{\"delta\":{\"content\":\"\\u00e9\\u65e5\\ud83d\\ude80\"}}]}\n",
+    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"comm\"}}]}}]}\n",
+    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"and\\\":\\\"ls\\\"}\"}}]}}]}\ndata: [DONE]\n",
+    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"a\\\"}\"}},{\"index\":63,\"function\":{\"name\":\"git\"}}]}}]}\n",
+    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":64,\"function\":{\"name\":\"bash\"}}]}}]}\n",
+    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":-1},{\"index\":1e30},{\"index\":\"0\"},{\"index\":null},\"x\",[],{}]}}]}\n",
+    "data: {\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3,\"total_tokens\":15,\"completion_tokens_details\":{\"reasoning_tokens\":2},\"prompt_tokens_details\":{\"cached_tokens\":9}}}\n",
+    "data: {\"usage\":{\"prompt_tokens\":1e30,\"prompt_cache_hit_tokens\":7,\"cache_read_input_tokens\":8}}\n",
+    "data: {\"usage\":\"nope\",\"choices\":[]}\n",
+    "data: {\"choices\":[{\"delta\":{\"content\":123}},{\"delta\":\"x\"},null,5]}\n",
+    "data: {\"choices\":[{\"delta\":{\"content\":\"unterminated}}\n",
+    "data: {}\ndata: [DONE]\n",
+};
+
+test "a fuzzed provider stream always leaves a request body the body writer can carry" {
+    try std.testing.fuzz({}, fuzzStream, .{ .corpus = &stream_corpus });
+}
+
+fn fuzzStream(_: void, smith: *std.testing.Smith) !void {
+    const gpa = std.testing.allocator;
+    var scratch: [8 * 1024]u8 = undefined;
+    const stream: []const u8 = if (smith.in) |seed| seed else scratch[0..smith.slice(&scratch)];
+
+    var sink = FrameSink.init(gpa);
+    defer sink.deinit();
+
+    // The line loop from `streamChat`, so the harness splits and trims frames
+    // the way the reader does rather than a second, more forgiving way.
+    var lines = std.mem.splitScalar(u8, stream, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trimEnd(u8, raw, "\r");
+        if (!std.mem.startsWith(u8, line, "data:")) continue;
+        const frame = std.mem.trim(u8, line[5..], " ");
+        if (frame.len == 0) continue;
+        if (std.mem.eql(u8, frame, "[DONE]")) break;
+        try sink.feed(frame);
+    }
+
+    // A provider-chosen index sizes the call list, so the list stays inside
+    // the cap no matter how many frames claim a slot.
+    try std.testing.expect(sink.calls.items.len <= max_tool_calls);
+    for (sink.calls.items) |call| try std.testing.expect(call.args.items.len <= stream.len * 2 + 64);
+
+    // Everything the frames produced goes back out as a request body, so the
+    // turn has to survive the round trip: a byte the escaping does not cover
+    // is a request the provider rejects, and a lost code point is a reply the
+    // user never asked for.
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var msgs: std.ArrayList(u8) = .empty;
+    defer msgs.deinit(gpa);
+    try conversationHeader(gpa, &msgs, system_prompt);
+    try msgs.appendSlice(gpa, ",");
+    try msgs.appendSlice(gpa, try assistantMessage(arena, &sink.result));
+    for (sink.calls.items) |call| {
+        var tool_msg = JsonBuf.init(arena);
+        try msgs.appendSlice(gpa, ",{\"role\":\"tool\",\"tool_call_id\":");
+        try writeJsonString(tool_msg.writer(), call.id);
+        try tool_msg.writer().writeAll(",\"content\":");
+        try writeJsonString(tool_msg.writer(), "ok");
+        try tool_msg.writer().writeAll("}");
+        try msgs.appendSlice(gpa, tool_msg.items());
+    }
+    // `buildBody` opens and closes the `messages` array, so what it is given
+    // is the objects between the brackets.
+    const body = try buildBody(arena, .{}, msgs.items);
+    try std.testing.expect(try std.json.validate(gpa, body));
 }
 
 test "the env levels override the config file's, and a bad one is named" {

@@ -51,10 +51,14 @@ pub const Release = struct {
     assets: []const ListedAsset,
 };
 
-/// One leading `v` on the tag, then exact equality. `v0.1.0` is `0.1.0`.
+/// One leading `v` on either side, then exact equality. `v0.1.0` is `0.1.0`,
+/// and so is a running build labelled the same way as the tag it matches.
 pub fn sameRelease(running: []const u8, tag: []const u8) bool {
-    const bare = if (std.mem.startsWith(u8, tag, "v")) tag[1..] else tag;
-    return std.mem.eql(u8, running, bare);
+    return std.mem.eql(u8, bareVersion(running), bareVersion(tag));
+}
+
+fn bareVersion(release: []const u8) []const u8 {
+    return if (std.mem.startsWith(u8, release, "v")) release[1..] else release;
 }
 
 /// Where the running build sits against a published tag, ignoring one leading
@@ -750,7 +754,9 @@ test "update: a v-prefixed tag equals the running version exactly" {
     try std.testing.expect(!sameRelease("0.1.1", "v0.1.10"));
     try std.testing.expect(!sameRelease("0.1.10", "v0.1.1"));
     try std.testing.expect(sameRelease("0.1.10", "v0.1.10"));
-    try std.testing.expect(!sameRelease("v0.1.0", "v0.1.0"));
+    // One leading `v` is the prefix, on either side; two is part of the name.
+    try std.testing.expect(sameRelease("v0.1.0", "v0.1.0"));
+    try std.testing.expect(sameRelease("v0.1.0", "0.1.0"));
     try std.testing.expect(!sameRelease("0.1.0", "vv0.1.0"));
 }
 
@@ -1022,4 +1028,120 @@ test "update: replaceVerified follows a symlinked destination" {
     const got = try tmp.dir.readFileAlloc(io, "real_bin", alloc, .limited(64));
     defer alloc.free(got);
     try std.testing.expectEqualStrings("new-content", got);
+}
+
+// The release body is attacker-shaped input too: it is whatever the API served
+// for the repo, and every field in it becomes a tag, a name or a URL the
+// updater acts on. `std.testing.fuzz` runs this corpus through the harness on
+// every `zig build test`, and through the fuzzer's mutations when the test
+// binary is built in fuzz mode. A real `releases/latest` body, the same body
+// with one field of the wrong type or missing, an asset with a name but no
+// URL, and the empty, truncated and non-object shapes.
+const asset_base_fixture = "{\"name\":\"" ++ asset_base ++
+    "\",\"browser_download_url\":\"https://github.com/maci0/microagent/releases/download/v0.1.0/" ++ asset_base ++ "\"}";
+
+/// A release the updater may install: a published asset on a GitHub URL, and
+/// one whose URLs are the lookalikes `trustedGithubUrl` has to refuse.
+const published_release = "{\"tag_name\":\"v0.1.0\",\"html_url\":\"https://github.com/maci0/microagent/releases/tag/v0.1.0\",\"assets\":[" ++ asset_base_fixture ++ "]}";
+const lookalike_release = "{\"tag_name\":\"v0.1.0\",\"html_url\":\"https://github.com/o/r\",\"assets\":[{\"name\":\"a\",\"browser_download_url\":\"https://github.com.evil.com/a\"},{\"name\":\"b\",\"browser_download_url\":\"https://evil.com/github.com/b\"},{\"name\":\"c\",\"browser_download_url\":\"http://github.com/c\"},{\"name\":\"d\",\"browser_download_url\":\"https://user@github.com/d\"},{\"name\":\"e\",\"browser_download_url\":\"https://raw.githubusercontent.com/e\"}]}";
+
+const release_corpus = [_][]const u8{
+    "",
+    "null",
+    "[]",
+    "{}",
+    "{",
+    "{\"tag_name\":\"v0.1.0\"}",
+    "{\"tag_name\":7,\"html_url\":\"https://github.com/o/r\",\"assets\":[]}",
+    "{\"tag_name\":\"v0.1.0\",\"html_url\":null,\"assets\":[]}",
+    "{\"tag_name\":\"v0.1.0\",\"html_url\":\"https://github.com/o/r\",\"assets\":{}}",
+    "{\"tag_name\":\"v0.1.0\",\"html_url\":\"https://github.com/o/r\",\"assets\":[null,1,\"x\",[],{}]}",
+    "{\"tag_name\":\"v0.1.0\",\"html_url\":\"https://github.com/o/r\",\"assets\":[{\"name\":\"a\"},{\"name\":1,\"browser_download_url\":\"https://github.com/o/r/a\"},{\"browser_download_url\":\"https://github.com/o/r/a\"}]}",
+    published_release,
+    "{\"tag_name\":\"v0.1.0\",\"html_url\":\"https://github.com/o/r\",\"assets\":[" ++ asset_base_fixture ++ "," ++ abc_sha ++ "]}",
+    lookalike_release,
+    "{\"tag_name\":\"\\u0000\\ud83d\\ude80\",\"html_url\":\"https://github.com/o/r\",\"assets\":[{\"name\":\"\\u0000\",\"browser_download_url\":\"https://github.com/o/r/\\u0000\"}]}",
+};
+
+/// The first listed asset, paired with a sidecar that matches the bytes, so the
+/// verdict turns on the tag and URL checks rather than stopping at the
+/// checksum. A body that does not parse still has to produce an input, since
+/// what the updater does with a malformed body is part of the same surface.
+const Decision = struct {
+    rel: ?Release,
+    in: Inputs,
+    verdict: Verdict,
+};
+
+fn decideFromBody(arena: std.mem.Allocator, body: []const u8) !Decision {
+    const rel = parseRelease(arena, body) catch null;
+    const first: ?ListedAsset = if (rel) |r| (if (r.assets.len > 0) r.assets[0] else null) else null;
+    const tag = if (rel) |r| r.tag else body;
+    const name = if (first) |a| a.name else body;
+    const url = if (first) |a| a.url else body;
+    // The sidecar sits beside the asset in the same release, so its URL is the
+    // asset's with the checksum suffix the updater already looks for.
+    const sidecar_url = if (first != null) try std.fmt.allocPrint(arena, "{s}.sha256", .{url}) else null;
+
+    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(body, &digest, .{});
+    const sidecar = try std.fmt.allocPrint(arena, "{s}  {s}\n", .{ std.fmt.bytesToHex(digest, .lower), name });
+
+    const in: Inputs = .{
+        .running = "0.0.1",
+        .tag = tag,
+        .asset_url = url,
+        .asset = body,
+        .sidecar_url = sidecar_url,
+        .sidecar = sidecar,
+        .basename = name,
+    };
+    return .{ .rel = rel, .in = in, .verdict = decide(in) };
+}
+
+test "update: fuzz: a release body only reaches a replacement it earns" {
+    const gpa = std.testing.allocator;
+    try std.testing.fuzz({}, fuzzRelease, .{ .corpus = &release_corpus });
+
+    // The corpus has to reach the branch the harness asserts about, or the
+    // assertion never fires: a published asset with a matching sidecar and two
+    // trusted URLs is a replacement, and a lookalike host is not.
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try std.testing.expectEqual(Verdict.replaced, (try decideFromBody(arena, published_release)).verdict);
+    try std.testing.expectEqual(Verdict.untrusted_url, (try decideFromBody(arena, lookalike_release)).verdict);
+}
+
+fn fuzzRelease(_: void, smith: *std.testing.Smith) !void {
+    const gpa = std.testing.allocator;
+    var buf: [16 * 1024]u8 = undefined;
+    const body = if (smith.in) |seed| seed else buf[0..smith.slice(&buf)];
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const d = try decideFromBody(arena, body);
+
+    if (d.rel) |r| {
+        for (r.assets) |asset| {
+            try std.testing.expect(assetUrl(r, asset.name) != null);
+        }
+    }
+
+    if (d.verdict == .replaced) {
+        try std.testing.expect(trustedGithubUrl(d.in.asset_url.?));
+        try std.testing.expect(trustedGithubUrl(d.in.sidecar_url.?));
+        try std.testing.expect(checksumMatches(d.in.asset.?, d.in.sidecar.?, d.in.basename));
+        try std.testing.expect(!sameRelease(d.in.running, d.in.tag));
+    }
+
+    // Whatever the tag said, the running build is the same release as itself
+    // with or without the `v` on either side, and as nothing else.
+    const tag = d.in.tag;
+    const bare = if (std.mem.startsWith(u8, tag, "v")) tag[1..] else tag;
+    try std.testing.expect(sameRelease(tag, tag));
+    try std.testing.expect(sameRelease(bare, tag));
+    try std.testing.expect(sameRelease(tag, bare));
+    try std.testing.expect(!sameRelease(bare, try std.fmt.allocPrint(arena, "{s}x", .{bare})));
 }
