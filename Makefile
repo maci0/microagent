@@ -316,10 +316,17 @@ overhead: build
 	PATH="$(BIN_DIR):$$PATH" sh bench/overhead.sh
 
 # `install -D` is GNU coreutils; macOS ships BSD install, so the parent
-# directory is created here instead.
+# directory is created here instead. The copy lands beside the installed binary
+# and is renamed over it, the way `musl` and `checksums` stage theirs: the
+# installed path is not a make target, so `.DELETE_ON_ERROR` does not cover it,
+# and `install` truncates in place. An install cut off part way through left a
+# truncated binary on PATH, which the next run would find and benchmark. The
+# rename is atomic, so a reader sees either the old binary whole or the new one
+# whole, and a second `make install` converges on the same file.
 install: build
 	mkdir -p $(HOME)/.local/bin
-	install -m755 $(BIN) $(HOME)/.local/bin/microagent
+	install -m755 $(BIN) $(HOME)/.local/bin/microagent.tmp
+	mv $(HOME)/.local/bin/microagent.tmp $(HOME)/.local/bin/microagent
 
 # Every target here is a target `microagent update` asks for, and every target
 # it asks for is published here. The two are separate files that a rename in

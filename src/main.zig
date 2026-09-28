@@ -965,6 +965,7 @@ fn run(
     var turn: usize = 0;
     var usage: chat_mod.Usage = .{};
     var compaction_floor: usize = 0;
+    var dispatched: ToolCallLedger = .empty;
     while (turn < opts.max_turns) : (turn += 1) {
         _ = turn_state.reset(.retain_capacity);
         if (budget.expired(io)) {
@@ -974,7 +975,7 @@ fn run(
             // with a small diff, and the model has already done the reading.
             net.note(io, arena, "microagent: budget of {d}s reached after {d} turn(s); one final turn\n", .{ opts.budget_s.?, turn });
             try appendMessage(gpa, msgs, "user", final_push);
-            _ = try runTurn(client, io, turn_arena, gpa, opts, msgs, &session, &usage, budget.withGraceNs(final_push_grace_s), tool_env);
+            _ = try runTurn(client, io, turn_arena, gpa, opts, msgs, &session, &usage, budget.withGraceNs(final_push_grace_s), tool_env, &dispatched);
             return;
         }
         // The ceiling is announced on the turn it applies to, before it is
@@ -984,7 +985,7 @@ fn run(
             net.note(io, arena, "microagent: last turn (--max-turns {d})\n", .{opts.max_turns});
         try compactMessages(io, gpa, msgs, turn_arena, &compaction_floor);
         // The model stopped asking for tools, so the run is over.
-        if (!try runTurn(client, io, turn_arena, gpa, opts, msgs, &session, &usage, budget, tool_env)) return;
+        if (!try runTurn(client, io, turn_arena, gpa, opts, msgs, &session, &usage, budget, tool_env, &dispatched)) return;
     }
     net.note(io, arena, "microagent: stopped at the --max-turns ceiling ({d})\n", .{opts.max_turns});
 }
@@ -1004,6 +1005,7 @@ fn runTurn(
     usage: *chat_mod.Usage,
     budget: Budget,
     tool_env: *const std.process.Environ.Map,
+    dispatched: *ToolCallLedger,
 ) !bool {
     const body = try buildBody(arena, opts, msgs.items);
     const asked = Io.Timestamp.now(io, .awake).nanoseconds;
@@ -1019,7 +1021,7 @@ fn runTurn(
     // the record says how long the model generated, and a gap that spans the
     // tools would report a rate for a generation that was never continuous.
     const model_ms = session_mod.elapsedMs(io, asked);
-    try finishTurn(io, arena, gpa, msgs, &result, usage, budget, tool_env);
+    try finishTurn(io, arena, gpa, msgs, &result, usage, budget, tool_env, dispatched);
     session_mod.writeRecord(io, arena, session, model_ms, &result);
     return result.calls.items.len != 0;
 }
@@ -1770,6 +1772,24 @@ fn flushOut(io: Io, arena: std.mem.Allocator, out_buf: *std.ArrayList(u8), shown
     out_buf.clearRetainingCapacity();
 }
 
+/// The `tool_call_id`s this run has already executed, so a call the provider
+/// sends twice is run once.
+///
+/// A `tool_call_id` is the one name a call carries in every turn it appears
+/// in, and the conversation pairs a tool result with a call by it. A gateway
+/// that replays a streamed frame, a provider that emits the same call twice,
+/// or a turn whose frames are re-merged all reach the same place: two calls,
+/// one id, two tool messages, and a tool run twice. Nothing downstream of
+/// that is idempotent (a `bash` call is a command, an `edit` is a rewrite of
+/// the user's tree), so the second execution is refused at the name the
+/// duplicate is recognized by rather than left to each tool to make safe.
+///
+/// The keys live in the run arena and die with the process, so the ledger
+/// cannot outlive the run that fills it. An id the run has not seen is
+/// inserted before the call runs, so a tool that fails still counts as done:
+/// retrying it is the model's call, and a failure has already been reported.
+const ToolCallLedger = std.StringHashMapUnmanaged(void);
+
 /// Appends the assistant message and, for every tool call it requested, runs
 /// the tool and appends its result.
 fn finishTurn(
@@ -1781,6 +1801,7 @@ fn finishTurn(
     usage: *chat_mod.Usage,
     budget: Budget,
     tool_env: *const std.process.Environ.Map,
+    dispatched: *ToolCallLedger,
 ) !void {
     try msgs.appendSlice(gpa, ",");
     try msgs.appendSlice(gpa, try assistantMessage(arena, result));
@@ -1790,6 +1811,28 @@ fn finishTurn(
     // shorter, not a reason to re-read the clock for each of them.
     const ceiling_ms = budget.toolCeilingMs(io);
     for (result.calls.items) |call| {
+        // The tool result for a call this run already executed is this line,
+        // and the call itself does not run. The message is still appended:
+        // the assistant turn above named the call, and a request carrying a
+        // tool call with no answer is a 400 the next turn would spend itself
+        // on instead of on the work.
+        if (dispatched.contains(call.id)) {
+            try appendToolResult(gpa, msgs, arena, call, try std.fmt.allocPrint(
+                arena,
+                "error: not run, tool call {s} was already executed in this run; its first result is above",
+                .{tool_mod.terminalSafe(arena, call.id)},
+            ));
+            continue;
+        }
+        // The key is copied into the run arena because the id itself is read
+        // from the turn arena, which is reset before the next turn and would
+        // leave the ledger holding a slice of a freed buffer. A ledger that
+        // cannot grow is a ledger that cannot deduplicate, and refusing the
+        // call would turn an allocation failure into a stalled run, so the
+        // tool runs and this one duplicate gets through.
+        if (arena.dupe(u8, call.id)) |key| {
+            dispatched.put(arena, key, {}) catch {};
+        } else |_| {}
         // A call the budget will not pay for still gets a tool message. An
         // assistant turn that names calls the conversation never answers is one
         // the next request rejects, so the loop below would spend a turn on a
@@ -1802,15 +1845,28 @@ fn finishTurn(
                 // failure as text) is named here, so a result reading
                 // `error: OutOfMemory` says which of the calls ran out.
                 try std.fmt.allocPrint(arena, "error: {s}: {s}", .{ call.name, @errorName(err) });
-        var tool_msg = chat_mod.JsonBuf.init(arena);
-        try tool_msg.writer().writeAll(",{\"role\":\"tool\",\"tool_call_id\":");
-        try chat_mod.writeJsonString(tool_msg.writer(), call.id);
-        try tool_msg.writer().writeAll(",\"content\":");
-        try chat_mod.writeJsonString(tool_msg.writer(), try tool_mod.toolResult(arena, output));
-        try tool_msg.writer().writeAll("}");
-        try msgs.appendSlice(gpa, tool_msg.items());
+        try appendToolResult(gpa, msgs, arena, call, output);
     }
     try logUsage(io, arena, usage, result);
+}
+
+/// One tool message in the conversation, keyed to the call it answers. The
+/// content is passed through `toolResult`, so a call whose output is over the
+/// cap is truncated the same way whichever way it was produced.
+fn appendToolResult(
+    gpa: std.mem.Allocator,
+    msgs: *std.ArrayList(u8),
+    arena: std.mem.Allocator,
+    call: chat_mod.ToolCall,
+    output: []const u8,
+) !void {
+    var tool_msg = chat_mod.JsonBuf.init(arena);
+    try tool_msg.writer().writeAll(",{\"role\":\"tool\",\"tool_call_id\":");
+    try chat_mod.writeJsonString(tool_msg.writer(), call.id);
+    try tool_msg.writer().writeAll(",\"content\":");
+    try chat_mod.writeJsonString(tool_msg.writer(), try tool_mod.toolResult(arena, output));
+    try tool_msg.writer().writeAll("}");
+    try msgs.appendSlice(gpa, tool_msg.items());
 }
 
 /// The assistant turn as the request body spells it. Plain content when the
