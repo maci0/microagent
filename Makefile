@@ -277,8 +277,13 @@ zig-version:
 	  echo "zig $$have, the release assets are built with $$want: a different compiler produces a different binary, so 'make release-assets' here would not be the one the tag publishes" >&2; \
 	  exit 1; }
 
+# The file list comes from git rather than from a hand-written glob: a glob
+# names the depths the scripts live at today, so a script added one level
+# deeper is linted by nothing and the gate still passes. xargs splits the list
+# if it grows past one command's argument limit, and exits non-zero either way.
 lint-shell:
-	shellcheck -x bench/*.sh bench/tasks/*/*.sh
+	@set -eu; \
+	git ls-files -z '*.sh' | xargs -0 shellcheck -x
 
 lint-python:
 	ruff check --config ruff.toml integrations/harbor

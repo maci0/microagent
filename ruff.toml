@@ -48,6 +48,7 @@ lint.select = [
     "SLF",  # private member access
     "SLOT", # __slots__ on subclasses
     "T10",  # leftover debugger calls
+    "TRY",  # tryceratops: a swallowed raise, a useless finally, a bare return in except
     "ASYNC", # async correctness: blocking a loop, a stray task group
     "ERA",   # commented-out code, which is never deleted and always misread
     "FA",    # `__future__` imports, so an annotation cannot be a runtime error
@@ -59,6 +60,13 @@ lint.ignore = [
     # A literal compared against len(sys.argv) reads as the arity it checks;
     # naming it would only move the number somewhere else.
     "PLR2004",
+    # TRY003 wants the message moved into an exception class. Here the message
+    # is the whole diagnostic: it names the missing binary, the env var to set
+    # and the build command to run, and an operator reads it in a harbor trace,
+    # not a traceback that ends in a class name they then have to look up.
+    # The rest of TRY (TRY002, TRY200/TRY201, TRY300, TRY301, TRY400, TRY401)
+    # is on and is what catches a swallowed raise or a useless finally.
+    "TRY003",
 ]
 
 # The cap C901 measures against, written down rather than left at ruff's
