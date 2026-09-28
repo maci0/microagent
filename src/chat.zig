@@ -25,6 +25,53 @@ pub const ToolCall = struct {
     args: std.ArrayList(u8) = .empty,
 };
 
+/// The tools a response can name, as a type rather than as the bytes that
+/// spell one.
+///
+/// The name arrives from outside the process: it is whatever the provider put
+/// in the stream. Past the boundary that resolves it, though, nothing has any
+/// business comparing names as text. A call is dispatched to a handler, named
+/// on the tool gutter, quoted back into a credentials refusal, and classified
+/// as an edit or a test run, and each of those used to spell its own `mem.eql`
+/// against a literal. That made the tool set a stringly-typed reference with
+/// no owner: adding a tool meant editing the schema, the dispatch chain, and
+/// four more string comparisons, and forgetting any one of them failed at run
+/// time rather than at compile time.
+///
+/// Resolved once at the edge, the rest of the program switches on an enum, so a
+/// new tool is a new variant and every `switch` over it that lacks an arm stops
+/// the build instead of silently answering `unknown tool` to a model the schema
+/// had just advertised the tool to.
+pub const Tool = enum {
+    bash,
+    read,
+    write,
+    edit,
+    search,
+    ast,
+    git,
+
+    /// The name as the wire spells it, which is the one the schema advertises
+    /// and the one the provider's stream carries.
+    pub fn name(tool: Tool) []const u8 {
+        return @tagName(tool);
+    }
+
+    /// The tool a name is, or null for a name this program does not have. A
+    /// name the model invented is the ordinary case here rather than an error
+    /// the run stops on: the model may call anything, and the refusal is what
+    /// it gets back as a tool result.
+    pub fn fromName(text: []const u8) ?Tool {
+        return std.meta.stringToEnum(Tool, text);
+    }
+};
+
+/// Every tool, in the order the schema advertises them. One list, so the tools
+/// a run offers and the ones a caller iterates cannot be two lists.
+pub inline fn tools() []const Tool {
+    return &.{ .bash, .read, .write, .edit, .search, .ast, .git };
+}
+
 /// Token counters as gauntlet wants to read them: cumulative for the run, so
 /// the max it takes from successive usage lines is the final total.
 pub const Usage = struct {
@@ -53,6 +100,26 @@ pub const Usage = struct {
 /// The five counters, in the order every JSON usage writer here emits them: a
 /// reader takes them by name, so one place spells the key list.
 pub const usage_fields = "\"prompt_tokens\":{d},\"cached_tokens\":{d},\"completion_tokens\":{d},\"reasoning_tokens\":{d},\"total_tokens\":{d}";
+
+// The name a tool is spelled by has to survive the round trip, because it is
+// the same string on both sides of the wire: the schema advertises it, the
+// provider streams it back, and the dispatcher resolves it. A `name` and a
+// `fromName` that disagreed on a variant would be a tool the run advertises and
+// then refuses by name, and the tag names are the one place the two could
+// drift.
+test "a tool's wire name and its variant are the same name both ways" {
+    for (tools()) |tool| {
+        try std.testing.expectEqual(tool, Tool.fromName(tool.name()).?);
+    }
+    // The whole set, so a variant that is not reachable by the name the schema
+    // advertises cannot pass by having a name nothing resolves to.
+    try std.testing.expectEqual(@typeInfo(Tool).@"enum".fields.len, tools().len);
+    // And the names a model can send that are not tools, which are the ordinary
+    // case at this boundary rather than an error.
+    for ([_][]const u8{ "", "bash ", "Bash", "delete_everything", "bash\n", "read/write" }) |name| {
+        try std.testing.expectEqual(@as(?Tool, null), Tool.fromName(name));
+    }
+}
 
 pub const ChatResult = struct {
     content: std.ArrayList(u8) = .empty,

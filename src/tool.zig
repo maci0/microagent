@@ -54,9 +54,12 @@ const tool_timeout_ms: u64 = 60_000;
 /// output, so it arrives with the same trust as a path or a command string: an
 /// unbounded one leaves a build running with no deadline, and the process-group
 /// kill that reaps it never fires. A request past this gets the ceiling.
-const max_bash_timeout_ms: u64 = 600_000;
-/// What `bash` runs under when the model sends no `timeout_ms`.
-const default_bash_timeout_ms: u64 = 120_000;
+pub const max_bash_timeout_ms: u64 = 600_000;
+/// What `bash` runs under when the model sends no `timeout_ms`. The two are
+/// public because the tool schema in `main` states them to the model: a default
+/// the schema spells as a literal is a second copy of this number, and the copy
+/// on the wire is the one the model acts on.
+pub const default_bash_timeout_ms: u64 = 120_000;
 
 /// A tool deadline cut down to what is left of the run's time budget.
 ///
@@ -293,7 +296,9 @@ fn failedOutput(
 
 /// Lines of git output a call keeps when the model asks for no limit: a raw
 /// `git log` in a big repository is thousands of lines of context nobody reads.
-const git_default_limit: usize = 400;
+/// Public because the tool schema in `main` states it to the model, for the
+/// reason `default_bash_timeout_ms` gives.
+pub const git_default_limit: usize = 400;
 
 /// How many lines of git output the model reads. `limit` is a ceiling, so a
 /// limit of zero is one line rather than the whole output, and a limit a 32-bit
@@ -354,7 +359,7 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
     // what the `path` argument is for, and that one is checked.
     if (rev) |r| if (std.mem.indexOfScalar(u8, r, ':')) |colon| {
         const named = r[colon + 1 ..];
-        if (isCredentialPath(named)) return credentialRefusal(arena, "git", named, false);
+        if (isCredentialPath(named)) return credentialRefusal(arena, .git, named, false);
         return std.fmt.allocPrint(arena, "error: rev must name a revision, not a file; use the path argument for a file (got '{s}')", .{
             chat.safeText(arena, r, 120),
         });
@@ -367,10 +372,10 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
     // the model named and never a name it did not: the exclusion set this tool
     // relies on does not reach a rev that is a bare file, and the key came
     // back as a tool result either way.
-    if (rev) |r| if (isCredentialPath(r)) return credentialRefusal(arena, "git", r, false);
+    if (rev) |r| if (isCredentialPath(r)) return credentialRefusal(arena, .git, r, false);
     // `git show <rev> -- .env` prints a committed credentials file as a patch,
     // so the path gets the refusal `read` gives it rather than a git one.
-    if (path) |p| if (isCredentialPath(p)) return credentialRefusal(arena, "git", p, false);
+    if (path) |p| if (isCredentialPath(p)) return credentialRefusal(arena, .git, p, false);
 
     const argv = gitArgv(arena, cmd, rev, path, limit) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -491,36 +496,52 @@ pub fn runTool(io: Io, arena: std.mem.Allocator, call: chat.ToolCall, ceiling_ms
         else => return std.fmt.allocPrint(arena, "error: tool arguments must be an object", .{}),
     };
 
-    noteToolCall(io, arena, call.name, args);
-    if (std.mem.eql(u8, call.name, "bash")) return toolBash(io, arena, args, ceiling_ms, environ_map);
-    if (std.mem.eql(u8, call.name, "read")) return toolRead(io, arena, args);
-    if (std.mem.eql(u8, call.name, "write")) return toolWrite(io, arena, args);
-    if (std.mem.eql(u8, call.name, "edit")) return toolEdit(io, arena, args);
-    if (std.mem.eql(u8, call.name, "search")) return toolSearch(io, arena, args, ceiling_ms, environ_map);
-    if (std.mem.eql(u8, call.name, "ast")) return toolAst(io, arena, args, ceiling_ms, environ_map);
-    if (std.mem.eql(u8, call.name, "git")) return toolGit(io, arena, args, ceiling_ms, environ_map);
-    return std.fmt.allocPrint(arena, "error: unknown tool '{s}'", .{call.name});
+    // The one place a tool name is a string. Past it the call is a variant, so
+    // the switch below is exhaustive by the compiler: a tool added without a
+    // handler here fails the build rather than answering `unknown tool` to a
+    // model the schema had just advertised it to.
+    const tool = chat.Tool.fromName(call.name) orelse return unknownTool(arena, call.name);
+    noteToolCall(io, arena, tool, args);
+    return switch (tool) {
+        .bash => toolBash(io, arena, args, ceiling_ms, environ_map),
+        .read => toolRead(io, arena, args),
+        .write => toolWrite(io, arena, args),
+        .edit => toolEdit(io, arena, args),
+        .search => toolSearch(io, arena, args, ceiling_ms, environ_map),
+        .ast => toolAst(io, arena, args, ceiling_ms, environ_map),
+        .git => toolGit(io, arena, args, ceiling_ms, environ_map),
+    };
+}
+
+/// What a name this program has no tool for gets back. The name is the model's
+/// own bytes and reaches the prompt and a stderr gutter, so it is escaped here
+/// the way every other untrusted value reaching a diagnostic is.
+fn unknownTool(arena: std.mem.Allocator, name: []const u8) error{OutOfMemory}![]const u8 {
+    return std.fmt.allocPrint(arena, "error: unknown tool '{s}'", .{chat.safeText(arena, name, 40)});
 }
 
 /// The gutter line, without the stream it is written to, so the one-line shape
 /// is a value a test can hold rather than a stream it has to capture. Every
 /// field is bounded, so the line fits a buffer of this length whatever the
 /// model sent: the marker, the name, one space, the detail and the newline.
+/// The name is a variant, so its budget is the widest tag rather than a number
+/// a caller could pass past; the detail is the model's own bytes and is what
+/// the second bound is for.
 const gutter_line_max = 5 + 40 + 1 + 120 + 1;
 
-/// A one-line tool gutter on stderr, the shape gauntlet recognizes. The name
-/// and the detail are the provider's own text and may carry a newline or an
-/// escape sequence, either of which breaks the one-line-per-call shape a reader
-/// parses, so control characters are written as their two-character escapes.
-fn noteToolCall(io: Io, arena: std.mem.Allocator, name: []const u8, args: std.json.ObjectMap) void {
+/// A one-line tool gutter on stderr, the shape gauntlet recognizes. The detail
+/// is the provider's own text and may carry a newline or an escape sequence,
+/// either of which breaks the one-line-per-call shape a reader parses, so
+/// control characters are written as their two-character escapes.
+fn noteToolCall(io: Io, arena: std.mem.Allocator, tool: chat.Tool, args: std.json.ObjectMap) void {
     var buf: [gutter_line_max]u8 = undefined;
-    net.writeErr(io, toolCallLine(arena, &buf, name, args) catch return);
+    net.writeErr(io, toolCallLine(arena, &buf, tool, args) catch return);
 }
 
-fn toolCallLine(arena: std.mem.Allocator, buf: []u8, name: []const u8, args: std.json.ObjectMap) ![]const u8 {
+fn toolCallLine(arena: std.mem.Allocator, buf: []u8, tool: chat.Tool, args: std.json.ObjectMap) ![]const u8 {
     // The interesting argument is not the same one for every tool: a structural
     // search is identified by its pattern, a bash call by its command.
-    const detail = if (std.mem.eql(u8, name, "ast"))
+    const detail = if (tool == .ast)
         (chat.str(args.get("pattern")) orelse "")
     else
         (chat.str(args.get("command")) orelse chat.str(args.get("pattern")) orelse chat.str(args.get("path")) orelse "");
@@ -532,7 +553,7 @@ fn toolCallLine(arena: std.mem.Allocator, buf: []u8, name: []const u8, args: std
     return std.fmt.bufPrint(
         buf,
         "\u{23fa} {s} {s}\n",
-        .{ chat.safeText(arena, name, 40), chat.safeText(arena, detail, 120) },
+        .{ tool.name(), chat.safeText(arena, detail, 120) },
     );
 }
 
@@ -640,7 +661,7 @@ fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_
     // `git show HEAD -- .env` both come back whole, and a tool result is
     // re-sent to the provider on every later turn. So the same name check runs
     // over the command's own words.
-    if (credentialInCommand(command)) |path| return credentialRefusal(arena, "bash", path, false);
+    if (credentialInCommand(command)) |path| return credentialRefusal(arena, .bash, path, false);
     const timeout_ms: u64 = bashTimeoutMs(requestedTimeoutMs(args.get("timeout_ms")), ceiling_ms);
     const capture_limit = max_tool_output * 4;
     // A command that runs to its own timeout has usually already said what is
@@ -854,8 +875,8 @@ fn isCredentialPath(path: []const u8) bool {
 /// going on, so the answer is the operator rather than another tool. `ast` is
 /// in neither list on its own, because a search leaves the tree as it found it
 /// and a rewrite does not; the caller says which it was.
-fn isWriting(tool: []const u8) bool {
-    return std.mem.eql(u8, tool, "write") or std.mem.eql(u8, tool, "edit");
+fn isWriting(tool: chat.Tool) bool {
+    return tool == .write or tool == .edit;
 }
 
 /// What a tool returns instead of a credential. It names the file, so a model
@@ -863,7 +884,7 @@ fn isWriting(tool: []const u8) bool {
 /// instead, because a bare error reads as a broken tool and gets retried.
 /// `writes` is the caller's answer to "would this call have changed the file",
 /// which the tool's name alone does not always carry.
-fn credentialRefusal(arena: std.mem.Allocator, tool: []const u8, path: []const u8, writes: bool) error{OutOfMemory}![]const u8 {
+fn credentialRefusal(arena: std.mem.Allocator, tool: chat.Tool, path: []const u8, writes: bool) error{OutOfMemory}![]const u8 {
     // The advice has to be the one that is true for the tool that was refused.
     // The `bash` branch sends the model to the operator because `bash` runs
     // the same name check over its own words: telling a model that `read` just
@@ -872,7 +893,7 @@ fn credentialRefusal(arena: std.mem.Allocator, tool: []const u8, path: []const u
     // the same thing, because there is no reading of it anyone should be doing.
     // `writes` covers `ast --rewrite`, which passes the path to `--update-all`
     // whatever the globs exclude, and is a write by the only test that matters.
-    const advice = if (std.mem.eql(u8, tool, "bash"))
+    const advice = if (tool == .bash)
         "`bash` does not read it either. Ask the operator for the value you need rather than printing a key."
     else if (writes or isWriting(tool))
         "No tool rewrites a credentials file. Ask the operator to make that change rather than replacing a key with a guess."
@@ -882,13 +903,13 @@ fn credentialRefusal(arena: std.mem.Allocator, tool: []const u8, path: []const u
         arena,
         "refused: {s} is a credentials file. `{s}` does not return one, because the result " ++
             "is re-sent to the provider on every later turn. {s}",
-        .{ path, tool, advice },
+        .{ path, tool.name(), advice },
     );
 }
 
 fn toolRead(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]const u8 {
     const path = chat.str(args.get("path")) orelse return std.fmt.allocPrint(arena, "error: missing path", .{});
-    if (isCredentialPath(path)) return try credentialRefusal(arena, "read", path, false);
+    if (isCredentialPath(path)) return try credentialRefusal(arena, .read, path, false);
     if (!args.contains("offset") and !args.contains("limit"))
         return std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_read_bytes)) catch |err|
             return readFailed(arena, path, err);
@@ -1013,7 +1034,7 @@ fn toolWrite(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]cons
     // model that gets the path from a file in the tree and the content from a
     // guess replaces the operator's working key with a placeholder, and the
     // next run of the agent cannot authenticate at all.
-    if (isCredentialPath(path)) return try credentialRefusal(arena, "write", path, true);
+    if (isCredentialPath(path)) return try credentialRefusal(arena, .write, path, true);
     // A call that names a path and no content is a call the model got cut
     // short on, not one asking for an empty file: a `write` is the one tool
     // result a run cannot undo, and emptying a source file is worse than
@@ -1077,7 +1098,7 @@ fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]const
     // match, and the operator's key is the one file in a tree where a match the
     // model guessed at and a rewrite of the value beside it is damage nobody
     // asked for.
-    if (isCredentialPath(path)) return try credentialRefusal(arena, "edit", path, true);
+    if (isCredentialPath(path)) return try credentialRefusal(arena, .edit, path, true);
     const old = chat.str(args.get("old_string")) orelse return std.fmt.allocPrint(arena, "error: missing old_string", .{});
     const new = chat.str(args.get("new_string")) orelse return std.fmt.allocPrint(arena, "error: missing new_string", .{});
     const all = if (args.get("replace_all")) |v| v == .bool and v.bool else false;
@@ -1143,7 +1164,7 @@ fn toolSearch(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceilin
     // `{"path": ".env"}` came back with the key's line in it. The name is
     // checked here instead, which is what the globs and this test between them
     // make true.
-    if (isCredentialPath(path)) return try credentialRefusal(arena, "search", path, false);
+    if (isCredentialPath(path)) return try credentialRefusal(arena, .search, path, false);
     const glob = chat.str(args.get("glob"));
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(arena, &.{ "rg", "--line-number", "--no-heading", "--color", "never", "--max-count", "200", "--glob-case-insensitive" });
@@ -1179,7 +1200,7 @@ fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
     // it found it, and a rewrite passes it to `--update-all`, so the refusal
     // for the second is the one that says no tool rewrites a key.
     const rewrite = chat.str(args.get("rewrite"));
-    if (isCredentialPath(path)) return try credentialRefusal(arena, "ast", path, rewrite != null);
+    if (isCredentialPath(path)) return try credentialRefusal(arena, .ast, path, rewrite != null);
     if (rewrite) |r| {
         if (try astRewriteRefusal(arena, pattern, r)) |why| return why;
     }
@@ -1910,23 +1931,23 @@ test "the tool gutter stays one line whatever the model sent" {
     try args.put(arena, "command", .{ .string = "rg -n 'foo'\nnext line\u{1b}[31mred\xff" });
     try std.testing.expectEqualStrings(
         "\u{23fa} bash rg -n 'foo'\\x0anext line\\x1b[31mred\u{fffd}\n",
-        try toolCallLine(arena, &buf, "bash", args),
+        try toolCallLine(arena, &buf, .bash, args),
     );
 
     // The argument named depends on the tool, and an argument that is not text
     // is not printed as one.
-    const cases = [_]struct { name: []const u8, key: []const u8, detail: []const u8 }{
-        .{ .name = "ast", .key = "pattern", .detail = "fn main" },
-        .{ .name = "search", .key = "pattern", .detail = "TODO" },
-        .{ .name = "read", .key = "path", .detail = "src/main.zig" },
-        .{ .name = "bash", .key = "command", .detail = "ls -la" },
+    const cases = [_]struct { tool: chat.Tool, key: []const u8, detail: []const u8 }{
+        .{ .tool = .ast, .key = "pattern", .detail = "fn main" },
+        .{ .tool = .search, .key = "pattern", .detail = "TODO" },
+        .{ .tool = .read, .key = "path", .detail = "src/main.zig" },
+        .{ .tool = .bash, .key = "command", .detail = "ls -la" },
     };
     for (cases) |c| {
         var one: std.json.ObjectMap = .empty;
         try one.put(arena, c.key, .{ .string = c.detail });
         try std.testing.expectEqualStrings(
-            try std.fmt.allocPrint(arena, "\u{23fa} {s} {s}\n", .{ c.name, c.detail }),
-            try toolCallLine(arena, &buf, c.name, one),
+            try std.fmt.allocPrint(arena, "\u{23fa} {s} {s}\n", .{ c.tool.name(), c.detail }),
+            try toolCallLine(arena, &buf, c.tool, one),
         );
 
         // A number where the name is would have been read as the detail, and
@@ -1934,19 +1955,24 @@ test "the tool gutter stays one line whatever the model sent" {
         var numbered: std.json.ObjectMap = .empty;
         try numbered.put(arena, c.key, .{ .integer = 7 });
         try std.testing.expectEqualStrings(
-            try std.fmt.allocPrint(arena, "\u{23fa} {s} \n", .{c.name}),
-            try toolCallLine(arena, &buf, c.name, numbered),
+            try std.fmt.allocPrint(arena, "\u{23fa} {s} \n", .{c.tool.name()}),
+            try toolCallLine(arena, &buf, c.tool, numbered),
         );
     }
 
-    // A name and a detail longer than their budgets are cut, on a code point
-    // boundary, and the line still ends exactly once.
+    // A name is a variant, so it is bounded by construction: the longest tag
+    // has to fit the budget the line is sized for, and every tool has to fit
+    // beside a full-budget detail. Only the detail is the model's own bytes,
+    // so only the detail is cut, and the line still ends exactly once.
     var long_args: std.json.ObjectMap = .empty;
     try long_args.put(arena, "command", .{ .string = "日" ** 300 });
-    const long_line = try toolCallLine(arena, &buf, "search" ** 10, long_args);
-    try std.testing.expect(long_line.len <= gutter_line_max);
-    try std.testing.expect(std.unicode.utf8ValidateSlice(long_line));
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, long_line, "\n"));
+    for (chat.tools()) |tool| {
+        try std.testing.expect(tool.name().len <= 40);
+        const long_line = try toolCallLine(arena, &buf, tool, long_args);
+        try std.testing.expect(long_line.len <= gutter_line_max);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(long_line));
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, long_line, "\n"));
+    }
 }
 
 // The tool name and the argument object are the model's, and the model decides
@@ -2047,12 +2073,17 @@ fn fuzzToolCall(_: void, smith: *std.testing.Smith) !void {
     // The gutter line is a fixed-size buffer, and its whole purpose is to be
     // one line a reader splits on: a line over the buffer, or one carrying a
     // second newline, is a call the operator sees twice or not at all.
-    var buf: [gutter_line_max]u8 = undefined;
-    const line = toolCallLine(arena, &buf, name, args) catch return error.TestUnexpectedResult;
-    try std.testing.expect(line.len <= gutter_line_max);
+    //
+    // A name the run has no tool for never reaches the gutter: it is refused
+    // before anything is dispatched, and the refusal is the line that has to
+    // stay one printable line, since it quotes the name back at the model and
+    // on stderr.
+    const line = if (chat.Tool.fromName(name)) |tool| blk: {
+        var buf: [gutter_line_max]u8 = undefined;
+        break :blk try toolCallLine(arena, &buf, tool, args);
+    } else try unknownTool(arena, name);
+    try std.testing.expect(line.len <= gutter_line_max + 32);
     try std.testing.expect(std.unicode.utf8ValidateSlice(line));
-    try std.testing.expect(std.mem.startsWith(u8, line, "\u{23fa} "));
-    try std.testing.expect(std.mem.endsWith(u8, line, "\n"));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, line, "\n"));
 
     // Nothing but the line's own newline is a byte a terminal acts on: the
@@ -2537,7 +2568,7 @@ test "the credentials refusal names the file and the way out" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const refused = try credentialRefusal(arena, "read", "/home/someone/.secrets/openrouter", false);
+    const refused = try credentialRefusal(arena, .read, "/home/someone/.secrets/openrouter", false);
     try std.testing.expect(std.mem.indexOf(u8, refused, "/home/someone/.secrets/openrouter") != null);
     try std.testing.expect(std.mem.indexOf(u8, refused, "bash") != null);
     // Not a single byte of a key is in the message, only the path that names it.
@@ -2546,8 +2577,8 @@ test "the credentials refusal names the file and the way out" {
     // The same tool name, one argument apart: a search leaves the file alone
     // and a rewrite passes it to `--update-all`, so the advice cannot be the
     // one that sends the model to another tool.
-    const search = try credentialRefusal(arena, "ast", "/home/someone/.env", false);
-    const rewritten = try credentialRefusal(arena, "ast", "/home/someone/.env", true);
+    const search = try credentialRefusal(arena, .ast, "/home/someone/.env", false);
+    const rewritten = try credentialRefusal(arena, .ast, "/home/someone/.env", true);
     try std.testing.expect(std.mem.indexOf(u8, search, "bash") != null);
     try std.testing.expect(std.mem.indexOf(u8, rewritten, "rewrites a credentials file") != null);
     try std.testing.expect(std.mem.indexOf(u8, rewritten, "bash") == null);

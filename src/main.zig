@@ -1472,7 +1472,7 @@ const tool_word_separators = " \t\r\n\"{},:";
 /// or the issue text mentioning pytest, is not a test run, and judging by the
 /// conversation counted both of those and never asked for verification.
 fn isTestRun(call_name: []const u8, args: []const u8) bool {
-    if (!std.mem.eql(u8, call_name, "bash")) return false;
+    if (chat_mod.Tool.fromName(call_name) != .bash) return false;
     for (test_runners) |runner| {
         if (namesWords(args, runner)) return true;
     }
@@ -1530,8 +1530,9 @@ fn namesWords(haystack: []const u8, needle: []const u8) bool {
 /// on changes that were never made. The key is read as a string, which is the
 /// only shape `runTool` dispatches a rewrite from.
 fn isEdit(call_name: []const u8, args: []const u8) bool {
-    if (std.mem.eql(u8, call_name, "edit") or std.mem.eql(u8, call_name, "write")) return true;
-    if (!std.mem.eql(u8, call_name, "ast")) return false;
+    const tool = chat_mod.Tool.fromName(call_name) orelse return false;
+    if (tool == .edit or tool == .write) return true;
+    if (tool != .ast) return false;
     // The page allocator, freed on the way out: this is a per-call parse of
     // arguments a few hundred bytes long, once, and the tree it builds is
     // released before the next one is read.
@@ -3628,10 +3629,16 @@ test "conversation and tool schema serialize as one valid request body" {
     try std.testing.expectEqualStrings("system", messages.items[0].object.get("role").?.string);
     try std.testing.expectEqualStrings("say \"hi\"\nplease", messages.items[1].object.get("content").?.string);
 
-    // The advertised names and the tool_mod.dispatch table are two lists that have to
-    // stay the same list: a tool in the schema that the dispatcher cannot
-    // dispatch is one the model will call and be told does not exist.
-    const advertised = [_][]const u8{ "bash", "read", "write", "edit", "search", "ast", "git" };
+    // The advertised names and the tool_mod dispatch table are one list, because
+    // both are `chat.Tool`: a tool in the schema that the dispatcher cannot
+    // dispatch is a variant with no arm in an exhaustive switch, which does not
+    // build. What is left to hold the schema to is that it advertises the list
+    // in the order `chat.tools` gives, with nothing added and nothing dropped.
+    const advertised = blk: {
+        var names: [chat_mod.tools().len][]const u8 = undefined;
+        for (chat_mod.tools(), &names) |tool, *slot| slot.* = tool.name();
+        break :blk &names;
+    };
     // What each tool answers when its one required argument is missing, which
     // is the dispatch every advertised name has to reach.
     const missing_argument = std.StaticStringMap([]const u8).initComptime(.{
@@ -3661,6 +3668,37 @@ test "conversation and tool schema serialize as one valid request body" {
         const err = try tool_mod.dispatch(arena_state.allocator(), name, "{}");
         try std.testing.expectEqualStrings(missing_argument.get(name).?, err);
     }
+
+    // The numbers the schema quotes to the model are the only defaults written
+    // twice: once as a constant the tool acts on, once as prose the model plans
+    // a command around. A constant moved without the prose leaves the model
+    // budgeting a timeout the run no longer grants, and nothing else in the
+    // build notices, because both halves are well-formed on their own. The
+    // constants are public for this one check, and the check is here because
+    // this is the only module that holds both halves.
+    const bash_timeout = try std.fmt.allocPrint(gpa, "default {d}, at most {d}", .{
+        tool_mod.default_bash_timeout_ms,
+        tool_mod.max_bash_timeout_ms,
+    });
+    try std.testing.expect(std.mem.indexOf(u8, parameterDescription(tools.items, "bash", "timeout_ms"), bash_timeout) != null);
+    const git_limit = try std.fmt.allocPrint(gpa, "default {d}", .{tool_mod.git_default_limit});
+    try std.testing.expect(std.mem.indexOf(u8, parameterDescription(tools.items, "git", "limit"), git_limit) != null);
+}
+
+/// The description one property of one tool's schema carries, which is where a
+/// default the model reads is written down. A tool or property this schema does
+/// not have is a test that cannot say what it meant to check, so the lookup
+/// fails rather than answering with an empty string.
+fn parameterDescription(tools: []const std.json.Value, tool_name: []const u8, property: []const u8) []const u8 {
+    for (tools) |tool| {
+        const f = tool.object.get("function") orelse continue;
+        if (!std.mem.eql(u8, chat_mod.str(f.object.get("name")) orelse continue, tool_name)) continue;
+        const parameters = f.object.get("parameters") orelse return "";
+        const named = parameters.object.get("properties") orelse return "";
+        const one = named.object.get(property) orelse return "";
+        return chat_mod.str(one.object.get("description")) orelse return "";
+    }
+    return "";
 }
 
 // The quadratic a ranged read had, one module up: a line longer than the
