@@ -14,6 +14,11 @@ release, and `microagent update` moves you to it.
 
 ### Added
 
+- `make check-reproducible` builds the first published target a third time, from a copy of the
+  source at another path, and refuses a release when those bytes differ. The other two builds vary
+  the clock, the locale, the timezone and the cache but share the checkout's path, so a build
+  directory reaching a binary (a panic message naming it, an embedded file read by absolute name)
+  passed a check that was looking for timestamps.
 - An MIT `LICENSE`, listed in the README and in the package `build.zig.zon`
   ships. A consumer reading the README or fetching the package had no file that
   said what the grant was.
@@ -590,6 +595,12 @@ release, and `microagent update` moves you to it.
 
 ### Security
 
+- The published binaries are linked position-independent. A fixed-address executable is mapped at
+  the same place on every run, so an address an attacker learns once is an address every run
+  uses; PIE moves the image to wherever this run's layout puts it. Full RELRO and a
+  non-executable stack were already the linker's defaults here, so this is the last of the three
+  the linker can give without a libc. There is still no stack canary: Zig's
+  `-fstack-protector` needs a libc to reach `__stack_chk_fail` through, and nothing links one.
 - `search` and `ast` skip the credential files `read` refuses, and `git` refuses one named as a
   path. A tool result is re-sent to the provider on every later turn, so a `search` that matched a
   line of `.env`, a `server.pem` or `$HOME/.secrets/openrouter`, or a `git show` that printed one

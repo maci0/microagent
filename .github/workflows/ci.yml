@@ -118,9 +118,9 @@ jobs:
     # what update.zig asks for, fails here instead of at a tag.
     runs-on: ubuntu-24.04
     # The cross build of every target plus the two independent builds of each
-    # that the reproducibility check below makes, and the two more of one target
-    # it makes from a second directory, so the ceiling has to cover more than
-    # twice the compile work the job used to do.
+    # that the reproducibility check below makes, and the one more of the first
+    # target it makes from a second directory, so the ceiling has to cover more
+    # than twice the compile work the job used to do.
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

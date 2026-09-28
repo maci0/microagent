@@ -15,6 +15,17 @@ pub fn build(b: *std.Build) void {
             .strip = optimize != .Debug,
         }),
     });
+    // A position-independent image, so the executable is mapped where the
+    // kernel's layout of this run puts it rather than at the fixed address
+    // every build of every machine agreed on. Full RELRO is the linker's own
+    // default here (Compile.link_z_relro), so the got table is read-only after
+    // startup, and a non-executable stack is what a Zig link already emits.
+    //
+    // There is no stack canary: Zig's -fstack-protector needs a libc to call
+    // __stack_chk_fail through, and nothing here links one, so the flag is a
+    // build error rather than a weaker binary. A canary arrives with the libc
+    // link, not before.
+    exe.pie = true;
     // The release version comes from build.zig.zon, so `--version` and the
     // update check compare against the same number the release was tagged with.
     const build_options = b.addOptions();

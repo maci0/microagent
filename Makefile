@@ -414,8 +414,16 @@ checksums:
 # removed first, so the second is a real build rather than a cache hit. The
 # clock, timezone and locale are varied between the two, so a timestamp or a
 # locale-dependent ordering leaking into the binary fails here rather than on a
-# consumer's machine. ci.yml runs it on every push and release.yml runs it on
-# the tag, so a release is never published from a commit that has not passed it.
+# consumer's machine. The first target is then built a third time from a copy
+# of the source at another path, because a build path can reach a binary the
+# same way a timestamp can: a panic message naming the checkout, an embedded
+# file read by absolute name, a link path. The other two builds share this
+# tree's path, so they cannot see that, and the bytes a release publishes
+# would then depend on where the runner put the checkout. The copy lives in a
+# sibling of REPRO_DIR rather than inside it, because build_once empties
+# REPRO_DIR on every call. ci.yml runs this on every push and release.yml runs
+# it on the tag, so a release is never published from a commit that has not
+# passed it.
 check-reproducible:
 	@set -eu; \
 	test -n "$(RELEASE_TARGETS)" || { echo "no RELEASE_TARGETS to check" >&2; exit 1; }; \
@@ -424,12 +432,24 @@ check-reproducible:
 	  echo "neither sha256sum nor shasum is on PATH, so a rebuild cannot be compared" >&2; \
 	  exit 2; \
 	}; \
+	REPRO_SRC=$(REPRO_DIR)-src; \
 	build_once() { \
 	  rm -rf "$(REPRO_DIR)"; \
 	  SOURCE_DATE_EPOCH="$$1" LC_ALL="$$2" TZ="$$3" $(ZIG) build \
 	    -Dtarget="$$4" -Doptimize=ReleaseSmall \
 	    --cache-dir "$(REPRO_DIR)/cache" -p "$(REPRO_DIR)/out"; \
 	  $$sum "$(REPRO_DIR)/out/bin/microagent" | cut -d' ' -f1; \
+	}; \
+	build_from_copy() { \
+	  srcdir="$$REPRO_SRC"; \
+	  rm -rf "$$srcdir" "$(REPRO_DIR)"; \
+	  mkdir -p "$$srcdir"; \
+	  cp build.zig build.zig.zon CHANGELOG.md LICENSE "$$srcdir/"; \
+	  cp -R src "$$srcdir/src"; \
+	  (cd "$$srcdir" && SOURCE_DATE_EPOCH="$$1" LC_ALL="$$2" TZ="$$3" $(ZIG) build \
+	    -Dtarget="$$4" -Doptimize=ReleaseSmall \
+	    --cache-dir "$(REPRO_DIR)/cache" -p "$(REPRO_DIR)/out2"); \
+	  $$sum "$(REPRO_DIR)/out2/bin/microagent" | cut -d' ' -f1; \
 	}; \
 	for target in $(RELEASE_TARGETS); do \
 	  first=$$(build_once 1700000000 C UTC "$$target"); \
@@ -438,9 +458,18 @@ check-reproducible:
 	    echo "rebuild of $$target differs: $$first != $$second" >&2; \
 	    exit 1; \
 	  fi; \
+	  if [ "$$target" = "$(firstword $(RELEASE_TARGETS))" ]; then \
+	    elsewhere=$$(build_from_copy 1900000000 C UTC "$$target"); \
+	    if [ "$$first" != "$$elsewhere" ]; then \
+	      echo "$$target built from another directory differs: $$first != $$elsewhere" >&2; \
+	      echo "the build path reaches the binary, so a checksum published from one checkout describes only that checkout" >&2; \
+	      exit 1; \
+	    fi; \
+	    echo "$$target is the same from another build directory"; \
+	  fi; \
 	  echo "$$target rebuilds to $$first"; \
 	done; \
-	rm -rf "$(REPRO_DIR)"
+	rm -rf "$(REPRO_DIR)" "$$REPRO_SRC"
 
 clean:
 	rm -rf zig-out .zig-cache

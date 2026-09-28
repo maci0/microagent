@@ -99,7 +99,8 @@ compiler is told rather than assumed). Two things it does not stand in for: the
 release-assets cross-build (`make release-assets` runs that, and
 `make check-reproducible` adds a byte-identical rebuild of every published
 target on top of it, with the clock, the locale, the timezone, the compiler's
-cache and the output directory varied) and the second runner, where the same gate also
+cache and the output directory varied, and one of them from a copy of the source
+at another path) and the second runner, where the same gate also
 runs on macOS. `make help` lists every target.
 Source is formatted with `zig fmt`; `make fmt` applies it, and `ruff format`
 does the same for the Harbor adapter. The three linters cover what `zig fmt`
@@ -176,9 +177,11 @@ make checksums                   # the sha256 sidecars `update` verifies
 `make check-reproducible` rebuilds every published target twice, from a cold
 cache and with a different clock, timezone and locale each time, and refuses a
 target whose two builds differ: a released checksum has to describe a binary a
-rebuild reproduces. The push workflow runs it on every push and the release
-workflow runs it on the tag, so a release is never published from a commit that
-has not passed it.
+rebuild reproduces. The first target is built a third time from a copy of the
+source at another path, because the first two share this checkout's path and a
+build directory can reach a binary the way a timestamp does. The push workflow
+runs it on every push and the release workflow runs it on the tag, so a release
+is never published from a commit that has not passed it.
 
 `make release-assets` empties `dist/` first, so what is there afterwards is the
 one run's assets: the release workflow publishes the glob `dist/microagent-*`,
