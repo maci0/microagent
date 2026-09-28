@@ -89,6 +89,23 @@ pub const Session = struct {
 /// log costs the run nothing.
 const session_name_attempts = 8;
 
+/// The mode a session log is created with, and the mode its directory is
+/// created with when the run is the one that made the directory.
+///
+/// A log is the run's transcript: the prompts, the tool arguments and every
+/// byte a tool read out of the tree, which is exactly the material the tools
+/// themselves refuse to hand the provider. The default file mode is
+/// 0o666 less the umask, so on the 0o022 an ordinary account carries, a log
+/// lands world-readable under `$HOME`, and every other account and every other
+/// process on the machine can read the last 200 runs. The directory is the
+/// other half of the same question: a 0o755 one exposes the names of the logs
+/// even where the logs themselves are not readable, and it is the directory
+/// the run creates out of nothing on a fresh account. Neither mode is applied
+/// to a directory that already exists, so an operator who pointed
+/// MICROAGENT_SESSION_DIR at a shared store keeps the mode they gave it.
+const log_file_mode: Io.File.Permissions = @enumFromInt(@as(std.posix.mode_t, 0o600));
+const log_dir_mode: Io.File.Permissions = @enumFromInt(@as(std.posix.mode_t, 0o700));
+
 /// This run's log, under a name nothing already holds.
 ///
 /// The wall clock is settable, so its stamp is not a claim on a file: two runs
@@ -124,7 +141,7 @@ fn createSessionLog(io: Io, arena: std.mem.Allocator, session_dir: []const u8, s
             net.note(io, arena, "microagent: a session log path under {s} could not be built ({s}); this run records no usage\n", .{ session_dir, @errorName(err) });
             return null;
         };
-        return std.Io.Dir.createFileAbsolute(io, path, .{ .exclusive = true }) catch |err| switch (err) {
+        return std.Io.Dir.createFileAbsolute(io, path, .{ .exclusive = true, .permissions = log_file_mode }) catch |err| switch (err) {
             error.PathAlreadyExists => continue,
             else => |e| {
                 net.note(io, arena, "microagent: a session log under {s} could not be created ({s}); this run records no usage\n", .{ session_dir, @errorName(e) });
@@ -157,7 +174,7 @@ pub fn open(io: Io, arena: std.mem.Allocator, session_dir: []const u8, model: []
         net.note(io, arena, "microagent: the working directory could not be read ({s}), so no session log is kept under {s}\n", .{ @errorName(err), session_dir });
         return null;
     };
-    std.Io.Dir.cwd().createDirPath(io, session_dir) catch |err| {
+    _ = std.Io.Dir.cwd().createDirPathStatus(io, session_dir, log_dir_mode) catch |err| {
         net.note(io, arena, "microagent: the session directory {s} could not be created ({s}); the rest of this run is not recorded\n", .{ session_dir, @errorName(err) });
         return null;
     };
@@ -745,6 +762,51 @@ test "a store named relative to the working directory is pruned where it is" {
 
     try std.testing.expectEqual(max_session_logs, try countRelativeSessionLogs(io, arena, relative));
 }
+
+// The mode a log and the directory holding it are created with. The log is the
+// run's transcript, so what a mode that leaves the file readable to every
+// other account on the machine gives away is everything the tools went to the
+// trouble of not printing. The mode is asserted through the real `open` and
+// `createSessionLog`, because a mode named in a test and not applied is a test
+// that passes on a code that never had it.
+test "a session log is readable by its owner alone" {
+    var store = try StoreFixture.init(std.testing.allocator);
+    defer store.deinit();
+    const io = store.io();
+    const arena = store.arena();
+    const relative = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}/modes", .{store.tmp.sub_path});
+
+    var session = open(io, arena, relative, "test/model") orelse return error.TestUnexpectedResult;
+    session.file.close(io);
+    defer std.Io.Dir.cwd().deleteTree(io, relative) catch {};
+
+    // The store the run made for itself, and the log it wrote in it.
+    const dir_stat = try std.Io.Dir.cwd().statFile(io, relative, .{});
+    try std.testing.expectEqual(@as(u32, 0), dir_stat.permissions.toMode() & group_other_mode_bits);
+
+    // The log is named after the run's own clock stamp, so it is found by
+    // walking the store rather than by spelling a name a test cannot know.
+    var store_dir = try std.Io.Dir.openDir(std.Io.Dir.cwd(), io, relative, .{ .iterate = true });
+    defer store_dir.close(io);
+    var walker = try store_dir.walk(arena);
+    defer walker.deinit();
+    const entry = (try walker.next(io)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(Io.File.Kind.file, entry.kind);
+
+    var name_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const log_path = try std.fmt.bufPrint(&name_buf, "{s}/{s}", .{ relative, entry.basename });
+    const log_stat = try std.Io.Dir.cwd().statFile(io, log_path, .{});
+    try std.testing.expectEqual(@as(u32, 0), log_stat.permissions.toMode() & group_other_mode_bits);
+    try std.testing.expect(log_stat.permissions.toMode() & owner_mode_bits == owner_mode_bits);
+}
+
+/// The group and other permission bits, the ones a shared machine reads
+/// through. Named so the assertion above says what it is refusing rather than
+/// repeating a mode as a decimal.
+const group_other_mode_bits: u32 = 0o077;
+/// The owner's read and write, which a log whose owner cannot open is no
+/// better than one everybody can.
+const owner_mode_bits: u32 = 0o600;
 
 // A re-run that reads the same clock stamp writes its log beside the first
 // one under a `-N` name, and a store that only recognised `<digits>.jsonl`
