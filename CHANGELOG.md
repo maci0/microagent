@@ -239,6 +239,22 @@ release, and `microagent update` moves you to it.
   it and the counter stopped short of the ceiling rather than reaching it. The
   notice read the counter, so that turn was reported as a whole one whose answer
   was missing a character nobody had been told about.
+- A session directory that cannot be created, and a session log that cannot be
+  opened, are named on stderr the way a log that cannot be written already was.
+  `MICROAGENT_SESSION_DIR` a monitor is pointed at and the run cannot use (a
+  read-only parent, a name no filesystem holds) left the store empty for the
+  whole run and said nothing, so the monitor reported a run that never started.
+- The Harbor adapter warns when the host has no CA bundle to upload, instead of
+  letting the first request in a bare image die as `TlsInitializationFailed`
+  with nothing in the job log naming the host that had none. The turn-ceiling
+  and agent-timeout defaults it checks in `setup` and passes in `run` are
+  spelled once each, so the two cannot drift apart.
+- `HOME` is trimmed like every other variable, and an empty one is no home
+  rather than a path off the root. The style config, the session store and the
+  key file are all looked for under it, so the newline a wrapper exported from
+  a file put every one of those a directory away, silently: a missing default
+  config is not a fault worth reporting, and a missing key file is reported as
+  no key.
 - A turn that reaches the 16 MB per-response ceiling says so on stderr. Past it
   the streamed content and the streamed tool-call arguments are dropped rather
   than held, so a call whose arguments were cut arrived as

@@ -243,7 +243,7 @@ pub fn main(init: std.process.Init) !void {
     opts.api_key = key.value;
     // The message names every source, including the file, because a user who
     // wrote a key there is not looking for the four variables.
-    if (opts.api_key.len == 0) return configError(io, "no API key: pass --api-key, set {s}, or put one in {s}/.secrets/openrouter", .{ key_var_names, init.environ_map.get("HOME") orelse "$HOME" });
+    if (opts.api_key.len == 0) return configError(io, "no API key: pass --api-key, set {s}, or put one in {s}/.secrets/openrouter", .{ key_var_names, net.homeDir(init.environ_map) orelse "$HOME" });
     // Refused as a url before it is refused as a leak, because that is what it
     // is: a caller who left the scheme off is told their key was about to go
     // out in the clear, which is a security warning about a value that never
@@ -396,7 +396,8 @@ const help_text =
     \\MICROAGENT_MAX_TURNS, MICROAGENT_MAX_TOKENS and MDEBUG keep their defaults,
     \\and MICROAGENT_CA_BUNDLE and MICROAGENT_CAVEMAN/PONYTAIL fall through to
     \\whatever comes next. MICROAGENT_CONFIG and MICROAGENT_SESSION_DIR are the
-    \\two where empty means off: no style file, no session log.
+    \\two where empty means off: no style file, no session log. HOME is trimmed
+    \\like the rest, and an empty one is no home rather than a path off the root.
     \\
 ;
 
@@ -814,7 +815,7 @@ fn resolveKey(io: Io, init: std.process.Init, given: []const u8) Key {
         if (envValue(init.environ_map, n)) |v| return .{ .value = v, .source = n };
     }
     const fallback = std.fs.path.join(init.arena.allocator(), &.{
-        init.environ_map.get("HOME") orelse return .{ .value = "", .source = "none" },
+        net.homeDir(init.environ_map) orelse return .{ .value = "", .source = "none" },
         ".secrets",
         "openrouter",
     }) catch return .{ .value = "", .source = "none" };
@@ -958,7 +959,7 @@ fn styleConfigPath(env: *const std.process.Environ.Map, arena: std.mem.Allocator
         if (path.len == 0) return .{ .path = null, .named = false };
         return .{ .path = std.fs.path.resolve(arena, &.{path}) catch path, .named = true };
     }
-    const home = env.get("HOME") orelse return .{ .path = null, .named = false };
+    const home = net.homeDir(env) orelse return .{ .path = null, .named = false };
     const path = std.fs.path.join(arena, &.{ home, ".microagent", "config.toml" }) catch
         return .{ .path = null, .named = false };
     return .{ .path = std.fs.path.resolve(arena, &.{path}) catch path, .named = false };
@@ -4311,6 +4312,18 @@ test "the style config path follows flag, then variable, then home" {
     var bare: std.process.Environ.Map = .init(std.testing.allocator);
     defer bare.deinit();
     try std.testing.expect(styleConfigPath(&bare, arena, "").path == null);
+
+    // A home exported from a file carries that file's newline, and a directory
+    // with one is a directory nothing holds: the config is never found, and its
+    // absence from the default path is not a fault worth reporting, so the run
+    // is on the built-in levels with nothing said.
+    try home_only.put("HOME", "/home/one\n");
+    const wrapped = styleConfigPath(&home_only, arena, "");
+    try std.testing.expect(std.mem.endsWith(u8, wrapped.path.?, "/home/one/.microagent/config.toml"));
+
+    // An empty home is no home, not a root-relative directory.
+    try home_only.put("HOME", "");
+    try std.testing.expect(styleConfigPath(&home_only, arena, "").path == null);
 }
 
 // The name and the id of a streamed tool call are copies the run allocator

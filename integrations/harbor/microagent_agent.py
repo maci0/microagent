@@ -58,9 +58,16 @@ HOST_CA_CANDIDATES = (
     "/usr/local/etc/ca-certificates/cert.pem",
 )
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+# The turn ceiling, above the binary's own 100. Spelled once because setup
+# checks it and run passes it, and a default one of the two no longer knows
+# about is a run that is checked for one ceiling and given another.
+DEFAULT_MAX_TURNS = "150"
 # Keep the agent's own budget under harbor's per-task agent timeout, so
 # microagent stops deliberately instead of being killed mid-turn.
 DEFAULT_BUDGET_SECONDS = "600"
+# The hard cap on the in-container process, and the ceiling the budget is
+# derived from. Spelled once for the same reason as the turn ceiling.
+DEFAULT_AGENT_TIMEOUT_SEC = "1500"
 # The grace the binary allows its forced final push to run past the budget
 # (`final_push_grace_s` in src/main.zig). A run that reaches its budget can
 # spend this much longer, so a room smaller than it leaves the caller's timeout
@@ -165,9 +172,9 @@ def validate_env() -> None:
     the binary into it, so a value checked only in `run` has already paid for a
     container start and an upload before the reason is printed.
     """
-    int_env("MICROAGENT_MAX_TURNS", "150")
+    int_env("MICROAGENT_MAX_TURNS", DEFAULT_MAX_TURNS)
     int_env("MICROAGENT_BUDGET_SECONDS", DEFAULT_BUDGET_SECONDS)
-    int_env("MICROAGENT_AGENT_TIMEOUT_SEC", "1500")
+    int_env("MICROAGENT_AGENT_TIMEOUT_SEC", DEFAULT_AGENT_TIMEOUT_SEC)
     reasoning_effort()
 
 
@@ -229,6 +236,18 @@ class Microagent(BaseAgent):
                 REMOTE_CA_PATH,
                 (check.stdout or "").strip() or f"write failed: {check.stderr}",
             )
+        else:
+            # Named, because the failure it leads to is a TLS error inside a
+            # container nobody can reach the filesystem of: a host whose trust
+            # store is not at any of the probed paths uploads nothing, and a
+            # bare image has none of its own, so the first request dies as
+            # TlsInitializationFailed with nothing in the log to connect it to
+            # the host that had no bundle to give.
+            self.logger.warning(
+                "no ca bundle on the host (%s); the container keeps its own trust store, "
+                "and a bare image has none. Set MICROAGENT_CA_BUNDLE to the PEM to upload.",
+                ", ".join(HOST_CA_CANDIDATES),
+            )
         result = await environment.exec(
             command=f"chmod +x {REMOTE_PATH} && {REMOTE_PATH} --version",
             timeout_sec=120,
@@ -251,7 +270,7 @@ class Microagent(BaseAgent):
         # caller's timeout allows, less room for the last turn to land. A
         # budget equal to the timeout is a run killed mid-turn; a budget far
         # below it is working time thrown away.
-        agent_timeout = int_env("MICROAGENT_AGENT_TIMEOUT_SEC", "1500")
+        agent_timeout = int_env("MICROAGENT_AGENT_TIMEOUT_SEC", DEFAULT_AGENT_TIMEOUT_SEC)
         budget = str(
             min(
                 int_env("MICROAGENT_BUDGET_SECONDS", DEFAULT_BUDGET_SECONDS),
@@ -268,7 +287,7 @@ class Microagent(BaseAgent):
                 "--budget",
                 budget,
                 "--max-turns",
-                str(int_env("MICROAGENT_MAX_TURNS", "150")),
+                str(int_env("MICROAGENT_MAX_TURNS", DEFAULT_MAX_TURNS)),
                 instruction,
             )
         )

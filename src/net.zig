@@ -92,6 +92,18 @@ pub fn caBundlePath(env: *const std.process.Environ.Map) []const u8 {
     return "";
 }
 
+/// `$HOME`, trimmed, or null when it is not set or holds nothing but
+/// whitespace. Every path built under it is a path no filesystem holds when
+/// the value carries the newline a wrapper that populates the environment from
+/// a file left on it, and that is the same wrapper `envValue` exists for.
+/// Empty reads as unset rather than as a root-relative path, so a `HOME=` left
+/// behind by a script cannot turn `$HOME/.microagent/config.toml` into
+/// `/.microagent/config.toml`.
+pub fn homeDir(env: *const std.process.Environ.Map) ?[]const u8 {
+    const v = std.mem.trim(u8, env.get("HOME") orelse return null, env_surrounding);
+    return if (v.len == 0) null else v;
+}
+
 /// The file `path` names once a symlink is followed, which is the file opening
 /// `path` would have written to and the only one a rename may replace.
 ///
@@ -219,6 +231,27 @@ test "a CA bundle that names no certificate leaves the client scanning the syste
     loadCaBundle(&client, io, gpa, absolute, arena);
     try std.testing.expect(client.now == null);
     try std.testing.expectEqual(@as(usize, 0), client.ca_bundle.map.count());
+}
+
+test "the home directory is trimmed, and an empty one is no home" {
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    try std.testing.expect(homeDir(&env) == null);
+
+    try env.put("HOME", "/home/me");
+    try std.testing.expectEqualStrings("/home/me", homeDir(&env).?);
+
+    // The newline a wrapper exports from a file, on the directory every
+    // default path is built under.
+    try env.put("HOME", "/home/me\n");
+    try std.testing.expectEqualStrings("/home/me", homeDir(&env).?);
+
+    // Empty is unset, not a root-relative path: `HOME=` left behind by a
+    // script must not turn ~/.microagent/config.toml into /.microagent/...
+    try env.put("HOME", "");
+    try std.testing.expect(homeDir(&env) == null);
+    try env.put("HOME", "  \r\n");
+    try std.testing.expect(homeDir(&env) == null);
 }
 
 test "a write target follows a symlink, relative or absolute" {

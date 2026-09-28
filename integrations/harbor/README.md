@@ -100,7 +100,10 @@ trial that scored on a partial tree is visible in the log rather than silent.
 project's own variable first and `SSL_CERT_FILE` after it, so the bundle a host
 names for its own runs is the one uploaded for the container's. With neither
 set, the host's trust store is probed at the usual distribution and Homebrew
-paths.
+paths, and a host where none of those holds a PEM is warned about at setup: the
+container then keeps its own trust store, and a bare image has none, so the
+first request dies as `TlsInitializationFailed` with nothing in the job log to
+connect it to the host.
 
 ## Two things the containers forced
 

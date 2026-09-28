@@ -26,7 +26,7 @@ const net = @import("net.zig");
 /// testable without one.
 pub fn sessionDir(env: *const std.process.Environ.Map, arena: std.mem.Allocator) []const u8 {
     if (env.get("MICROAGENT_SESSION_DIR")) |v| return std.mem.trim(u8, v, net.env_surrounding);
-    const home = env.get("HOME") orelse return "";
+    const home = net.homeDir(env) orelse return "";
     return std.fs.path.join(arena, &.{ home, ".microagent", "sessions" }) catch "";
 }
 
@@ -40,6 +40,16 @@ test "the session directory is trimmed, and an empty one turns the log off" {
 
     try env.put("HOME", "/home/me");
     try std.testing.expectEqualStrings("/home/me/.microagent/sessions", sessionDir(&env, arena));
+
+    // The home itself is trimmed like every other variable, so the newline a
+    // wrapper exported from a file does not name a directory the run creates
+    // and no monitor looks in. An empty one is no home rather than a path off
+    // the root.
+    try env.put("HOME", "/home/me\n");
+    try std.testing.expectEqualStrings("/home/me/.microagent/sessions", sessionDir(&env, arena));
+    try env.put("HOME", "  ");
+    try std.testing.expectEqualStrings("", sessionDir(&env, arena));
+    try env.put("HOME", "/home/me");
 
     try env.put("MICROAGENT_SESSION_DIR", "/var/log/ma\n");
     try std.testing.expectEqualStrings("/var/log/ma", sessionDir(&env, arena));
@@ -61,7 +71,10 @@ test "the session directory is trimmed, and an empty one turns the log off" {
 /// One session log per run, one JSONL record per model response, which is what
 /// a monitor (toktop) reads to report this run's tokens per second while it is
 /// still going. Nothing depends on it, so every failure here is a null rather
-/// than an error: a read-only home costs a run nothing.
+/// than an error: a read-only home costs a run nothing. A null is still named
+/// on stderr, because a directory the caller named and no log appeared in it
+/// is a store a monitor is reading that will stay empty, and the run is the
+/// only place that can say so.
 pub const Session = struct {
     file: Io.File,
     cwd: []const u8,
@@ -111,10 +124,19 @@ pub fn open(io: Io, arena: std.mem.Allocator, session_dir: []const u8, model: []
     // watcher happens to read the store. It comes from the run arena because a
     // directory that is resolved and then not used, by a log that could not be
     // opened, has no owner to free it.
-    const cwd = std.Io.Dir.cwd().realPathFileAlloc(io, ".", arena) catch return null;
-    std.Io.Dir.cwd().createDirPath(io, session_dir) catch return null;
+    const cwd = std.Io.Dir.cwd().realPathFileAlloc(io, ".", arena) catch |err| {
+        net.note(io, arena, "microagent: the working directory could not be read ({s}), so no session log is kept under {s}\n", .{ @errorName(err), session_dir });
+        return null;
+    };
+    std.Io.Dir.cwd().createDirPath(io, session_dir) catch |err| {
+        net.note(io, arena, "microagent: the session directory {s} could not be created ({s}); the rest of this run is not recorded\n", .{ session_dir, @errorName(err) });
+        return null;
+    };
     const stamp = Io.Clock.real.now(io).nanoseconds;
-    const file = createSessionLog(io, arena, session_dir, stamp) orelse return null;
+    const file = createSessionLog(io, arena, session_dir, stamp) orelse {
+        net.note(io, arena, "microagent: no session log could be opened under {s}; the rest of this run is not recorded\n", .{session_dir});
+        return null;
+    };
     pruneSessions(io, arena, session_dir);
     return .{ .file = file, .cwd = cwd, .model = model, .dir = session_dir };
 }
@@ -404,6 +426,44 @@ test "a repeated session log writes beside the first and never over it" {
     const survived = try tmp.dir.readFileAlloc(io, "1759000000000000000.jsonl", alloc, .limited(64));
     defer alloc.free(survived);
     try std.testing.expectEqualStrings("first\n", survived);
+}
+
+// A directory the caller named and that no log lands in is a store a monitor
+// reads that stays empty for the whole run, and the run is the only place that
+// can say so. Every one of these is a null, and every one of them names itself.
+test "a session directory that cannot be used is named, and keeps no log" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // The store sits under the test's own temporary directory, which is under
+    // the working directory, so the relative spelling a run is given reaches it
+    // and the cleanup takes it with the rest.
+    const store = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    // Off is not a failure and says nothing: the caller asked for no log.
+    try std.testing.expect(open(io, arena, "", "test/model") == null);
+
+    // A store no filesystem will hold: a name longer than a path component is
+    // allowed to be, so the directory cannot be made and no log is kept. The
+    // caller named it, so the run says which one rather than losing the log
+    // quietly.
+    const long_name = try arena.alloc(u8, 300);
+    @memset(long_name, 'x');
+    const blocked = try std.fs.path.join(arena, &.{ store, long_name });
+    try std.testing.expect(open(io, arena, blocked, "test/model") == null);
+
+    // The same path a run can use, so the null above is the directory and not
+    // the shape of the call.
+    const usable = try std.fs.path.join(arena, &.{ store, "sessions" });
+    var session: ?Session = open(io, arena, usable, "test/model") orelse return error.TestUnexpectedResult;
+    defer close(io, &session);
+    writeRecord(io, arena, &session, 12, &.{});
 }
 
 // A log that cannot be written to has stopped recording the run. Kept, it is

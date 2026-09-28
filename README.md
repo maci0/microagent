@@ -123,13 +123,16 @@ defaults, `MICROAGENT_CA_BUNDLE` falls through to `SSL_CERT_FILE`, and
 Two variables are the exception: `MICROAGENT_CONFIG` and `MICROAGENT_SESSION_DIR`
 read empty as off, so no style file and no session log.
 
-Every variable is trimmed before it is read, and one holding nothing but
-whitespace reads as the empty case above. A wrapper that populates the
+Every variable is trimmed before it is read, `HOME` included, and one holding
+nothing but whitespace reads as the empty case above. A wrapper that populates the
 environment from a file exports the newline that file ended with, and that
 newline is a different failure per option: an api key reaches the provider as an
 `Authorization` header carrying a byte a header may not hold, so every request
 is refused, a base url stops parsing, and a session directory names a directory
-the run creates and no monitor ever looks in. A base url that does not parse
+the run creates and no monitor ever looks in. The same newline on `HOME` would
+put every default path (`~/.microagent/config.toml`, the session store, the key
+file) one directory that does not exist, and an empty `HOME` is no home rather
+than a path off the root. A base url that does not parse
 anyway is refused as the typo it is, before the plaintext check that would
 report it as a key about to go out in the clear.
 
@@ -220,8 +223,10 @@ It is read from whichever of `prompt_tokens_details.cached_tokens`, `prompt_cach
 
 Each run appends one JSONL record per model response to `~/.microagent/sessions/<unix-ns>.jsonl`
 (`MICROAGENT_SESSION_DIR` moves it, an empty value turns it off), so a monitor can follow the run
-while it is still going. A run that finds its name taken takes the next one (`-1`, `-2`, ...), so a
-re-launched run writes beside the earlier log rather than over it:
+while it is still going. A directory that cannot be created, or a log that cannot be opened or
+written, is named on stderr and the rest of the run goes unrecorded: a store a monitor reads that
+stays empty is worth one line. A run that finds its name taken takes the next one (`-1`, `-2`, ...),
+so a re-launched run writes beside the earlier log rather than over it:
 
 ```json
 {"ts":1790608347342,"cwd":"/home/maci/Desktop/Projects/microagent","model":"deepseek/deepseek-v4-flash","finish_reason":"stop","elapsed_ms":1448,"usage":{"prompt_tokens":998,"cached_tokens":896,"completion_tokens":19,"reasoning_tokens":16,"total_tokens":1017}}
