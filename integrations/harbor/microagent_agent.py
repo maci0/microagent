@@ -9,8 +9,11 @@ binary, then runs one non-interactive turn with the task instruction.
       -m deepseek/deepseek-v4-flash
 
 The binary is found at $MICROAGENT_BINARY, else next to this file as
-`microagent-<arch>-linux-musl` (build with:
-`zig build -Dtarget=x86_64-linux-musl -Doptimize=ReleaseFast`).
+`microagent-<host arch>-linux-musl` (build with `make musl`, which is
+`zig build -Dtarget=<host arch>-linux-musl -Doptimize=ReleaseFast` followed by
+the copy). The architecture is the host's, because Harbor runs the task
+container on the host's architecture: an arm64 host needs the aarch64 binary,
+and the x86_64 one does not execute there.
 
 The model provider key comes from the host environment ($MICROAGENT_API_KEY,
 else $OPENROUTER_API_KEY, $OPENAI_API_KEY or $DEEPSEEK_API_KEY) and is passed to
@@ -21,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import shlex
 from pathlib import Path
 
@@ -28,7 +32,15 @@ from harbor.agents.base import BaseAgent
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
-BINARY_NAME = "microagent-x86_64-linux-musl"
+# The musl asset for the host's own architecture, under the name the release
+# publishes. Harbor runs the task container on the host's architecture, so the
+# binary has to be the one the host can execute, and a name spelled for the other
+# architecture is a file an arm64 container refuses to run. `uname -m` answers
+# x86_64 and aarch64 already; the two aliases are what Darwin and some Linux
+# images use for the same two.
+_ARCH_ALIASES = {"amd64": "x86_64", "arm64": "aarch64"}
+HOST_ARCH = _ARCH_ALIASES.get(platform.machine().lower(), platform.machine().lower())
+BINARY_NAME = f"microagent-{HOST_ARCH}-linux-musl"
 REMOTE_PATH = "/usr/local/bin/microagent"
 # Bare images (ubuntu, distroless) ship no CA store, and microagent's TLS then
 # fails before its first request. The host's bundle is uploaded and named
@@ -163,8 +175,8 @@ class Microagent(BaseAgent):
         if not source.is_file():
             raise RuntimeError(
                 f"microagent binary not found at {source}; build it with "
-                "`zig build -Dtarget=x86_64-linux-musl -Doptimize=ReleaseFast` "
-                "or set MICROAGENT_BINARY"
+                f"`zig build -Dtarget={HOST_ARCH}-linux-musl -Doptimize=ReleaseFast` "
+                "(or `make musl`), or set MICROAGENT_BINARY"
             )
         await environment.upload_file(source_path=source, target_path=REMOTE_PATH)
         bundle = host_ca_bundle()

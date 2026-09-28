@@ -73,7 +73,7 @@ help:
 	  'help                  this list' \
 	  'build                 zig build -Doptimize=$(OPT) -> $(BIN)' \
 	  'small                 ReleaseSmall binary' \
-	  'musl                  static musl binary for integrations/harbor' \
+	  'musl                  static musl binary for integrations/harbor, for this host ($(MUSL_ARCH))' \
 	  'version               the version build.zig.zon declares' \
 	  'test                  the whole unit test suite' \
 	  'test-one FILTER=...   only tests whose name contains FILTER' \
@@ -122,15 +122,29 @@ build:
 small:
 	$(ZIG) build -Doptimize=ReleaseSmall
 
-# Static musl binary for running inside containers (Harbor benchmarks). The
-# adapter uploads whatever sits at that name, so the copy is made beside it and
-# renamed: a copy interrupted halfway leaves a truncated binary that the next
-# Harbor run uploads into every container and fails in, which reads as a broken
-# agent rather than a broken build.
+# The architecture the musl binary is built for, from the host's own. Harbor
+# runs the task container on the host's architecture, so an Apple silicon or
+# arm64 Linux host needs the aarch64 binary: the x86_64 one is a file that
+# container cannot execute, and the adapter would report a missing binary for a
+# build that is sitting right there under the other name. `uname -m` answers
+# x86_64 and aarch64 already; the two aliases are what Darwin and some Linux
+# images use for the same two.
+MUSL_ARCH_x86_64 := x86_64
+MUSL_ARCH_amd64 := x86_64
+MUSL_ARCH_aarch64 := aarch64
+MUSL_ARCH_arm64 := aarch64
+MUSL_ARCH ?= $(or $(MUSL_ARCH_$(shell uname -m)),$(shell uname -m))
+MUSL_BINARY := integrations/harbor/microagent-$(MUSL_ARCH)-linux-musl
+
+# Static musl binary for running inside containers (Harbor benchmarks), named
+# for the host's architecture, which is the name the adapter looks for. The copy
+# is made beside it and renamed: a copy interrupted halfway leaves a truncated
+# binary that the next Harbor run uploads into every container and fails in,
+# which reads as a broken agent rather than a broken build.
 musl:
-	$(ZIG) build -Dtarget=x86_64-linux-musl -Doptimize=ReleaseFast
-	cp $(BIN) integrations/harbor/microagent-x86_64-linux-musl.tmp
-	mv integrations/harbor/microagent-x86_64-linux-musl.tmp integrations/harbor/microagent-x86_64-linux-musl
+	$(ZIG) build -Dtarget=$(MUSL_ARCH)-linux-musl -Doptimize=ReleaseFast
+	cp $(BIN) $(MUSL_BINARY).tmp
+	mv $(MUSL_BINARY).tmp $(MUSL_BINARY)
 
 test:
 	$(ZIG) build test --summary all

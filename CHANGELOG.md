@@ -159,6 +159,16 @@ release, and `microagent update` moves you to it.
   module, its own `MICROAGENT_SESSION_DIR` reader and its own copy of every session test, while the
   run itself used `session.zig`. The dead copy is removed, which is what let the live reader go
   untrimmed while a trimmed one sat beside it looking tested.
+- The Harbor binary is the one the host can execute. `make musl` built
+  `microagent-x86_64-linux-musl` and the adapter looked for that one name on
+  every host, while Harbor runs the task container on the host's architecture:
+  on Apple silicon or an arm64 Linux box the adapter reported a missing binary
+  for a build that was sitting right there, and the x86_64 one would not have
+  run in that container anyway. Both now name the host's architecture, read
+  with `uname -m` (`arm64` and `amd64` mapped onto the release's spellings),
+  and `make musl MUSL_ARCH=<arch>` builds another one. An x86_64 host is
+  unaffected. The binary and the `.tmp` it is renamed from are now ignored, as
+  `CONTRIBUTING.md` said they were.
 - `integrations/harbor/microagent_agent.py` is formatted the way `ruff format` writes it, so the
   `ruff format --check` step that `make lint-python` and CI both run passes. The file had drifted
   from the formatter after the log-formatting change above it, which left `make check` red on a

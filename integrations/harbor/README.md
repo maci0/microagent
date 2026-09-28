@@ -15,10 +15,15 @@ make musl
 ```
 
 That is the same two commands spelled in the
-[Makefile](../../Makefile): `zig build -Dtarget=x86_64-linux-musl
+[Makefile](../../Makefile): `zig build -Dtarget=<host arch>-linux-musl
 -Doptimize=ReleaseFast`, then the binary copied to
-`microagent-x86_64-linux-musl` next to the adapter, which is the name
-`binary_path()` below looks for. Neither file is committed.
+`microagent-<host arch>-linux-musl` next to the adapter, which is the name
+`binary_path()` below looks for. The architecture is the host's own, read with
+`uname -m`: Harbor runs the task container on the host's architecture, so
+Apple silicon and arm64 Linux hosts need `aarch64` and the `x86_64` binary does
+not execute in their containers. Pass a different one with `make musl
+MUSL_ARCH=<arch>`, or a binary of any other architecture through
+`MICROAGENT_BINARY`. Neither file is committed.
 
 Statically linked, ~1.31 MB, no runtime dependencies — it runs in `python:slim`,
 bare `ubuntu`, and distroless images alike.

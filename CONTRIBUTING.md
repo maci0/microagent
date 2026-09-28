@@ -89,9 +89,11 @@ a lock that no longer carries the manifest's pin, or that has an entry with no
 `sha256`, so a lock left behind by an earlier pin fails the gate instead of
 quietly benchmarking a Harbor release the manifest no longer names. The only build output
 is `zig-out/`, and `make clean` removes it along with `.zig-cache/`. `make musl`
-also copies the static binary to `integrations/harbor/microagent-x86_64-linux-musl`
-for the Harbor adapter; that one and the `.tmp` it is renamed from are ignored,
-so nothing under `integrations/` is ever a build output a commit picks up. A
+also copies the static binary to
+`integrations/harbor/microagent-<arch>-linux-musl`, named for the host's own
+architecture, for the Harbor adapter; that one and the `.tmp` it is renamed from
+are ignored, so nothing under `integrations/` is ever a build output a commit
+picks up. A
 bench run appends its own line to the committed `bench/results.jsonl`; that file
 is results, not code, so leave the appended line out of a change that did not run
 a benchmark.
