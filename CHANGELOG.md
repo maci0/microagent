@@ -12,18 +12,7 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
-### Changed
-
-- The reproducibility gate isolates the compiler's global cache as well as the project one.
-  `--cache-dir` moves the project's artifacts, but the compiled toolchain stayed in the
-  runner's `$HOME/.cache/zig`, so a warm cache left by a previous build on the same machine
-  fed the next one and the check was not measuring the cold build it claimed to. Each
-  build now sets `ZIG_GLOBAL_CACHE_DIR` to a scratch of its own, and the scratch is removed
-  by a trap, so a target that fails the comparison leaves nothing behind either.
-- The push workflow runs the `x86_64-macos` asset instead of only building it. The two
-  macOS runners are an Apple silicon one and, now, an x86_64 one, so three of the four
-  published binaries are started on a push rather than cross-compiled and left. The fourth,
-  `aarch64-linux-musl`, still needs a machine of its own and is covered by the build alone.
+## [0.2.0] - 2026-09-29
 
 ### Added
 
@@ -145,7 +134,31 @@ release, and `microagent update` moves you to it.
   refusals rather than re-running the experiment. `BENCHMARK.md` still says what the harness
   measures against other harnesses.
 
+- `git` tool: read-only `status`, `diff`, `log`, `show` and `blame` with a fixed subcommand list and a
+  400-line cap, so git state no longer has to be assembled by the model through `bash`.
+- Reply styles. `caveman` sets how terse the agent's own prose is (`off`, `lite`, `full`, `ultra`, and the
+  three `wenyan-*` levels) and `ponytail` sets how lazy the code is (`off`, `lite`, `full`, `ultra`). Both
+  are read from `$MICROAGENT_CONFIG`, else `~/.microagent/config.toml`, and both have an env override
+  (`MICROAGENT_CAVEMAN`, `MICROAGENT_PONYTAIL`). Neither touches the tools, the request shape or the
+  conversation: each appends text to the system prompt. With `caveman = "off"` and `ponytail = "off"` the
+  system prompt is byte for byte the one `0.1.1` sent.
+- `cached_tokens` on the stdout usage line and in each session-log record: the part of the prompt the
+  provider served from its prompt cache, read from `prompt_tokens_details.cached_tokens`,
+  `prompt_cache_hit_tokens` or `cache_read_input_tokens`. Both are additive JSON keys, so a reader that
+  looks up the counters it already knows is unaffected.
+
 ### Changed
+
+- The reproducibility gate isolates the compiler's global cache as well as the project one.
+  `--cache-dir` moves the project's artifacts, but the compiled toolchain stayed in the
+  runner's `$HOME/.cache/zig`, so a warm cache left by a previous build on the same machine
+  fed the next one and the check was not measuring the cold build it claimed to. Each
+  build now sets `ZIG_GLOBAL_CACHE_DIR` to a scratch of its own, and the scratch is removed
+  by a trap, so a target that fails the comparison leaves nothing behind either.
+- The push workflow runs the `x86_64-macos` asset instead of only building it. The two
+  macOS runners are an Apple silicon one and, now, an x86_64 one, so three of the four
+  published binaries are started on a push rather than cross-compiled and left. The fourth,
+  `aarch64-linux-musl`, still needs a machine of its own and is covered by the build alone.
 
 - `make gauntlet AGENTS=...` wraps `bench/gauntlet.sh`, the usefulness
   benchmark whose results BENCHMARK.md publishes, beside the `make bench` and
@@ -236,10 +249,11 @@ release, and `microagent update` moves you to it.
   trial as an exception and scored the work as nothing: the tree the agent changed goes to
   verification, the timeout lands in `microagent-timeout.txt` in the job's log directory, and a
   warning names it, so a trial scored on a partial tree is visible rather than silent.
-- `release.yml` refuses a patch tag whose changelog section carries an `Added` or a `Changed`
-  entry, and names the version above it in the message. The policy is in the README and in
+- `release.yml` refuses a patch tag whose changelog section carries an `Added`, a `Changed` or a
+  `Removed` entry, and names the version above it in the message. The policy is in the README and in
   CONTRIBUTING, but nothing checked that the tag agreed with the entries it publishes, so a
-  feature or a changed default could ship as `0.2.1` under a number that promises it did not.
+  feature, a changed default or a removal could ship as `0.2.1` under a number that promises it
+  did not.
 - `microagent --help` carries three worked invocations, and its subcommand line spells the flag
   the way `microagent update --help` does (`update [--check]`, not `update [-c|--check]`).
 - The file a write lands on when the path is a symlink is resolved once, in `net.zig`, and shared
@@ -250,6 +264,11 @@ release, and `microagent update` moves you to it.
   is the one thing in a path that is not portable, and there is now one implementation of the
   answer to check. `writeFileAtomic` takes no allocator as a result: the two scratch buffers
   it needs are stack, so the arena a caller passed for nothing is gone.
+
+- `--max-turns` now defaults to 100 (was 60). A run that relied on stopping at 60 turns now gets the
+  longer loop; pass `--max-turns 60` to keep the old ceiling.
+- Replies are terse by default: `caveman` is `ultra` and `ponytail` is `full` unless the config or env
+  says otherwise. A run that wants the prose back sets `caveman = "off"`.
 
 ### Removed
 
@@ -688,6 +707,17 @@ release, and `microagent update` moves you to it.
   whichever logs it saw rather than the oldest ones, and the failures that leave the store over
   its limit are counted and named once.
 
+- A `rev` beginning with `-` in a `git` tool call (`git show -3`) was read as an option instead of a
+  revision.
+- Tool results and assistant text are JSON-escaped, so a diff containing quotes, backslashes or control
+  characters no longer corrupts the request body.
+- A streamed tool call whose `index` is past the cap is dropped instead of growing the pending-call list
+  to that index, which a hostile or broken provider could turn into a multi-gigabyte allocation.
+- `microagent update` compares versions instead of testing string equality, so a build ahead of the
+  latest published tag (a branch after a version bump, before the release) reports that there is
+  nothing to install rather than downgrading itself to the older release. A tag that is not a dotted
+  `major.minor.patch` still installs, so tracking a fork whose tags are not versions keeps working.
+
 ### Security
 
 - The published binaries are linked position-independent. A fixed-address executable is mapped at
@@ -722,43 +752,6 @@ release, and `microagent update` moves you to it.
   on the operator's terminal through the version line, the missing-asset message, the sidecar note and
   both download failures. The decision still reads the bytes the body carried, so a release is neither
   refused nor matched on a name this quoting changed.
-
-## [0.2.0] - 2026-09-29
-
-### Added
-
-- `git` tool: read-only `status`, `diff`, `log`, `show` and `blame` with a fixed subcommand list and a
-  400-line cap, so git state no longer has to be assembled by the model through `bash`.
-- Reply styles. `caveman` sets how terse the agent's own prose is (`off`, `lite`, `full`, `ultra`, and the
-  three `wenyan-*` levels) and `ponytail` sets how lazy the code is (`off`, `lite`, `full`, `ultra`). Both
-  are read from `$MICROAGENT_CONFIG`, else `~/.microagent/config.toml`, and both have an env override
-  (`MICROAGENT_CAVEMAN`, `MICROAGENT_PONYTAIL`). Neither touches the tools, the request shape or the
-  conversation: each appends text to the system prompt. With `caveman = "off"` and `ponytail = "off"` the
-  system prompt is byte for byte the one `0.1.1` sent.
-- `cached_tokens` on the stdout usage line and in each session-log record: the part of the prompt the
-  provider served from its prompt cache, read from `prompt_tokens_details.cached_tokens`,
-  `prompt_cache_hit_tokens` or `cache_read_input_tokens`. Both are additive JSON keys, so a reader that
-  looks up the counters it already knows is unaffected.
-
-### Changed
-
-- `--max-turns` now defaults to 100 (was 60). A run that relied on stopping at 60 turns now gets the
-  longer loop; pass `--max-turns 60` to keep the old ceiling.
-- Replies are terse by default: `caveman` is `ultra` and `ponytail` is `full` unless the config or env
-  says otherwise. A run that wants the prose back sets `caveman = "off"`.
-
-### Fixed
-
-- A `rev` beginning with `-` in a `git` tool call (`git show -3`) was read as an option instead of a
-  revision.
-- Tool results and assistant text are JSON-escaped, so a diff containing quotes, backslashes or control
-  characters no longer corrupts the request body.
-- A streamed tool call whose `index` is past the cap is dropped instead of growing the pending-call list
-  to that index, which a hostile or broken provider could turn into a multi-gigabyte allocation.
-- `microagent update` compares versions instead of testing string equality, so a build ahead of the
-  latest published tag (a branch after a version bump, before the release) reports that there is
-  nothing to install rather than downgrading itself to the older release. A tag that is not a dotted
-  `major.minor.patch` still installs, so tracking a fork whose tags are not versions keeps working.
 
 ## [0.1.1] - 2026-09-28
 
