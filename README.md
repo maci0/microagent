@@ -86,7 +86,9 @@ review, and a missing feature is cheaper than a half-working one.
 
 ## gauntlet
 
-Register it once in `~/.gauntlet/agents.json`:
+Recent gauntlet builds know microagent as a built-in agent: `gauntlet doctor` lists it, and
+`gauntlet -a microagent -r quick --once` works with no configuration. On an older release that
+refuses it as an unknown tool, register it once in `~/.gauntlet/agents.json`:
 
 ```json
 {
@@ -97,6 +99,9 @@ Register it once in `~/.gauntlet/agents.json`:
   }
 }
 ```
+
+Delete that entry once gauntlet ships the built-in: a definition file naming a built-in agent is
+refused at startup rather than ignored.
 
 Then:
 
@@ -115,6 +120,21 @@ converged and which burned the budget, are in [BENCHMARK.md](BENCHMARK.md#useful
 
 No `stream` flags are needed: usage is always machine-readable. No session transcripts are written,
 so no `usage.roots` entry is required either.
+
+## External benchmarks
+
+microagent runs on [Harbor](https://github.com/laude-institute/harbor) benchmarks — Terminal-Bench 2
+and SWE-bench Verified — as a static musl binary inside the task container:
+
+```sh
+make musl
+PYTHONPATH=$PWD/integrations/harbor ~/harbor-venv/bin/harbor run \
+  -d swebench-verified@1.0 -i pytest-dev__pytest-5809 \
+  -a microagent_agent:Microagent -m deepseek/deepseek-v4-flash
+```
+
+See [integrations/harbor/README.md](integrations/harbor/README.md) and
+[BENCHMARK.md](BENCHMARK.md#swe-bench-verified).
 
 ## Benchmarks
 

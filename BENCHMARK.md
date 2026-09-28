@@ -192,6 +192,50 @@ not a controlled experiment.
 - **DSH's own `benchmarks/`** (terminal-io, session-open, active-stream-reconnect, ...) measure that
   harness's internals, not a coding agent's usefulness.
 
+## Terminal-Bench 2
+
+The external benchmark for a coding harness: 89 containerized tasks with their own verifiers,
+driven through Harbor. microagent runs inside the task container as a static musl binary
+(`make musl`), so its own shell and file tools operate on the task's real files. Adapter and
+instructions: [integrations/harbor/README.md](integrations/harbor/README.md).
+
+Model `deepseek/deepseek-v4-flash` (OpenRouter), reasoning off, 600 s agent budget, `-n 2`.
+
+| task | reward | wall |
+| --- | --- | --- |
+| log-summary-date-ranges | 1.0 | 47 s |
+| fix-git | 1.0 | — |
+| cobol-modernization | 1.0 | — |
+| overfull-hbox | 0.0 | 600 s budget |
+| adaptive-rejection-sampler | 0.0 | 600 s budget |
+| **batch mean** | **0.600** (3/5) | 5m10s |
+
+Both zeros first failed with `TlsInitializationFailed` — bare `ubuntu:24.04` images ship no CA
+store. That is a harness defect, not a model defect, and it is what produced `--ca-bundle`: with the
+host bundle written into the container (resolved through its symlink, which `docker cp` would
+otherwise copy as a dangling link) both tasks run to completion. They still score 0.0 — the model
+does not solve them inside the budget — which is the honest result and is left as one.
+
+## SWE-bench Verified
+
+The canonical measure for a coding agent. Harbor's `swebench-verified@1.0` registry dataset (500
+instances), same adapter and binary as above, `deepseek/deepseek-v4-flash`, reasoning off, 1200 s
+budget, `-n 4`.
+
+First four instances:
+
+| instance | resolved |
+| --- | --- |
+| pytest-dev__pytest-5809 | 1.0 |
+| sphinx-doc__sphinx-8593 | 1.0 |
+| pydata__xarray-3095 | 1.0 |
+| sympy__sympy-13852 | 0.0 |
+| **mean** | **0.750** (3/4) |
+
+No exceptions, 6m19s wall for the four, 908k input and 17k output tokens in total. That sample is
+far too small to call a score — it is four instances out of five hundred — and the numbers a reader
+should compare against are published full-set results, not this.
+
 ## Streaming profile
 
 The harness's only real hot loop is the SSE reader: every token delta is parsed and printed. It was

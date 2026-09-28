@@ -3,7 +3,7 @@ ZIG ?= zig
 OPT ?= ReleaseFast
 BIN := zig-out/bin/microagent
 
-.PHONY: build small test fmt bench install clean
+.PHONY: build small musl test fmt bench install clean
 
 build:
 	$(ZIG) build -Doptimize=$(OPT)
@@ -11,6 +11,11 @@ build:
 # Smallest binary that still runs the same code (~600 KB).
 small:
 	$(ZIG) build -Doptimize=ReleaseSmall
+
+# Static musl binary for running inside containers (Harbor benchmarks).
+musl:
+	$(ZIG) build -Dtarget=x86_64-linux-musl -Doptimize=ReleaseFast
+	cp $(BIN) integrations/harbor/microagent-x86_64-linux-musl
 
 test:
 	$(ZIG) build test --summary all

@@ -1,0 +1,67 @@
+# Running microagent on Harbor benchmarks
+
+[Harbor](https://github.com/laude-institute/harbor) runs containerized agent
+benchmarks (Terminal-Bench 2, SWE-bench Verified, aider-polyglot, ...). This
+directory holds the adapter that lets Harbor drive microagent.
+
+microagent is a static binary with its own shell and file tools, so it runs
+*inside* the task container, where the task's files already are. The adapter
+uploads it, then runs one non-interactive turn with the task instruction.
+
+## Build the binary
+
+```sh
+zig build -Dtarget=x86_64-linux-musl -Doptimize=ReleaseFast
+cp zig-out/bin/microagent integrations/harbor/microagent-x86_64-linux-musl
+```
+
+Statically linked, ~1.06 MB, no runtime dependencies — it runs in `python:slim`,
+bare `ubuntu`, and distroless images alike.
+
+## Run
+
+```sh
+uv venv /tmp/harbor-venv && uv pip install --python /tmp/harbor-venv/bin/python harbor
+
+export MICROAGENT_API_KEY=...            # or OPENROUTER_API_KEY
+export MICROAGENT_REASONING_EFFORT=none  # see "Reasoning" below
+export MICROAGENT_BUDGET_SECONDS=1200    # stop below harbor's per-task timeout
+
+PYTHONPATH=$PWD/integrations/harbor /tmp/harbor-venv/bin/harbor run \
+  -d terminal-bench@2.0 -i log-summary-date-ranges \
+  -a microagent_agent:Microagent \
+  -m deepseek/deepseek-v4-flash \
+  --jobs-dir /tmp/harbor-jobs -n 2
+```
+
+`swebench-verified@1.0`, `swebenchpro@1.0`, `aider-polyglot@1.0` and the rest of
+Harbor's registry work the same way; only the dataset name changes.
+
+## Environment
+
+| variable | effect |
+| --- | --- |
+| `MICROAGENT_API_KEY` / `OPENROUTER_API_KEY` / `OPENAI_API_KEY` | provider key, passed to the container process only |
+| `MICROAGENT_BASE_URL` | OpenAI-compatible endpoint (default OpenRouter) |
+| `MICROAGENT_BUDGET_SECONDS` | wall-clock budget inside the container (default 600) |
+| `MICROAGENT_REASONING_EFFORT` | `none`/`low`/... — reasoning models otherwise spend the whole budget thinking |
+| `MICROAGENT_AGENT_TIMEOUT_SEC` | hard cap on the in-container process (default 1500) |
+| `MICROAGENT_BINARY` | path to the static binary, if not next to this file |
+
+## Two things the containers forced
+
+Bare images have no CA store, and microagent's TLS then fails before its first
+request with `TlsInitializationFailed`. The adapter uploads the host's CA bundle
+and passes `MICROAGENT_CA_BUNDLE`; the host path is usually a symlink into
+`ca-certificates/extracted`, which `docker cp` would copy as a dangling link, so
+the adapter resolves it first.
+
+Reasoning models burn the entire per-task timeout thinking. Measured on
+Terminal-Bench 2 `log-summary-date-ranges` with deepseek-v4-flash: with reasoning
+on, 12-minute gauntlet reviews timed out with zero files changed; with
+`MICROAGENT_REASONING_EFFORT=none`, the same work lands in minutes.
+
+## Results
+
+See [BENCHMARK.md](../../BENCHMARK.md#terminal-bench-2) for the scores and the
+machine they were produced on.
