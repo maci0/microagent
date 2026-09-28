@@ -1105,11 +1105,13 @@ const tool_timeout_floor_ms: u64 = 5_000;
 
 /// How a turn ended, which is what tells a finished run from a stopped one.
 ///
-/// A turn is finished when the model stopped asking for tools on its own. The
-/// other two end the run without that: `wants_tools` is a turn whose answer was
-/// a request for more work, and `cut_off` is a turn the budget ended before
-/// there was a turn to append. Both leave a prefix of an answer on stdout, so
-/// neither may report itself as a finished run.
+/// A turn is finished when the model stopped asking for tools on its own, and
+/// said something. The other two end the run without that: `wants_tools` is a
+/// turn whose answer was a request for more work, and `cut_off` is a turn the
+/// budget ended before there was a turn to append, or a response that called no
+/// tool and is not an answer either (`incompleteAnswer`). Both leave a prefix of
+/// an answer on stdout, or none, so neither may report itself as a finished
+/// run.
 const TurnEnd = enum { answered, wants_tools, cut_off };
 
 /// The agent loop: keep asking until the model stops calling tools.
@@ -1263,7 +1265,54 @@ fn runTurn(
     const model_ms = session_mod.elapsedMs(io, asked);
     try finishTurn(io, arena, gpa, msgs, &result, usage, budget, tool_env, progress);
     session_mod.writeRecord(io, arena, session, model_ms, &result);
-    return if (result.calls.items.len != 0) .wants_tools else .answered;
+    if (result.calls.items.len != 0) return .wants_tools;
+    // No tool call ends the loop, but only an answer ends the run. A refusal, a
+    // provider that stopped generating, a response cut at `max_tokens` and a
+    // response with nothing in it all arrive as "called no tool", and each
+    // leaves stdout holding the model's words or nothing at all while exit 0
+    // says the task finished. The reason is named before the run reports itself
+    // unfinished, so a caller sees which of the four it was.
+    if (incompleteAnswer(arena, &result, opts.max_tokens)) |notice| {
+        net.note(io, arena, "microagent: {s}\n", .{notice});
+        return .cut_off;
+    }
+    return .answered;
+}
+
+/// Why a response that called no tool is not an answer, in the words the
+/// operator reads. Null when it is one.
+///
+/// The provider is the one saying so, in its own `finish_reason`, and a
+/// response is model output rather than this program's own, so the question
+/// asked here is what the run is about to report, not whether the model was
+/// right. Four shapes end a run that would otherwise exit 0 with nothing on
+/// stdout:
+///
+///   * `content_filter`: the provider stopped generating on purpose, and
+///     usually sends no text with it.
+///   * nothing at all: no text and no tool call, which is how a refusal, an
+///     empty completion and a stream that carried only a usage frame each
+///     arrive.
+///   * `length`: the response was cut at `max_tokens`, so what it said is a
+///     prefix of the answer. With tool calls in it the loop continues and the
+///     next turn says more, so only the toolless turn is an unfinished run.
+fn incompleteAnswer(arena: std.mem.Allocator, result: *const chat_mod.ChatResult, max_tokens: u32) ?[]const u8 {
+    const reason = result.finish_reason;
+    if (std.mem.eql(u8, reason, "content_filter")) {
+        return std.fmt.allocPrint(arena, "the provider stopped generating this response (finish_reason content_filter); there is no answer to report", .{}) catch
+            "the provider stopped generating this response (finish_reason content_filter); there is no answer to report";
+    }
+    if (result.content.items.len == 0) {
+        return std.fmt.allocPrint(arena, "the last response carried no text and no tool call (finish_reason: {s}), so the run ends with nothing to report", .{
+            if (reason.len == 0) "none sent" else reason,
+        }) catch "the last response carried no text and no tool call, so the run ends with nothing to report";
+    }
+    if (std.mem.eql(u8, reason, "length")) {
+        return std.fmt.allocPrint(arena, "the answer was cut at the generation ceiling (max_tokens {d}) after {d} byte(s) of text, so what is on stdout is a prefix of it", .{
+            max_tokens, result.content.items.len,
+        }) catch "the answer was cut at the generation ceiling, so what is on stdout is a prefix of it";
+    }
+    return null;
 }
 
 /// The request body, with `messages` last.
@@ -1565,7 +1614,7 @@ fn streamChat(
     if (result.content.items.len > 0) try out_buf.append(gpa, '\n');
     try flushOut(io, arena, &out_buf, shown_url);
     result.calls = calls;
-    dropNamelessCalls(gpa, &result.calls);
+    dropUnusableCalls(gpa, &result.calls);
     return result;
 }
 
@@ -1590,15 +1639,19 @@ fn truncatedNotice(
 }
 
 /// A provider that skips a tool-call index leaves an empty slot where `applyFrame`
-/// sized the list by index. A nameless call is not a call: it dispatches as
-/// `unknown tool ''` and it goes back to the provider as an assistant message
-/// carrying a function with no name, which the next request rejects. The gap is
-/// dropped here rather than sent on.
-fn dropNamelessCalls(gpa: std.mem.Allocator, calls: *std.ArrayList(chat_mod.ToolCall)) void {
+/// sized the list by index, and a response cut at `max_tokens` or at the turn's
+/// byte ceiling leaves a call whose arguments stop mid-object. Neither is a call
+/// the run can carry, and both go back to the provider inside the assistant
+/// message: a function with no name, or `arguments` that are not a JSON object,
+/// and the next request is rejected with a 400 that ends the run. They are
+/// dropped here instead, so a truncated turn costs that turn and not the rest
+/// of the run. The ceiling notice above has already said the arguments were cut.
+fn dropUnusableCalls(gpa: std.mem.Allocator, calls: *std.ArrayList(chat_mod.ToolCall)) void {
     var kept: usize = 0;
     for (calls.items) |*call| {
-        if (call.name.len == 0) {
+        if (call.name.len == 0 or !argumentsAreAnObject(gpa, call.args.items)) {
             if (call.id.len != 0) gpa.free(call.id);
+            if (call.name.len != 0) gpa.free(call.name);
             call.args.deinit(gpa);
             continue;
         }
@@ -1606,6 +1659,16 @@ fn dropNamelessCalls(gpa: std.mem.Allocator, calls: *std.ArrayList(chat_mod.Tool
         kept += 1;
     }
     calls.shrinkRetainingCapacity(kept);
+}
+
+/// Whether a call's streamed arguments are an object, which is the only thing
+/// the OpenAI-shaped completions API accepts in `arguments` and the only thing
+/// `runTool` dispatches. A stream that was cut mid-argument is a prefix such as
+/// `{"command": "ls -`, and sending it on turns every later request into a 400.
+fn argumentsAreAnObject(gpa: std.mem.Allocator, args: []const u8) bool {
+    const trimmed = std.mem.trim(u8, args, " \t\r\n");
+    if (trimmed.len == 0 or trimmed[0] != '{') return false;
+    return std.json.validate(gpa, trimmed) catch false;
 }
 
 /// The frame shapes `applyFrame` reads, declared so the common frame parses
@@ -3864,6 +3927,47 @@ test "a stream that ends without [DONE] is reported, not taken for finished" {
     try std.testing.expect(std.mem.indexOf(u8, empty, "0 byte(s) of content") != null);
 }
 
+// A response that called no tool ends the loop, and a run that ends there is
+// only finished if the response was an answer. A refusal, a content filter and a
+// response cut at `max_tokens` all arrive the same way, and each of them would
+// otherwise leave the run exiting 0 over nothing or over a prefix.
+test "a toolless response that is not an answer does not finish the run" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Text and no reason: the ordinary answer, and the only shape that is one.
+    var answered: chat_mod.ChatResult = .{};
+    try answered.content.appendSlice(std.testing.allocator, "done");
+    defer answered.deinit(std.testing.allocator);
+    try std.testing.expect(incompleteAnswer(arena, &answered, default_max_tokens) == null);
+
+    // The provider stopped generating: no answer whatever it left behind.
+    var blocked: chat_mod.ChatResult = .{ .finish_reason = try arena.dupe(u8, "content_filter") };
+    const blocked_notice = incompleteAnswer(arena, &blocked, default_max_tokens).?;
+    try std.testing.expect(std.mem.indexOf(u8, blocked_notice, "content_filter") != null);
+
+    // A refusal, an empty completion and a stream that carried only a usage
+    // frame all arrive with nothing in them and no reason to read.
+    var empty: chat_mod.ChatResult = .{};
+    const empty_notice = incompleteAnswer(arena, &empty, default_max_tokens).?;
+    try std.testing.expect(std.mem.indexOf(u8, empty_notice, "no text and no tool call") != null);
+    try std.testing.expect(std.mem.indexOf(u8, empty_notice, "none sent") != null);
+
+    var tool_only: chat_mod.ChatResult = .{ .finish_reason = try arena.dupe(u8, "tool_calls") };
+    const tool_notice = incompleteAnswer(arena, &tool_only, default_max_tokens).?;
+    try std.testing.expect(std.mem.indexOf(u8, tool_notice, "tool_calls") != null);
+
+    // Cut at the generation ceiling: what is there is a prefix of the answer,
+    // and the ceiling that cut it is named so a caller can raise it.
+    var cut: chat_mod.ChatResult = .{ .finish_reason = try arena.dupe(u8, "length") };
+    try cut.content.appendSlice(std.testing.allocator, "half an ans");
+    defer cut.content.deinit(std.testing.allocator);
+    const cut_notice = incompleteAnswer(arena, &cut, default_max_tokens).?;
+    try std.testing.expect(std.mem.indexOf(u8, cut_notice, "max_tokens 65536") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cut_notice, "prefix") != null);
+}
+
 // A frame the parser cannot read holds text and tool-call arguments the turn
 // will not carry. Dropping it silently leaves a short response that looks like
 // a complete one, so the count is what the run reports.
@@ -3967,13 +4071,45 @@ test "a gap in the tool-call indexes leaves no nameless call behind" {
     try applyFrame(arena, arena, payload, &result, &calls, &out_buf, &unparsable);
     try std.testing.expectEqual(@as(usize, 3), calls.items.len);
 
-    dropNamelessCalls(arena, &calls);
+    dropUnusableCalls(arena, &calls);
     try std.testing.expectEqual(@as(usize, 1), calls.items.len);
     try std.testing.expectEqualStrings("read", calls.items[0].name);
 
     // A response whose calls are all named is untouched.
-    dropNamelessCalls(arena, &calls);
+    dropUnusableCalls(arena, &calls);
     try std.testing.expectEqual(@as(usize, 1), calls.items.len);
+}
+
+// A call whose arguments stopped mid-object is a prefix of a call, and the
+// assistant message carries the arguments back to the provider as they are. A
+// provider that reads them rejects the next request, so one truncated turn ends
+// the run instead of only costing that turn.
+test "a tool call cut mid-argument is dropped rather than sent on" {
+    const gpa = std.testing.allocator;
+    var run_state = std.heap.ArenaAllocator.init(gpa);
+    defer run_state.deinit();
+    const arena = run_state.allocator();
+
+    try std.testing.expect(argumentsAreAnObject(arena, "{}"));
+    try std.testing.expect(argumentsAreAnObject(arena, " {\"path\":\"a.zig\"} "));
+    try std.testing.expect(!argumentsAreAnObject(arena, ""));
+    try std.testing.expect(!argumentsAreAnObject(arena, "{\"command\": \"ls -"));
+    try std.testing.expect(!argumentsAreAnObject(arena, "\"a string\""));
+
+    const cut = "{\"choices\":[{\"delta\":{\"tool_calls\":[" ++
+        "{\"index\":0,\"id\":\"call_cut\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\": \\\"ls -\"}}," ++
+        "{\"index\":1,\"id\":\"call_ok\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\": \\\"ls\\\"}\"}}" ++
+        "]}}]}";
+    var result: chat_mod.ChatResult = .{};
+    var calls: std.ArrayList(chat_mod.ToolCall) = .empty;
+    var out_buf: std.ArrayList(u8) = .empty;
+    var unparsable: usize = 0;
+    try applyFrame(arena, arena, cut, &result, &calls, &out_buf, &unparsable);
+    try std.testing.expectEqual(@as(usize, 2), calls.items.len);
+
+    dropUnusableCalls(arena, &calls);
+    try std.testing.expectEqual(@as(usize, 1), calls.items.len);
+    try std.testing.expectEqualStrings("call_ok", calls.items[0].id);
 }
 
 test "out-of-range numbers from the model saturate instead of trapping" {

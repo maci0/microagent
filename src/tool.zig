@@ -301,6 +301,20 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
     // A rev such as `--output=FILE` would turn a read into a write.
     if (rev) |r| if (std.mem.startsWith(u8, r, "-"))
         return std.fmt.allocPrint(arena, "error: rev must not start with '-'", .{});
+    // A rev that carries a path after a colon (`HEAD:.env`, `main:keys/id`)
+    // is a tree-ish plus a file, and git shows that file whatever the
+    // `:(exclude)` pathspecs below say: they filter a revision's diff, not an
+    // object named on the command line. So the exclusion set this tool relies
+    // on does not reach it, and a committed credential comes back as a tool
+    // result that is re-sent to the provider on every later turn. A file is
+    // what the `path` argument is for, and that one is checked.
+    if (rev) |r| if (std.mem.indexOfScalar(u8, r, ':')) |colon| {
+        const named = r[colon + 1 ..];
+        if (isCredentialPath(named)) return credentialRefusal(arena, "git", named);
+        return std.fmt.allocPrint(arena, "error: rev must name a revision, not a file; use the path argument for a file (got '{s}')", .{
+            chat.safeText(arena, r, 120),
+        });
+    };
     // `git show <rev> -- .env` prints a committed credentials file as a patch,
     // so the path gets the refusal `read` gives it rather than a git one.
     if (path) |p| if (isCredentialPath(p)) return credentialRefusal(arena, "git", p);
@@ -2052,6 +2066,37 @@ test "git tool refuses a rev that git would read as an option" {
     try args.put(arena, "rev", .{ .string = "--output=pwned" });
     const out = try toolGit(std.testing.io, arena, args, null, null);
     try std.testing.expectEqualStrings("error: rev must not start with '-'", out);
+}
+
+// `git show HEAD:.env` prints the committed file whatever the `:(exclude)`
+// pathspecs say, because a tree-ish plus a path names an object rather than
+// selecting one out of a diff. The credential comes back as a tool result and
+// is re-sent to the provider on every later turn, so the rev is refused and the
+// model is sent to the argument that is checked.
+test "git tool refuses a rev that names a file through a tree-ish" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var creds: std.json.ObjectMap = .empty;
+    try creds.put(arena, "cmd", .{ .string = "show" });
+    try creds.put(arena, "rev", .{ .string = "HEAD:.env" });
+    const refused = try toolGit(std.testing.io, arena, creds, null, null);
+    try std.testing.expect(std.mem.startsWith(u8, refused, "refused: .env is a credentials file"));
+
+    var plain: std.json.ObjectMap = .empty;
+    try plain.put(arena, "cmd", .{ .string = "show" });
+    try plain.put(arena, "rev", .{ .string = "HEAD:src/main.zig" });
+    const directed = try toolGit(std.testing.io, arena, plain, null, null);
+    try std.testing.expect(std.mem.startsWith(u8, directed, "error: rev must name a revision, not a file"));
+    try std.testing.expect(std.mem.indexOf(u8, directed, "path argument") != null);
+
+    // A rev with no path in it is what the tool is for, and it is not refused.
+    var head: std.json.ObjectMap = .empty;
+    try head.put(arena, "cmd", .{ .string = "diff" });
+    try head.put(arena, "rev", .{ .string = "HEAD" });
+    const shown = try toolGit(std.testing.io, arena, head, null, null);
+    try std.testing.expect(!std.mem.startsWith(u8, shown, "error: rev"));
 }
 
 test "a git line limit is a ceiling, so zero is one line and a huge one is no trap" {
