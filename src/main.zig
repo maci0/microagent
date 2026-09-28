@@ -1205,7 +1205,10 @@ test "json string escaping" {
 
 test "clamp keeps short strings intact" {
     try std.testing.expectEqualStrings("abc", clamp("abc", 8));
+    // A string exactly at the limit is kept whole, not cut to one byte short.
+    try std.testing.expectEqualStrings("abc", clamp("abc", 3));
     try std.testing.expectEqualStrings("ab", clamp("abcd", 2));
+    try std.testing.expectEqualStrings("", clamp("abc", 0));
 }
 
 test "conversation and tool schema serialize as one valid request body" {
@@ -1219,7 +1222,7 @@ test "conversation and tool schema serialize as one valid request body" {
     try appendMessage(gpa, &msgs, "system", system_prompt);
     try appendMessage(gpa, &msgs, "user", "say \"hi\"\nplease");
 
-    var opts: Options = .{ .model = "test/model" };
+    const opts: Options = .{ .model = "test/model" };
     const body = try buildBody(gpa, opts, msgs.items);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, gpa, body, .{});
@@ -1233,13 +1236,24 @@ test "conversation and tool schema serialize as one valid request body" {
     try std.testing.expectEqualStrings("system", messages.items[0].object.get("role").?.string);
     try std.testing.expectEqualStrings("say \"hi\"\nplease", messages.items[1].object.get("content").?.string);
 
+    // The advertised names and the dispatch table are two lists that have to
+    // stay the same list: a tool in the schema that `runTool` cannot dispatch
+    // is one the model will call and be told does not exist.
+    const advertised = [_][]const u8{ "bash", "read", "write", "edit", "search", "ast", "git" };
     const tools = root.get("tools").?.array;
-    try std.testing.expectEqual(@as(usize, 7), tools.items.len);
-    for (tools.items) |tool| {
+    try std.testing.expectEqual(advertised.len, tools.items.len);
+    for (advertised, tools.items) |name, tool| {
         const f = tool.object.get("function").?.object;
-        try std.testing.expect(f.get("name").?.string.len > 0);
+        try std.testing.expectEqualStrings(name, f.get("name").?.string);
+        // The description is what the model picks the tool by, so an empty one
+        // is a tool the model has no reason to call.
+        try std.testing.expect(f.get("description").?.string.len > 0);
+        try std.testing.expect(f.get("parameters").?.object.get("required") != null);
+        const err = try dispatch(arena_state.allocator(), name, "{}");
+        // Every tool has a required argument, so `{}` is refused by the tool
+        // itself and never reaches "unknown tool".
+        try std.testing.expect(!std.mem.startsWith(u8, err, "error: unknown tool"));
     }
-    opts.max_turns = 1;
 }
 
 test "a long stream costs the largest frame, not the sum of frames" {
@@ -1387,6 +1401,16 @@ test "tool output truncation keeps whole lines" {
 
     const long = try firstLines(arena, "1\n2\n3\n4\n", 2);
     try std.testing.expectEqualStrings("1\n2\n... [output truncated at 2 lines]", long);
+
+    // A limit equal to the line count keeps every line and adds no marker.
+    try std.testing.expectEqualStrings("1\n2\n", try firstLines(arena, "1\n2\n", 2));
+    try std.testing.expectEqualStrings("1\n2\n3\n", try firstLines(arena, "1\n2\n3\n", 3));
+    // A last line with no newline still counts, so the cut lands on it.
+    try std.testing.expectEqualStrings("1\n... [output truncated at 1 lines]", try firstLines(arena, "1\n2", 1));
+    try std.testing.expectEqualStrings("1\n2", try firstLines(arena, "1\n2", 2));
+    // No newline at all means one line, which a limit of one keeps whole.
+    try std.testing.expectEqualStrings("solo", try firstLines(arena, "solo", 1));
+    try std.testing.expectEqualStrings("solo\n", try firstLines(arena, "solo\n", 1));
 }
 
 test "compaction elides old tool output and keeps the recent turns" {
@@ -1531,6 +1555,19 @@ test "token counters read the OpenAI and OpenRouter spellings" {
     try std.testing.expectEqual(@as(u64, 0), num(null));
 }
 
+// A tool argument is a model-controlled string, and a model that sends
+// `{"path": 42}` or `{"path": null}` must be told the argument is missing
+// rather than having the number read as a path. Only a JSON string is a
+// string; every other type, including a number and a bool, is refused.
+test "a tool argument is a string or it is refused" {
+    try std.testing.expectEqualStrings("a.zig", str(.{ .string = "a.zig" }).?);
+    try std.testing.expectEqualStrings("", str(.{ .string = "" }).?);
+    try std.testing.expect(str(null) == null);
+    try std.testing.expect(str(.{ .integer = 42 }) == null);
+    try std.testing.expect(str(.{ .float = 1.5 }) == null);
+    try std.testing.expect(str(.{ .bool = true }) == null);
+}
+
 var debug_enabled: bool = false;
 
 /// Cheap env-gated trace, for debugging a stuck stream.
@@ -1547,6 +1584,103 @@ test "git tool refuses a rev that git would read as an option" {
     try args.put(arena, "rev", .{ .string = "--output=pwned" });
     const out = try toolGit(std.testing.io, arena, args);
     try std.testing.expectEqualStrings("error: rev must not start with '-'", out);
+}
+
+test "git tool refuses a missing or unknown subcommand" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    {
+        const out = try toolGit(std.testing.io, arena, .empty);
+        try std.testing.expectEqualStrings("error: missing cmd", out);
+    }
+    {
+        // The subcommand is what picks the git argv, so an unknown one has to
+        // stop here rather than be handed to git.
+        var args: std.json.ObjectMap = .empty;
+        try args.put(arena, "cmd", .{ .string = "push" });
+        try std.testing.expectEqualStrings(
+            "error: unknown git cmd 'push'",
+            try toolGit(std.testing.io, arena, args),
+        );
+    }
+}
+
+// The tool arguments are written by the model, so dispatch is the trust
+// boundary: malformed JSON, a non-object payload, and an unrecognized name all
+// have to be refused with the tool's own error text instead of reaching a
+// subprocess.
+test "the tool dispatcher refuses arguments that are not an object" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try std.testing.expectEqualStrings(
+        "error: tool arguments are not valid JSON",
+        try dispatch(arena, "read", "{"),
+    );
+    try std.testing.expectEqualStrings(
+        "error: tool arguments must be an object",
+        try dispatch(arena, "read", "[]"),
+    );
+    try std.testing.expectEqualStrings(
+        "error: unknown tool 'delete_everything'",
+        try dispatch(arena, "delete_everything", "{}"),
+    );
+}
+
+// Every tool's required argument is checked before it opens a file or spawns a
+// process, so a model that omits one gets "missing <arg>" rather than a
+// confusing error from the kernel.
+test "each tool refuses a missing required argument" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const cases = [_]struct { tool: []const u8, args: []const u8, want: []const u8 }{
+        .{ .tool = "bash", .args = "{}", .want = "error: missing command" },
+        .{ .tool = "read", .args = "{}", .want = "error: missing path" },
+        .{ .tool = "write", .args = "{}", .want = "error: missing path" },
+        .{ .tool = "edit", .args = "{}", .want = "error: missing path" },
+        .{ .tool = "edit", .args = "{\"path\":\"a.zig\"}", .want = "error: missing old_string" },
+        .{ .tool = "edit", .args = "{\"path\":\"a.zig\",\"old_string\":\"a\"}", .want = "error: missing new_string" },
+        .{ .tool = "search", .args = "{}", .want = "error: missing pattern" },
+        .{ .tool = "ast", .args = "{}", .want = "error: missing pattern" },
+        .{ .tool = "ast", .args = "{\"pattern\":\"a$b\"}", .want = "error: missing lang" },
+        .{ .tool = "git", .args = "{}", .want = "error: missing cmd" },
+    };
+    for (cases) |c| {
+        try std.testing.expectEqualStrings(c.want, try dispatch(arena, c.tool, c.args));
+    }
+    // The same omissions go through dispatch, not only the direct call.
+    try std.testing.expectEqualStrings(
+        "error: missing pattern",
+        try dispatch(arena, "search", "{\"path\":\".\"}"),
+    );
+}
+
+// A missing argument that the model filled with a number is still missing: the
+// tools read their arguments through `str`, which refuses every non-string.
+test "a tool argument sent as a number is missing, not a value" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try std.testing.expectEqualStrings(
+        "error: missing path",
+        try dispatch(arena, "read", "{\"path\":42}"),
+    );
+    try std.testing.expectEqualStrings(
+        "error: missing command",
+        try dispatch(arena, "bash", "{\"command\":null}"),
+    );
+}
+
+// A tool call as the model produced it: the same mutable slices the frame
+// parser fills in, so the dispatcher tests go through the real entry point.
+fn dispatch(arena: std.mem.Allocator, name: []const u8, args: []const u8) ![]u8 {
+    return runTool(std.testing.io, arena, .{
+        .id = try arena.dupe(u8, ""),
+        .name = try arena.dupe(u8, name),
+        .args = try arena.dupe(u8, args),
+    });
 }
 
 test "out-of-range numbers from the model saturate instead of trapping" {
