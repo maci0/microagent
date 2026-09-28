@@ -83,6 +83,11 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- `read` refuses a credentials file. Its result goes into the conversation, and the conversation is
+  re-sent to the provider on every turn after it, so a `read` of `.env`, a `.pem`, an `id_ed25519`
+  or `$HOME/.secrets/openrouter` shipped a live key to a third party and kept shipping it for the
+  rest of the run. The refusal names the file and says what to do instead; the system prompt tells
+  the model not to ask for one. `bash` still reaches any file.
 - The session store prunes the logs a re-run wrote beside the first. A run that read the same
   clock stamp opened its log under a `<unix-ns>-N.jsonl` name rather than truncating the one
   already there, and the pruner only recognised `<unix-ns>.jsonl`, so on a machine whose clock

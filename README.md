@@ -241,7 +241,7 @@ Seven tools, all of them thin wrappers over tools you already have:
 | tool | what it does |
 | --- | --- |
 | `bash` | `/bin/sh -c`, 120 s default timeout (600 s ceiling on what the model may ask for), output capped at 24 KB |
-| `read` | read a file, optional line offset/limit |
+| `read` | read a file, optional line offset/limit; refuses credentials (`.env`, key files, `$HOME/.secrets`) |
 | `write` | create or overwrite a file, parents created |
 | `edit` | exact string replacement, refuses an ambiguous match unless `replace_all` |
 | `search` | `rg --line-number --no-heading`, optional glob |
@@ -258,6 +258,12 @@ repository that ships a file telling the model to run something is data the run 
 than an instruction it follows. The other bound on the same loop is `max_tokens` on every
 request: without it a model that fails to stop is billed until something else stops it, and
 `--max-turns` is a turn count, not a token count.
+
+A credential is the one thing a `read` refuses. Its result goes into the conversation, and the
+conversation is re-sent to the provider on every turn after it, so a `read` of `.env`, a `.pem`,
+an `id_ed25519` or `$HOME/.secrets/openrouter` would ship a key to a third party and keep
+shipping it. The model is told not to ask for one and told what to do instead; `bash` still
+reaches any file, which is where a human at the keyboard would go.
 
 A transient failure — 429, any 5xx, a connection that dies before the request reached the provider —
 is retried twice with 1 s and 2 s of backoff before the run exits non-zero, so a provider's bad
