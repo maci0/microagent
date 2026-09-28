@@ -4,6 +4,14 @@
 # same commands.
 line-length = 120
 
+# The Python the adapter runs on, not the one ruff assumes. Left unset, ruff
+# falls back to py39 and every UP rule that only fires from 3.10 on is never
+# evaluated: the tree is checked against a Python it does not support and
+# passes there, which says nothing about the one it does. 3.12 is the floor
+# integrations/harbor/requirements.txt records, in the `uv pip compile
+# --python-version 3.12` that generates the lock the adapter is installed from.
+target-version = "py312"
+
 lint.select = [
     "E",    # pycodestyle
     "F",    # pyflakes

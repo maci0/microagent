@@ -44,6 +44,13 @@ lint-versions` fails when a version there and one in the Makefile drift apart.
 
 `zig fmt` covers the Zig and needs nothing else.
 
+`ruff` is pointed at the Python the adapter actually runs on, not at ruff's
+own default. [ruff.toml](ruff.toml) sets `target-version = "py312"`, the floor
+`integrations/harbor/requirements.txt` records in the `uv pip compile
+--python-version 3.12` that generates the lock; without it ruff assumes py39
+and never evaluates the rules that only fire from 3.10 on, so a green run says
+nothing about the interpreter the adapter is installed into.
+
 ## Before you push
 
 ```sh

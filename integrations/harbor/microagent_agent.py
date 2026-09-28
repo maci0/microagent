@@ -168,6 +168,11 @@ def normalize_model(model_name: str | None) -> str:
 class Microagent(BaseAgent):
     """microagent as a harbor agent: uploaded, run once, output kept."""
 
+    # Set by setup, read by run. Declared here so the attribute has one type and
+    # run does not reach for it through getattr, which returns the default and
+    # reports no bundle when setup has not run instead of when none was found.
+    _ca_uploaded: bool = False
+
     @staticmethod
     def name() -> str:
         return "microagent"
@@ -250,7 +255,7 @@ class Microagent(BaseAgent):
             "MICROAGENT_API_KEY": api_key(),
             "MICROAGENT_BASE_URL": trimmed_env("MICROAGENT_BASE_URL") or DEFAULT_BASE_URL,
         }
-        if getattr(self, "_ca_uploaded", False):
+        if self._ca_uploaded:
             env["MICROAGENT_CA_BUNDLE"] = REMOTE_CA_PATH
         if reasoning:
             env["MICROAGENT_REASONING_EFFORT"] = reasoning
@@ -294,7 +299,7 @@ class Microagent(BaseAgent):
             raise RuntimeError(f"microagent exited {result.return_code}: {(result.stderr or '')[-2000:]}")
 
 
-def last_usage(stdout: str) -> dict:
+def last_usage(stdout: str) -> dict[str, int]:
     """microagent prints one cumulative usage JSON line per model response."""
     for raw in reversed(stdout.splitlines()):
         line = raw.strip()
