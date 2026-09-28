@@ -55,18 +55,38 @@ if [ -n "$limiter" ]; then
 		(cd "$dir" && exec "$limiter" -k "$run_limited_grace" "$secs" "$@")
 	}
 else
-	# A watchdog polls the child and TERMs it at the ceiling, then KILLs it if
-	# the grace passes. The sleep is one second, so killing the watchdog leaves
-	# nothing behind but a moment. Each signal is sent only while the child is
-	# still there: a pid the kernel has already recycled belongs to somebody
-	# else by the time a poll says so, and a benchmark that TERMs a stranger's
-	# process is worse than one that overran by a second.
+	# A watchdog polls the child and TERMs its group at the ceiling, then
+	# KILLs the group if the grace passes. The sleep is one second, so killing
+	# the watchdog leaves nothing behind but a moment. Each signal is sent only
+	# while the child is still there: a pid the kernel has already recycled
+	# belongs to somebody else by the time a poll says so, and a benchmark that
+	# TERMs a stranger's process is worse than one that overran by a second.
+	#
+	# The group, not the pid, is what the signals below address, and that is
+	# the same thing GNU `timeout` does above. Signalling only the process it
+	# spawned left the rest of the tree running: a harness that outlived the
+	# ceiling went on writing into the work tree the next task copies and the
+	# check then diffs, and a build or test server it had launched held a port
+	# and a directory the following runs fought over. One benchmark run leaked
+	# one process tree per task that overran, and the next run started with
+	# every one of them still there.
+	#
+	# The child is made a group leader by `set -m` around the launch, because
+	# a non-interactive shell runs a background job in its own process group
+	# only when job control is on, and without it `-$pid` would name this
+	# script's group: the watchdog would signal the benchmark, and the
+	# measurement of one task would end the measurement of the rest. The
+	# setting is restored immediately because this is a sourced function and
+	# the caller's shell outlives the call, and the job notification job
+	# control prints is dropped rather than written into the task's output,
+	# which is read back for the numbers below.
 	run_limited() {
 		secs=$1 dir=$2
 		shift 2
 		check_secs "$secs" || return 2
-		(cd "$dir" && exec "$@") &
+		{ set -m; (cd "$dir" && exec "$@") & } 2>/dev/null
 		pid=$!
+		set +m
 		(
 			# The tick is counted after the sleep, so `secs` sleeps have passed
 			# by the time the ceiling is read. Counting it first read the
@@ -79,14 +99,18 @@ else
 				[ "$ticks" -ge "$secs" ] && break
 			done
 			if kill -0 "$pid" 2>/dev/null; then
-				kill -TERM "$pid" 2>/dev/null
+				kill -TERM -"$pid" 2>/dev/null
 				grace=0
 				while [ "$grace" -lt "$run_limited_grace" ]; do
 					kill -0 "$pid" 2>/dev/null || break
 					grace=$((grace + 1))
 					sleep 1
 				done
-				kill -KILL "$pid" 2>/dev/null
+				# The group rather than the leader, and not only while the
+				# leader answers: a leader that took the TERM and left is
+				# exactly the case the ceiling exists to end, and the children
+				# are the part that was never asked to die with it.
+				kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
 			fi
 		) &
 		watchdog=$!
