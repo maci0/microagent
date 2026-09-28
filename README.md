@@ -63,7 +63,8 @@ microagent -p "fix the failing test and run it"
                        (env MICROAGENT_CA_BUNDLE, SSL_CERT_FILE). Needed in
                        images that ship no ca-certificates.
     --budget <seconds> stop starting turns after this long, then take one last
-                       turn to make the edit (env MICROAGENT_BUDGET_SECONDS)
+                       turn to make the edit, which may run 5 minutes past it
+                       (env MICROAGENT_BUDGET_SECONDS)
     --reasoning-effort <level>
                        reasoning.effort sent to the provider: minimal, low,
                        medium, high, or none to disable (env MICROAGENT_REASONING_EFFORT)
@@ -183,11 +184,14 @@ while it is still going. A run that finds its name taken takes the next one (`-1
 re-launched run writes beside the earlier log rather than over it:
 
 ```json
-{"ts":1790608347342,"cwd":"/home/maci/Desktop/Projects/microagent","model":"deepseek/deepseek-v4-flash","elapsed_ms":1448,"usage":{"prompt_tokens":998,"cached_tokens":896,"completion_tokens":19,"reasoning_tokens":16,"total_tokens":1017}}
+{"ts":1790608347342,"cwd":"/home/maci/Desktop/Projects/microagent","model":"deepseek/deepseek-v4-flash","finish_reason":"stop","elapsed_ms":1448,"usage":{"prompt_tokens":998,"cached_tokens":896,"completion_tokens":19,"reasoning_tokens":16,"total_tokens":1017}}
 ```
 
 One response's own counters, not the run's cumulative ones, plus the directory the run works in and
-how long the model spent on that response. The store keeps the 200 most recent runs and prunes the
+how long the model spent on that response. `finish_reason` is why the provider stopped: `length`
+means the response was cut at `--max-tokens`, so the turn is a prefix of what the model meant to
+say, and the run says so on stderr rather than reporting it as a finished answer. The empty string
+is a stream that carried no reason at all. The store keeps the 200 most recent runs and prunes the
 older ones, so a machine that runs this in a loop does not accumulate a log per review forever.
 `elapsed_ms` is the model's time, so a reader computes
 tokens per second the model actually generated instead of over a gap that includes tool calls.

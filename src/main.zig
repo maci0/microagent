@@ -160,6 +160,16 @@ const ChatResult = struct {
     reasoning_tokens: u64 = 0,
     total_tokens: u64 = 0,
     cached_tokens: u64 = 0,
+    /// Why the provider stopped generating, as the last frame spells it, or the
+    /// empty slice when the stream carried none. `length` is the one that
+    /// matters: it means the response was cut at `max_tokens`, so the turn is a
+    /// prefix of what the model meant to say.
+    finish_reason: []u8 = &.{},
+
+    fn deinitFinish(self: *ChatResult, gpa: std.mem.Allocator) void {
+        if (!std.mem.eql(u8, self.finish_reason, &.{})) gpa.free(self.finish_reason);
+        self.finish_reason = &.{};
+    }
 
     /// The response outlives the turn's arena, so what a turn keeps is
     /// allocated here and released with the turn rather than at process exit.
@@ -168,6 +178,7 @@ const ChatResult = struct {
     fn deinit(self: *ChatResult, gpa: std.mem.Allocator) void {
         deinitCalls(gpa, &self.calls);
         self.content.deinit(gpa);
+        self.deinitFinish(gpa);
     }
 };
 
@@ -287,7 +298,9 @@ const help_text =
     \\                         (env MICROAGENT_CA_BUNDLE, SSL_CERT_FILE). Needed in
     \\                         images that ship no ca-certificates.
     \\      --budget <seconds>
-    \\                         stop starting turns after this long, and say so
+    \\                         stop starting turns after this long, and say so.
+    \\                         The last turn it takes may run 5 minutes past it;
+    \\                         a turn cut off there is discarded, not half-applied
     \\                         (env MICROAGENT_BUDGET_SECONDS)
     \\      --reasoning-effort <level>
     \\                         reasoning.effort sent to the provider: minimal, low,
@@ -691,6 +704,44 @@ fn resolveStyle(
     return unknown;
 }
 
+/// The run's time budget as an instant on the monotonic clock the loop already
+/// reads. Every part of a turn asks this, not just the top of the loop: a
+/// provider that is slow rather than broken hands the loop one long turn, and a
+/// budget only checked between turns is a budget that provider ignores, which
+/// is the run being killed in the middle of the turn the budget exists to avoid.
+const Budget = struct {
+    /// Nanoseconds on the awake clock, or null when no budget was set.
+    deadline_ns: ?i96 = null,
+
+    fn of(started_ns: i96, seconds: ?u64) Budget {
+        const s = seconds orelse return .{};
+        return .{ .deadline_ns = started_ns + @as(i96, s) * std.time.ns_per_s };
+    }
+
+    fn set(self: Budget) bool {
+        return self.deadline_ns != null;
+    }
+
+    fn expired(self: Budget, io: Io) bool {
+        const d = self.deadline_ns orelse return false;
+        return Io.Timestamp.now(io, .awake).nanoseconds >= d;
+    }
+
+    /// The same budget with `seconds` more to run. The final push is the one
+    /// turn that is allowed past the budget, and the grace is what keeps that
+    /// turn bounded too: it lands or it is cut off with a reason, never left
+    /// waiting on a provider that stopped answering.
+    fn withGraceNs(self: Budget, seconds: u64) Budget {
+        const d = self.deadline_ns orelse return self;
+        return .{ .deadline_ns = d + @as(i96, seconds) * std.time.ns_per_s };
+    }
+};
+
+/// How long the final turn may run past the budget. It exists to turn what the
+/// model has already read into one edit, which is a few tool calls, not a
+/// fresh investigation.
+const final_push_grace_s: u64 = 300;
+
 /// The agent loop: keep asking until the model stops calling tools.
 fn run(
     client: *std.http.Client,
@@ -701,6 +752,7 @@ fn run(
     msgs: *std.ArrayList(u8),
 ) !void {
     const started = Io.Timestamp.now(io, .awake).nanoseconds;
+    const budget = Budget.of(started, opts.budget_s);
     const session = openSession(io, arena, opts);
     defer closeSession(io, session);
     // What one turn allocates from the wire down -- the request body (a full
@@ -716,18 +768,15 @@ fn run(
     var usage: Usage = .{};
     while (turn < opts.max_turns) : (turn += 1) {
         _ = turn_state.reset(.retain_capacity);
-        if (opts.budget_s) |budget| {
-            const spent_s = @divTrunc(Io.Timestamp.now(io, .awake).nanoseconds - started, std.time.ns_per_s);
-            if (spent_s >= budget) {
-                // Stop in the middle of the work, or stop after one last push
-                // that is told to edit? A review that ran out of time with
-                // nothing changed is worth less than one that ran out of time
-                // with a small diff, and the model has already done the reading.
-                net.note(io, arena, "microagent: budget of {d}s reached after {d} turn(s); one final turn\n", .{ budget, turn });
-                try appendMessage(gpa, msgs, "user", final_push);
-                _ = try runTurn(client, io, turn_arena, gpa, opts, msgs, session, &usage);
-                return;
-            }
+        if (budget.expired(io)) {
+            // Stop in the middle of the work, or stop after one last push
+            // that is told to edit? A review that ran out of time with
+            // nothing changed is worth less than one that ran out of time
+            // with a small diff, and the model has already done the reading.
+            net.note(io, arena, "microagent: budget of {d}s reached after {d} turn(s); one final turn\n", .{ opts.budget_s.?, turn });
+            try appendMessage(gpa, msgs, "user", final_push);
+            _ = try runTurn(client, io, turn_arena, gpa, opts, msgs, session, &usage, budget.withGraceNs(final_push_grace_s));
+            return;
         }
         // The ceiling is announced on the turn it applies to, before it is
         // spent, so a truncated answer is never the last thing on stdout with no
@@ -736,14 +785,15 @@ fn run(
             net.note(io, arena, "microagent: last turn (--max-turns {d})\n", .{opts.max_turns});
         try compactMessages(gpa, msgs, turn_arena);
         // The model stopped asking for tools, so the run is over.
-        if (!try runTurn(client, io, turn_arena, gpa, opts, msgs, session, &usage)) return;
+        if (!try runTurn(client, io, turn_arena, gpa, opts, msgs, session, &usage, budget)) return;
     }
     net.note(io, arena, "microagent: stopped at the --max-turns ceiling ({d})\n", .{opts.max_turns});
 }
 
 /// One request and everything its answer causes: the completion, the assistant
 /// message and tool results it appends, the usage line, and the session record.
-/// False when the response asked for no tools, which ends the loop.
+/// False when the response asked for no tools, which ends the loop, and when
+/// the budget cut the turn off before there was a turn to append.
 fn runTurn(
     client: *std.http.Client,
     io: Io,
@@ -753,16 +803,23 @@ fn runTurn(
     msgs: *std.ArrayList(u8),
     session: ?Session,
     usage: *Usage,
+    budget: Budget,
 ) !bool {
     const body = try buildBody(arena, opts, msgs.items);
     const asked = Io.Timestamp.now(io, .awake).nanoseconds;
-    var result = try streamChat(client, io, gpa, arena, opts, body);
+    // A turn the budget cut off is not a turn: half a tool call's arguments is
+    // not a tool call, so nothing of it is appended and the run ends here with
+    // the reason already on stderr.
+    var result = streamChat(client, io, gpa, arena, opts, body, budget) catch |err| switch (err) {
+        error.BudgetExhausted => return false,
+        else => return err,
+    };
     defer result.deinit(gpa);
     // The model time is taken here, before the tool calls `finishTurn` runs:
     // the record says how long the model generated, and a gap that spans the
     // tools would report a rate for a generation that was never continuous.
     const model_ms = elapsedMs(io, asked);
-    try finishTurn(io, arena, gpa, msgs, &result, usage);
+    try finishTurn(io, arena, gpa, msgs, &result, usage, budget);
     writeSessionRecord(io, arena, session, model_ms, &result);
     return result.calls.items.len != 0;
 }
@@ -918,6 +975,11 @@ fn sessionRecord(
     try writeJsonString(w, cwd);
     try w.writeAll(",\"model\":");
     try writeJsonString(w, model);
+    // Why the provider stopped, so a record that was cut at the generation
+    // ceiling is distinguishable from one that ran to its own end. The empty
+    // string is a stream that carried no finish_reason at all.
+    try w.writeAll(",\"finish_reason\":");
+    try writeJsonString(w, result.finish_reason);
     try w.print(",\"elapsed_ms\":{d},\"usage\":{{" ++ usage_fields, .{
         elapsed_ms, result.prompt_tokens, result.cached_tokens, result.completion_tokens, result.reasoning_tokens, result.total_tokens,
     });
@@ -968,6 +1030,7 @@ fn streamChat(
     arena: std.mem.Allocator,
     opts: Options,
     body: []const u8,
+    budget: Budget,
 ) !ChatResult {
     const url = try std.fmt.allocPrint(arena, "{s}/chat/completions", .{std.mem.trimEnd(u8, opts.base_url, "/")});
     const uri = std.Uri.parse(url) catch return error.InvalidUrl;
@@ -1072,6 +1135,15 @@ fn streamChat(
     var done = false;
     var unparsable: usize = 0;
     while (!done) {
+        // Between reads, because a read is the one thing here that cannot be
+        // interrupted: a provider that is slow rather than gone has to cost the
+        // run its budget and stop there, not a caller's whole review timeout.
+        if (budget.expired(io)) {
+            net.note(io, arena, "microagent: the time budget ran out after {d} byte(s) of content and {d} tool call(s) from {s}; the turn is discarded\n", .{
+                result.content.items.len, calls.items.len, url,
+            });
+            return error.BudgetExhausted;
+        }
         // A read that fails mid-stream is a dropped connection, not an end of
         // response. The cause is named before it propagates, because by the
         // time the run's error line is written the only record of what arrived
@@ -1117,6 +1189,16 @@ fn streamChat(
         net.note(io, arena, "{s}\n", .{notice});
         return error.StreamTruncated;
     }
+    // `length` is the provider saying it stopped at `max_tokens`. The frame
+    // arrived and the stream terminated cleanly, so nothing here is broken: the
+    // response is simply the prefix of what the model meant to say, and a
+    // truncated tool call's arguments are not JSON the next turn can dispatch.
+    // A run that printed it as a finished answer would be reporting a cut
+    // generation as the review's result.
+    if (std.mem.eql(u8, result.finish_reason, "length"))
+        net.note(io, arena, "microagent: the response from {s} hit the generation ceiling (max_tokens {d}) after {d} byte(s) of content and {d} tool call(s); the turn is incomplete\n", .{
+            url, opts.max_tokens, result.content.items.len, calls.items.len,
+        });
     if (result.content.items.len > 0) try out_buf.append(gpa, '\n');
     flushOut(io, &out_buf);
     result.calls = calls;
@@ -1332,6 +1414,14 @@ fn applyFrame(
     if (choices != .array or choices.array.items.len == 0) return;
     const choice = choices.array.items[0];
     if (choice != .object) return;
+    // Why the provider stopped, on the last frame that carries it. `length`
+    // means the response was cut at `max_tokens`; the caller says so rather
+    // than appending a prefix of an answer as if it were the whole one.
+    if (str(choice.object.get("finish_reason"))) |reason| {
+        const owned = try gpa.dupe(u8, reason);
+        result.deinitFinish(gpa);
+        result.finish_reason = owned;
+    }
     const delta = choice.object.get("delta") orelse return;
     if (delta != .object) return;
 
@@ -1627,13 +1717,21 @@ fn finishTurn(
     msgs: *std.ArrayList(u8),
     result: *ChatResult,
     usage: *Usage,
+    budget: Budget,
 ) !void {
     try msgs.appendSlice(gpa, ",");
     try msgs.appendSlice(gpa, try assistantMessage(arena, result));
 
     for (result.calls.items) |call| {
-        const output = runTool(io, arena, call) catch |err|
-            try std.fmt.allocPrint(arena, "error: {s}", .{@errorName(err)});
+        // A call the budget will not pay for still gets a tool message. An
+        // assistant turn that names calls the conversation never answers is one
+        // the next request rejects, so the loop below would spend a turn on a
+        // 400 instead of on the answer.
+        const output = if (budget.expired(io))
+            try std.fmt.allocPrint(arena, "error: not run, the run's time budget is exhausted", .{})
+        else
+            runTool(io, arena, call) catch |err|
+                try std.fmt.allocPrint(arena, "error: {s}", .{@errorName(err)});
         var tool_msg = JsonBuf.init(arena);
         try tool_msg.writer().writeAll(",{\"role\":\"tool\",\"tool_call_id\":");
         try writeJsonString(tool_msg.writer(), call.id);
@@ -2089,10 +2187,12 @@ const Captured = struct {
 /// bytes past the cap are drained and dropped instead: the child still runs to
 /// its own end, so the exit status and the timeout keep meaning what they did.
 ///
-/// The process group is this one's, as in `runToolProcess`. A `bash` call is the
-/// one the model runs a build through, so it is the one most likely to leave a
-/// compiler or a test server behind when the timeout fires: killing only the
-/// shell that was spawned leaves the tree it started running.
+/// The child leads its own process group and the whole group is signalled on the
+/// way out, for the reason `runToolProcess` gives: a model-supplied `bash`
+/// command that backgrounds work and exits leaves that work holding a port, a
+/// build cache or a database lock for every later turn of the run and for
+/// whatever starts next, and a timeout that fires while the shell is still there
+/// leaves the compiler or test server it launched running without it.
 fn runCapped(
     io: Io,
     arena: std.mem.Allocator,
@@ -2102,16 +2202,14 @@ fn runCapped(
 ) !Captured {
     var child = try std.process.spawn(io, .{
         .argv = argv,
-        // Its own group, like every other tool subprocess: a command that
-        // backgrounds work, or times out holding its pipes open, must not
-        // leave a build tree running behind the call.
-        .pgid = 0,
+        .pgid = 0, // its own group leader, so the group signal stays ours
         .stdin = .ignore,
         .stdout = .pipe,
         .stderr = .pipe,
     });
     // Every exit path signals the whole group and then reaps the direct child,
-    // so a timeout leaves neither an orphan nor a zombie.
+    // so a timeout leaves neither an orphan nor a zombie. The group is
+    // published while it runs, so Ctrl+C reaches it, and cleared on the way out.
     const pgid: ?std.posix.pid_t = if (builtin.os.tag == .windows) null else @intCast(child.id.?);
     defer {
         watchToolGroup(null);
@@ -2766,11 +2864,12 @@ test "session record carries one response's counters, cwd and model time" {
     result.completion_tokens = 18;
     result.reasoning_tokens = 0;
     result.total_tokens = 928;
+    result.finish_reason = try arena.dupe(u8, "stop");
 
     const line = try sessionRecord(arena, 1759000000000, "/home/me/proj", "deepseek/deepseek-v4-flash", 1234, &result);
     try std.testing.expectEqualStrings(
         "{\"ts\":1759000000000,\"cwd\":\"/home/me/proj\",\"model\":\"deepseek/deepseek-v4-flash\"," ++
-            "\"elapsed_ms\":1234,\"usage\":{\"prompt_tokens\":910,\"cached_tokens\":832," ++
+            "\"finish_reason\":\"stop\",\"elapsed_ms\":1234,\"usage\":{\"prompt_tokens\":910,\"cached_tokens\":832," ++
             "\"completion_tokens\":18,\"reasoning_tokens\":0,\"total_tokens\":928}}\n",
         line,
     );
@@ -2783,6 +2882,7 @@ test "session record escapes a directory that needs it" {
     const line = try sessionRecord(state.allocator(), 1, "/tmp/a\"b\\c", "m", 5, &result);
     try std.testing.expectEqualStrings(
         "{\"ts\":1,\"cwd\":\"/tmp/a\\\"b\\\\c\",\"model\":\"m\"," ++
+            "\"finish_reason\":\"\"," ++
             "\"elapsed_ms\":5,\"usage\":{\"prompt_tokens\":0,\"cached_tokens\":0," ++
             "\"completion_tokens\":4,\"reasoning_tokens\":0,\"total_tokens\":0}}\n",
         line,
@@ -3280,6 +3380,101 @@ test "backoff doubles, caps, and never overflows an attempt counter" {
     try std.testing.expectEqual(max_backoff_ms, backoffMs(1000));
 }
 
+// The budget is a deadline, not a turn counter. Checked only at the top of the
+// loop, a provider that is slow rather than broken hands the run one long turn
+// and the budget is never asked again, which is the run being killed in the
+// middle of the turn the budget exists to avoid.
+test "the time budget is a deadline the turn itself is held to" {
+    const io = std.testing.io;
+    const now = Io.Timestamp.now(io, .awake).nanoseconds;
+
+    // No budget set is a budget that never runs out, at any point in a turn.
+    const none = Budget.of(now, null);
+    try std.testing.expect(!none.set());
+    try std.testing.expect(!none.expired(io));
+
+    const short = Budget.of(now, 1);
+    try std.testing.expect(short.set());
+    try std.testing.expect(!short.expired(io));
+
+    // A deadline already in the past is spent, wherever it is read.
+    const spent = Budget.of(now, 0);
+    try std.testing.expect(spent.expired(io));
+    const long_gone = Budget.of(now - std.time.ns_per_s * 10, 1);
+    try std.testing.expect(long_gone.expired(io));
+
+    // The final push is the one turn allowed past the budget, and the grace is
+    // what keeps that turn bounded too: the grace moves the deadline later, so
+    // the push is not already over before it starts.
+    const push = short.withGraceNs(final_push_grace_s);
+    try std.testing.expect(!push.expired(io));
+    const push_later = spent.withGraceNs(final_push_grace_s);
+    try std.testing.expect(!push_later.expired(io));
+    // Grace on a run with no budget is still no budget.
+    try std.testing.expect(!none.withGraceNs(final_push_grace_s).set());
+}
+
+// A generation the provider cut at `max_tokens` arrives with a clean
+// terminator, so nothing else in the run knows the answer is a prefix of what
+// the model meant to say. The reason has to survive the frame that carries it.
+test "a response cut at the generation ceiling says so" {
+    var sink = FrameSink.init(std.testing.allocator);
+    defer sink.deinit();
+
+    try sink.feed("{\"choices\":[{\"delta\":{\"content\":\"half a sen\"}}]}");
+    try std.testing.expectEqualStrings("", sink.result.finish_reason);
+
+    try sink.feed("{\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}");
+    try std.testing.expectEqualStrings("length", sink.result.finish_reason);
+
+    // A later frame's reason replaces the earlier one, and the string is
+    // copied out of the frame arena, which the caller resets after every frame.
+    try sink.feed("{\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}");
+    try std.testing.expectEqualStrings("stop", sink.result.finish_reason);
+
+    // A reason that is not a string, or is null, leaves the last one standing.
+    try sink.feed("{\"choices\":[{\"delta\":{},\"finish_reason\":7}]}");
+    try sink.feed("{\"choices\":[{\"delta\":{},\"finish_reason\":null}]}");
+    try std.testing.expectEqualStrings("stop", sink.result.finish_reason);
+}
+
+// A model command that backgrounds work and exits is the shape that used to
+// leave a process holding the run's ports after the call returned.
+test "a capped tool call takes its process tree down with it" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const pid_path = try std.fs.path.join(arena, &.{ path_buf[0..n], "grandchild.pid" });
+
+    // The shell exits at once; the grandchild holds the pipe open, so the read
+    // only ends at the timeout, which is the path under test. `$!` and not
+    // `$$`: inside a nested `sh -c` the latter is still the outer shell's pid,
+    // which has already exited, so the check below would pass on a process
+    // that was never running.
+    const script = try std.fmt.allocPrint(arena, "sh -c 'sleep 30 & echo $! > {s}; wait' & exit 0", .{pid_path});
+    try std.testing.expectError(error.Timeout, runCapped(io, arena, &.{ "/bin/sh", "-c", script }, 4096, durationMs(300)));
+
+    const raw = tmp.dir.readFileAlloc(io, "grandchild.pid", arena, .limited(64)) catch return error.GrandchildNotReported;
+    const pid = try std.fmt.parseInt(std.posix.pid_t, std.mem.trim(u8, raw, " \t\r\n"), 10);
+    // The kill is delivered asynchronously and the orphan is reaped by init
+    // afterwards, so "gone" is a short poll rather than an instant check.
+    var attempt: usize = 0;
+    while (attempt < 50) : (attempt += 1) {
+        std.posix.kill(pid, .CONT) catch return;
+        try io.sleep(.{ .nanoseconds = 20 * std.time.ns_per_ms }, .awake);
+    }
+    std.debug.print("grandchild {d} survived the tool call\n", .{pid});
+    return error.GrandchildSurvived;
+}
+
 // A run that starts twice, or two runs that start together, can read the same
 // wall-clock stamp. The second one must write beside the first: truncating it
 // would leave the store holding one run's records labelled as another's.
@@ -3541,9 +3736,12 @@ test "a tool call that times out leaves no process of its own behind" {
     const n = try tmp.dir.realPath(io, &path_buf);
     const pid_path = try std.fs.path.join(arena, &.{ path_buf[0..n], "grandchild.pid" });
     // The grandchild holds the pipe open, so the read only ends when the
-    // timeout fires, which is the path under test.
+    // timeout fires, which is the path under test. `$!` and not `$$`: inside a
+    // nested `sh -c` the latter is still the outer shell's pid, so the check
+    // below would be about a process that had already exited rather than about
+    // the grandchild the group signal exists to take down.
     const script = try std.fmt.allocPrint(arena,
-        \\sh -c 'echo $$ > {s}; sleep 30' &
+        \\sh -c 'sleep 30 & echo $! > {s}; wait' &
         \\sleep 30
     , .{pid_path});
     try std.testing.expectError(error.Timeout, runToolProcess(arena, io, &.{ "/bin/sh", "-c", script }, 4096, 4096, durationMs(300)));

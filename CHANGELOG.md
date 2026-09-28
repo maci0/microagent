@@ -80,6 +80,22 @@ release, and `microagent update` moves you to it.
 - `--budget` and `MICROAGENT_BUDGET_SECONDS` take a value with surrounding whitespace, as
   `--max-turns` and `MICROAGENT_MAX_TURNS` already did. `export MICROAGENT_BUDGET_SECONDS="$(cat f)"`
   kept a trailing newline and was refused where the other ceilings were not.
+- The time budget is now a deadline the turn is held to, not a check between turns. `--budget` was
+  only read at the top of the tool loop, so a provider that was slow rather than broken handed the
+  run one long turn, the budget was never asked again, and the run was killed in the middle of the
+  turn the budget exists to avoid. It is now checked between stream reads and before each tool call:
+  a turn cut off that way is discarded rather than half-appended, tool calls the budget will not pay
+  for get a tool result saying so, and the one final push is allowed 5 minutes past the budget so it
+  is bounded too.
+- A response cut at `--max-tokens` is no longer reported as a finished answer. The provider sends
+  `finish_reason: "length"` with a clean terminator, so nothing in the run could tell a complete
+  turn from the prefix of one, and a tool call whose arguments were cut mid-JSON looked like one the
+  model had finished sending. The reason is read from the stream, noted on stderr, and recorded per
+  response in the session log as `finish_reason`.
+- A `bash` call no longer leaves its process tree behind. The child leads its own process group and
+  the group is signalled on the way out, as the search and git tools already did: a model-supplied
+  command that backgrounds work and exits left that work holding a port, a build cache or a lock for
+  every later turn of the run and for whatever started next.
 
 - A `bash` call can no longer run without a deadline. `timeout_ms` is model output and was taken as
   sent, so a value past anything a run survives left the child with no timeout at all and the
