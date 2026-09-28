@@ -25,6 +25,14 @@ release, and `microagent update` moves you to it.
   `ruff` also runs the security, naming, builtin-shadowing, logging and import
   convention groups, which the tree already passed. `yamllint` covers
   `.github/actions/setup-zig/action.yml` as well as the workflows.
+- `ruff` also runs the annotation and boolean-argument groups, so a new Harbor
+  function without annotations or a boolean positional argument is caught rather than
+  shipped, and `C901` is measured against a `max-complexity` written down in `ruff.toml`
+  instead of the default. The adapter already passed all three.
+- The lint job runs `make lint-versions`, the check that keeps the version pinned in
+  `lint-requirements.txt` and the one named in the Makefile from drifting. It was in
+  `make check` but not in CI, so a bump that forgot one of the two files only failed for
+  whoever ran the gate locally.
 - `THREAT_MODEL.md`: the attack surface as a whole, entry points, trust boundaries, assets,
   the threats on each boundary, the controls the code implements and the gaps it does not
   cover, each with a file reference.

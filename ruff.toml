@@ -1,7 +1,7 @@
 # The Python in integrations/harbor is small but real: it drives the benchmark
 # adapter, so a typo in it silently reports the wrong reward. `make check` runs
-# `ruff check` and `ruff format --check` against this file, and CI runs the same
-# commands.
+# `ruff check` and `ruff format --check` against these files, and CI runs the
+# same commands.
 line-length = 120
 
 lint.select = [
@@ -23,9 +23,12 @@ lint.select = [
     "S",    # bandit, security defects
     "N",    # pep8-naming
     "A",    # shadowed builtins
+    "ANN",  # annotations on every signature, so a new one is checked
     "BLE",  # blind except
+    "C90",  # mccabe complexity, capped below
     "DTZ",  # naive datetime calls
     "EXE",  # shebang and executable rules
+    "FBT",  # a boolean argument reads at the call site as a plain flag
     "G",    # logging format
     "ISC",  # implicit string concatenation
     "ICN",  # import conventions
@@ -44,3 +47,8 @@ lint.ignore = [
     # naming it would only move the number somewhere else.
     "PLR2004",
 ]
+
+# The cap C901 measures against, written down rather than left at ruff's
+# default so a bump is a line someone edited on purpose.
+[lint.mccabe]
+max-complexity = 10

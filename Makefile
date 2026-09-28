@@ -15,8 +15,7 @@ BIN := zig-out/bin/microagent
 export LC_ALL := C
 export TZ := UTC
 
-.PHONY: default help build small musl test test-one fmt fmt-python lint lint-versions print-lint-versions lint-shell lint-python lint-yaml check bench overhead install release-assets checksums clean
-.PHONY: default help build small musl test test-one fmt fmt-python lint lint-versions print-lint-versions lint-shell lint-python lint-yaml check bench overhead install release-assets checksums clean
+.PHONY: default help build small musl test test-one fmt fmt-python lint lint-versions lint-shell lint-python lint-yaml check bench overhead install release-assets checksums clean
 
 # The targets `microagent update` asks for, in the names release.yml publishes.
 # ci.yml rehearses the same list on every push and release.yml publishes it, so

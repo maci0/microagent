@@ -96,6 +96,13 @@ jobs:
           python3 -m pip install --disable-pip-version-check --require-hashes \
             -r lint-requirements.txt
 
+      # `make check` runs this before the linters, and it is the check that
+      # keeps the version in lint-requirements.txt and the one in the Makefile
+      # from drifting. A bump to either that forgets the other would otherwise
+      # only be caught by whoever ran the gate locally.
+      - name: the installed linters are the versions the Makefile names
+        run: make lint-versions
+
       - name: the shell scripts parse and are shellcheck-clean
         run: make lint-shell
 

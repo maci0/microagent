@@ -39,7 +39,8 @@ make lint                   # shellcheck, ruff and yamllint on their own
 
 `make check` is the whole gate: it is the same `zig fmt --check`, the same
 `ruff check`, `ruff format --check` and `yamllint`, the same `zig build test`,
-and the same `ReleaseSmall` build whose binary it then runs, that
+the same `make lint-versions`, and the same `ReleaseSmall` build whose binary
+it then runs, that
 [.github/workflows/ci.yml](.github/workflows/ci.yml) runs, on the same Zig
 version. Two things it does not stand in for: the release-assets
 cross-build (`make release-assets` runs that, and CI adds a byte-identical
