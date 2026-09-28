@@ -349,6 +349,21 @@ returns `401 The API Key appears to be invalid or may have expired` against
 `https://api.kimi.com/coding/v1`. A zero recorded from a failed setup would be a lie, so there is no
 kimi column rather than a zero column.
 
+## Harness faults found by running the benchmarks
+
+Two of these cost whole tasks before they were fixed, and neither was visible without a real
+benchmark run:
+
+| fault | symptom | fix |
+| --- | --- | --- |
+| The API key was passed as a *privileged header* | every provider answered `401 No cookie auth credentials found`; the key was never on the wire | send it as the request's `authorization` header (`Headers.authorization = .override`), with a regression test |
+| A tool's timeout ignored the budget | a two-minute `bash` call started at second 779 of a 780 s budget; the caller killed the task mid-command (Terminal-Bench 2 `adaptive-rejection-sampler`) | clamp every tool timeout to the time left, floor 5 s |
+| The budget did not fit the caller's timeout | microagent's final push may run 300 s past its budget, so a 780 s budget inside a 900 s task timeout was still killed | the adapter derives the budget from the timeout it is given, leaving the grace plus margin |
+
+Terminal-Bench 2, same five tasks, after the fixes: **5/5 trials completed, 0 exceptions, 3/5 solved,
+10m55s**. Before them the same set lost a task to `RuntimeError: Command timed out after 880 seconds`
+and another to the agent timeout.
+
 ## Head to head with opencode
 
 The same machine, the same 13 SWE-bench instances, the same model
