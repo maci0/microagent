@@ -9,6 +9,7 @@ const std = @import("std");
 const Io = std.Io;
 
 const build_options = @import("build_options");
+const net = @import("net.zig");
 const style_mod = @import("style.zig");
 const update_mod = @import("update.zig");
 
@@ -127,10 +128,7 @@ pub fn main(init: std.process.Init) !void {
     if (init.environ_map.get("MICROAGENT_MODEL")) |v| opts.model = v;
     if (init.environ_map.get("MICROAGENT_BASE_URL")) |v| opts.base_url = v;
     if (init.environ_map.get("MICROAGENT_REASONING_EFFORT")) |v| opts.reasoning_effort = v;
-    if (init.environ_map.get("MICROAGENT_CA_BUNDLE")) |v| opts.ca_bundle = v;
-    if (opts.ca_bundle.len == 0) {
-        if (init.environ_map.get("SSL_CERT_FILE")) |v| opts.ca_bundle = v;
-    }
+    opts.ca_bundle = net.caBundlePath(init.environ_map);
     if (init.environ_map.get("MICROAGENT_BUDGET_SECONDS")) |v|
         opts.budget_s = std.fmt.parseInt(u64, v, 10) catch return usageError(io, "MICROAGENT_BUDGET_SECONDS must be a number");
     opts.session_dir = sessionDir(init);
@@ -202,7 +200,7 @@ pub fn main(init: std.process.Init) !void {
 
     var client: std.http.Client = .{ .allocator = gpa, .io = io };
     defer client.deinit();
-    loadCaBundle(&client, io, gpa, opts.ca_bundle, init.arena.allocator());
+    net.loadCaBundle(&client, io, gpa, opts.ca_bundle, init.arena.allocator());
 
     // The conversation is kept as the literal JSON array the API wants, so a
     // message is appended once, in the wire format, with no model in between.
@@ -280,30 +278,6 @@ fn usageError(io: Io, arg: []const u8) noreturn {
     std.process.exit(2);
 }
 
-/// Points the TLS client at a PEM file when one was named. Many container
-/// images (bare ubuntu, distroless) ship no ca-certificates at all, and the
-/// client's own rescan then fails with TlsInitializationFailed before a single
-/// request is sent. A path that cannot be read is a warning, not a failure: the
-/// client falls back to scanning the system store. `update.zig` calls this for
-/// its own GitHub client.
-pub fn loadCaBundle(
-    client: *std.http.Client,
-    io: Io,
-    gpa: std.mem.Allocator,
-    path: []const u8,
-    arena: std.mem.Allocator,
-) void {
-    if (path.len == 0) return;
-    const abs = std.fs.path.resolve(arena, &.{path}) catch path;
-    const now = Io.Clock.real.now(io);
-    client.ca_bundle.addCertsFromFilePathAbsolute(gpa, io, now, abs) catch |err| {
-        announce(io, arena, "microagent: cannot read CA bundle {s}: {s}; scanning the system store instead\n", .{ path, @errorName(err) });
-        return;
-    };
-    // Non-null `now` is how the client knows the bundle is already populated.
-    client.now = now;
-}
-
 fn resolveKey(init: std.process.Init, given: []const u8) []const u8 {
     if (given.len > 0) return given;
     const names = [_][]const u8{ "MICROAGENT_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY" };
@@ -343,7 +317,7 @@ fn loadStyle(io: Io, init: std.process.Init, arena: std.mem.Allocator) style_mod
     const abs = std.fs.path.resolve(arena, &.{path}) catch path;
     const text = std.Io.Dir.cwd().readFileAlloc(io, abs, arena, .limited(64 * 1024)) catch return style;
     if (style.applyToml(text)) |key|
-        announce(io, arena, "microagent: config {s}: '{s}' is not a level; keeping the default\n", .{ path, key });
+        net.note(io, arena, "microagent: config {s}: '{s}' is not a level; keeping the default\n", .{ path, key });
     return style;
 }
 
@@ -369,7 +343,7 @@ fn run(
                 // that is told to edit? A review that ran out of time with
                 // nothing changed is worth less than one that ran out of time
                 // with a small diff, and the model has already done the reading.
-                announce(io, arena, "microagent: budget of {d}s reached after {d} turn(s); one final turn\n", .{ budget, turn });
+                net.note(io, arena, "microagent: budget of {d}s reached after {d} turn(s); one final turn\n", .{ budget, turn });
                 try appendMessage(gpa, msgs, "user", final_push);
                 const body = try buildBody(arena, opts, msgs.items);
                 const asked = Io.Timestamp.now(io, .awake).nanoseconds;
@@ -390,17 +364,10 @@ fn run(
         // One turn left: say so, rather than ending on a truncated answer that
         // reads like a finished one.
         if (turn + 1 == opts.max_turns - 1)
-            announce(io, arena, "microagent: last turn (--max-turns {d})\n", .{opts.max_turns});
+            net.note(io, arena, "microagent: last turn (--max-turns {d})\n", .{opts.max_turns});
     }
-    announce(io, arena, "microagent: stopped at the --max-turns ceiling ({d})\n", .{opts.max_turns});
+    net.note(io, arena, "microagent: stopped at the --max-turns ceiling ({d})\n", .{opts.max_turns});
     return turn;
-}
-
-/// A line on stderr, which is where gauntlet shows harness notes; stdout stays
-/// the model's own words and the usage line.
-fn announce(io: Io, arena: std.mem.Allocator, comptime fmt: []const u8, args: anytype) void {
-    const msg = std.fmt.allocPrint(arena, fmt, args) catch return;
-    Io.File.stderr().writeStreamingAll(io, msg) catch {};
 }
 
 /// Where the session log goes: MICROAGENT_SESSION_DIR, else a directory beside
@@ -892,7 +859,7 @@ fn runTool(io: Io, arena: std.mem.Allocator, call: ToolCall) ![]u8 {
         else => return std.fmt.allocPrint(arena, "error: tool arguments must be an object", .{}),
     };
 
-    note(io, arena, call.name, args);
+    noteToolCall(io, arena, call.name, args);
     if (std.mem.eql(u8, call.name, "bash")) return toolBash(io, arena, args);
     if (std.mem.eql(u8, call.name, "read")) return toolRead(io, arena, args);
     if (std.mem.eql(u8, call.name, "write")) return toolWrite(io, arena, args);
@@ -904,7 +871,7 @@ fn runTool(io: Io, arena: std.mem.Allocator, call: ToolCall) ![]u8 {
 }
 
 /// A one-line tool gutter on stderr, the shape gauntlet recognizes.
-fn note(io: Io, arena: std.mem.Allocator, name: []const u8, args: std.json.ObjectMap) void {
+fn noteToolCall(io: Io, arena: std.mem.Allocator, name: []const u8, args: std.json.ObjectMap) void {
     // The interesting argument is not the same one for every tool: a structural
     // search is identified by its pattern, a bash call by its command.
     const detail = if (std.mem.eql(u8, name, "ast"))
@@ -1458,7 +1425,7 @@ test "a CA bundle path that cannot be read falls back to the system store" {
     var client: std.http.Client = .{ .allocator = gpa, .io = io };
     defer client.deinit();
 
-    loadCaBundle(&client, io, gpa, "/nonexistent/ca-bundle.pem", arena_state.allocator());
+    net.loadCaBundle(&client, io, gpa, "/nonexistent/ca-bundle.pem", arena_state.allocator());
     try std.testing.expect(client.now == null);
 }
 

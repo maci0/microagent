@@ -1,4 +1,4 @@
-//! Reply-style modes appended to the system prompt, set from one JSON config.
+//! Reply-style modes appended to the system prompt, set from one TOML config.
 //!
 //! Two independent knobs, both a level the task asked for and both a prompt
 //! fragment rather than a code path:

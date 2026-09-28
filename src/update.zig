@@ -8,7 +8,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const main_mod = @import("main.zig");
+const net = @import("net.zig");
 
 const version = @import("build_options").version;
 
@@ -539,10 +539,9 @@ fn loadCaBundle(
     arena: std.mem.Allocator,
     env: *std.process.Environ.Map,
 ) void {
-    var path: []const u8 = env.get("MICROAGENT_CA_BUNDLE") orelse "";
-    if (path.len == 0) path = env.get("SSL_CERT_FILE") orelse "";
+    const path: []const u8 = net.caBundlePath(env);
     if (path.len == 0) return;
-    main_mod.loadCaBundle(client, io, gpa, path, arena);
+    net.loadCaBundle(client, io, gpa, path, arena);
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
