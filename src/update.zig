@@ -191,6 +191,25 @@ pub fn trustedGithubUrl(url: []const u8) bool {
     return hostTrusted(host);
 }
 
+/// The `Authorization` value for a request to `url`, or null when that request
+/// goes without one.
+///
+/// The token lifts the anonymous rate limit on the releases API, and that API is
+/// the only request here that needs it. The asset and its sidecar are public
+/// release files, and GitHub's asset host serves them without authentication, so
+/// a token carrying repository scope is never presented to a host that had no
+/// reason to see it. The host allowlist already makes every host here GitHub's;
+/// narrowing it to the one API that authenticates keeps the grant as wide as the
+/// check that uses it rather than as wide as the allowlist.
+pub fn bearerFor(url: []const u8, bearer: ?[]const u8) ?[]const u8 {
+    const api = "https://api.github.com/";
+    if (bearer == null or url.len < api.len) return null;
+    for (api, 0..) |c, i| {
+        if (std.ascii.toLower(url[i]) != c) return null;
+    }
+    return bearer;
+}
+
 /// Stdout of `--check` is this URL, or nothing when the page is not a GitHub
 /// https URL.
 pub fn releasePageLine(url: []const u8) error{UntrustedUrl}![]const u8 {
@@ -673,7 +692,7 @@ fn runChecked(
 
     const bearer = githubBearer(arena, env);
     var status: std.http.Status = .ok;
-    const body = fetchBody(&client, gpa, arena, api, bearer, max_api_bytes, &status) catch |err| {
+    const body = fetchBody(&client, gpa, arena, api, bearerFor(api, bearer), max_api_bytes, &status) catch |err| {
         if (err == error.HttpStatus) return fail(io, "GitHub returned HTTP {d} for {s}{s}", .{
             @intFromEnum(status), repo, statusHint(status),
         });
@@ -725,11 +744,11 @@ fn runChecked(
 
     // The URL the response named is unbounded, and these lines print into a
     // fixed buffer, so the asset name is what identifies the download.
-    const asset = fetchBody(&client, gpa, arena, a_url, bearer, max_asset_bytes, &status) catch |err|
+    const asset = fetchBody(&client, gpa, arena, a_url, bearerFor(a_url, bearer), max_asset_bytes, &status) catch |err|
         return downloadFailure(io, asset_name, status, err);
     var side_what_buf: [320]u8 = undefined;
     const side_what = std.fmt.bufPrint(&side_what_buf, "the checksum sidecar for {s}", .{asset_name}) catch asset_name;
-    const sidecar = fetchBody(&client, gpa, arena, s_url, bearer, max_sidecar_bytes, &status) catch |err|
+    const sidecar = fetchBody(&client, gpa, arena, s_url, bearerFor(s_url, bearer), max_sidecar_bytes, &status) catch |err|
         return downloadFailure(io, side_what, status, err);
 
     const decision = decide(.{
@@ -965,6 +984,41 @@ test "update: the GitHub token is trimmed, and an empty one is no token" {
     try std.testing.expectEqualStrings("Bearer ghp_abc123", githubBearer(arena, &env).?);
     try env.put("GITHUB_TOKEN", "  ");
     try std.testing.expect(githubBearer(arena, &env) == null);
+}
+
+// The token exists to lift the anonymous rate limit on the releases API. The
+// asset and its sidecar are public files the asset host serves unauthenticated,
+// so they are fetched without it: a token with repository scope has no business
+// being presented to a host the check never needed to authenticate to. Both URLs
+// pass the host allowlist either way, so the allowlist is not what this narrows.
+test "update: only the releases API carries the GitHub token" {
+    const bearer: ?[]const u8 = "Bearer ghp_abc123";
+    const api = "https://api.github.com/repos/maci0/microagent/releases/latest";
+    const asset = "https://github.com/maci0/microagent/releases/download/v0.2.0/" ++ asset_base;
+    const cdn = "https://release-assets.githubusercontent.com/github-production-release-asset/1";
+
+    try std.testing.expectEqualStrings("Bearer ghp_abc123", bearerFor(api, bearer).?);
+
+    // A public release download, on GitHub's web host and on its asset host
+    // alike: both are trusted enough to install from and neither authenticates.
+    try std.testing.expect(bearerFor(asset, bearer) == null);
+    try std.testing.expect(bearerFor(cdn, bearer) == null);
+    try std.testing.expect(bearerFor(asset ++ ".sha256", bearer) == null);
+
+    // A lookalike host is not the API, and an API reached by another name is not
+    // the API: the prefix has to be the whole scheme, host and path root.
+    try std.testing.expect(bearerFor("https://api.github.com.evil.com/repos/o/r", bearer) == null);
+    try std.testing.expect(bearerFor("https://user@api.github.com/repos/o/r", bearer) == null);
+    try std.testing.expect(bearerFor("https://evil.com/https://api.github.com/", bearer) == null);
+    try std.testing.expect(bearerFor("https://api.github.com", bearer) == null);
+    // The scheme and host are compared the way `trustedGithubUrl` compares them,
+    // so a caller that spells the API in upper case still authenticates rather
+    // than being silently sent unauthenticated.
+    try std.testing.expectEqualStrings("Bearer ghp_abc123", bearerFor("HTTPS://API.GITHUB.COM/repos/o/r", bearer).?);
+
+    // No token is no token on either side of the rule.
+    try std.testing.expect(bearerFor(api, null) == null);
+    try std.testing.expect(bearerFor(asset, null) == null);
 }
 
 test "update: checksum line is the published hex, two spaces, and the basename" {

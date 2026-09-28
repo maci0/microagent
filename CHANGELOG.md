@@ -502,6 +502,11 @@ release, and `microagent update` moves you to it.
 - The stderr tool gutter stays one line. A model that puts a newline or an escape sequence in a path,
   pattern or command broke the `⏺ tool detail` shape a reader parses, and could drive the reader's
   terminal with an escape sequence; control characters are now written as `\xNN`.
+- `microagent update` sends `GITHUB_TOKEN` to the releases API only. The token exists to lift the
+  anonymous rate limit, and the release asset and its `.sha256` sidecar are public files that GitHub's
+  asset host serves unauthenticated, so a token carrying repository scope was being presented to a
+  host the download never needed to authenticate to. Both URLs already passed the GitHub host
+  allowlist, so this narrows the grant rather than the hosts it is allowed to reach.
 
 ## [0.2.0] - 2026-09-29
 
