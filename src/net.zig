@@ -119,8 +119,9 @@ pub fn homeDir(env: *const std.process.Environ.Map) ?[]const u8 {
     return if (v.len == 0) null else v;
 }
 
-/// The file `path` names once a symlink is followed, which is the file opening
-/// `path` would have written to and the only one a rename may replace.
+/// The file `path` names once every symlink on it is followed, which is the
+/// file opening `path` would have written to and the only one a rename may
+/// replace.
 ///
 /// Both callers need it: `write` and `edit` so a rewrite through a link
 /// replaces the real file and leaves the link a link, and `update` so the
@@ -129,27 +130,73 @@ pub fn homeDir(env: *const std.process.Environ.Map) ?[]const u8 {
 /// inline is where a hardcoded `/` hides: the join goes through
 /// `std.fs.path`, so it uses the separator the target actually has.
 ///
-/// `name_buf` receives the link's own bytes and `join_buf` the answer when the
-/// link is relative; both belong to the caller, and the returned slice is one
-/// of them, or `path` itself when `path` is not a link.
+/// The whole chain is followed, not only the first link. A chain is ordinary on
+/// both platforms this ships to: a version manager pointing at a per-version
+/// binary, a `current`-style symlink pointing at a release symlink. Resolving
+/// one link and stopping there replaces the *middle* of the chain with a
+/// regular file, so the write lands on a copy while the binary the user runs is
+/// the file that was never written, and both links are destroyed doing it.
+///
+/// `name_buf` receives each link's own bytes, and `cur_buf` and `next_buf` the
+/// composed path; the walk alternates between the last two, because the link
+/// read at each step overwrites `name_buf` and the path being resolved must
+/// survive it. All three belong to the caller, and the returned slice is one of
+/// `cur_buf` and `next_buf`, or `path` itself when `path` is not a link.
 pub fn resolveSymlinkTarget(
     io: Io,
     dir: Io.Dir,
     path: []const u8,
     name_buf: []u8,
-    join_buf: []u8,
+    cur_buf: []u8,
+    next_buf: []u8,
 ) ![]const u8 {
-    const n = dir.readLink(io, path, name_buf) catch |err| switch (err) {
-        error.NotLink, error.FileNotFound => return path,
-        else => |e| return e,
-    };
-    const link = name_buf[0..n];
-    if (std.fs.path.isAbsolute(link)) return link;
-    // A relative link is read against the directory holding the link, not
-    // against the process's working directory. A bare name has no directory,
-    // and the caller handed in the directory that name is already relative to.
-    const dir_end = std.fs.path.dirname(path) orelse return link;
-    return std.fmt.bufPrint(join_buf, "{s}{c}{s}", .{ dir_end, std.fs.path.sep, link }) catch link;
+    var spare = cur_buf;
+    var into = next_buf;
+    var cur: []const u8 = path;
+    var depth: usize = 0;
+    while (depth < max_symlink_depth) : (depth += 1) {
+        const n = dir.readLink(io, cur, name_buf) catch |err| switch (err) {
+            error.NotLink, error.FileNotFound => return cur,
+            else => |e| return e,
+        };
+        const link = name_buf[0..n];
+        // A relative link is read against the directory holding the link, not
+        // against the process's working directory. A bare name has no
+        // directory, and the caller handed in the directory that name is
+        // already relative to.
+        const next = if (std.fs.path.isAbsolute(link))
+            try copyInto(into, link)
+        else if (std.fs.path.dirname(cur)) |dir_end|
+            try joinOnto(into, dir_end, link)
+        else
+            try copyInto(into, link);
+        const written = spare;
+        spare = into;
+        into = written;
+        cur = next;
+    }
+    return error.SymlinkLoop;
+}
+
+/// How many links a path may hold before the answer is a cycle rather than a
+/// file. Two links naming each other, or a link into a directory of links, would
+/// otherwise spin here; the kernel refuses a chain this long for the same
+/// reason, so a path that reaches it is not one any of these platforms opens.
+const max_symlink_depth = 32;
+
+fn copyInto(buf: []u8, bytes: []const u8) error{NameTooLong}![]const u8 {
+    if (bytes.len > buf.len) return error.NameTooLong;
+    @memcpy(buf[0..bytes.len], bytes);
+    return buf[0..bytes.len];
+}
+
+fn joinOnto(buf: []u8, dir_end: []const u8, link: []const u8) error{NameTooLong}![]const u8 {
+    const n = dir_end.len + 1 + link.len;
+    if (n > buf.len) return error.NameTooLong;
+    @memcpy(buf[0..dir_end.len], dir_end);
+    buf[dir_end.len] = std.fs.path.sep;
+    @memcpy(buf[dir_end.len + 1 ..][0..link.len], link);
+    return buf[0..n];
 }
 
 /// The index of the next newline in `pending`, or null while the line it would
@@ -409,6 +456,13 @@ test "the home directory is trimmed, and an empty one is no home" {
     try std.testing.expect(homeDir(&env) == null);
 }
 
+/// `resolveSymlinkTarget` over the three caller-owned buffers the tests below
+/// each declare, so a call site reads as the one path under test rather than as
+/// its scratch.
+fn resolveForTest(dir: std.Io.Dir, path: []const u8, name: []u8, a: []u8, b: []u8) ![]const u8 {
+    return resolveSymlinkTarget(std.testing.io, dir, path, name, a, b);
+}
+
 test "a write target follows a symlink, relative or absolute" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -417,7 +471,8 @@ test "a write target follows a symlink, relative or absolute" {
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "sub/real2", .data = "old" });
 
     var name_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var join_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
+    var cur_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
+    var next_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
 
     // A link whose target is written relative to the link's own directory.
     // Resolving it against the working directory instead would name a file
@@ -427,7 +482,7 @@ test "a write target follows a symlink, relative or absolute" {
     defer std.testing.allocator.free(want_rel);
     try std.testing.expectEqualStrings(
         want_rel,
-        try resolveSymlinkTarget(std.testing.io, tmp.dir, "sub/link", &name_buf, &join_buf),
+        try resolveForTest(tmp.dir, "sub/link", &name_buf, &cur_buf, &next_buf),
     );
 
     // An absolute link needs no join and must not be rewritten as one. The
@@ -441,19 +496,56 @@ test "a write target follows a symlink, relative or absolute" {
     try tmp.dir.symLink(std.testing.io, abs, "abs_link", .{});
     try std.testing.expectEqualStrings(
         abs,
-        try resolveSymlinkTarget(std.testing.io, tmp.dir, "abs_link", &name_buf, &join_buf),
+        try resolveForTest(tmp.dir, "abs_link", &name_buf, &cur_buf, &next_buf),
     );
 
     // A path that is not a link is its own target, and a link with no
     // directory part is already relative to the directory the caller opened.
     try std.testing.expectEqualStrings(
         "real",
-        try resolveSymlinkTarget(std.testing.io, tmp.dir, "real", &name_buf, &join_buf),
+        try resolveForTest(tmp.dir, "real", &name_buf, &cur_buf, &next_buf),
     );
     try tmp.dir.symLink(std.testing.io, "real", "bare", .{});
     try std.testing.expectEqualStrings(
         "real",
-        try resolveSymlinkTarget(std.testing.io, tmp.dir, "bare", &name_buf, &join_buf),
+        try resolveForTest(tmp.dir, "bare", &name_buf, &cur_buf, &next_buf),
+    );
+}
+
+test "a write target follows a whole chain of symlinks, and refuses a cycle" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "real", .data = "old" });
+    try tmp.dir.createDirPath(std.testing.io, "sub");
+
+    var name_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var cur_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
+    var next_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
+
+    // A chain is ordinary: a `microagent` pointing at a per-version binary that
+    // is itself a link into the tree the version was unpacked into. Stopping at
+    // the first link answers `sub/mid`, and a rename there replaces a symlink
+    // with a copy of the file rather than writing the one at the end of it.
+    // The answer is the composed path and is not normalized, because the walk
+    // does path arithmetic and not a filesystem lookup: `sub/../real` is the
+    // name the last link spelled, and the caller opens it as it stands.
+    try tmp.dir.symLink(std.testing.io, "../real", "sub/real2", .{});
+    try tmp.dir.symLink(std.testing.io, "real2", "sub/mid", .{});
+    try tmp.dir.symLink(std.testing.io, "sub/mid", "chain", .{});
+    try std.testing.expectEqualStrings(
+        "sub/../real",
+        try resolveForTest(tmp.dir, "chain", &name_buf, &cur_buf, &next_buf),
+    );
+
+    // A chain that closes on itself names no file, and following it for ever
+    // would hang the run that asked to write through it. The bound the kernel
+    // uses is the one here, so a path that reaches it is one no filesystem on
+    // either platform would open.
+    try tmp.dir.symLink(std.testing.io, "loop_b", "loop_a", .{});
+    try tmp.dir.symLink(std.testing.io, "loop_a", "loop_b", .{});
+    try std.testing.expectError(
+        error.SymlinkLoop,
+        resolveForTest(tmp.dir, "loop_a", &name_buf, &cur_buf, &next_buf),
     );
 }
 

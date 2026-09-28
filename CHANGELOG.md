@@ -31,6 +31,14 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- A write through a chain of symlinks writes the file at the end of the chain
+  rather than replacing the link in the middle of it. Only the first link was
+  resolved, and the rename landed on whatever it named: where a path is a link
+  to a link, as a version manager's `microagent` -> per-version binary is, the
+  write went to a new regular file and both links were gone, so the file the
+  user runs was the one never written. `write`, `edit` and `microagent update`
+  all resolve the whole chain now, and a cycle is refused instead of followed
+  for ever.
 - A tool call the completion stream delivers twice is dispatched once. The
   stream is delivered at least once, and a relay that reconnects replays from
   the last event it saw, so one response can carry the same call under two

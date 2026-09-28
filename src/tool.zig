@@ -895,8 +895,9 @@ pub const permission_bits: std.posix.mode_t = 0o7777;
 /// 0o600 file that comes back 0o644 is a change the run was never asked to make.
 pub fn writeFileAtomic(io: Io, dir: std.Io.Dir, path: []const u8, bytes: []const u8) !void {
     var link_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var join_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
-    const target = try net.resolveSymlinkTarget(io, dir, path, &link_buf, &join_buf);
+    var cur_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
+    var next_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
+    const target = try net.resolveSymlinkTarget(io, dir, path, &link_buf, &cur_buf, &next_buf);
     // Only the permission bits: the stat also carries the file type, and a
     // create mode is a permission set.
     const permissions: Io.File.Permissions = if (dir.statFile(io, target, .{})) |stat|

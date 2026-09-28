@@ -289,8 +289,9 @@ pub fn replaceVerified(
 ) !void {
     if (decision != .replaced) return error.Refused;
     var link_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var joined_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
-    const target = try net.resolveSymlinkTarget(io, dir, dest_name, &link_buf, &joined_buf);
+    var cur_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
+    var next_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
+    const target = try net.resolveSymlinkTarget(io, dir, dest_name, &link_buf, &cur_buf, &next_buf);
 
     var af = try dir.createFileAtomic(io, target, .{ .replace = true, .make_path = true, .permissions = exec_mode });
     defer af.deinit(io);
@@ -1808,6 +1809,34 @@ test "update: replaceVerified follows a symlinked destination" {
     var link_buf: [256]u8 = undefined;
     const n = try tmp.dir.readLink(io, "microagent", &link_buf);
     try std.testing.expectEqualStrings("real_bin", link_buf[0..n]);
+
+    const got = try tmp.dir.readFileAlloc(io, "real_bin", alloc, .limited(64));
+    defer alloc.free(got);
+    try std.testing.expectEqualStrings("new-content", got);
+}
+
+test "update: replaceVerified follows a chain of symlinked destinations" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "real_bin", .data = "old-content" });
+    try tmp.dir.symLink(io, "real_bin", "versioned_bin", .{});
+    try tmp.dir.symLink(io, "versioned_bin", "microagent", .{});
+
+    try replaceVerified(io, tmp.dir, "microagent", .replaced, "new-content");
+
+    // Both links are still links: a resolution that stopped at the first one
+    // replaced `versioned_bin` with a regular file, so the update landed on a
+    // copy and the binary the user runs never changed.
+    var link_buf: [256]u8 = undefined;
+    const outer = try tmp.dir.readLink(io, "microagent", &link_buf);
+    try std.testing.expectEqualStrings("versioned_bin", link_buf[0..outer]);
+    const inner = try tmp.dir.readLink(io, "versioned_bin", &link_buf);
+    try std.testing.expectEqualStrings("real_bin", link_buf[0..inner]);
 
     const got = try tmp.dir.readFileAlloc(io, "real_bin", alloc, .limited(64));
     defer alloc.free(got);
