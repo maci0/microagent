@@ -14,6 +14,17 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 agents=${*:-microagent claude gemini codex crush grok kimi opencode cursor-agent clanker dsh}
 prompt="Reply with exactly: pong"
 
+# The work directory of the agent in flight, and the trap that takes it away on
+# every way out, including a signal. `bench/instructions.sh` has one for the same
+# reason: `rm -rf` on the last line of a loop body is reached only when the body
+# runs to its end, so an interrupt or a failed command left one directory per
+# agent behind in the system temp directory, and the next run started with the
+# pile still there.
+work=
+trap '[ -n "$work" ] && rm -rf "$work"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 printf '%-14s %10s %10s %10s\n' agent startup_ms wall_s tokens
 printf '%s\n' "----------------------------------------------"
 

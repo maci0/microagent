@@ -143,6 +143,14 @@ release, and `microagent update` moves you to it.
   answer to check. `writeFileAtomic` takes no allocator as a result: the two scratch buffers
   it needs are stack, so the arena a caller passed for nothing is gone.
 
+### Removed
+
+- The second copy of the session store in `main.zig`. The run opens, writes and closes its log
+  through `src/session.zig`; `main.zig` kept a parallel `Session` type, its own
+  `createSessionLog`, `pruneSessions` and `sessionRecord`, and a `sessionDir` no call reached, so
+  one file-owning store was spelled twice and only one of them was ever run. The tests beside the
+  dead copy were duplicates of the ones in `session.zig`, which keep every assertion.
+
 ### Fixed
 
 - A base url that is not a url is refused as one. `--base-url api.openai.com/v1` and
@@ -169,6 +177,11 @@ release, and `microagent update` moves you to it.
   and `make musl MUSL_ARCH=<arch>` builds another one. An x86_64 host is
   unaffected. The binary and the `.tmp` it is renamed from are now ignored, as
   `CONTRIBUTING.md` said they were.
+- `bench/overhead.sh` takes its work directory away on a signal. The `rm -rf` was the last
+  statement of the per-agent loop body, so an interrupted run, or one a harness made fail
+  partway, left one `mktemp -d` directory per agent in the system temp directory and the next
+  run started with the pile still there. A trap covers the ways out the last line does not
+  reach, the way `bench/instructions.sh` already does.
 - `integrations/harbor/microagent_agent.py` is formatted the way `ruff format` writes it, so the
   `ruff format --check` step that `make lint-python` and CI both run passes. The file had drifted
   from the formatter after the log-formatting change above it, which left `make check` red on a
