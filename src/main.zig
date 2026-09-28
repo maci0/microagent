@@ -49,11 +49,22 @@ const default_max_tokens: u32 = 65_536;
 /// Parallel tool calls accepted from one response; higher indices are dropped.
 const max_tool_calls = 64;
 /// Ceiling on what one response may add to the run: visible text, and the
-/// arguments of a tool call streamed in fragments. A provider that never sends
-/// `[DONE]` would otherwise grow the run's memory for as long as it keeps
+/// arguments of its tool calls streamed in fragments. A provider that never
+/// sends `[DONE]` would otherwise grow the run's memory for as long as it keeps
 /// sending, and the caller chose the base url, not the server on the other end
-/// of it. Well past any real completion.
+/// of it. Well past any real completion. The argument half is one budget for
+/// the whole response, not one per call: `max_tool_calls` calls at the ceiling
+/// each is a gigabyte the run never asked for.
 const max_response_bytes = 16 * 1024 * 1024;
+/// Ceiling on one line of the completion stream, the bytes between newlines
+/// that `pending` holds for a frame that has not finished arriving.
+/// `max_response_bytes` bounds what a finished frame may add to the turn, so it
+/// never sees a line that never ends: nothing is consumed, the buffer grows by
+/// a read chunk at a time, and a provider that sends `data: ` and no newline
+/// costs the run the whole stream. One line is a frame, and a frame is a
+/// token-sized delta or a fragment of one call's arguments, so this is far
+/// past anything a real completion sends.
+const max_frame_bytes: usize = 1024 * 1024;
 /// The reply-style config is a handful of keys; a bigger file is not one.
 const max_config_bytes: usize = 64 * 1024;
 /// Ceiling on a file `read` returns whole. A source file is kilobytes, so the
@@ -1279,6 +1290,15 @@ fn streamChat(
         };
         if (n == 0) break;
         try pending.appendSlice(gpa, chunk[0..n]);
+        // A line that has not ended by now is not one this turn can carry, and
+        // the buffer below only shrinks on a newline, so the run says so and
+        // ends the turn rather than growing with the rest of the stream.
+        if (pending.items.len > max_frame_bytes) {
+            net.note(io, arena, "microagent: a line of the completion stream from {s} passed {d} byte(s) without ending; the turn is discarded\n", .{
+                shown_url, pending.items.len,
+            });
+            return error.StreamTruncated;
+        }
 
         var start: usize = 0;
         while (nextLineEnd(pending.items, &scanned)) |pos| {
@@ -2484,6 +2504,58 @@ fn contentFrame(gpa: std.mem.Allocator, text: []const u8) ![]u8 {
 
 fn argsFrame(gpa: std.mem.Allocator, text: []const u8) ![]u8 {
     return std.fmt.allocPrint(gpa, "{{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":0,\"function\":{{\"arguments\":\"{s}\"}}}}]}}}}]}}", .{text});
+}
+
+// The arguments ceiling is one budget for the response, not one per call: a
+// provider naming `max_tool_calls` calls and streaming each one to the ceiling
+// would otherwise cost the run that many times over.
+test "the argument ceiling is spent across the response, not handed to each call" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const gpa = state.allocator();
+
+    var result: chat_mod.ChatResult = .{};
+    var calls: std.ArrayList(chat_mod.ToolCall) = .empty;
+    var out_buf: std.ArrayList(u8) = .empty;
+    var unparsable: usize = 0;
+
+    // Fill the budget with one call, exactly as a stream of fragments would.
+    var full: std.ArrayList(u8) = .empty;
+    try full.appendSlice(gpa, "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"");
+    try full.appendNTimes(gpa, 'x', max_response_bytes);
+    try full.appendSlice(gpa, "\"}}]}}]}");
+    try applyFrame(gpa, gpa, full.items, &result, &calls, &out_buf, &unparsable);
+    try std.testing.expectEqual(max_response_bytes, calls.items[0].args.items.len);
+
+    // A second call in the same response gets nothing: the budget is gone.
+    const next = "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"function\":{\"name\":\"bash\",\"arguments\":\"{}\"}}]}}]}";
+    try applyFrame(gpa, gpa, next, &result, &calls, &out_buf, &unparsable);
+    try std.testing.expectEqual(@as(usize, 2), calls.items.len);
+    try std.testing.expectEqualStrings("bash", calls.items[1].name);
+    try std.testing.expectEqual(@as(usize, 0), calls.items[1].args.items.len);
+    try std.testing.expectEqual(max_response_bytes, result.streamed);
+}
+
+// A line of the stream that never ends is the one shape the response ceiling
+// cannot see, because nothing is consumed and nothing is folded into a frame.
+test "a stream line that never ends is bounded" {
+    try std.testing.expect(max_frame_bytes < max_response_bytes);
+
+    // The check is on the buffer, so it is the buffer that has to stop growing.
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const gpa = state.allocator();
+
+    var pending: std.ArrayList(u8) = .empty;
+    try pending.appendNTimes(gpa, 'd', max_frame_bytes + 1);
+    try std.testing.expect(pending.items.len > max_frame_bytes);
+
+    // A line that does end is consumed and dropped, as the loop does, so the
+    // check is on what is left rather than on what has passed through.
+    var complete: std.ArrayList(u8) = .empty;
+    try complete.appendNTimes(gpa, 'd', max_frame_bytes);
+    try complete.append(gpa, '\n');
+    try std.testing.expect(complete.items.len > max_frame_bytes);
 }
 
 test "usage counters land on the result" {
