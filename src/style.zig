@@ -118,6 +118,9 @@ pub const Style = struct {
             if (!ours) continue;
             const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
             const key = std.mem.trim(u8, line[0..eq], " \t");
+            // A line with a value but no key names no setting, and reporting it
+            // would put an empty key in the message the operator reads.
+            if (key.len == 0) continue;
             const value = unquote(std.mem.trim(u8, line[eq + 1 ..], " \t"));
             if (std.mem.eql(u8, key, "caveman")) {
                 if (parseCaveman(value)) |level| {
@@ -334,6 +337,103 @@ test "the config reads either root or [style] keys, and nothing else" {
     const empty = style.applyToml("caveman =\n").?;
     try std.testing.expectEqualStrings("caveman", empty.key);
     try std.testing.expect(empty.bad_value);
+}
+
+// The config file is text this program did not write: a path from a flag, an
+// environment variable, or `$HOME/.microagent/config.toml`. The reader is a
+// hand-written line scanner rather than a TOML parser, so the shapes that break
+// it are its own. `std.testing.fuzz` runs this corpus through the harness on
+// every `zig build test`, and through the fuzzer's mutations when the test
+// binary is built in fuzz mode. Quoted and bare values, both table forms, a
+// comment, a key with no `=`, a section that is never closed, and the empty and
+// control-character cases.
+const config_corpus = [_][]const u8{
+    "",
+    "\n",
+    "\r\n\r\n",
+    "#\n# comment\n",
+    "caveman = \"lite\"\n",
+    "caveman='wenyan'\n",
+    "caveman = ultra\n",
+    "caveman =\n",
+    "caveman\n",
+    "caveman ==\n",
+    " = \"lite\"\n",
+    "[style]\ncaveman = \"off\"\nponytail = \"off\"\n",
+    "[style\ncaveman = \"off\"\n",
+    "style]\ncaveman = \"off\"\n",
+    "[model]\ncaveman = \"off\"\n[style]\nponytail = \"ultra\"\n",
+    "[[style]]\ncaveman = \"off\"\n",
+    "[ style ]\ncaveman = \"off\"\n",
+    "[STYLE]\ncaveman = \"off\"\n",
+    "ponytail = 'ultra' # trailing\ncaveman = \"wenyan-ultra\"\n",
+    "caveman = \"unterminated\n",
+    "caveman = \"\"\n",
+    "caveman = ''\n",
+    "caveman = \"a\\\"b\"\n",
+    "caveman = \"\\u0000\"\n",
+    "caveman = \"  Lite \"\n",
+    "caveman\t=\t\"lite\"\n",
+    "caveman = \"lite\"\r\nponytail = \"lite\"\r\n",
+    "caveman = \"lite\"\ncavman = \"off\"\ncaveman = \"full\"\n",
+    "caveman = \"off\"\n[other]\nponytail = \"off\"\n",
+    "\u{0}caveman = \"lite\"\n",
+    "caveman = \"lit\u{fffd}e\"\n",
+    "caveman = \"off\" ponytail = \"ultra\"\n",
+    "a=b\nc=d\ne=f\ncaveman = \"lite\"\n",
+};
+
+test "style: fuzz: a config document only ever sets a level it can name" {
+    try std.testing.fuzz({}, fuzzConfig, .{ .corpus = &config_corpus });
+
+    // The corpus has to reach the branches the harness asserts about: a level
+    // the parser knows is set, and a key it does not is named rather than
+    // applied.
+    var style: Style = .{};
+    try std.testing.expect(style.applyToml("[style]\ncaveman = \"off\"\n") == null);
+    try std.testing.expectEqual(CavemanLevel.off, style.caveman);
+    const problem = style.applyToml("cavmen = \"off\"\n").?;
+    try std.testing.expectEqualStrings("cavmen", problem.key);
+}
+
+fn fuzzConfig(_: void, smith: *std.testing.Smith) !void {
+    var scratch: [8 * 1024]u8 = undefined;
+    const text = if (smith.in) |seed| seed else scratch[0..smith.slice(&scratch)];
+
+    var style: Style = .{};
+    const problem = style.applyToml(text);
+
+    // Whatever the document said, the levels in force are ones the parsers
+    // accept and the enum can name: a run must not be able to end up in a state
+    // the prompt has no text for.
+    try std.testing.expectEqual(style.caveman, parseCaveman(style.caveman.name()).?);
+    try std.testing.expectEqual(style.ponytail, parsePonytail(style.ponytail.name()).?);
+
+    // The prompt the levels produce is what reaches the provider, so it has to
+    // build for every combination a document can leave behind, and a level that
+    // is off adds nothing to it.
+    const gpa = std.testing.allocator;
+    const block = try style.ruleset(gpa);
+    defer gpa.free(block);
+    if (style.caveman == .off and style.ponytail == .off) {
+        try std.testing.expectEqualStrings("", block);
+    } else {
+        try std.testing.expect(block.len > 0);
+        try std.testing.expect(std.mem.indexOf(u8, block, "MODE ACTIVE - level: ") != null);
+    }
+    try std.testing.expect(std.mem.indexOf(u8, block, "MODE ACTIVE - level: off\n") == null);
+
+    // A key the document is reported on is a key the document wrote, and only
+    // one of the two is reported, so a caller that prints it is naming a line
+    // the operator can find.
+    if (problem) |p| {
+        try std.testing.expect(p.key.len > 0);
+        try std.testing.expect(std.mem.indexOf(u8, text, p.key) != null);
+        // Only a key this file defines can carry a value that names no level.
+        if (p.bad_value) {
+            try std.testing.expect(std.mem.eql(u8, p.key, "caveman") or std.mem.eql(u8, p.key, "ponytail"));
+        }
+    }
 }
 
 test "the levels the environment accepts are the levels the config accepts" {

@@ -1388,13 +1388,20 @@ fn gitLineLimit(args: std.json.ObjectMap) usize {
     return @max(1, numCount(v));
 }
 
+/// A rev goes after a fixed subcommand on git's own command line, so one that
+/// begins with `-` is an option rather than a revision. `--output=FILE` is the
+/// one that matters: it turns a read into a write.
+fn gitRevAllowed(rev: []const u8) bool {
+    return !std.mem.startsWith(u8, rev, "-");
+}
+
 fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     const cmd = str(args.get("cmd")) orelse return std.fmt.allocPrint(arena, "error: missing cmd", .{});
     const path = str(args.get("path"));
     const rev = str(args.get("rev"));
     const limit = gitLineLimit(args);
     // A rev such as `--output=FILE` would turn a read into a write.
-    if (rev) |r| if (std.mem.startsWith(u8, r, "-"))
+    if (rev) |r| if (!gitRevAllowed(r))
         return std.fmt.allocPrint(arena, "error: rev must not start with '-'", .{});
 
     var argv: std.ArrayList([]const u8) = .empty;
@@ -1591,11 +1598,19 @@ fn runTool(io: Io, arena: std.mem.Allocator, call: ToolCall) ![]u8 {
     return std.fmt.allocPrint(arena, "error: unknown tool '{s}'", .{call.name});
 }
 
-/// A one-line tool gutter on stderr, the shape gauntlet recognizes. The name
-/// and the detail are the provider's own text and may carry a newline or an
-/// escape sequence, either of which breaks the one-line-per-call shape a reader
-/// parses, so control characters are written as their two-character escapes.
+/// Writes the gutter line to stderr.
 fn noteToolCall(io: Io, arena: std.mem.Allocator, name: []const u8, args: std.json.ObjectMap) void {
+    const line = gutterLine(arena, name, args) catch return;
+    net.writeErr(io, line);
+}
+
+/// The gutter line and nothing else: the marker, the tool name, the one
+/// argument worth reading, and the newline. The name and the detail are the
+/// provider's own text and may carry a newline or an escape sequence, either of
+/// which breaks the one-line-per-call shape a reader parses, so control
+/// characters are written as their two-character escapes. Separated from the
+/// write so what the reader sees is assertable without a stream.
+fn gutterLine(arena: std.mem.Allocator, name: []const u8, args: std.json.ObjectMap) ![]const u8 {
     // The interesting argument is not the same one for every tool: a structural
     // search is identified by its pattern, a bash call by its command.
     const detail = if (std.mem.eql(u8, name, "ast"))
@@ -1603,12 +1618,13 @@ fn noteToolCall(io: Io, arena: std.mem.Allocator, name: []const u8, args: std.js
     else
         (str(args.get("command")) orelse str(args.get("pattern")) orelse str(args.get("path")) orelse "");
     var buf: std.ArrayList(u8) = .empty;
-    buf.appendSlice(arena, "\u{23fa} ") catch return;
-    writeGutterText(arena, &buf, clamp(name, 40)) catch return;
-    buf.append(arena, ' ') catch return;
-    writeGutterText(arena, &buf, clamp(detail, 120)) catch return;
-    buf.append(arena, '\n') catch return;
-    net.writeErr(io, buf.items);
+    errdefer buf.deinit(arena);
+    try buf.appendSlice(arena, "\u{23fa} ");
+    try writeGutterText(arena, &buf, clamp(name, 40));
+    try buf.append(arena, ' ');
+    try writeGutterText(arena, &buf, clamp(detail, 120));
+    try buf.append(arena, '\n');
+    return buf.toOwnedSlice(arena);
 }
 
 /// Gutter text with every C0 control and DEL written as `\xNN`, and bytes that
@@ -3303,6 +3319,156 @@ fn fuzzStream(_: void, smith: *std.testing.Smith) !void {
     const body = try buildBody(arena, .{}, msgs.items);
     try std.testing.expect(try std.json.validate(gpa, body));
 }
+
+// The tool arguments are the model's own text and they are what the tools act
+// on: a command line, a file path, a git revision, a line limit, a timeout.
+// Nothing about them is trusted, so the parser that reads them and the three
+// ceilings the tools clamp them to are the surface after the stream.
+// `std.testing.fuzz` runs this corpus through the harness on every
+// `zig build test`, and through the fuzzer's mutations when the test binary is
+// built in fuzz mode. Real provider argument objects for each tool, the same
+// objects with a field of the wrong type, numbers past what a count can hold,
+// strings carrying escape sequences, and the empty and non-object shapes.
+const toolarg_corpus = [_][]const u8{
+    "",
+    "null",
+    "[]",
+    "{}",
+    "{",
+    "{\"command\":\"rg -n foo\"}",
+    "{\"command\":\"ls\",\"timeout_ms\":60000}",
+    "{\"command\":\"ls\",\"timeout_ms\":0}",
+    "{\"command\":\"ls\",\"timeout_ms\":-1}",
+    "{\"command\":\"ls\",\"timeout_ms\":1e30}",
+    "{\"command\":\"ls\",\"timeout_ms\":1e400}",
+    "{\"command\":\"ls\",\"timeout_ms\":\"60000\"}",
+    "{\"command\":\"ls\",\"timeout_ms\":true}",
+    "{\"path\":\"src/main.zig\",\"offset\":10,\"limit\":20}",
+    "{\"path\":\"src/main.zig\",\"offset\":-5,\"limit\":1e300}",
+    "{\"path\":\"src/main.zig\",\"offset\":1e30,\"limit\":-0}",
+    "{\"path\":\"/etc/shadow\"}",
+    "{\"path\":\"\\u0000\\ud83d\\ude80/../x\"}",
+    "{\"path\":123}",
+    "{\"content\":\"a\\u0000b\",\"path\":\"x\"}",
+    "{\"old_string\":\"a\\\"b\\\\c\",\"new_string\":\"d\\ne\",\"path\":\"f\",\"replace_all\":true}",
+    "{\"old_string\":\"\",\"new_string\":\"\"}",
+    "{\"old_string\":\"a\",\"new_string\":\"b\",\"replace_all\":\"yes\"}",
+    "{\"cmd\":\"log\",\"limit\":0}",
+    "{\"cmd\":\"log\",\"limit\":-1}",
+    "{\"cmd\":\"log\",\"limit\":18446744073709551616}",
+    "{\"cmd\":\"log\",\"rev\":\"--output=/tmp/pwned\"}",
+    "{\"cmd\":\"log\",\"rev\":\"-\"}",
+    "{\"cmd\":\"log\",\"rev\":\"--upload-pack=sh\"}",
+    "{\"cmd\":\"log\",\"rev\":\"HEAD..main\"}",
+    "{\"cmd\":\"rm -rf /\"}",
+    "{\"cmd\":\"status\",\"path\":\"--help\"}",
+    "{\"pattern\":\"\\u{1b}[31m\\u{009b}31m\\u{0007}foo\\nbar\",\"path\":\".\"}",
+    "{\"pattern\":\"[a-\",\"glob\":\"*.zig\"}",
+    "{\"pattern\":\"$\u{fffd}\",\"lang\":\"zig\",\"rewrite\":\"x=>y\"}",
+    "{\"pattern\":\"a\",\"lang\":\"--help\"}",
+    "{\"pattern\":\"\",\"path\":\"\"}",
+    "{\"command\":\"\\xff\\xfe not utf8\"}",
+    "{\"command\":null,\"pattern\":null,\"path\":null}",
+    "{\"command\":[],\"pattern\":{},\"path\":7}",
+    "{\"unknown_key\":\"x\",\"command\":\"ls\"}",
+};
+
+test "tool: fuzz: model-sent arguments stay inside every ceiling the tools apply" {
+    try std.testing.fuzz({}, fuzzToolArgs, .{ .corpus = &toolarg_corpus });
+
+    // The corpus has to reach the branches the harness asserts about, or the
+    // assertions never fire: a git rev that names an option is refused, and a
+    // limit past what a count can hold is every line rather than a trap.
+    var args: std.json.ObjectMap = .empty;
+    defer args.deinit(std.testing.allocator);
+    try args.put(std.testing.allocator, "rev", .{ .string = "--output=/tmp/pwned" });
+    try args.put(std.testing.allocator, "limit", .{ .integer = -1 });
+    try std.testing.expect(!gitRevAllowed("--output=/tmp/pwned"));
+    try std.testing.expectEqual(@as(usize, 1), gitLineLimit(args));
+}
+
+fn fuzzToolArgs(_: void, smith: *std.testing.Smith) !void {
+    const gpa = std.testing.allocator;
+    var scratch: [8 * 1024]u8 = undefined;
+    const raw = if (smith.in) |seed| seed else scratch[0..smith.slice(&scratch)];
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // `runTool` reads a name and an argument object, and refuses anything that
+    // is not an object, so the harness stops where the dispatch stops.
+    const parsed = std.json.parseFromSliceLeaky(std.json.Value, arena, raw, .{}) catch return;
+    const args = switch (parsed) {
+        .object => |o| o,
+        else => return,
+    };
+
+    // A line count and a timeout are ceilings, so whatever the model sent, a
+    // count is at least one and a timeout is inside the run's own deadline.
+    try std.testing.expect(gitLineLimit(args) >= 1);
+    try std.testing.expect(bashTimeoutMs(if (args.get("timeout_ms")) |v| num(v) else null) <= max_bash_timeout_ms);
+
+    // Every number-shaped field a tool reads goes through the same two readers,
+    // and neither may trap or answer a negative.
+    var it = args.iterator();
+    while (it.next()) |entry| {
+        const v: std.json.Value = entry.value_ptr.*;
+        try std.testing.expect(num(v) >= 0);
+        _ = numCount(v);
+        // A string the tools will act on has to survive the trip back to the
+        // provider: it is re-escaped into the next request body, and a byte the
+        // escaper drops or mistypes is a value the model reads back as
+        // something else.
+        if (str(v)) |s| {
+            var jb = JsonBuf.init(arena);
+            try writeJsonString(jb.writer(), s);
+            const back = std.json.parseFromSliceLeaky(std.json.Value, arena, jb.items(), .{}) catch
+                return error.TestUnexpectedResult;
+            try std.testing.expectEqualStrings(s, back.string);
+        }
+        // The gutter carries the provider's own text to the operator's screen,
+        // so a name or an argument that is shown has to be shown as one line of
+        // printable text, whatever bytes it carried.
+        if (str(v)) |s| {
+            const shown = terminalSafe(arena, s);
+            try std.testing.expectEqual(s.len, shown.len);
+            for (shown) |c| try std.testing.expect(c >= 0x20 and c != 0x7f);
+            // A C1 control is UTF-8 as C2 80..9F, and both of its bytes become
+            // dots, so no pair a terminal would act on survives.
+            for (shown, 0..) |c, i| {
+                if (c != 0xc2 or i + 1 >= shown.len) continue;
+                if (s[i + 1] < 0x80 or s[i + 1] > 0x9f) continue;
+                try std.testing.expectEqual(@as(u8, '.'), shown[i]);
+                try std.testing.expectEqual(@as(u8, '.'), shown[i + 1]);
+            }
+        }
+    }
+
+    // The one-line-per-call shape is what a reader parses, so the line the
+    // operator sees is exactly one line and ends where it should.
+    for ([_][]const u8{ "bash", "read", "write", "edit", "search", "ast", "git", "unknown" }) |name| {
+        const line = try gutterLine(arena, name, args);
+        try std.testing.expect(line.len > 0);
+        try std.testing.expectEqual(@as(u8, '\n'), line[line.len - 1]);
+        try std.testing.expect(std.mem.indexOfScalar(u8, line[0 .. line.len - 1], '\n') == null);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(line));
+        // The name is capped at 40 and the detail at 120, and each control byte
+        // they carried grew to a four-character escape, so the line cannot run
+        // away with the size of what the model sent.
+        try std.testing.expect(line.len <= gutter_marker.len + 1 + 40 * 4 + 1 + 120 * 4 + 1);
+    }
+
+    // A rev is appended to a fixed subcommand with no `--` in front of it, so
+    // one that names an option is refused, and the check is what every rev the
+    // model sent goes through.
+    if (str(args.get("rev"))) |rev| {
+        if (std.mem.startsWith(u8, rev, "-")) try std.testing.expect(!gitRevAllowed(rev));
+    }
+}
+
+/// The bytes a gutter line starts with, before the tool name.
+const gutter_marker = "\u{23fa}";
 
 test "the env levels override the config file's, and a bad one is named" {
     var style: style_mod.Style = .{};
