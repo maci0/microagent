@@ -460,3 +460,16 @@ Run against a fresh clone without a `make bench` first, every harness is skipped
 by name, so the run reports nothing and appends nothing.
 
 Results from this machine are in [BENCHMARK.md](BENCHMARK.md).
+
+## Deterministic tools the agent can drive
+
+Beyond the built-in tool set, the agent runs the machine's own tools through `bash`, and the
+system prompt tells it to prefer them over ad-hoc work: `rg` for text, `ast-grep` for syntax,
+`semcode` for semantic queries over an indexed C/C++/Rust database, `git` for history and diffs.
+
+semcode needs a git repository and an index before it can answer:
+
+```sh
+semcode-index -s . --extensions c,h,rs   # writes ./.semcode.db
+semcode -q "callers parse_config"        # callers, callees, types, macros
+```
