@@ -1135,6 +1135,7 @@ fn run(
     var usage: chat_mod.Usage = .{};
     var compaction_floor: usize = 0;
     var verify_asked = false;
+    var progress: Progress = .{};
     while (turn < opts.max_turns) : (turn += 1) {
         _ = turn_state.reset(.{ .retain_with_limit = turn_arena_retain_bytes });
         if (budget.expired(io)) {
@@ -1148,7 +1149,7 @@ fn run(
             // way any other does. A model that answers it finished, and one
             // that asks for more tools was cut off mid-work, which is a
             // different exit status from a finished run.
-            return try runTurn(client, io, turn_arena, gpa, opts, msgs, &session, &usage, budget.withGraceNs(final_push_grace_s), tool_env);
+            return try runTurn(client, io, turn_arena, gpa, opts, msgs, &session, &usage, budget.withGraceNs(final_push_grace_s), tool_env, &progress);
         }
         // The ceiling is announced on the turn it applies to, before it is
         // spent, so a truncated answer is never the last thing on stdout with no
@@ -1158,7 +1159,7 @@ fn run(
         try compactMessages(io, gpa, msgs, turn_arena, &compaction_floor);
         // `.wants_tools` keeps the loop going, and `.cut_off` is the budget
         // ending the run mid-turn, so neither is a finished run.
-        switch (try runTurn(client, io, turn_arena, gpa, opts, msgs, &session, &usage, budget, tool_env)) {
+        switch (try runTurn(client, io, turn_arena, gpa, opts, msgs, &session, &usage, budget, tool_env, &progress)) {
             .wants_tools, .cut_off => |end| return end,
             // The model stopped asking for tools. If it changed the tree
             // without ever running a test, ask for that once rather than
@@ -1166,7 +1167,7 @@ fn run(
             // loop exists to catch, and one extra turn is a cheap way to catch
             // it.
             .answered => {
-                if (!verify_asked and madeEdit(msgs.items) and !ranTests(msgs.items)) {
+                if (!verify_asked and progress.edited and !progress.tested) {
                     verify_asked = true;
                     net.note(io, arena, "microagent: no test runner was used; asking for one verification turn\n", .{});
                     try appendMessage(gpa, msgs, "user", verify_push);
@@ -1190,24 +1191,29 @@ const test_runners = [_][]const u8{
     "gradle test", "mvn test",       "bazel test", "swift test",     "mix test",
 };
 
-/// True when some tool call in this conversation ran a test runner. It reads
-/// the conversation rather than instrumenting each tool, so it counts a command
-/// from any earlier turn too.
-fn ranTests(msgs: []const u8) bool {
+/// True when a single tool call's arguments name a test runner. It reads the
+/// call's own arguments, not the whole conversation: a `read` of a test file,
+/// or the issue text mentioning pytest, is not a test run, and judging by the
+/// conversation counted both of those and never asked for verification.
+fn isTestRun(call_name: []const u8, args: []const u8) bool {
+    if (!std.mem.eql(u8, call_name, "bash")) return false;
     for (test_runners) |runner| {
-        if (std.mem.indexOf(u8, msgs, runner) != null) return true;
+        if (std.mem.indexOf(u8, args, runner) != null) return true;
     }
     return false;
 }
 
-/// True when the conversation shows the agent changed something, so a missing
-/// test run is a gap rather than a run that had nothing to verify.
-fn madeEdit(msgs: []const u8) bool {
-    for ([_][]const u8{ "\"name\":\"edit\"", "\"name\":\"write\"", "\"name\":\"ast\"" }) |call| {
-        if (std.mem.indexOf(u8, msgs, call) != null) return true;
-    }
-    return false;
+fn isEdit(call_name: []const u8) bool {
+    return std.mem.eql(u8, call_name, "edit") or
+        std.mem.eql(u8, call_name, "write") or
+        std.mem.eql(u8, call_name, "ast");
 }
+
+/// What the run has done that the loop needs to know about afterwards.
+const Progress = struct {
+    edited: bool = false,
+    tested: bool = false,
+};
 
 /// One request and everything its answer causes: the completion, the assistant
 /// message and tool results it appends, the usage line, and the session record.
@@ -1225,6 +1231,7 @@ fn runTurn(
     usage: *chat_mod.Usage,
     budget: Budget,
     tool_env: *const std.process.Environ.Map,
+    progress: *Progress,
 ) !TurnEnd {
     const body = try buildBody(arena, opts, msgs.items);
     const asked = Io.Timestamp.now(io, .awake).nanoseconds;
@@ -1240,7 +1247,7 @@ fn runTurn(
     // the record says how long the model generated, and a gap that spans the
     // tools would report a rate for a generation that was never continuous.
     const model_ms = session_mod.elapsedMs(io, asked);
-    try finishTurn(io, arena, gpa, msgs, &result, usage, budget, tool_env);
+    try finishTurn(io, arena, gpa, msgs, &result, usage, budget, tool_env, progress);
     session_mod.writeRecord(io, arena, session, model_ms, &result);
     return if (result.calls.items.len != 0) .wants_tools else .answered;
 }
@@ -2027,6 +2034,7 @@ fn finishTurn(
     usage: *chat_mod.Usage,
     budget: Budget,
     tool_env: *const std.process.Environ.Map,
+    progress: *Progress,
 ) !void {
     try msgs.appendSlice(gpa, ",");
     try msgs.appendSlice(gpa, try assistantMessage(arena, result));
@@ -2036,6 +2044,8 @@ fn finishTurn(
     // shorter, not a reason to re-read the clock for each of them.
     const ceiling_ms = budget.toolCeilingMs(io);
     for (result.calls.items) |call| {
+        if (isEdit(call.name)) progress.edited = true;
+        if (isTestRun(call.name, call.args)) progress.tested = true;
         // A call the budget will not pay for still gets a tool message. An
         // assistant turn that names calls the conversation never answers is one
         // the next request rejects, so the loop below would spend a turn on a
@@ -3574,15 +3584,22 @@ test "the api key is sent as the request's authorization header" {
     }
 }
 
-test "a conversation without a test runner is recognised" {
-    const with_pytest = "[{\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\\\"python -m pytest tests/\\\"}\"}}]}]";
-    try std.testing.expect(ranTests(with_pytest));
-    try std.testing.expect(madeEdit("[{\"name\":\"edit\"}]"));
-    try std.testing.expect(!madeEdit("[{\"name\":\"search\"}]"));
+test "only a bash call that names a runner counts as verification" {
+    // A runner in a bash command is a test run.
+    try std.testing.expect(isTestRun("bash", "{\"command\":\"python -m pytest tests/\"}"));
+    try std.testing.expect(isTestRun("bash", "{\"command\":\"cargo test --all\"}"));
+    try std.testing.expect(isTestRun("bash", "{\"command\":\"zig build test\"}"));
 
-    const reading_only = "[{\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"a.py\\\"}\"}}]}]";
-    try std.testing.expect(!ranTests(reading_only));
-    try std.testing.expect(!ranTests(""));
+    // Reading a test file is not, and neither is the issue text mentioning
+    // pytest: judging by the conversation counted both and asked for nothing.
+    try std.testing.expect(!isTestRun("read", "{\"path\":\"tests/test_thing.py\"}"));
+    try std.testing.expect(!isTestRun("bash", "{\"command\":\"ls tests/\"}"));
+    try std.testing.expect(!isTestRun("search", "{\"pattern\":\"pytest\"}"));
+
+    try std.testing.expect(isEdit("edit"));
+    try std.testing.expect(isEdit("write"));
+    try std.testing.expect(isEdit("ast"));
+    try std.testing.expect(!isEdit("read"));
 }
 
 test "a tool timeout is cut to what is left of the budget" {
