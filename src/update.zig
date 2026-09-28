@@ -1229,3 +1229,98 @@ fn fuzzRelease(_: void, smith: *std.testing.Smith) !void {
     try std.testing.expect(sameRelease(tag, bare));
     try std.testing.expect(!sameRelease(bare, try std.fmt.allocPrint(arena, "{s}x", .{bare})));
 }
+
+// The sidecar is the last untrusted input the updater reads and the only thing
+// that decides whether the bytes it just downloaded are installed, so it
+// deserves the same harness as the release body: a mirror that answers the
+// sidecar URL with a body where the checksum was expected, a capture cut short
+// by a proxy, a line with a second name on it, and a digest in a spelling this
+// updater never wrote all arrive here as ordinary bytes.
+// `std.testing.fuzz` runs this corpus on every `zig build test`, and through
+// the fuzzer's mutations when the test binary is built in fuzz mode. The
+// corpus is what the harness must be able to read: the line `sha256sum`
+// writes, that line under CRLF and with a second line after it, the same hex
+// in upper case, the binary-mode `*` separator, a `sha256:` prefix, a name
+// that is not the asset's, a 64-byte line with no name, and the empty and
+// truncated shapes. The published digest here is the one for `abc`, the asset
+// the corpus-mode runs hash.
+const sidecar_corpus = [_][]const u8{
+    "",
+    "\n",
+    "\r\n",
+    " ",
+    abc_sha,
+    abc_sha ++ " ",
+    abc_sha ++ "  ",
+    abc_sha ++ "  " ++ asset_base,
+    abc_sha ++ "  " ++ asset_base ++ "\n",
+    abc_sha ++ "  " ++ asset_base ++ "\r\n",
+    abc_sha ++ "  " ++ asset_base ++ "\nsecond line\n",
+    abc_sha ++ " " ++ asset_base,
+    abc_sha ++ " *" ++ asset_base,
+    "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD  " ++ asset_base,
+    "sha256:" ++ abc_sha ++ "  " ++ asset_base,
+    abc_sha ++ "  other",
+    abc_sha[0..63],
+    abc_sha[0..63] ++ "  " ++ asset_base,
+    abc_sha ++ "\t " ++ asset_base,
+    "g" ** 64 ++ "  " ++ asset_base,
+    "0" ** 64 ++ "  " ++ asset_base,
+    "\x00" ** 64 ++ "  " ++ asset_base,
+    "  " ++ asset_base,
+    "\u{fffd} microagent\n",
+};
+
+test "update: fuzz: a sidecar matches only the bytes whose digest it publishes" {
+    try std.testing.fuzz({}, fuzzSidecar, .{ .corpus = &sidecar_corpus });
+
+    // The corpus has to reach both sides of the harness's assertions, or
+    // neither fires: a line that spells out the digest of `abc` beside this
+    // asset's name is a match, and one hex digit of it changed is not.
+    try std.testing.expect(checksumMatches("abc", abc_sha ++ "  " ++ asset_base, asset_base));
+    try std.testing.expect(!checksumMatches("abd", abc_sha ++ "  " ++ asset_base, asset_base));
+}
+
+fn fuzzSidecar(_: void, smith: *std.testing.Smith) !void {
+    const gpa = std.testing.allocator;
+    var scratch: [16 * 1024]u8 = undefined;
+    // The sidecar is the whole fuzzed input, the asset the bytes it is checked
+    // against, and the name the line has to end in is the one this build asks
+    // the release for, so a match can only come from the digest agreeing.
+    const sidecar: []const u8 = if (smith.in) |seed| seed else scratch[0..smith.slice(&scratch)];
+    const asset: []const u8 = if (smith.in) |_|
+        "abc"
+    else
+        scratch[sidecar.len..][0..smith.slice(scratch[sidecar.len..])];
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    if (checksumMatches(asset, sidecar, asset_base)) {
+        // A match is the whole first line and nothing past it: the digest of
+        // these bytes, the two-space separator, and the name the asset was
+        // asked for. A match on a line that says anything else would install
+        // bytes nobody published a digest for. The digest is folded to lower
+        // case first, because that is the case the comparison is in.
+        const end = std.mem.indexOfScalar(u8, sidecar, '\n') orelse sidecar.len;
+        var line = sidecar[0..end];
+        if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
+        var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(asset, &digest, .{});
+        const hex = std.fmt.bytesToHex(digest, .lower);
+        for (line[0..64], hex) |got, want| {
+            try std.testing.expectEqual(want, std.ascii.toLower(got));
+        }
+        try std.testing.expectEqualStrings(asset_base, line[66..]);
+    }
+
+    // One hex digit changed describes different bytes, so the same line must
+    // stop being a match: without this the check could pass on anything and
+    // every refusal below it would be untested.
+    const tampered = try arena.dupe(u8, sidecar);
+    if (tampered.len > 0 and std.ascii.isHex(tampered[0])) {
+        tampered[0] = if (std.ascii.toLower(tampered[0]) == '0') '1' else '0';
+        try std.testing.expect(!checksumMatches(asset, tampered, asset_base));
+    }
+}

@@ -306,3 +306,76 @@ test "a cut never leaves half a code point in the request body" {
     try std.testing.expectEqualStrings("caf\u{00e9} \u{1f600}", clamp(text, 10));
     try std.testing.expectEqualStrings("", clamp("\u{1f600}", 2));
 }
+
+// Every byte the process holds that came from outside it goes out again
+// through this escaper: a tool result, a file's bytes, a streamed fragment, an
+// argv entry. A byte it does not cover is a request body the provider answers
+// with a 400, and a byte it mangles is text the model reads back wrong, so the
+// round trip is the property worth asserting on. `std.testing.fuzz` runs this
+// corpus on every `zig build test`, and through the fuzzer's mutations when the
+// test binary is built in fuzz mode. The corpus carries the shapes a file and a
+// terminal carry: the escapes, DEL, NUL, text in several scripts, and the
+// malformed sequences a latin-1 file or a cut codepoint leaves behind.
+const json_string_corpus = [_][]const u8{
+    "",
+    "a",
+    "\"",
+    "\\",
+    "\n",
+    "\r\n",
+    "\t",
+    "\x08\x0c",
+    "\u{0}\u{1}\u{1f}\u{7f}",
+    "quote\" backslash\\ newline\n tab\t",
+    "{\"content\":\"already a json string\"}",
+    "caf\u{00e9}",
+    "\u{65e5}\u{8a00}\u{1f600}",
+    "\u{fffd}",
+    "\u{2028}\u{2029}",
+    "\xc3",
+    "\xe6\x97",
+    "\xf0\x9f",
+    "\xed\xa0\x80",
+    "\xc0\xaf",
+    "\xf8\x88\x80\x80\x80",
+    "\xc2",
+    "\xff\xfe",
+    "\xc3\x28",
+    "ok\xff",
+};
+
+test "a fuzzed byte string leaves a JSON string that reads back as itself" {
+    try std.testing.fuzz({}, fuzzJsonString, .{ .corpus = &json_string_corpus });
+}
+
+fn fuzzJsonString(_: void, smith: *std.testing.Smith) !void {
+    const gpa = std.testing.allocator;
+    var scratch: [8 * 1024]u8 = undefined;
+    const text: []const u8 = if (smith.in) |seed| seed else scratch[0..smith.slice(&scratch)];
+
+    var buf = JsonBuf.init(gpa);
+    defer buf.list.deinit(gpa);
+    try writeJsonString(buf.writer(), text);
+    const quoted = buf.items();
+
+    // What the escaper wrote has to be a JSON string on its own, or the body
+    // built around it is a request the provider rejects.
+    try std.testing.expect(try std.json.validate(gpa, quoted));
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena_state.allocator(), quoted, .{});
+    const got = str(parsed.value) orelse return error.TestUnexpectedResult;
+    if (std.unicode.utf8ValidateSlice(text)) {
+        // Text that went in whole comes back whole: an escape the parser reads
+        // as something else, or a character the escaper dropped, is text the
+        // model never said.
+        try std.testing.expectEqualStrings(text, got);
+    } else {
+        // A byte that is not a valid sequence became U+FFFD, so what comes
+        // back is still text, and never longer than the three bytes each of
+        // those replacements takes.
+        try std.testing.expect(std.unicode.utf8ValidateSlice(got));
+        try std.testing.expect(got.len <= text.len * 3);
+    }
+}
