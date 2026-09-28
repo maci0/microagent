@@ -73,7 +73,15 @@ for agent in $agents; do
 		# persists after the function in a POSIX shell.
 		PROMPT=$prompt
 		export PROMPT
-		start=$(monotonic_ns)
+		# No clock, no number. A duration measured off a wall clock is
+		# recorded in results.jsonl beside durations that were not, and nothing
+		# downstream can tell them apart.
+		if ! start=$(monotonic_ns); then
+			printf '%-10s %-14s %8s %10s %8s  %s\n' "$agent" "$task" - - - no-clock
+			printf '{"agent":"%s","task":"%s","wall_s":null,"tokens":null,"lines":"n/a","result":"no-clock"}\n' \
+				"$agent" "$task" >>"$results"
+			continue
+		fi
 		run_limited "$timeout_s" "$work" sh -c "$(argv_for "$agent")" >"$work/.out" 2>"$work/.err"
 		rc=$?
 		end=$(monotonic_ns)

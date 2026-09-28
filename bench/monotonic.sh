@@ -36,7 +36,11 @@ monotonic_ns() {
 		*) printf '%s\n' "$value"; return 0 ;;
 		esac
 	fi
-	# Padded to nanoseconds: a bare `date +%s` here would be off by a factor
-	# of a billion rather than merely unmonotonic.
-	printf '%s000000000\n' "$(date +%s)"
+	# A wall clock is not a fallback for a measurement, it is a different
+	# quantity: an NTP step inside a run makes the difference negative or an
+	# hour long, and one-second resolution records a 17.7 s task as 17.0. So
+	# rather than answer and let the number be recorded as if it were measured,
+	# this refuses, and says which machines get here.
+	printf 'bench/monotonic.sh: no monotonic clock: /proc/uptime is unreadable and perl is not installed, so no duration measured here can be trusted\n' >&2
+	return 1
 }
