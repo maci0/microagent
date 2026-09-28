@@ -1705,6 +1705,86 @@ test "a tool argument cannot repaint the operator's terminal" {
     try std.testing.expectEqualStrings("plain text", terminalSafe(arena, "plain text"));
 }
 
+// An error body the provider sent is quoted onto the operator's screen, and it
+// reached this program over the network, so its bytes are the provider's to
+// choose. `terminalSafe` is the whole of what stands between them and a
+// terminal, and the provider picks a value the harness cannot guess: an
+// escape sequence split across a read boundary, a CSI spelled as C2 9B, a
+// lone 0xC2 followed by nothing. `std.testing.fuzz` runs this corpus on every
+// `zig build test`, and through the fuzzer's mutations when the test binary is
+// built in fuzz mode.
+const terminal_corpus = [_][]const u8{
+    "",
+    "a",
+    "plain text",
+    " \x1b[2Jrm -rf /",
+    "\x07\x08\x0a\x0d\x1b",
+    "\x00",
+    "\x1f\x7f",
+    "\u{009b}31m",
+    "\u{0080}\u{009f}\u{00a0}",
+    "\xc2",
+    "\xc2\x9b",
+    "\xc2\x9f",
+    "\xc2\xa0",
+    "caf\u{00e9} \u{65e5}\u{8a00} \u{1f600}",
+    "\xe6\x97",
+    "\xf0\x9f",
+    "\xed\xa0\x80",
+    "\xff\xfe",
+    "{\"error\":{\"message\":\"rate limit\"}}",
+    "<html>\n<head><title>502</title></head>\n</html>",
+    "\x1b[31m" ** 20,
+    "\u{009b}" ** 20,
+    "mixed \xff caf\u{00e9} \u{009b} \n text" ** 8,
+};
+
+test "a fuzzed error body leaves nothing a terminal acts on" {
+    try std.testing.fuzz({}, fuzzTerminalSafe, .{ .corpus = &terminal_corpus });
+}
+
+fn fuzzTerminalSafe(_: void, smith: *std.testing.Smith) !void {
+    const gpa = std.testing.allocator;
+    var raw: [4 * 1024]u8 = undefined;
+    const text: []const u8 = if (smith.in) |seed| seed else raw[0..smith.slice(&raw)];
+
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const safe = terminalSafe(state.allocator(), text);
+
+    // The escaper replaces bytes rather than dropping them, so a diagnostic
+    // still lines its fields up no matter what the body held.
+    try std.testing.expectEqual(text.len, safe.len);
+
+    var i: usize = 0;
+    while (i < safe.len) : (i += 1) {
+        const c = safe[i];
+        try std.testing.expect(c >= 0x20 and c != 0x7f);
+        if (c == 0xc2) {
+            try std.testing.expect(i + 1 >= safe.len or safe[i + 1] > 0x9f);
+            i += 1;
+        }
+    }
+
+    // A byte that was already printable is left exactly as it was, so the
+    // provider cannot have text rewritten around a sequence it wanted hidden.
+    i = 0;
+    while (i < text.len) : (i += 1) {
+        const c = text[i];
+        if (c == 0xc2 and i + 1 < text.len and text[i + 1] >= 0x80 and text[i + 1] <= 0x9f) {
+            i += 1;
+            continue;
+        }
+        if (c < 0x20 or c == 0x7f) continue;
+        try std.testing.expectEqual(c, safe[i]);
+    }
+
+    // The result is its own fixed point: a second pass has nothing left to
+    // replace, so a value printed twice reads the same both times.
+    const again = terminalSafe(state.allocator(), safe);
+    try std.testing.expectEqualStrings(safe, again);
+}
+
 // `read` is the one tool whose result rides back to the provider on every
 // later turn, so a credential it returns is shipped once per turn for the rest
 // of the run. The refusal is a decision about the name alone: the path is

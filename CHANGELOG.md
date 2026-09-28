@@ -106,6 +106,14 @@ release, and `microagent update` moves you to it.
   argument carried, that a repo `validRepo` refuses never becomes a request, and that one it
   accepts only ever names `api.github.com`. Both run their corpus on every `zig build test`
   through `std.testing.fuzz`.
+- Fuzz harnesses for the two terminal-facing escapers, which had unit tests but no corpus: the
+  quoted value every diagnostic prints (`chat.safeText`) and the provider error body
+  (`tool.terminalSafe`). The first asserts that a fuzzed value quoted under a fuzzed budget
+  carries no C0, DEL or C1 byte, stays valid UTF-8 inside its budget, and is a prefix of the same
+  value quoted with more room, so a cut cannot land inside a character or inside an escape. The
+  second asserts that a fuzzed body leaves the same length, keeps every byte that was already
+  printable, and is its own fixed point. Both run their corpus on every `zig build test` through
+  `std.testing.fuzz`.
 - Stale `path:line` references in `THREAT_MODEL.md` now point at the functions they name; the
   gutter and `terminalSafe` rows had been citing the dispatcher above them.
 - `MDEBUG=1` prints the configuration the run resolved: model, base url, the ceilings, the level

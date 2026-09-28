@@ -467,6 +467,88 @@ test "a quoted value never exceeds its budget" {
     }
 }
 
+// Every value a diagnostic quotes back came from outside the process: an
+// `argv` entry, a config key, a config path. `safeText` is what makes those
+// bytes printable, so it is the last thing between a repository's bytes and the
+// operator's screen, and both halves of its job are properties a fuzzer can
+// see. Nothing a terminal acts on survives it, and a budget cuts whole
+// characters and whole escapes rather than the bytes of either.
+const safe_text_corpus = [_][]const u8{
+    "",
+    "a",
+    "plain text",
+    "\n",
+    "\r\n",
+    "\t\x00",
+    "\x01\x02\x03\x1f\x7f",
+    "\x1b[2J\x1b[31m\x07",
+    "ls\u{009b}31m",
+    "\u{00a0}\u{00a1}\u{00bf}",
+    "caf\u{00e9}",
+    "\u{65e5}\u{8a00}\u{1f600}",
+    "\u{2028}\u{2029}\u{fffd}",
+    "a\\b\\x41",
+    "\xc2",
+    "\xc2\x9b",
+    "\xc3",
+    "\xe6\x97",
+    "\xf0\x9f",
+    "\xed\xa0\x80",
+    "\xc0\xaf",
+    "\xf8\x88\x80\x80\x80",
+    "\xff\xfe",
+    "\xc3\x28",
+    "ok\xff",
+    "{\"key\":\"value\"}",
+    "\x00" ** 64,
+    "\x1b[31m" ** 20,
+    "\u{1f600}" ** 20,
+    "mixed \xff caf\u{00e9} \u{009b} \n text" ** 8,
+};
+
+test "a fuzzed quoted value is printable, whole, and inside its budget" {
+    try std.testing.fuzz({}, fuzzSafeText, .{ .corpus = &safe_text_corpus });
+}
+
+fn fuzzSafeText(_: void, smith: *std.testing.Smith) !void {
+    const gpa = std.testing.allocator;
+    var raw: [4 * 1024]u8 = undefined;
+    const text: []const u8 = if (smith.in) |seed| seed else raw[0..smith.slice(&raw)];
+    // A budget the fuzzer picks, so the cuts land inside a character, inside
+    // an escape and between them rather than only at the comfortable sizes a
+    // fixed table would try.
+    var budget_buf: [2]u8 = undefined;
+    const max = smith.slice(&budget_buf);
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const quoted = safeText(arena_state.allocator(), text, max);
+
+    try std.testing.expect(quoted.len <= max);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(quoted));
+
+    var i: usize = 0;
+    while (i < quoted.len) : (i += 1) {
+        const c = quoted[i];
+        // A C0 control or DEL would move the cursor, clear the line or end it.
+        try std.testing.expect(c >= 0x20 and c != 0x7f);
+        // A C1 control is a valid two-byte sequence, so it passes a byte test
+        // that only knows about C0.
+        if (c == 0xc2) {
+            try std.testing.expect(i + 1 >= quoted.len or quoted[i + 1] > 0x9f);
+            i += 1;
+        }
+    }
+
+    // A larger budget can only add to what a smaller one wrote, so the shorter
+    // quote is a prefix of the longer: a budget that cut a character or an
+    // escape in half, or dropped one that fitted, shows up here.
+    const roomier = safeText(arena_state.allocator(), text, max + 64);
+    try std.testing.expect(roomier.len >= quoted.len);
+    try std.testing.expect(std.mem.startsWith(u8, roomier, quoted));
+    try std.testing.expect(std.unicode.utf8ValidateSlice(roomier));
+}
+
 test "clamp keeps short strings intact" {
     try std.testing.expectEqualStrings("abc", clamp("abc", 8));
     // A string exactly at the limit is kept whole, not cut to one byte short.
