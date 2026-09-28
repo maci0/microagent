@@ -6,3 +6,8 @@
 {"agent":"microagent:stealth/space-bunny-alpha","passed":0,"failed":1,"changed_files":0,"wall_s":721,"tokens":8377,"rc":1}
 {"agent":"microagent:deepseek/deepseek-v4-flash","passed":0,"failed":1,"changed_files":0,"wall_s":720,"tokens":38447,"rc":1}
 {"agent":"microagent:stealth/space-bunny-alpha","passed":1,"failed":0,"changed_files":1,"wall_s":284,"tokens":21359,"rc":0}
+{"agent":"microagent:stealth/space-bunny-alpha","passed":1,"failed":0,"changed_files":1,"wall_s":334,"tokens":24315,"rc":0}
+{"agent":"microagent:stealth/space-bunny-alpha","passed":1,"failed":0,"changed_files":1,"wall_s":372,"tokens":19046,"rc":0}
+{"agent":"kimi","passed":1,"failed":0,"changed_files":2,"wall_s":144,"tokens":18,"rc":0}
+{"agent":"microagent:deepseek/deepseek-v4-flash","passed":1,"failed":0,"changed_files":0,"wall_s":594,"tokens":24423,"rc":0}
+{"agent":"microagent:stealth/space-bunny-alpha","passed":1,"failed":0,"changed_files":1,"wall_s":335,"tokens":20055,"verify":"ok","rc":0}

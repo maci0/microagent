@@ -108,8 +108,10 @@ MICROAGENT_BUDGET_SECONDS=600 gauntlet -a microagent -r quick --once
 ```
 
 Set a budget below gauntlet's `-t` timeout. A review the harness kills at the ceiling with an
-untouched tree is worth nothing; one that stops deliberately still has the model's diff. Review
-outcomes per harness are in [BENCHMARK.md](BENCHMARK.md#usefulness).
+untouched tree is worth nothing; one that stops deliberately still has the model's diff. Note that
+gauntlet scoring a review "Passed" does not mean a diff landed — score with `git diff --numstat` and
+a real check, the way `bench/gauntlet.sh` does. Review outcomes per harness, including which models
+converged and which burned the budget, are in [BENCHMARK.md](BENCHMARK.md#usefulness).
 
 No `stream` flags are needed: usage is always machine-readable. No session transcripts are written,
 so no `usage.roots` entry is required either.
@@ -118,7 +120,7 @@ so no `usage.roots` entry is required either.
 
 ```sh
 bench/run.sh microagent kimi opencode   # three coding tasks, pass/fail + wall time + tokens
-bench/gauntlet.sh microagent kimi       # the same gauntlet reviews per agent, scored on the diff
+bench/gauntlet.sh microagent kimi       # the same gauntlet reviews per agent, scored on pass + diff + verify
 bench/overhead.sh                       # startup latency and no-op request cost per harness
 ```
 

@@ -120,52 +120,65 @@ usage lines with no `usage.roots` session-store entry configured.
 
 The three-task benchmark above measures plumbing: can the loop drive tools and land a diff. It says
 nothing about whether the harness is *useful* on real work. `bench/gauntlet.sh` is the measure that
-does: the same gauntlet review, on the same repository clone, run once per agent, scored on whether
-the review passed and whether a diff actually landed (`git status`, not the agent's own claim).
+does: the same gauntlet review, on the same repository clone, once per agent, scored on four things
+— the review's own verdict, whether a diff landed, whether the patched tree still passes
+`zig build test`, and how long it took.
 
-Scenario: `error-review` (a resilience audit, one of gauntlet's `quick` set) against a clone of this
-repository, per-review timeout 12 minutes, gauntlet 1.25.0, commit `e44b3d0`.
+Scenario: one review at a time against a clone of this repository, 12 minutes per review, gauntlet
+1.25.0. Model names are the router ids microagent was given; kimi runs its own default.
 
-| agent | model | budget | passed | files changed | wall | tokens |
-| --- | --- | --- | --- | --- | --- | --- |
-| microagent | deepseek/deepseek-v4-flash | none | 0 | 0 | 720 s (timeout) | 36 255 |
-| microagent | deepseek/deepseek-v4-flash | none, `--reasoning-effort low` | 0 | 0 | 720 s (timeout) | 38 447 |
-| microagent | stealth/space-bunny-alpha | none | 0 | 0 | 721 s (timeout) | 8 377 |
-| **microagent** | stealth/space-bunny-alpha | none, hardened prompt | **1** | **1** | **284 s** | 21 359 |
-| kimi 2.1.1 | CLI default | n/a | 1 | 1 | 185 s | n/a |
+| agent | model | budget | review | gauntlet | files | verify | wall |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| microagent | deepseek/deepseek-v4-flash | – | error-review | fail (timeout) | 0 | – | 720 s |
+| microagent | deepseek/deepseek-v4-flash | – | error-review, `--reasoning-effort low` | fail (timeout) | 0 | – | 720 s |
+| microagent | stealth/space-bunny-alpha | – | error-review | fail (timeout) | 0 | – | 721 s |
+| **microagent** | stealth/space-bunny-alpha | – | error-review | **pass** | 1 | ok | 284 s |
+| **microagent** | stealth/space-bunny-alpha | – | error-review | **pass** | 1 | ok | 334 s / 335 s |
+| **microagent** | stealth/space-bunny-alpha | – | cli-review | **pass** | 1 | ok | 372 s |
+| microagent | deepseek/deepseek-v4-flash | 480 s | error-review | pass | **0** | – | 594 s |
+| kimi 2.1.1 | CLI default | – | error-review | pass | 1 | not run | 185 s |
+| kimi 2.1.1 | CLI default | – | cli-review | pass | 2 | ok | 144 s |
+
+Rows in bold are the same configuration; the three timeout rows are the same configuration *before*
+the prompt was hardened. Read the table with these three things in mind:
+
+- **gauntlet's "Passed" does not mean a diff landed.** deepseek's budgeted run was scored as passed
+  with an untouched tree: the budget cut the loop, the model answered with prose, gauntlet saw a
+  completed review. This is why the benchmark counts files with `git diff --numstat` and runs the
+  project's own check. A usefulness benchmark without those columns flatters every agent equally.
+- **The diffs are real work.** microagent's cli-review run grew specific per-flag error messages in
+  `src/main.zig` (+53/-13); kimi's added the same kind of thing across `src/main.zig` and
+  `README.md` (+54/-21). Both patched trees build and pass 9/9 tests. microagent reviewed its own
+  code and left it better.
+- **Model choice dominates.** The identical harness, running the identical review, timed out three
+  times on two deepseek configurations and passed on bunny-alpha.
 
 Three defects and one behaviour problem came out of this, in order of how much they mattered:
 
 1. **A model-qualified agent spec never ran at all.** gauntlet's custom-agent definitions insert the
    model flags immediately after `-p`, so `["microagent", "-p", "{prompt}"]` produced
    `microagent -p --model stealth/... <prompt>` — microagent took `--model` as the prompt and exited
-   2 immediately. Fixed by accepting the prompt as a bare argument and defining the agent as
-   `["microagent", "{prompt}"]`; flagged runs now work in any flag order.
-2. **The agent wandered instead of editing.** With the original prompt, the bunny run spent its
+   2. Fixed by accepting the prompt as a bare argument; the definition is now
+   `["microagent", "{prompt}"]` and flagged runs work in any order.
+2. **The agent wandered instead of editing.** On the pre-hardening prompt, the bunny run spent its
    twelve minutes grepping `/home/maci/.zvm/0.16.0/lib/std` — dozens of calls inside the Zig
-   standard library, trying to answer a question about this repository — and ended with zero files
-   changed. The system prompt now says to budget its steps, not to audit unrelated code, and not to
-   read library or standard-library sources. The next run made 53 tool calls, never opened `lib/std`,
-   and landed a real diff.
+   standard library to answer a question about this repository — and changed nothing. The system
+   prompt now says to budget its steps, not to audit unrelated code, and not to read library or
+   standard-library sources. The next runs made ~50 tool calls, never opened `lib/std`, and landed
+   diffs.
 3. **Nothing forced convergence inside the caller's timeout.** Added `--budget <seconds>`
    (`MICROAGENT_BUDGET_SECONDS`), which stops starting turns at the budget and spends one final turn
-   telling the model to make the edit it already knows about, plus a "last turn" notice at the
-   `--max-turns` boundary. A review killed by gauntlet at its ceiling with nothing changed is the
-   worst outcome available; failing on purpose beats it.
-4. **`--reasoning-effort low` did not help this model.** deepseek-v4-flash still spent the full
-   twelve minutes (38 447 tokens, 97% of it reasoning) without editing. The flag is kept because it
-   passes through cleanly and reasoning-heavy models are exactly where it matters, but it is not
-   claimed as a fix.
+   telling the model to make the edit it already knows about, plus a last-turn notice at the
+   `--max-turns` boundary.
+4. **`--reasoning-effort low` did not help.** deepseek-v4-flash still burned its full budget without
+   editing. The flag stays because it passes through cleanly, but it is not claimed as a fix, and the
+   budgeted deepseek row shows the honest outcome: a clean stop, not a fix.
 
-Caveat on attribution: the passing run differs from the timed-out run in both the system prompt and
-the budget knob, and the budget never actually fired there (`--max-turns` did). Single runs, and a
-stealth model behind a router that may re-route between runs, so this is evidence, not a controlled
-result. What is not in doubt is the direction: two runs at 12 minutes with zero files changed, then
-one at 4m43s that passed with a diff.
-
-gauntlet's own "Lines changed" figure is not trustworthy for this agent — it reported +71/-0 and
-+182/-21 for runs whose trees were clean or had one file changed. `bench/gauntlet.sh` counts files
-with `git diff --numstat` instead.
+Caveat on attribution: the passing runs differ from the timeout runs in both the system prompt and
+the budget knob, and in the passing runs the budget never fired (`--max-turns` did, at 60 turns).
+Single runs against a stealth model behind a router that may re-route. The direction is not in
+doubt — three timeouts with zero files changed, then three passes with diffs — but this is evidence,
+not a controlled experiment.
 
 ### Not measured
 
@@ -173,9 +186,9 @@ with `git diff --numstat` instead.
   checkout, and SSA *is* the agent (a Python loop with its own tool calling). A CLI harness cannot be
   substituted for it; these datasets would need a microagent-specific runner.
 - **Terminal-Bench 2** — harbor takes an agent as `--agent-import-path`, i.e. a Python adapter class,
-  so microagent is pluggable in principle with one adapter that shells out to
-  `microagent {prompt}` inside the task container. Not built here: it needs the `terminal-bench@2.0`
-  dataset, per-task docker images (`TB2_ECR_MAP`) and a large image pull that is not cached locally.
+  so microagent is pluggable in principle with one adapter that shells out to `microagent {prompt}`
+  inside the task container. Not built here: it needs the `terminal-bench@2.0` dataset, per-task
+  docker images (`TB2_ECR_MAP`) and a large image pull that is not cached locally.
 - **DSH's own `benchmarks/`** (terminal-io, session-open, active-stream-reconnect, ...) measure that
   harness's internals, not a coding agent's usefulness.
 
