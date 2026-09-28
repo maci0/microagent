@@ -93,27 +93,55 @@ fn bareVersion(release: []const u8) []const u8 {
 
 /// Where the running build sits against a published tag, ignoring one leading
 /// `v` on either side. Components are `major.minor.patch`, a missing one is 0.
-/// Anything else (a pre-release suffix, a fork's tag) is `.eq`, which leaves
-/// the caller on exact equality rather than guessing an order.
+/// A tag carrying no order at all (a fork's tag, a branch name) is `.eq`, which
+/// leaves the caller on exact equality rather than guessing an order.
 fn compareVersions(running: []const u8, tag: []const u8) std.math.Order {
-    const a = parseTriple(running) orelse return .eq;
-    const b = parseTriple(tag) orelse return .eq;
-    for (a, b) |an, bn| {
+    const a = parseVersion(running) orelse return .eq;
+    const b = parseVersion(tag) orelse return .eq;
+    for (a.triple, b.triple) |an, bn| {
         if (an != bn) return if (an < bn) .lt else .gt;
     }
+    // Same triple. A pre-release is a version of that triple, and it is the one
+    // released before it, so it sorts below the release rather than equal to
+    // it. Reading it as equal let the tag order past the `fetchesAsset` guard,
+    // which is the guard that stops a newer binary being replaced by an older
+    // one: a build on `0.3.0` installed `0.2.0-rc1` over itself, silently, and
+    // the run it left behind was the older code.
+    if (a.prerelease) return .lt;
+    if (b.prerelease) return .gt;
     return .eq;
 }
 
-/// `major.minor.patch` with a missing component read as 0, or null when a
-/// component is not a plain number.
-fn parseTriple(release: []const u8) ?[3]u64 {
+/// A `major.minor.patch` with a missing component read as 0, and whether what
+/// followed the patch was a pre-release suffix (`-rc1`, `-beta.2`).
+const Version = struct {
+    triple: [3]u64,
+    prerelease: bool,
+};
+
+/// The version a tag names, or null when it names no version at all: a
+/// component that is not a plain number, or a fourth one. A pre-release
+/// suffix is a version, so it parses; only what carries no order does not.
+fn parseVersion(release: []const u8) ?Version {
     const v = bareVersion(release);
-    var out = [3]u64{ 0, 0, 0 };
+    var out: Version = .{ .triple = .{ 0, 0, 0 }, .prerelease = false };
     var it = std.mem.splitScalar(u8, v, '.');
     var n: usize = 0;
     while (it.next()) |c| {
-        if (n == out.len) return null;
-        out[n] = std.fmt.parseInt(u64, c, 10) catch return null;
+        if (n == out.triple.len) return null;
+        // The suffix is a `-` on the patch component, which is where semver
+        // puts it. It is read as present or absent rather than compared, so no
+        // order between two pre-releases of one triple is claimed here.
+        if (n == out.triple.len - 1) {
+            const base = c[0 .. std.mem.indexOfAny(u8, c, "-+") orelse c.len];
+            if (base.len == 0) return null;
+            if (std.mem.indexOfAny(u8, c, "-") != null) out.prerelease = true;
+            out.triple[n] = std.fmt.parseInt(u64, base, 10) catch return null;
+            n += 1;
+            continue;
+        }
+        if (c.len == 0) return null;
+        out.triple[n] = std.fmt.parseInt(u64, c, 10) catch return null;
         n += 1;
     }
     return out;
@@ -247,9 +275,10 @@ fn releasePageLine(url: []const u8) error{UntrustedUrl}![]const u8 {
 
 /// `--check` never downloads an asset. An equal version never does either,
 /// and neither does a tag that orders as older than the running build:
-/// installing it would replace a newer binary with an older one. A tag that is
-/// not a `major.minor.patch` triple orders as equal, so it is installed like
-/// any other release this build is not already.
+/// installing it would replace a newer binary with an older one. A pre-release
+/// is older than the release it precedes, so it is refused on both counts. A
+/// tag that names no version at all (a fork's tag, a branch name) orders as
+/// equal, so it is installed like any other release this build is not already.
 fn fetchesAsset(check_only: bool, running: []const u8, tag: []const u8) bool {
     if (check_only) return false;
     if (compareVersions(running, tag) == .gt) return false;
@@ -1517,12 +1546,28 @@ test "update: a build ahead of the latest release is not downgraded" {
     try std.testing.expectEqual(std.math.Order.gt, compareVersions("1.0.0", "v0.9.9"));
     try std.testing.expectEqual(std.math.Order.eq, compareVersions("0.1.0", "v0.1.0"));
     try std.testing.expectEqual(std.math.Order.eq, compareVersions("0.1", "v0.1.0"));
-    // A tag that is not a dotted triple carries no order to claim, so it stays
-    // on the caller's explicit request rather than being blocked.
-    try std.testing.expectEqual(std.math.Order.eq, compareVersions("0.2.0-rc1", "v0.1.1"));
+    // A pre-release is a version, and it is the one released before its triple,
+    // so it orders against every other tag rather than past the guard as an
+    // unorderable one did.
+    try std.testing.expectEqual(std.math.Order.gt, compareVersions("0.2.0-rc1", "v0.1.1"));
+    try std.testing.expectEqual(std.math.Order.lt, compareVersions("0.1.0", "v0.2.0-rc1"));
+    // Same triple: the release is newer than the pre-release of itself.
+    try std.testing.expectEqual(std.math.Order.gt, compareVersions("0.2.0", "v0.2.0-rc1"));
+    // And the other way, so a pre-release build takes the release it precedes.
+    try std.testing.expectEqual(std.math.Order.lt, compareVersions("v0.2.0-rc1", "0.2.0"));
+    // A tag that is not a dotted triple at all carries no order to claim, so it
+    // stays on the caller's explicit request rather than being blocked.
+    try std.testing.expectEqual(std.math.Order.eq, compareVersions("0.2.0", "nightly"));
+    try std.testing.expectEqual(std.math.Order.eq, compareVersions("0.2.0", "v0.1.x"));
 
     try std.testing.expect(!fetchesAsset(false, "0.2.0", "v0.1.1"));
-    try std.testing.expect(fetchesAsset(false, "0.2.0", "v0.2.0-rc1"));
+    // The downgrade the pre-release ordering closes: a build on a release is
+    // not replaced by that triple's own pre-release, nor by an older one.
+    try std.testing.expect(!fetchesAsset(false, "0.2.0", "v0.2.0-rc1"));
+    try std.testing.expect(!fetchesAsset(false, "0.3.0", "v0.2.0-rc1"));
+    // Upgrading onto a pre-release is still an install, which is the case an
+    // operator asks for by naming one.
+    try std.testing.expect(fetchesAsset(false, "0.1.0", "v0.2.0-rc1"));
     try std.testing.expect(fetchesAsset(false, "0.1.0", "v0.2.0"));
     try std.testing.expect(fetchesAsset(false, "0.1.0", "nightly"));
 

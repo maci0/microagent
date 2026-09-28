@@ -128,6 +128,13 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- `microagent update` no longer installs a pre-release over a newer build. A tag
+  with a `-rc1` suffix was not a version the ordering could read, so it ordered
+  as equal to everything and past the guard that stops a downgrade: a build on
+  `0.3.0` installed `v0.2.0-rc1` over itself, silently, and the run it left
+  behind was the older code. A pre-release is the version released before its
+  triple, so it now orders below it. A tag naming no version at all (a fork's
+  tag, a branch name) still orders as equal and is installed, as before.
 - The bidi controls and zero-width characters are written out in every value
   quoted for the operator. They are well-formed UTF-8 carrying no C0 or C1
   control, so the escaping every diagnostic already went through passed them,
