@@ -49,6 +49,8 @@ DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 # Keep the agent's own budget under harbor's per-task agent timeout, so
 # microagent stops deliberately instead of being killed mid-turn.
 DEFAULT_BUDGET_SECONDS = "600"
+# Room left inside the caller's timeout for the last turn to finish.
+FINAL_TURN_ROOM_S = 90
 # The levels the binary accepts for reasoning.effort, kept beside the defaults
 # so a mistyped one is refused before a container is started rather than inside
 # one.
@@ -202,7 +204,15 @@ class Microagent(BaseAgent):
         # The budget and the level are both read by the binary, so both are
         # checked here rather than handed over as strings the container refuses
         # after an upload and a container start.
-        budget = str(int_env("MICROAGENT_BUDGET_SECONDS", DEFAULT_BUDGET_SECONDS))
+        # The budget is the agent's working time, so it is as large as the
+        # caller's timeout allows, less room for the last turn to land. A
+        # budget equal to the timeout is a run killed mid-turn; a budget far
+        # below it is working time thrown away.
+        agent_timeout = int_env("MICROAGENT_AGENT_TIMEOUT_SEC", "1500")
+        budget = str(min(
+            int_env("MICROAGENT_BUDGET_SECONDS", DEFAULT_BUDGET_SECONDS),
+            max(60, agent_timeout - FINAL_TURN_ROOM_S),
+        ))
         reasoning = reasoning_effort()
         command = " ".join(
             shlex.quote(part)
@@ -227,11 +237,25 @@ class Microagent(BaseAgent):
             env["MICROAGENT_REASONING_EFFORT"] = reasoning
 
         started = self.logs_dir / "microagent-stdout.txt"
-        result = await environment.exec(
-            command=command,
-            env=env,
-            timeout_sec=int_env("MICROAGENT_AGENT_TIMEOUT_SEC", "1500"),
-        )
+        try:
+            result = await environment.exec(
+                command=command,
+                env=env,
+                timeout_sec=agent_timeout,
+            )
+        except RuntimeError as error:
+            # A timeout is the caller's budget ending, not a broken agent: the
+            # tree the agent already changed is what the verifier scores, and
+            # raising here records the trial as an exception and scores the
+            # work as nothing. Hand over to verification with the tree as it
+            # stands.
+            if "timed out" not in str(error).lower():
+                raise
+            self.logger.warning(
+                "microagent hit the %ss agent timeout; scoring the tree as it stands", agent_timeout
+            )
+            (self.logs_dir / "microagent-timeout.txt").write_text(str(error), encoding="utf-8")
+            return
         # UTF-8 named rather than left to the locale: a host running under
         # LANG=C or a legacy code page raises on a non-ASCII byte, and the run's
         # own transcript is the one log that must always land.
