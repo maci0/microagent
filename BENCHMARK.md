@@ -84,6 +84,18 @@ is the reverse. The table above is the argument for looking at it before a run
 dies on a provider timeout, not a reason to change it blind: only a live
 provider can say which side wins.
 
+One consequence is worth knowing before moving it, because it is arithmetic and
+not a measurement: **the uncached bytes a run spends do not depend on the
+limit.** Compaction fires every time the conversation grows by half of the
+limit, and each time it throws away a prompt of about the limit, so the product
+is the growth of the conversation, whatever the limit is. Raising the limit
+therefore buys back no uncached prefill at all; it only buys a larger cached
+prompt every turn. Eight compactions over roughly two megabytes of growth is
+about 1.6 times that growth, which is the same figure the formula gives.
+
+So the limit is not a latency knob. It sets how much evidence the model keeps
+per token spent, and every token past it is one the limit bought on purpose.
+
 ## One trivial request
 
 `Reply with exactly: pong`, one-shot, no repository involved. This is harness overhead plus one
