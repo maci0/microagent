@@ -50,9 +50,21 @@ release, and `microagent update` moves you to it.
   `make release-assets TAG=v0.2.0`. `ci.yml` rehearses the release with that target and
   `release.yml` publishes what it builds, so a release can be built on a laptop the way the tag
   builds it, and a renamed target no longer has to be renamed in two workflows.
+- `microagent --help` carries three worked invocations, and its subcommand line spells the flag
+  the way `microagent update --help` does (`update [--check]`, not `update [-c|--check]`).
 
 ### Fixed
 
+- Ctrl+C and `kill` now take the tool subprocess with them. A tool child leads its own process
+  group so its tree can be reaped, which is also where the terminal's interrupt does not reach: the
+  agent died and the build it had launched kept running and writing files. The run now forwards
+  SIGINT and SIGTERM to the group in flight and exits 130.
+- A config file named by `--config` or `MICROAGENT_CONFIG` that cannot be read says so on stderr.
+  A flag naming a file that is not there was read as a run with the built-in reply style and no
+  word about it. The default `~/.microagent/config.toml`, missing on most machines, stays quiet.
+- `microagent update --repo` with a value that is not `owner/name` now prints the usage text with
+  its reason, as every other update usage error does. It exited 2 with one line and broke the
+  promise the update help makes.
 - `elapsed_ms` in a session record is the model's time again. It was measured after the turn's tool
   calls had run, so it reported a gap that included them, and a monitor dividing a response's tokens
   by it got a rate for a generation that was never continuous. It is now taken when the completion

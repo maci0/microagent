@@ -226,6 +226,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (opts.prompt.len == 0) return usageError(io, "no prompt: pass it as an argument or with --print", .{});
+    forwardInterruptsToToolGroup();
     opts.api_key = resolveKey(init, opts.api_key);
     if (opts.api_key.len == 0) return configError(io, "no API key: pass --api-key or set {s}", .{key_var_names});
     if (!baseUrlCarriesKey(opts.base_url))
@@ -309,12 +310,17 @@ const help_text =
     \\                         (default ~/.microagent/sessions; empty writes none)
     \\
     \\subcommand:
-    \\  update [-c|--check] [--repo owner/name]
+    \\  update [--check] [--repo owner/name]
     \\                         replace this binary with the latest GitHub
     \\                         release after verifying its .sha256 sidecar
     \\                         (--check only reports; GITHUB_TOKEN lifts the
     \\                         API rate limit). "microagent update --help" has
     \\                         the details.
+    \\
+    \\examples:
+    \\  microagent "fix the failing test in src/net.zig and run it"
+    \\  microagent --max-turns 20 "review the diff and stop"
+    \\  microagent --print "$(cat task.txt)"
     \\
     \\exit status: 0 the run finished, 1 the run failed, 2 the command line was
     \\wrong.
@@ -612,17 +618,24 @@ fn readSecret(init: std.process.Init, name: []const u8) ?[]const u8 {
 /// nothing: the levels that were understood still apply.
 fn loadStyle(io: Io, init: std.process.Init, arena: std.mem.Allocator, config: []const u8) style_mod.Style {
     var style: style_mod.Style = .{};
-    const path = styleConfigPath(init, arena, config);
-    const text: ?[]const u8 = if (path) |p|
-        std.Io.Dir.cwd().readFileAlloc(io, p, arena, .limited(max_config_bytes)) catch null
-    else
-        null;
+    const source = styleConfigPath(init, arena, config);
+    var text: ?[]const u8 = null;
+    if (source.path) |p| {
+        text = std.Io.Dir.cwd().readFileAlloc(io, p, arena, .limited(max_config_bytes)) catch |err| blk: {
+            // A config somebody named is one the caller believes is there, so
+            // a read that fails is said out loud. The default path is missing
+            // on most machines and its absence is not a fault.
+            if (source.named)
+                net.note(io, arena, "microagent: config {s}: {s}; using the built-in levels\n", .{ p, @errorName(err) });
+            break :blk null;
+        };
+    }
     if (resolveStyle(&style, text, envValue(init.environ_map, "MICROAGENT_CAVEMAN"), envValue(init.environ_map, "MICROAGENT_PONYTAIL"))) |unknown| {
         if (unknown.from_config) {
             if (unknown.bad_value)
-                net.note(io, arena, "microagent: config {s}: '{s}' is not a level; keeping the default\n", .{ path.?, unknown.key })
+                net.note(io, arena, "microagent: config {s}: '{s}' is not a level; keeping the default\n", .{ source.path.?, unknown.key })
             else
-                net.note(io, arena, "microagent: config {s}: '{s}' is not a key this file uses; keeping the default\n", .{ path.?, unknown.key });
+                net.note(io, arena, "microagent: config {s}: '{s}' is not a key this file uses; keeping the default\n", .{ source.path.?, unknown.key });
         } else {
             net.note(io, arena, "microagent: {s} is not a level; keeping the default\n", .{unknown.key});
         }
@@ -630,18 +643,24 @@ fn loadStyle(io: Io, init: std.process.Init, arena: std.mem.Allocator, config: [
     return style;
 }
 
+/// The file the style config is read from, and whether anything named it. A
+/// flag or a variable naming a file that cannot be read is a caller's mistake
+/// worth reporting; the default path is absent on most machines.
+const StyleSource = struct { path: ?[]const u8, named: bool };
+
 /// Where the style config is read from: --config, else MICROAGENT_CONFIG, else
 /// `$HOME/.microagent/config.toml`. An empty MICROAGENT_CONFIG turns the
 /// file off, as does a home that is not there.
-fn styleConfigPath(init: std.process.Init, arena: std.mem.Allocator, config: []const u8) ?[]const u8 {
-    if (config.len > 0) return std.fs.path.resolve(arena, &.{config}) catch config;
+fn styleConfigPath(init: std.process.Init, arena: std.mem.Allocator, config: []const u8) StyleSource {
+    if (config.len > 0) return .{ .path = std.fs.path.resolve(arena, &.{config}) catch config, .named = true };
     if (init.environ_map.get("MICROAGENT_CONFIG")) |path| {
-        if (path.len == 0) return null;
-        return std.fs.path.resolve(arena, &.{path}) catch path;
+        if (path.len == 0) return .{ .path = null, .named = false };
+        return .{ .path = std.fs.path.resolve(arena, &.{path}) catch path, .named = true };
     }
-    const home = init.environ_map.get("HOME") orelse return null;
-    const path = std.fmt.allocPrint(arena, "{s}/.microagent/config.toml", .{home}) catch return null;
-    return std.fs.path.resolve(arena, &.{path}) catch path;
+    const home = init.environ_map.get("HOME") orelse return .{ .path = null, .named = false };
+    const path = std.fmt.allocPrint(arena, "{s}/.microagent/config.toml", .{home}) catch
+        return .{ .path = null, .named = false };
+    return .{ .path = std.fs.path.resolve(arena, &.{path}) catch path, .named = false };
 }
 
 /// A level named by a key or a variable that the parser does not have, so the
@@ -1289,9 +1308,11 @@ fn runToolProcess(
     // a command that backgrounded work and exited must not outlive the call.
     const pgid: ?std.posix.pid_t = if (builtin.os.tag == .windows) null else @intCast(child.id.?);
     defer {
+        watchToolGroup(null);
         if (pgid) |group| signalGroup(group);
         child.kill(io);
     }
+    watchToolGroup(pgid);
 
     var multi_buffer: Io.File.MultiReader.Buffer(2) = undefined;
     var multi: Io.File.MultiReader = undefined;
@@ -1319,6 +1340,37 @@ fn runToolProcess(
 /// case, not a failure.
 fn signalGroup(pgid: std.posix.pid_t) void {
     std.posix.kill(-pgid, .KILL) catch {};
+}
+
+/// The group of the tool subprocess in flight, published for the interrupt
+/// handler. A tool child leads its own group, so the terminal's Ctrl+C never
+/// reaches it: without this the user stops the agent and the build it launched
+/// keeps writing files behind it. Zero means no tool call is running.
+var tool_group: std.atomic.Value(std.posix.pid_t) = .init(0);
+
+/// A signal that ends the run takes the tool subprocess with it, then leaves by
+/// the code the shell reads as an interrupt.
+fn onInterrupt(_: std.posix.SIG) callconv(.c) void {
+    const group = tool_group.load(.monotonic);
+    if (group > 0) signalGroup(group);
+    std.process.exit(130);
+}
+
+fn watchToolGroup(pgid: ?std.posix.pid_t) void {
+    tool_group.store(if (pgid) |group| group else 0, .monotonic);
+}
+
+/// Installed once the run starts, so Ctrl+C and `kill` reach the tools. Help,
+/// the version and the update subcommand own no subprocess and keep the default
+/// disposition.
+fn forwardInterruptsToToolGroup() void {
+    if (builtin.os.tag == .windows) return;
+    var act: std.posix.Sigaction = undefined;
+    act.handler = .{ .handler = onInterrupt };
+    act.mask = std.posix.sigemptyset();
+    act.flags = 0;
+    std.posix.sigaction(.INT, &act, null);
+    std.posix.sigaction(.TERM, &act, null);
 }
 
 /// A tool that delegates to a binary already on PATH: the caller builds the
@@ -1954,9 +2006,11 @@ fn runCapped(
     // so a timeout leaves neither an orphan nor a zombie.
     const pgid: ?std.posix.pid_t = if (builtin.os.tag == .windows) null else @intCast(child.id.?);
     defer {
+        watchToolGroup(null);
         if (pgid) |group| signalGroup(group);
         child.kill(io);
     }
+    watchToolGroup(pgid);
 
     const files = [2]Io.File{ child.stdout.?, child.stderr.? };
     var chunks: [2][capture_chunk]u8 = undefined;
@@ -3397,6 +3451,42 @@ test "a tool call that times out leaves no process of its own behind" {
     }
     std.debug.print("grandchild {d} survived the tool call\n", .{pid});
     return error.GrandchildSurvived;
+}
+
+test "an interrupt during a tool call is forwarded to that call's process group" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // Read the disposition back rather than raising the signal: a raised
+    // SIGINT ends the run, and this run is the test binary.
+    var before: std.posix.Sigaction = undefined;
+    std.posix.sigaction(.INT, null, &before);
+    forwardInterruptsToToolGroup();
+    var after: std.posix.Sigaction = undefined;
+    std.posix.sigaction(.INT, null, &after);
+    std.posix.sigaction(.INT, &before, null);
+    try std.testing.expect(after.handler.handler == onInterrupt);
+
+    const Thread = std.Thread;
+    const Call = struct {
+        fn go(a: std.mem.Allocator, t: Io) void {
+            // The call outlives nothing here: the handler kills its group, so
+            // a hung call would hang the suite rather than fail it.
+            _ = runToolProcess(a, t, &.{ "/bin/sh", "-c", "sleep 5" }, 4096, 4096, durationMs(3000)) catch {};
+        }
+    };
+    const thread = try Thread.spawn(.{}, Call.go, .{ arena, io });
+    // Published for as long as the call runs, which is what the handler reads.
+    var attempt: usize = 0;
+    while (tool_group.load(.monotonic) == 0 and attempt < 200) : (attempt += 1)
+        try io.sleep(.{ .nanoseconds = 5 * std.time.ns_per_ms }, .awake);
+    try std.testing.expect(tool_group.load(.monotonic) > 0);
+    thread.join();
+    try std.testing.expectEqual(@as(std.posix.pid_t, 0), tool_group.load(.monotonic));
 }
 
 // The session store is a per-run directory nothing used to delete from, so a

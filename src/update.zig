@@ -570,14 +570,10 @@ pub fn run(
 
     const repo = repo_arg orelse default_repo;
     var api_buf: [240]u8 = undefined;
-    const api = releaseApiUrl(&api_buf, repo) catch {
-        var msg: [192]u8 = undefined;
-        const line = std.fmt.bufPrint(&msg, "microagent update: want owner/repo, not a URL (got '{s}')\n", .{
-            repo[0..@min(repo.len, 80)],
-        }) catch "microagent update: want owner/repo, not a URL\n";
-        net.writeErr(io, line);
-        return 2;
-    };
+    // A value the flag cannot carry is a usage error, so it prints the reason
+    // and the usage text together like every other one.
+    const api = releaseApiUrl(&api_buf, repo) catch
+        return updateUsageError(io, "want owner/repo, not a URL (got '{s}')", .{repo[0..@min(repo.len, 80)]});
 
     var client: std.http.Client = .{ .allocator = gpa, .io = io };
     defer client.deinit();
