@@ -175,6 +175,23 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(update_mod.run(io, gpa, init.arena.allocator(), init.environ_map, args.items[2..]));
     }
 
+    // `--help` and `--version` before the environment is read, so a variable
+    // this machine cannot use cannot take away the one command line that
+    // explains the rest. It used to: `MICROAGENT_MAX_TURNS=0 microagent
+    // --help` exited 2 and printed the help text on stderr, which is the one
+    // thing the help text says the exit status table forbids, and left a user
+    // whose variable was wrong with no way to read the variable's own
+    // documentation. `microagent update`, dispatched above, already behaved
+    // this way; the two commands now agree.
+    if (earlyAction(args.items[1..])) |action| {
+        switch (action) {
+            .help => net.writeOut(io, help_text) catch {},
+            .version => net.writeOut(io, "microagent " ++ version ++ "\n") catch {},
+            .run => {},
+        }
+        return;
+    }
+
     var opts: Options = .{};
     if (envValue(init.environ_map, "MICROAGENT_MODEL")) |v| opts.model = v;
     if (envValue(init.environ_map, "MICROAGENT_BASE_URL")) |v| opts.base_url = v;
@@ -667,6 +684,31 @@ fn parseArgs(buf: []u8, argv: []const []const u8, opts: *Options) ?[]const u8 {
         } else {
             return std.fmt.bufPrint(buf, "unknown or incomplete argument '{s}'", .{arg}) catch "bad arguments";
         }
+    }
+    return null;
+}
+
+/// The action `--help` or `--version` asks for, or null when the command line
+/// asks for neither. Read over the same arguments, and with the same rules,
+/// as `parseArgs` below: a value a flag takes is stepped over, so
+/// `microagent -p --help` is a run whose prompt is the words `--help` and not
+/// a request for help, in both places. A change to how one walks the command
+/// line is a change to both.
+fn earlyAction(argv: []const []const u8) ?Action {
+    var i: usize = 0;
+    while (i < argv.len) : (i += 1) {
+        const arg = argv[i];
+        var name = arg;
+        var joined: ?[]const u8 = null;
+        if (arg.len > 2 and arg[0] == '-' and arg[1] == '-') {
+            if (std.mem.indexOfScalar(u8, arg, '=')) |eq| {
+                name = arg[0..eq];
+                joined = arg[eq + 1 ..];
+            }
+        }
+        if (isFlag(name, "-V", "--version")) return .version;
+        if (isFlag(name, "-h", "--help")) return .help;
+        if (valuedFlag(name) != null and joined == null) i += 1;
     }
     return null;
 }
@@ -2108,6 +2150,35 @@ test "help and version win wherever they appear" {
     var v: Options = .{};
     try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &.{ "-V", "--model" }, &v));
     try std.testing.expectEqual(Action.version, v.action);
+}
+
+// The walk that runs before the environment is read has to reach the same
+// answer as the walk that runs after it, on the arguments both of them are
+// given, and it has to leave a command line that asks for no help and no
+// version alone. `earlyAction` is what keeps `microagent --help` working on
+// a machine whose `MICROAGENT_MAX_TURNS` is not a number, which is the only
+// way that walk is reachable at all.
+test "the walk that answers help before reading the environment agrees with the parser" {
+    const cases = [_]struct { argv: []const []const u8, want: ?Action }{
+        .{ .argv = &.{ "a prompt", "--help" }, .want = .help },
+        .{ .argv = &.{ "-V", "--model" }, .want = .version },
+        .{ .argv = &.{"--help=1"}, .want = .help },
+        // The value of a valued flag is stepped over, so these words are a
+        // prompt and not a request for help. The parser says the same.
+        .{ .argv = &.{ "-p", "--help" }, .want = null },
+        .{ .argv = &.{ "--print", "--help" }, .want = null },
+        .{ .argv = &.{ "-p", "hi", "-h" }, .want = .help },
+        .{ .argv = &.{"hi"}, .want = null },
+        .{ .argv = &.{"--nope"}, .want = null },
+        .{ .argv = &.{}, .want = null },
+    };
+    for (cases) |c| {
+        try std.testing.expectEqual(c.want, earlyAction(c.argv));
+        var opts: Options = .{};
+        var buf: [512]u8 = undefined;
+        _ = parseArgs(&buf, c.argv, &opts);
+        if (c.want) |want| try std.testing.expectEqual(want, opts.action) else try std.testing.expectEqual(Action.run, opts.action);
+    }
 }
 
 // The command line is the one input surface that is always untrusted: a
