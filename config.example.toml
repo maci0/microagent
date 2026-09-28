@@ -1,0 +1,16 @@
+# microagent reply style. Copy to ~/.microagent/config.toml, or point
+# MICROAGENT_CONFIG or --config at it. Every key here is optional: an absent
+# one, a bad level, and a file that is not there at all all keep the built-in
+# default, and the first key this file gets wrong is named on stderr.
+#
+# MICROAGENT_CAVEMAN and MICROAGENT_PONYTAIL set the same two levels for one
+# run and win over this file, since naming a level in the environment is the
+# more explicit statement.
+
+# How terse the agent's own prose is. off, lite, full, ultra, or one of the
+# three wenyan levels (wenyan-lite, wenyan-full, wenyan-ultra) that write the
+# reply in classical Chinese. Default ultra.
+caveman = "ultra"
+
+# How lazy the code it writes is. off, lite, full, ultra. Default full.
+ponytail = "full"

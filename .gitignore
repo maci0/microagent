@@ -4,3 +4,7 @@ zig-pkg/
 dist/
 __pycache__/
 .scratch/
+# A style config written here to try a level out. The template that is tracked
+# is config.example.toml; a key in this one must never reach a commit.
+config.toml
+.env

@@ -40,6 +40,12 @@ release, and `microagent update` moves you to it.
   `zig build test` through `std.testing.fuzz`, and both assert the invariants a crash-only harness
   misses: the turn a stream produces still serializes as a valid request body, and a release body only
   reaches `.replaced` when both download URLs are trusted and the published checksum matches the bytes.
+- `MDEBUG=1` prints the configuration the run resolved: model, base url, the ceilings, the level
+  each style key took, and the name of the variable or file the API key came from. The key is never
+  printed and a base url is the redacted spelling. Precedence spans three sources per option, and
+  there was no way to see which one answered.
+- `config.example.toml` is a commented template for the reply-style file, with both keys, their
+  levels and their defaults.
 
 ### Changed
 
@@ -51,6 +57,14 @@ release, and `microagent update` moves you to it.
 - The Harbor adapter's own dependency is declared. `integrations/harbor/requirements.txt` pins
   `harbor` exactly, because the adapter subclasses its agent API and a benchmark score is only
   the same score against the Harbor release that produced it.
+- A style config that is present but unreadable, is a directory, or is over the 64 KB cap says so on
+  stderr, not only one a flag or `MICROAGENT_CONFIG` named. A file that is simply absent stays quiet.
+- `GITHUB_TOKEN` is trimmed before it becomes an `Authorization` header, like the provider key file
+  is. A token a wrapper read from a file arrived carrying that file's trailing newline, and GitHub
+  refused it as an invalid credential rather than as a whitespace mistake. `microagent update --help`
+  now names the two CA-bundle variables it already read.
+- The Harbor adapter validates `MICROAGENT_BUDGET_SECONDS` before the container starts, and refuses
+  a zero value for every ceiling it reads, which is what its README already promised.
 - CI restores the Zig build caches between runs, from the shared toolchain action, so a push no
   longer pays for compiling the compiler cache and `std` from scratch on a cold runner. The
   global cache is moved under `RUNNER_TEMP`, whose default path differs per runner OS.
@@ -74,6 +88,9 @@ release, and `microagent update` moves you to it.
 - A config file named by `--config` or `MICROAGENT_CONFIG` that cannot be read says so on stderr.
   A flag naming a file that is not there was read as a run with the built-in reply style and no
   word about it. The default `~/.microagent/config.toml`, missing on most machines, stays quiet.
+- A `~/.secrets/openrouter` that is present and empty now says so. It was read as no key at all, so
+  the file being there, which is the reason a user believes a key is set, went unreported. The
+  no-key error names that file alongside the four variables.
 - `microagent update --repo` with a value that is not `owner/name` now prints the usage text with
   its reason, as every other update usage error does. It exited 2 with one line and broke the
   promise the update help makes.

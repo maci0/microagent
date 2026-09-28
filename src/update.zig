@@ -488,6 +488,9 @@ const usage_text =
     \\
     \\environment:
     \\  GITHUB_TOKEN           GitHub token, to get past the anonymous rate limit
+    \\  MICROAGENT_CA_BUNDLE   PEM file to trust instead of the system store,
+    \\                         else SSL_CERT_FILE (needed in images that ship
+    \\                         no ca-certificates). An empty value is not one.
     \\
     \\With --check, stdout is the release page URL and the version comparison
     \\goes to stderr; nothing is downloaded. Exit 0 means the check ran;
@@ -503,7 +506,11 @@ pub fn printUsage(io: std.Io) void {
 /// The run arena, not `gpa`: the header outlives every fetch and nothing here
 /// owns the copy, so there is nothing to hand back.
 fn githubBearer(arena: std.mem.Allocator, env: *std.process.Environ.Map) ?[]const u8 {
-    const tok = env.get("GITHUB_TOKEN") orelse return null;
+    // Trimmed the way the provider key file is: a token read from a file by a
+    // wrapper arrives with the newline that file ended with, and a header
+    // carrying one is refused as an invalid credential rather than as a
+    // whitespace mistake.
+    const tok = std.mem.trim(u8, env.get("GITHUB_TOKEN") orelse return null, " \t\r\n");
     if (tok.len == 0) return null;
     return std.fmt.allocPrint(arena, "Bearer {s}", .{tok}) catch null;
 }
@@ -891,6 +898,22 @@ test "update: a build ahead of the latest release is not downgraded" {
         "0.2.0 is newer than the latest release (v0.1.1); nothing to install",
         try formatAhead(&buf, "0.2.0", "v0.1.1"),
     );
+}
+
+test "update: the GitHub token is trimmed, and an empty one is no token" {
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    try std.testing.expect(githubBearer(arena, &env) == null);
+    // A token a wrapper read from a file arrives with the newline it ended
+    // with, and a header carrying one is refused as a bad credential.
+    try env.put("GITHUB_TOKEN", "ghp_abc123\n");
+    try std.testing.expectEqualStrings("Bearer ghp_abc123", githubBearer(arena, &env).?);
+    try env.put("GITHUB_TOKEN", "  ");
+    try std.testing.expect(githubBearer(arena, &env) == null);
 }
 
 test "update: checksum line is the published hex, two spaces, and the basename" {

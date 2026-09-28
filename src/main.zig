@@ -252,8 +252,11 @@ pub fn main(init: std.process.Init) !void {
 
     if (opts.prompt.len == 0) return usageError(io, "no prompt: pass it as an argument or with --print", .{});
     forwardInterruptsToToolGroup();
-    opts.api_key = resolveKey(init, opts.api_key);
-    if (opts.api_key.len == 0) return configError(io, "no API key: pass --api-key or set {s}", .{key_var_names});
+    const key = resolveKey(io, init, opts.api_key);
+    opts.api_key = key.value;
+    // The message names every source, including the file, because a user who
+    // wrote a key there is not looking for the four variables.
+    if (opts.api_key.len == 0) return configError(io, "no API key: pass --api-key, set {s}, or put one in {s}/.secrets/openrouter", .{ key_var_names, init.environ_map.get("HOME") orelse "$HOME" });
     if (!baseUrlCarriesKey(opts.base_url))
         return configError(io, "the API key would go to {s} in the clear; use an https base url, or http on loopback", .{clip(opts.base_url)});
 
@@ -266,6 +269,7 @@ pub fn main(init: std.process.Init) !void {
     var msgs: std.ArrayList(u8) = .empty;
     defer msgs.deinit(gpa);
     const style = loadStyle(io, init, init.arena.allocator(), opts.config);
+    traceConfig(io, init.arena.allocator(), opts, style, key.source);
     const reply_style = try style.ruleset(init.arena.allocator());
     const prompt = if (reply_style.len == 0)
         system_prompt
@@ -357,14 +361,19 @@ const help_text =
     \\exit status: 0 the run finished, 1 the run failed, 2 the command line was
     \\wrong.
     \\
-    \\MDEBUG=1                 trace a stuck stream on stderr. 0, off, no,
-    \\                         false and an empty value all leave it off.
+    \\MDEBUG=1                 trace a stuck stream on stderr, and print the
+    \\                         configuration this run resolved: model, base
+    \\                         url, ceilings, style levels, and the name of
+    \\                         the source the api key came from, never the key.
+    \\                         0, off, no, false and an empty value all leave
+    \\                         it off.
     \\
     \\A variable set to an empty string is not a value: MICROAGENT_MODEL,
     \\MICROAGENT_BASE_URL, MICROAGENT_REASONING_EFFORT, MICROAGENT_BUDGET_SECONDS,
     \\MICROAGENT_MAX_TURNS, MICROAGENT_MAX_TOKENS and MDEBUG keep their defaults,
     \\and MICROAGENT_CA_BUNDLE and MICROAGENT_CAVEMAN/PONYTAIL fall through to
-    \\whatever comes next.
+    \\whatever comes next. MICROAGENT_CONFIG and MICROAGENT_SESSION_DIR are the
+    \\two where empty means off: no style file, no session log.
     \\
 ;
 
@@ -619,13 +628,24 @@ fn setPrompt(buf: []u8, opts: *Options, value: []const u8) ?[]const u8 {
     return null;
 }
 
-fn resolveKey(init: std.process.Init, given: []const u8) []const u8 {
-    if (given.len > 0) return given;
+/// The key this run will use, and where it came from. A secret file that is
+/// there and holds nothing is named rather than passed off as no key at all:
+/// the file being present is exactly why a reader believes a key is set.
+const Key = struct { value: []const u8, source: []const u8 };
+
+fn resolveKey(io: Io, init: std.process.Init, given: []const u8) Key {
+    if (given.len > 0) return .{ .value = given, .source = "--api-key" };
     for (key_vars) |n| {
-        if (envValue(init.environ_map, n)) |v| return v;
+        if (envValue(init.environ_map, n)) |v| return .{ .value = v, .source = n };
     }
-    if (readSecret(init, "openrouter")) |v| return v;
-    return "";
+    const fallback = std.fmt.allocPrint(init.arena.allocator(), "{s}/.secrets/openrouter", .{
+        init.environ_map.get("HOME") orelse return .{ .value = "", .source = "none" },
+    }) catch return .{ .value = "", .source = "none" };
+    if (readSecret(init, "openrouter")) |v| {
+        if (v.len != 0) return .{ .value = v, .source = fallback };
+        net.note(io, init.arena.allocator(), "microagent: {s} is empty; no key in it\n", .{fallback});
+    }
+    return .{ .value = "", .source = "none" };
 }
 
 /// In the order they are tried, and the order the help text and README name
@@ -650,10 +670,7 @@ fn loadStyle(io: Io, init: std.process.Init, arena: std.mem.Allocator, config: [
     var text: ?[]const u8 = null;
     if (source.path) |p| {
         text = std.Io.Dir.cwd().readFileAlloc(io, p, arena, .limited(max_config_bytes)) catch |err| blk: {
-            // A config somebody named is one the caller believes is there, so
-            // a read that fails is said out loud. The default path is missing
-            // on most machines and its absence is not a fault.
-            if (source.named)
+            if (configReadWorthReporting(source.named, err))
                 net.note(io, arena, "microagent: config {s}: {s}; using the built-in levels\n", .{ p, @errorName(err) });
             break :blk null;
         };
@@ -669,6 +686,45 @@ fn loadStyle(io: Io, init: std.process.Init, arena: std.mem.Allocator, config: [
         }
     }
     return style;
+}
+
+/// The configuration this run resolved, on stderr when MDEBUG is on. Precedence
+/// spans three sources per option, so the only way to tell which one answered
+/// is to be told; the key is named by the source it came from and never
+/// printed, and a base url is the redacted spelling so credentials in one do
+/// not reach a log either.
+fn traceConfig(io: Io, arena: std.mem.Allocator, opts: Options, style: style_mod.Style, key_source: []const u8) void {
+    if (!debug_enabled) return;
+    net.note(io, arena,
+        \\[mdebug] model={s} base_url={s}
+        \\[mdebug] max_turns={d} max_tokens={d} budget_s={s} reasoning_effort={s}
+        \\[mdebug] ca_bundle={s} session_dir={s}
+        \\[mdebug] caveman={s} ponytail={s}
+        \\[mdebug] api key from {s}
+        \\
+    , .{
+        opts.model,
+        displayUrl(arena, opts.base_url),
+        opts.max_turns,
+        opts.max_tokens,
+        if (opts.budget_s) |b| std.fmt.allocPrint(arena, "{d}", .{b}) catch "?" else "unset",
+        opts.reasoning_effort orelse "unset",
+        if (opts.ca_bundle.len == 0) "unset" else opts.ca_bundle,
+        if (opts.session_dir.len == 0) "off" else opts.session_dir,
+        style.caveman.name(),
+        style.ponytail.name(),
+        key_source,
+    });
+}
+
+/// Whether a style config that could not be read is worth a line on stderr. A
+/// config somebody named is one the caller believes is there, so any failure
+/// is said out loud. The default path is missing on most machines and that is
+/// not a fault, but a file that is there and is a directory, is unreadable,
+/// or is over the cap is: the run continues on the built-in levels, and
+/// silence there is a misconfiguration nothing reports.
+fn configReadWorthReporting(named: bool, err: anyerror) bool {
+    return named or err != error.FileNotFound;
 }
 
 /// The file the style config is read from, and whether anything named it. A
@@ -4003,6 +4059,18 @@ test "an environment variable set to nothing is not a value" {
     // has --model to say so with.
     try env.put("MICROAGENT_MODEL", "gpt-5");
     try std.testing.expectEqualStrings("gpt-5", envValue(&env, "MICROAGENT_MODEL").?);
+}
+
+test "a style config that cannot be read is reported, a missing one is not" {
+    // The default path is absent on most machines and that is not a fault, but
+    // a file that is there and is a directory, is unreadable, or is over the
+    // cap is: running on the built-in levels with nothing said is the silent
+    // misconfiguration, and only absence is the normal case.
+    try std.testing.expect(!configReadWorthReporting(false, error.FileNotFound));
+    try std.testing.expect(configReadWorthReporting(true, error.FileNotFound));
+    try std.testing.expect(configReadWorthReporting(false, error.IsDir));
+    try std.testing.expect(configReadWorthReporting(false, error.AccessDenied));
+    try std.testing.expect(configReadWorthReporting(false, error.StreamTooLong));
 }
 
 test "the trace switch is on only for a value that says so" {

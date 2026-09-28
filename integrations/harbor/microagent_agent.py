@@ -82,15 +82,20 @@ def api_key() -> str:
     )
 
 
-def int_env(name: str, default: str) -> int:
+def int_env(name: str, default: str, minimum: int = 1) -> int:
     """A whole-number knob read from the host environment. An empty value is
     not a value, and a bad one names the variable instead of surfacing as a
-    ValueError from int() with no indication of which knob it was."""
+    ValueError from int() with no indication of which knob it was. A knob the
+    binary reads as a ceiling is refused here too, so a mistyped value stops
+    the run before a container is started rather than inside one."""
     raw = os.environ.get(name) or default
     try:
-        return int(raw)
+        value = int(raw)
     except ValueError:
         raise RuntimeError(f"{name} must be a whole number, got {raw!r}") from None
+    if value < minimum:
+        raise RuntimeError(f"{name} must be at least {minimum}, got {raw!r}")
+    return value
 
 
 def normalize_model(model_name: str | None) -> str:
@@ -157,7 +162,9 @@ class Microagent(BaseAgent):
         context: AgentContext,
     ) -> None:
         model = normalize_model(self.model_name)
-        budget = os.environ.get("MICROAGENT_BUDGET_SECONDS") or DEFAULT_BUDGET_SECONDS
+        # The budget is a ceiling the binary reads too, so it is checked here
+        # rather than handed over as a string the container refuses.
+        budget = str(int_env("MICROAGENT_BUDGET_SECONDS", DEFAULT_BUDGET_SECONDS))
         command = " ".join(
             shlex.quote(part)
             for part in (

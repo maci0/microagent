@@ -86,8 +86,9 @@ subcommand:
                          (--check only reports; GITHUB_TOKEN lifts the
                          API rate limit)
 
-MDEBUG=1                trace a stuck stream on stderr. 0, off, no, false and
-                        an empty value all leave it off.
+MDEBUG=1                trace a stuck stream on stderr, and print the
+                        configuration this run resolved (never the key). 0,
+                        off, no, false and an empty value all leave it off.
 ```
 
 Every long flag also takes `--flag=value`, a flag wins over the environment variable for the same
@@ -103,15 +104,16 @@ a 400 or an empty run. A variable set to an empty string is not a value:
 and `MDEBUG` keep their
 defaults, `MICROAGENT_CA_BUNDLE` falls through to `SSL_CERT_FILE`, and
 `MICROAGENT_CAVEMAN`/`MICROAGENT_PONYTAIL` fall through to the config file.
-`MICROAGENT_SESSION_DIR` is the one variable where empty means something else:
-it turns the session log off.
+Two variables are the exception: `MICROAGENT_CONFIG` and `MICROAGENT_SESSION_DIR`
+read empty as off, so no style file and no session log.
 
 The prompt may also be the last bare argument. That matters for gauntlet: a custom-agent
 definition inserts the model flags immediately after `-p`, so an agent defined as
 `["microagent", "-p", "{prompt}"]` would hand `--model` to `-p`. Define it as
 `["microagent", "{prompt}"]` instead, and any flag order works.
 
-With no key in the environment, `~/.secrets/openrouter` is read as a last resort.
+With no key in the environment, `~/.secrets/openrouter` is read as a last resort; a file there that
+is empty is named on stderr rather than passed off as no key at all.
 
 Any OpenAI-compatible endpoint works: OpenRouter, DeepSeek, OpenAI, vLLM, LiteLLM, Z.AI. Both
 `deepseek/deepseek-v4-flash` and `stealth/space-bunny-alpha` (OpenRouter) were used to verify it
@@ -148,13 +150,20 @@ parser.
   the thing this project exists to avoid. Never at the cost of input validation at a trust boundary,
   error handling that prevents data loss, security, accessibility, or anything the task asks for.
 
-The file is `MICROAGENT_CONFIG`, else `~/.microagent/config.toml`; a missing or unreadable file just
-means the defaults. `MICROAGENT_CAVEMAN` and `MICROAGENT_PONYTAIL` set a level for one run without
-touching the file and win over it, since naming a level in the environment is the more explicit
+The file is `MICROAGENT_CONFIG`, else `~/.microagent/config.toml`; a missing file means the defaults, and
+one that is there but cannot be read, is a directory, or is over the 64 KB cap says so on stderr before
+the run continues on the defaults. [`config.example.toml`](config.example.toml) is a commented template
+with both keys and their defaults. `MICROAGENT_CAVEMAN` and `MICROAGENT_PONYTAIL` set a level for one run
+without touching the file and win over it, since naming a level in the environment is the more explicit
 statement. A level that is not recognized is reported on stderr with that key's default kept, and so
 is a key this file does not define, so a misspelled `caveman` cannot leave the default in force
 quietly. With `caveman = "off"` and `ponytail = "off"`, the system prompt is exactly the one the
 harness sent before styles existed.
+
+`MDEBUG=1` prints the configuration the run resolved: model, base url (credentials in it redacted),
+the ceilings, the level each style key took, and the name of the variable or file the API key came
+from. The key itself is never printed. Precedence spans three sources per option, so this is how you
+tell which one answered.
 
 ### Output contract
 

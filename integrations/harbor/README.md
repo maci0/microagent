@@ -56,7 +56,7 @@ Harbor release that produced it.
 | `MICROAGENT_VERSION` | version string reported to harbor, if not the binary's own |
 
 An empty value is the same as an unset one for every variable here, and a
-non-numeric `MICROAGENT_MAX_TURNS`, `MICROAGENT_BUDGET_SECONDS` or
+non-numeric or zero `MICROAGENT_MAX_TURNS`, `MICROAGENT_BUDGET_SECONDS` or
 `MICROAGENT_AGENT_TIMEOUT_SEC` stops the run before the container starts, naming
 the variable. `MICROAGENT_MAX_TURNS` is passed as `--max-turns` and the binary
 reads the same name itself, so either route ends at the same ceiling.

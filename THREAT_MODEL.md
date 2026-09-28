@@ -32,23 +32,23 @@ on its own is the API key.
 
 | Entry point | What arrives | Handled at |
 | --- | --- | --- |
-| Command line, agent mode | prompt, flags, api key in `argv` | `src/main.zig:411` (`parseArgs`), `src/main.zig:173` (`main`) |
-| Command line, `update` | `--check`, `--repo` | `src/update.zig:499` (`run`), dispatched at `src/main.zig:186` |
-| `MICROAGENT_MODEL`, `MICROAGENT_BASE_URL`, `MICROAGENT_REASONING_EFFORT` | endpoint, model, response style | `src/main.zig:191-193` |
-| `MICROAGENT_MAX_TURNS`, `MICROAGENT_MAX_TOKENS` | loop and response ceilings | `src/main.zig:194-195` (`turnCeiling`, `tokenCeiling`) |
-| `MICROAGENT_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY` | provider credential | `src/main.zig:515` (`resolveKey`) |
-| `~/.secrets/openrouter` | provider credential, up to 4 KB | `src/main.zig:528` (`readSecret`) |
-| `MICROAGENT_CA_BUNDLE`, `SSL_CERT_FILE` | the trust anchors for the provider host | `src/net.zig:55` (`caBundlePath`), loaded at `src/main.zig:196`, `src/main.zig:222` |
-| `MICROAGENT_CONFIG`, `~/.microagent/config.toml` | reply-style levels, 64 KB cap | `src/main.zig:563` (`styleConfigPath`), `src/main.zig:540` (`loadStyle`) |
-| `MICROAGENT_BUDGET_SECONDS` | wall-clock ceiling on the run | `src/main.zig:197`, enforced at `src/main.zig:636` |
-| `MICROAGENT_SESSION_DIR` | where the JSONL run log is written | `src/main.zig:686` (`sessionDir`) |
-| `MDEBUG` | writes protocol notes to stderr | `src/main.zig:182`, `src/main.zig:356` |
-| `GITHUB_TOKEN` | credential, sent to the API and to the asset host | `src/update.zig:481` (`githubBearer`), used at `src/update.zig:550`, `598`, `600` |
+| Command line, agent mode | prompt, flags, api key in `argv` | `src/main.zig:490` (`parseArgs`), `src/main.zig:185` (`main`) |
+| Command line, `update` | `--check`, `--repo` | `src/update.zig:547` (`run`), dispatched at `src/main.zig:199` |
+| `MICROAGENT_MODEL`, `MICROAGENT_BASE_URL`, `MICROAGENT_REASONING_EFFORT` | endpoint, model, response style | `src/main.zig:203-205` |
+| `MICROAGENT_MAX_TURNS`, `MICROAGENT_MAX_TOKENS` | loop and response ceilings | `src/main.zig:206-207`, both through `ceiling` at `src/main.zig:412` |
+| `MICROAGENT_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY` | provider credential | `src/main.zig:599` (`resolveKey`) |
+| `~/.secrets/openrouter` | provider credential, up to 4 KB | `src/main.zig:618` (`readSecret`) |
+| `MICROAGENT_CA_BUNDLE`, `SSL_CERT_FILE` | the trust anchors for the provider host | `src/net.zig:55` (`caBundlePath`), loaded at `src/main.zig:208`, `src/main.zig:240` |
+| `MICROAGENT_CONFIG`, `~/.microagent/config.toml` | reply-style levels, 64 KB cap | `src/main.zig:701` (`styleConfigPath`), `src/main.zig:630` (`loadStyle`) |
+| `MICROAGENT_BUDGET_SECONDS` | wall-clock ceiling on the run | `src/main.zig:210`, enforced at `src/main.zig:775` |
+| `MICROAGENT_SESSION_DIR` | where the JSONL run log is written | `src/main.zig:829` (`sessionDir`) |
+| `MDEBUG` | writes protocol notes and the resolved configuration to stderr, never the key | `src/main.zig:194`, `src/main.zig:660` (`traceConfig`), `src/main.zig:1079`, `1085` |
+| `GITHUB_TOKEN` | credential, sent to the API and to the asset host | `src/update.zig:489` (`githubBearer`), used at `src/update.zig:594`, `642`, `644` |
 | GitHub release JSON | tag, page URL, asset names, download URLs | `src/update.zig:274` (`parseRelease`) |
-| Downloaded asset and `.sha256` sidecar | bytes that become the running executable | `src/update.zig:598`, `src/update.zig:600`, installed at `src/update.zig:621` |
-| Streamed provider response (SSE) | model text and tool calls | `src/main.zig:868` (`streamChat`), `src/main.zig:1070` (`applyFrame`) |
-| Tool call arguments | what the model wants done | `src/main.zig:1419` (`runTool`) |
-| Files in the working tree | the model's evidence, and its instructions | `src/main.zig:1549` (`toolRead`) |
+| Downloaded asset and `.sha256` sidecar | bytes that become the running executable | `src/update.zig:642`, `644`, installed by the run at `src/update.zig:547` |
+| Streamed provider response (SSE) | model text and tool calls | `src/main.zig:1020` (`streamChat`), `src/main.zig:1232` (`applyFrame`) |
+| Tool call arguments | what the model wants done | `src/main.zig:1631` (`runTool`) |
+| Files in the working tree | the model's evidence, and its instructions | `src/main.zig:1761` (`toolRead`) |
 
 There is no network listener, no webhook, no message consumer, no scheduled job and no
 IPC. The only outbound traffic is to the provider's base URL and to GitHub.
