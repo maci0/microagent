@@ -103,6 +103,13 @@ first, so the first changed byte is early and everything after it is re-read.
 That is the price of keeping the evidence the model is acting on, and it is the
 right trade, but it is a real cost: one turn in fifteen pays a full re-prefill.
 
+The prefix does grow, because the walk skips messages it has already elided
+and picks up where the last compaction stopped, about 3 KB per compaction. It
+grows from 1,704 bytes at the first to 22,956 at the eighth, which is 5% of a
+418 KB prompt, so over a run this size it never recovers. The cost is close to
+a full re-prefill on every one of those turns and the schedule is steady at one
+every thirteen turns.
+
 `conversation_soft_limit` is the knob, and it trades the two directly. Raising
 it means a larger prompt on every turn and fewer full re-prefills; lowering it
 is the reverse. The table above is the argument for looking at it before a run
