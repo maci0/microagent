@@ -76,6 +76,16 @@ release, and `microagent update` moves you to it.
 
 ### Changed
 
+- An empty tool argument is a missing one. A model that streams an argument out in
+  fragments can leave the field it named empty, and an empty `path` reached a backend as an
+  empty argv entry, an empty `pattern` searched for every line in the tree, and an empty
+  `rewrite` was applied with `--update-all` to every match in it. Each is now the argument
+  the model did not send, so the defaults apply, and `ast` refuses an empty `rewrite` by
+  name rather than running it. `content` and `new_string` keep an empty value: writing an
+  empty file and deleting a match are what the model asked for. The same rule the
+  environment already followed (`net.envValue`, `caBundlePath`) is now one function in
+  `net` rather than three spellings of it.
+
 - A `read` with `offset` or `limit` streams the file instead of reading all of it and
   copying the lines out. Reading fifty lines of a 3.9 MB file took 0.90 ms and left the
   whole file in the turn's memory beside the response it shared that memory with; it takes

@@ -63,19 +63,34 @@ pub fn note(io: Io, arena: std.mem.Allocator, comptime fmt: []const u8, args: an
     writeErr(io, msg);
 }
 
+/// The value of an environment variable, or null when it is not set or is set
+/// to nothing but whitespace. A wrapper that builds its own environment exports
+/// the name with nothing behind it, and an empty string read as a value sends
+/// `"model": ""` to the provider and loses the default; every other variable
+/// here already treats empty as unset.
+///
+/// Surrounding whitespace is trimmed here rather than in each reader, because
+/// a wrapper that populates the environment from a file carries the newline the
+/// file ended with, and that newline is a different failure per option: an API
+/// key arrives as an `Authorization` header carrying a byte a header may not
+/// hold, so every request is refused; a base url fails to parse, so the run
+/// stops claiming the key would go out in the clear, which is a security
+/// warning about a value that is otherwise fine. The ceilings and the levels
+/// trim for themselves at the point of parsing, `githubBearer` trims for the
+/// same reason, and a key file is read trimmed; this makes the environment
+/// itself the one place the whitespace is removed.
+pub fn envValue(env: *const std.process.Environ.Map, name: []const u8) ?[]const u8 {
+    const v = std.mem.trim(u8, env.get(name) orelse return null, env_surrounding);
+    return if (v.len == 0) null else v;
+}
+
 /// Where a CA bundle is named, for the agent run and for `update` alike: the
 /// project's own variable first, then the one the system trust store tooling
 /// already uses. Empty means no bundle was named, and so does a value that is
 /// nothing but whitespace, which is not a path any filesystem holds.
 pub fn caBundlePath(env: *const std.process.Environ.Map) []const u8 {
-    if (env.get("MICROAGENT_CA_BUNDLE")) |v| {
-        const p = std.mem.trim(u8, v, env_surrounding);
-        if (p.len > 0) return p;
-    }
-    if (env.get("SSL_CERT_FILE")) |v| {
-        const p = std.mem.trim(u8, v, env_surrounding);
-        if (p.len > 0) return p;
-    }
+    if (envValue(env, "MICROAGENT_CA_BUNDLE")) |v| return v;
+    if (envValue(env, "SSL_CERT_FILE")) |v| return v;
     return "";
 }
 

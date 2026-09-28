@@ -363,31 +363,15 @@ fn die(io: Io, comptime fallback: []const u8, comptime fmt: []const u8, args: an
     std.process.exit(2);
 }
 
-/// The value of an environment variable, or null when it is not set or is set
-/// to nothing but whitespace. A wrapper that builds its own environment exports
-/// the name with nothing behind it, and an empty string read as a value sends
-/// `"model": ""` to the provider and loses the default; every other variable
-/// here already treats empty as unset.
-///
-/// Surrounding whitespace is trimmed here rather than in each reader, because
-/// a wrapper that populates the environment from a file carries the newline the
-/// file ended with, and that newline is a different failure per option: an API
-/// key arrives as an `Authorization` header carrying a byte a header may not
-/// hold, so every request is refused; a base url fails to parse, so the run
-/// stops claiming the key would go out in the clear, which is a security
-/// warning about a value that is otherwise fine. The ceilings and the levels
-/// trim for themselves at the point of parsing, `githubBearer` trims for the
-/// same reason, and a key file is read trimmed; this makes the environment
-/// itself the one place the whitespace is removed.
-fn envValue(env: *const std.process.Environ.Map, name: []const u8) ?[]const u8 {
-    const v = std.mem.trim(u8, env.get(name) orelse return null, env_surrounding);
-    return if (v.len == 0) null else v;
-}
-
 /// What a wrapper reading a file leaves around a value it exported. Spelled
 /// in `net`, which every reader of the environment imports, so the set is one
 /// set and not one per reader.
 const env_surrounding = net.env_surrounding;
+
+/// The trimmed value of an environment variable, or null when it is unset or
+/// empty. The rule and the reason it holds live in `net`, beside the other two
+/// readers of the environment that answer to it.
+const envValue = net.envValue;
 
 /// The debugging switch, on unless the variable is set to something that reads
 /// as off. Set-at-all was the old reading, which turned the trace on for a

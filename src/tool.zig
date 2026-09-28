@@ -246,12 +246,24 @@ fn gitLogLines(limit: usize) usize {
     return @min(limit, git_log_line_ceiling);
 }
 
+/// A string argument the model sent, or null when it sent none or sent an
+/// empty one. Every other untrusted input in this program reads empty as
+/// absent (`net.caBundlePath`, `sessionDir`, the command line's own parse), and
+/// a model that streams an argument out in pieces can leave the field it named
+/// empty. Left as a value, it reaches a backend as an empty argv entry or an
+/// empty search pattern, and what comes back is a tool error with no name in
+/// it rather than the one the argument is missing.
+fn strArg(args: std.json.ObjectMap, key: []const u8) ?[]const u8 {
+    const value = chat.str(args.get(key)) orelse return null;
+    return if (value.len == 0) null else value;
+}
+
 /// Read-only git, with the subcommands fixed here rather than assembled by the
 /// model. Deterministic, no shell quoting, and the output is capped.
 fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64) ![]u8 {
-    const cmd = chat.str(args.get("cmd")) orelse return std.fmt.allocPrint(arena, "error: missing cmd", .{});
-    const path = chat.str(args.get("path"));
-    const rev = chat.str(args.get("rev"));
+    const cmd = strArg(args, "cmd") orelse return std.fmt.allocPrint(arena, "error: missing cmd", .{});
+    const path = strArg(args, "path");
+    const rev = strArg(args, "rev");
     const limit = gitLineLimit(args);
     // A rev such as `--output=FILE` would turn a read into a write.
     if (rev) |r| if (std.mem.startsWith(u8, r, "-"))
@@ -409,7 +421,7 @@ fn requestedTimeoutMs(v: ?std.json.Value) ?u64 {
 }
 
 fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64) ![]u8 {
-    const command = chat.str(args.get("command")) orelse return std.fmt.allocPrint(arena, "error: missing command", .{});
+    const command = strArg(args, "command") orelse return std.fmt.allocPrint(arena, "error: missing command", .{});
     const timeout_ms: u64 = bashTimeoutMs(requestedTimeoutMs(args.get("timeout_ms")), ceiling_ms);
     const capture_limit = max_tool_output * 4;
     const res = runCapped(io, arena, &.{ "/bin/sh", "-c", command }, capture_limit, net.durationMs(timeout_ms)) catch |err| switch (err) {
@@ -553,7 +565,7 @@ fn credentialRefusal(arena: std.mem.Allocator, tool: []const u8, path: []const u
 }
 
 fn toolRead(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
-    const path = chat.str(args.get("path")) orelse return std.fmt.allocPrint(arena, "error: missing path", .{});
+    const path = strArg(args, "path") orelse return std.fmt.allocPrint(arena, "error: missing path", .{});
     if (isCredentialPath(path)) return try credentialRefusal(arena, "read", path);
     if (!args.contains("offset") and !args.contains("limit"))
         return std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_read_bytes)) catch |err|
@@ -661,7 +673,7 @@ fn readLines(io: Io, arena: std.mem.Allocator, path: []const u8, offset: usize, 
 }
 
 fn toolWrite(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
-    const path = chat.str(args.get("path")) orelse return std.fmt.allocPrint(arena, "error: missing path", .{});
+    const path = strArg(args, "path") orelse return std.fmt.allocPrint(arena, "error: missing path", .{});
     // A call that names a path and no content is a call the model got cut
     // short on, not one asking for an empty file: a `write` is the one tool
     // result a run cannot undo, and emptying a source file is worse than
@@ -719,14 +731,18 @@ pub fn writeFileAtomic(io: Io, dir: std.Io.Dir, path: []const u8, bytes: []const
 }
 
 fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
-    const path = chat.str(args.get("path")) orelse return std.fmt.allocPrint(arena, "error: missing path", .{});
+    const path = strArg(args, "path") orelse return std.fmt.allocPrint(arena, "error: missing path", .{});
+    // An empty `new_string` is the delete, and stays one; an empty `old_string`
+    // is nothing to find, and is refused before the file is read rather than
+    // after up to `max_edit_bytes` of it has been pulled in for a call that
+    // was never going to write anything.
     const old = chat.str(args.get("old_string")) orelse return std.fmt.allocPrint(arena, "error: missing old_string", .{});
+    if (old.len == 0) return std.fmt.allocPrint(arena, "error: old_string is empty", .{});
     const new = chat.str(args.get("new_string")) orelse return std.fmt.allocPrint(arena, "error: missing new_string", .{});
     const all = if (args.get("replace_all")) |v| v == .bool and v.bool else false;
 
     const raw = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_edit_bytes)) catch |err|
         return std.fmt.allocPrint(arena, "error: cannot read {s}: {s}", .{ path, @errorName(err) });
-    if (old.len == 0) return std.fmt.allocPrint(arena, "error: old_string is empty", .{});
 
     const count = std.mem.count(u8, raw, old);
     if (count == 0) return std.fmt.allocPrint(arena, "error: old_string not found in {s}", .{path});
@@ -748,15 +764,15 @@ fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
 }
 
 fn toolSearch(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64) ![]u8 {
-    const pattern = chat.str(args.get("pattern")) orelse return std.fmt.allocPrint(arena, "error: missing pattern", .{});
-    const path = chat.str(args.get("path")) orelse ".";
+    const pattern = strArg(args, "pattern") orelse return std.fmt.allocPrint(arena, "error: missing pattern", .{});
+    const path = strArg(args, "path") orelse ".";
     // The globs below are traversal rules: ripgrep applies them while it walks,
     // and a file named as the search path is read whatever they say, so
     // `{"path": ".env"}` came back with the key's line in it. The name is
     // checked here instead, which is what the globs and this test between them
     // make true.
     if (isCredentialPath(path)) return try credentialRefusal(arena, "search", path);
-    const glob = chat.str(args.get("glob"));
+    const glob = strArg(args, "glob");
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(arena, &.{ "rg", "--line-number", "--no-heading", "--color", "never", "--max-count", "200", "--glob-case-insensitive" });
     if (glob) |g| {
@@ -774,14 +790,20 @@ fn toolSearch(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceilin
 /// is applied to every match (`--update-all`), so the next turn reads the
 /// result back rather than trusting the tool's summary.
 fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64) ![]u8 {
-    const pattern = chat.str(args.get("pattern")) orelse return std.fmt.allocPrint(arena, "error: missing pattern", .{});
-    const lang = chat.str(args.get("lang")) orelse return std.fmt.allocPrint(arena, "error: missing lang", .{});
-    const path = chat.str(args.get("path")) orelse ".";
+    const pattern = strArg(args, "pattern") orelse return std.fmt.allocPrint(arena, "error: missing pattern", .{});
+    const lang = strArg(args, "lang") orelse return std.fmt.allocPrint(arena, "error: missing lang", .{});
+    const path = strArg(args, "path") orelse ".";
     // The same hole `search` has: `--globs` filters the walk, and a file named
     // as the path is rewritten whatever they say, which is a key's line in a
     // match and a keystore in the diff of the turn after.
     if (isCredentialPath(path)) return try credentialRefusal(arena, "ast", path);
-    const rewrite = chat.str(args.get("rewrite"));
+    // `--update-all` applies the replacement to every match in the tree, so an
+    // empty one is a request to delete every match rather than a rewrite. The
+    // two spellings are told apart by `rewrite` being absent, which is the
+    // search this tool runs instead.
+    const rewrite = strArg(args, "rewrite");
+    if (rewrite == null and chat.str(args.get("rewrite")) != null)
+        return std.fmt.allocPrint(arena, "error: rewrite is empty: --update-all would apply it to every match in the tree, so it is refused rather than run", .{});
 
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(arena, &.{ "ast-grep", "run", "--pattern", pattern, "--lang", lang });
@@ -1755,6 +1777,73 @@ test "a tool argument sent as a number is missing, not a value" {
         "error: missing command",
         try dispatch(arena, "bash", "{\"command\":null}"),
     );
+}
+
+// An empty value is not a value either, and a model that streams one argument
+// out in fragments can leave the field it named empty. Handed on as written it
+// reaches a backend as an empty argv entry, an empty search pattern that
+// matches everything, or an empty rewrite that `--update-all` applies to every
+// match in the tree. The two fields where empty does mean something, `content`
+// and `new_string`, keep it.
+test "an empty tool argument is missing, except where empty is the edit" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const cases = [_]struct { tool: []const u8, args: []const u8, want: []const u8 }{
+        .{ .tool = "bash", .args = "{\"command\":\"\"}", .want = "error: missing command" },
+        .{ .tool = "read", .args = "{\"path\":\"\"}", .want = "error: missing path" },
+        .{ .tool = "write", .args = "{\"path\":\"\"}", .want = "error: missing path" },
+        .{ .tool = "search", .args = "{\"pattern\":\"\"}", .want = "error: missing pattern" },
+        .{ .tool = "ast", .args = "{\"pattern\":\"$A\",\"lang\":\"\"}", .want = "error: missing lang" },
+        .{ .tool = "git", .args = "{\"cmd\":\"\"}", .want = "error: missing cmd" },
+        .{
+            .tool = "ast",
+            .args = "{\"pattern\":\"$A\",\"lang\":\"python\",\"rewrite\":\"\"}",
+            .want = "error: rewrite is empty: --update-all would apply it to every match in the tree, so it is refused rather than run",
+        },
+    };
+    for (cases) |c|
+        try std.testing.expectEqualStrings(c.want, try dispatch(arena, c.tool, c.args));
+
+    // The optional arguments take the same rule, so `path` falls back to the
+    // working directory and `rev` to HEAD rather than a backend being handed
+    // an empty one.
+    try std.testing.expect(strArg(.empty, "path") == null);
+    try std.testing.expectEqualStrings("a.zig", strArg(try argMap(arena, "path", "a.zig"), "path").?);
+
+    var with_empty: std.json.ObjectMap = .empty;
+    try with_empty.put(arena, "path", .{ .string = "" });
+    try std.testing.expect(strArg(with_empty, "path") == null);
+
+    // An empty `new_string` is the delete, and an empty `content` is the empty
+    // file: both are what the model asked for, so neither is read as missing.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "x" });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const path = try std.fmt.allocPrint(arena, "{s}/a.txt", .{path_buf[0..n]});
+
+    var edit_args = try argMap(arena, "path", path);
+    try edit_args.put(arena, "old_string", .{ .string = "x" });
+    try edit_args.put(arena, "new_string", .{ .string = "" });
+    try std.testing.expectEqualStrings(
+        try std.fmt.allocPrint(arena, "replaced 1 occurrence(s) in {s}", .{path}),
+        try toolEdit(io, arena, edit_args),
+    );
+    try std.testing.expectEqualStrings("", try tmp.dir.readFileAlloc(io, "a.txt", arena, .limited(64)));
+}
+
+/// One argument map holding a single string, for the cases that are about the
+/// value rather than about a whole tool call.
+fn argMap(arena: std.mem.Allocator, key: []const u8, value: []const u8) !std.json.ObjectMap {
+    var args: std.json.ObjectMap = .empty;
+    try args.put(arena, key, .{ .string = value });
+    return args;
 }
 
 test "a child that outruns the capture cap keeps its first bytes instead of failing" {
