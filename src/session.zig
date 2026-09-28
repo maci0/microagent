@@ -122,6 +122,12 @@ const log_dir_mode: Io.File.Permissions = @enumFromInt(@as(std.posix.mode_t, 0o7
 /// a silent log cannot show, so it is named here like any other failure to open
 /// a log.
 fn createSessionLog(io: Io, arena: std.mem.Allocator, session_dir: []const u8, stamp: i128) ?Io.File {
+    // The directory the notes below name is `MICROAGENT_SESSION_DIR` or a
+    // path under `$HOME`: whatever the shell, a wrapper script or a container
+    // image put there. It is escaped once here rather than at every call site,
+    // so a value carrying an escape sequence, or a byte that is not text,
+    // reaches the operator's terminal as the characters it is.
+    const shown = chat.safeTextAll(arena, session_dir);
     var attempt: usize = 0;
     while (attempt < session_name_attempts) : (attempt += 1) {
         var suffix_buf: [4]u8 = undefined;
@@ -130,26 +136,26 @@ fn createSessionLog(io: Io, arena: std.mem.Allocator, session_dir: []const u8, s
         // The three silent nulls this replaces left a monitor reading a store
         // that stayed empty with nothing on stderr to say why.
         const suffix = if (attempt == 0) "" else std.fmt.bufPrint(&suffix_buf, "-{d}", .{attempt}) catch |err| {
-            net.note(io, arena, "microagent: a session log name under {s} could not be built ({s}); this run records no usage\n", .{ session_dir, @errorName(err) });
+            net.note(io, arena, "microagent: a session log name under {s} could not be built ({s}); this run records no usage\n", .{ shown, @errorName(err) });
             return null;
         };
         const name = std.fmt.allocPrint(arena, "{d}{s}.jsonl", .{ stamp, suffix }) catch |err| {
-            net.note(io, arena, "microagent: a session log name under {s} could not be built ({s}); this run records no usage\n", .{ session_dir, @errorName(err) });
+            net.note(io, arena, "microagent: a session log name under {s} could not be built ({s}); this run records no usage\n", .{ shown, @errorName(err) });
             return null;
         };
         const path = std.fs.path.join(arena, &.{ session_dir, name }) catch |err| {
-            net.note(io, arena, "microagent: a session log path under {s} could not be built ({s}); this run records no usage\n", .{ session_dir, @errorName(err) });
+            net.note(io, arena, "microagent: a session log path under {s} could not be built ({s}); this run records no usage\n", .{ shown, @errorName(err) });
             return null;
         };
         return std.Io.Dir.createFileAbsolute(io, path, .{ .exclusive = true, .permissions = log_file_mode }) catch |err| switch (err) {
             error.PathAlreadyExists => continue,
             else => |e| {
-                net.note(io, arena, "microagent: a session log under {s} could not be created ({s}); this run records no usage\n", .{ session_dir, @errorName(e) });
+                net.note(io, arena, "microagent: a session log under {s} could not be created ({s}); this run records no usage\n", .{ shown, @errorName(e) });
                 return null;
             },
         };
     }
-    net.note(io, arena, "microagent: {d} session log names under {s} were already taken; this run records no usage\n", .{ session_name_attempts, session_dir });
+    net.note(io, arena, "microagent: {d} session log names under {s} were already taken; this run records no usage\n", .{ session_name_attempts, shown });
     return null;
 }
 
@@ -170,17 +176,21 @@ pub fn open(io: Io, arena: std.mem.Allocator, session_dir: []const u8, model: []
     // watcher happens to read the store. It comes from the run arena because a
     // directory that is resolved and then not used, by a log that could not be
     // opened, has no owner to free it.
+    // Escaped once for the notes below, for the reason `createSessionLog`
+    // gives: the directory is a variable or a path under `$HOME`, and a value
+    // that is not text is written as the characters it is.
+    const shown = chat.safeTextAll(arena, session_dir);
     const cwd = std.Io.Dir.cwd().realPathFileAlloc(io, ".", arena) catch |err| {
-        net.note(io, arena, "microagent: the working directory could not be read ({s}), so no session log is kept under {s}\n", .{ @errorName(err), session_dir });
+        net.note(io, arena, "microagent: the working directory could not be read ({s}), so no session log is kept under {s}\n", .{ @errorName(err), shown });
         return null;
     };
     _ = std.Io.Dir.cwd().createDirPathStatus(io, session_dir, log_dir_mode) catch |err| {
-        net.note(io, arena, "microagent: the session directory {s} could not be created ({s}); the rest of this run is not recorded\n", .{ session_dir, @errorName(err) });
+        net.note(io, arena, "microagent: the session directory {s} could not be created ({s}); the rest of this run is not recorded\n", .{ shown, @errorName(err) });
         return null;
     };
     const stamp = Io.Clock.real.now(io).nanoseconds;
     const file = createSessionLog(io, arena, session_dir, stamp) orelse {
-        net.note(io, arena, "microagent: no session log could be opened under {s}; the rest of this run is not recorded\n", .{session_dir});
+        net.note(io, arena, "microagent: no session log could be opened under {s}; the rest of this run is not recorded\n", .{shown});
         return null;
     };
     pruneSessions(io, arena, session_dir);
@@ -279,7 +289,7 @@ fn pruneSessions(io: Io, arena: std.mem.Allocator, session_dir: []const u8) void
 /// one function so the three cannot drift into three different sentences.
 fn partialList(io: Io, arena: std.mem.Allocator, session_dir: []const u8, seen: usize, err: anyerror) void {
     net.note(io, arena, "microagent: the session store under {s} could not be listed past {d} of its logs ({s}); nothing is pruned, because pruning from a partial list would delete whichever logs it saw rather than the oldest ones\n", .{
-        session_dir, seen, @errorName(err),
+        chat.safeTextAll(arena, session_dir), seen, @errorName(err),
     });
 }
 
@@ -287,8 +297,11 @@ fn partialList(io: Io, arena: std.mem.Allocator, session_dir: []const u8, seen: 
 /// so the fuzz harness can put a handful of names over a window of two and
 /// check what the delete loop does with them.
 fn pruneSessionsTo(io: Io, arena: std.mem.Allocator, session_dir: []const u8, keep: usize) void {
+    // Escaped once for the two notes below, for the reason `createSessionLog`
+    // gives: the directory is a variable or a path under `$HOME`.
+    const shown = chat.safeTextAll(arena, session_dir);
     var dir = std.Io.Dir.openDir(std.Io.Dir.cwd(), io, session_dir, .{ .iterate = true }) catch |err| {
-        net.note(io, arena, "microagent: the session store under {s} could not be read for pruning ({s}); it is not pruned and is left as it stands\n", .{ session_dir, @errorName(err) });
+        net.note(io, arena, "microagent: the session store under {s} could not be read for pruning ({s}); it is not pruned and is left as it stands\n", .{ shown, @errorName(err) });
         return;
     };
     defer dir.close(io);
@@ -303,7 +316,7 @@ fn pruneSessionsTo(io: Io, arena: std.mem.Allocator, session_dir: []const u8, ke
     // through `dir` while it is still open closes that handle under it.
     {
         var walker = dir.walk(arena) catch |err| {
-            net.note(io, arena, "microagent: the session store under {s} could not be walked for pruning ({s}); it is not pruned and is left as it stands\n", .{ session_dir, @errorName(err) });
+            net.note(io, arena, "microagent: the session store under {s} could not be walked for pruning ({s}); it is not pruned and is left as it stands\n", .{ shown, @errorName(err) });
             return;
         };
         defer walker.deinit();
@@ -350,7 +363,7 @@ fn pruneSessionsTo(io: Io, arena: std.mem.Allocator, session_dir: []const u8, ke
         };
     }
     if (failed != 0) net.note(io, arena, "microagent: {d} of {d} session logs under {s} could not be deleted ({s}); the store is over its {d}-log limit and stays that way until they can be\n", .{
-        failed, found.items.len - keep, session_dir, @errorName(first_err.?), keep,
+        failed, found.items.len - keep, shown, @errorName(first_err.?), keep,
     });
 }
 
@@ -385,15 +398,18 @@ pub fn elapsedMs(io: Io, since: i96) u64 {
 /// and saying nothing about the gap.
 pub fn writeRecord(io: Io, arena: std.mem.Allocator, session: *?Session, elapsed_ms: u64, result: *const chat.ChatResult) void {
     const s = session.* orelse return;
+    // `s.dir` is the directory the run was given, escaped for the reason
+    // `createSessionLog` gives.
+    const shown = chat.safeTextAll(arena, s.dir);
     const ts_ms: i64 = @intCast(@divTrunc(Io.Clock.real.now(io).nanoseconds, std.time.ns_per_ms));
     const line = sessionRecord(arena, ts_ms, s.cwd, s.model, elapsed_ms, result) catch |err| {
-        net.note(io, arena, "microagent: a session record for {s} could not be built ({s}); the rest of this run is not recorded\n", .{ s.dir, @errorName(err) });
+        net.note(io, arena, "microagent: a session record for {s} could not be built ({s}); the rest of this run is not recorded\n", .{ shown, @errorName(err) });
         s.file.close(io);
         session.* = null;
         return;
     };
     s.file.writeStreamingAll(io, line) catch |err| {
-        net.note(io, arena, "microagent: the session log under {s} could not be written ({s}); the rest of this run is not recorded\n", .{ s.dir, @errorName(err) });
+        net.note(io, arena, "microagent: the session log under {s} could not be written ({s}); the rest of this run is not recorded\n", .{ shown, @errorName(err) });
         s.file.close(io);
         session.* = null;
     };
@@ -807,6 +823,42 @@ const group_other_mode_bits: u32 = 0o077;
 /// The owner's read and write, which a log whose owner cannot open is no
 /// better than one everybody can.
 const owner_mode_bits: u32 = 0o600;
+
+// The directory the notes name and the directory the log is created in are the
+// same path spelled two ways, because the first goes through `safeText` and the
+// second must not: a store whose name carries an escape sequence (a shell, a
+// wrapper script or a container image named it) is written where it was asked
+// for, and the escaping is only ever what a diagnostic prints.
+test "a store whose name is not plain text is created where it was named" {
+    var store = try StoreFixture.init(std.testing.allocator);
+    defer store.deinit();
+    const io = store.io();
+    const arena = store.arena();
+
+    const hostile = try std.fs.path.join(arena, &.{ try store.path(), "s\x1b[2J\xffstore" });
+    var live: ?Session = open(io, arena, hostile, "test/model") orelse return error.TestUnexpectedResult;
+    defer close(io, &live);
+
+    // The log is under the real name, with the escape sequence and the byte
+    // that is not text in it: the escaping a note applies never reached a path
+    // the filesystem was asked about.
+    var dir = try std.Io.Dir.openDirAbsolute(io, hostile, .{ .iterate = true });
+    defer dir.close(io);
+    var walker = try dir.walk(arena);
+    defer walker.deinit();
+    var logs: usize = 0;
+    while (try walker.next(io)) |entry| {
+        if (entry.kind == .file and std.mem.endsWith(u8, entry.basename, ".jsonl")) logs += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), logs);
+
+    // And the escaped spelling, which is what a note about that store prints,
+    // carries none of it.
+    const shown = chat.safeTextAll(arena, hostile);
+    for (shown) |c| try std.testing.expect(c >= 0x20 and c != 0x7f);
+    try std.testing.expect(std.mem.indexOf(u8, shown, "\\x1b") != null);
+    try std.testing.expect(std.mem.indexOf(u8, shown, "\u{fffd}") != null);
+}
 
 // A re-run that reads the same clock stamp writes its log beside the first
 // one under a `-N` name, and a store that only recognised `<digits>.jsonl`

@@ -607,12 +607,8 @@ fn isIpv4Loopback(host: []const u8) bool {
 /// needs in full to recognize the endpoint a run was talking to.
 fn displayUrl(arena: std.mem.Allocator, url: []const u8) []const u8 {
     const shown = redactUserinfo(arena, url);
-    return chat_mod.safeText(arena, shown, shown.len *| safe_text_widening);
+    return chat_mod.safeTextAll(arena, shown);
 }
-
-/// The longest `safeText` can be for a byte of input: a C0 control becomes four
-/// bytes, which is more than any other escape it writes.
-const safe_text_widening: usize = 4;
 
 fn redactUserinfo(arena: std.mem.Allocator, url: []const u8) []const u8 {
     const scheme_end = std.mem.indexOf(u8, url, "://") orelse return url;
@@ -893,20 +889,26 @@ fn resolveKey(io: Io, init: std.process.Init, given: []const u8) Key {
         // the run has no API key, when the key is in a file whose path this
         // could not build.
         net.note(io, arena, "microagent: the path to {s}/.secrets/openrouter could not be built ({s}); no key was taken from a file there\n", .{
-            net.homeDir(init.environ_map) orelse "$HOME", @errorName(err),
+            chat_mod.safeTextAll(arena, net.homeDir(init.environ_map) orelse "$HOME"), @errorName(err),
         });
         return .{ .value = "", .source = "none" };
     };
+    // The path is built out of `$HOME`, which is whatever the shell, a wrapper
+    // script or a container image put there, so the two notes that name it
+    // escape it. `safeText` is what every other diagnostic quoting a value
+    // already uses; a home carrying ESC or a byte that is not text reached the
+    // operator's terminal through these two lines intact.
+    const shown_fallback = chat_mod.safeTextAll(arena, fallback);
     switch (tool_mod.readSecret(io, arena, fallback)) {
         .found => |v| {
             if (v.len != 0) return .{ .value = v, .source = fallback };
-            net.note(io, arena, "microagent: {s} is empty; no key in it\n", .{fallback});
+            net.note(io, arena, "microagent: {s} is empty; no key in it\n", .{shown_fallback});
         },
         // A key that is set in a file this process cannot read is not the same
         // as no key, and the difference is the whole of what the caller does
         // next: the first is a permissions problem on a file that holds a
         // working key, the second is a key to go and find.
-        .unreadable => |u| net.note(io, arena, "microagent: {s} could not be read ({s}); it may hold a key this process cannot reach, and no key was taken from it\n", .{ fallback, @errorName(u.reason) }),
+        .unreadable => |u| net.note(io, arena, "microagent: {s} could not be read ({s}); it may hold a key this process cannot reach, and no key was taken from it\n", .{ shown_fallback, @errorName(u.reason) }),
         .absent => {},
     }
     return .{ .value = "", .source = "none" };
@@ -1018,6 +1020,15 @@ fn configPathText(arena: std.mem.Allocator, source: StyleSource) []const u8 {
 /// is to be told; the key is named by the source it came from and never
 /// printed, and a base url is the redacted spelling so credentials in one do
 /// not reach a log either.
+///
+/// Every value on this line is one the operator or the environment supplied:
+/// the model id and the base url are flags, the ca bundle and the session
+/// directory are variables, the style config is a path and the key source is
+/// either a variable name or the file the key was read from. Each goes through
+/// `safeTextAll`, the escaping every other diagnostic quoting a value uses, so
+/// a `--model` carrying an escape sequence or a `MICROAGENT_SESSION_DIR`
+/// carrying a byte that is not text is written as the characters it is rather
+/// than acted on.
 fn traceConfig(io: Io, arena: std.mem.Allocator, opts: Options, style: LoadedStyle, key_source: []const u8) void {
     if (!debug_enabled) return;
     net.note(io, arena,
@@ -1029,18 +1040,18 @@ fn traceConfig(io: Io, arena: std.mem.Allocator, opts: Options, style: LoadedSty
         \\[mdebug] api key from {s}
         \\
     , .{
-        opts.model,
+        chat_mod.safeTextAll(arena, opts.model),
         displayUrl(arena, opts.base_url),
         opts.max_turns,
         opts.max_tokens,
         if (opts.budget_s) |b| std.fmt.allocPrint(arena, "{d}", .{b}) catch "?" else "unset",
         opts.reasoning_effort orelse "unset",
-        if (opts.ca_bundle.len == 0) "unset" else opts.ca_bundle,
-        if (opts.session_dir.len == 0) "off" else opts.session_dir,
-        style.source orelse "none",
+        if (opts.ca_bundle.len == 0) "unset" else chat_mod.safeTextAll(arena, opts.ca_bundle),
+        if (opts.session_dir.len == 0) "off" else chat_mod.safeTextAll(arena, opts.session_dir),
+        if (style.source) |p| chat_mod.safeTextAll(arena, p) else "none",
         style.style.caveman.name(),
         style.style.ponytail.name(),
-        key_source,
+        chat_mod.safeTextAll(arena, key_source),
     });
 }
 

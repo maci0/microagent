@@ -5,12 +5,15 @@
 //! to, and the reading of an HTTP date off the wire, which is wire format rather
 //! than any one caller's policy.
 //!
-//! A leaf module. It imports nothing from the rest of the program, so the
-//! agent run, the session log and `update` can each use it without importing
-//! one another.
+//! A leaf module over the other leaf: it imports `chat` and nothing else, so
+//! the agent run, the session log and `update` can each use it without
+//! importing one another. `chat` is imported for the one escaping the notes
+//! here need, which is the escaping the rest of the program uses.
 
 const std = @import("std");
 const Io = std.Io;
+
+const chat = @import("chat.zig");
 
 /// What a wrapper that reads its environment out of a file leaves around every
 /// value it exported. It is spelled here, in the module every reader imports,
@@ -49,7 +52,10 @@ pub fn loadCaBundle(
     else
         client.ca_bundle.addCertsFromFilePath(gpa, io, now, Io.Dir.cwd(), path);
     added catch |err| {
-        note(io, arena, "microagent: cannot read CA bundle {s}: {s}; scanning the system store instead\n", .{ path, @errorName(err) });
+        // The path is a variable the operator set, and both notes below name
+        // it: a value that is not text, or one carrying an escape sequence,
+        // has to be written as the characters it is rather than acted on.
+        note(io, arena, "microagent: cannot read CA bundle {s}: {s}; scanning the system store instead\n", .{ chat.safeTextAll(arena, path), @errorName(err) });
         return;
     };
     // A file that is readable but holds no PEM parses as zero certificates
@@ -58,7 +64,7 @@ pub fn loadCaBundle(
     // shipped no ca-certificates, and the bundle the operator named is never
     // mentioned. The system store is the documented fallback, so take it.
     if (client.ca_bundle.map.count() == before) {
-        note(io, arena, "microagent: CA bundle {s} holds no certificates; scanning the system store instead\n", .{path});
+        note(io, arena, "microagent: CA bundle {s} holds no certificates; scanning the system store instead\n", .{chat.safeTextAll(arena, path)});
         return;
     }
     // Non-null `now` is how the client knows the bundle is already populated.

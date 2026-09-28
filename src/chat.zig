@@ -440,6 +440,62 @@ pub fn safeText(arena: std.mem.Allocator, s: []const u8, max: usize) []const u8 
     return out.items;
 }
 
+/// The longest `safeText` can be for a byte of input: a C0 control becomes four
+/// bytes, which is more than any other escape it writes. A value a reader has
+/// to be able to recognize in full (a path they will copy, a url they will
+/// paste) is escaped under a budget no escaping can overrun, and this is the
+/// multiplier that spells it. The quote budget the other callers pass is for a
+/// value quoted inside a sentence, where a truncated tail is still a shorter
+/// sentence rather than a path that no longer names anything.
+pub const safe_text_widening: usize = 4;
+
+/// `s` escaped whole, for a diagnostic a reader has to be able to use: a
+/// directory to look in, a url to paste, a model id to retype. The budget is
+/// `safe_text_widening` per input byte, so the escaping cannot be cut short
+/// part way through a path.
+pub fn safeTextAll(arena: std.mem.Allocator, s: []const u8) []const u8 {
+    return safeText(arena, s, s.len *| safe_text_widening);
+}
+
+// The whole-value form is what every diagnostic quoting a path, a model id or a
+// variable's value now uses, so what it guarantees is pinned here: the escaping
+// is complete (nothing past the input is invented, nothing in it is dropped) and
+// nothing a terminal acts on survives. The budget is what makes completeness
+// possible, so the two are asserted against the same input rather than
+// separately.
+test "a value quoted whole is escaped whole, and nothing in it is a control" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const cases = [_][]const u8{
+        "",
+        "/home/me/.microagent/sessions",
+        "/home/me\x1b[2J",
+        "/home/\x9b31m/sessions",
+        "/home/me/\xff\xfe",
+        "/home/me/\u{00e5}\u{4e2d}\u{6587}/sessions",
+        "model-with-a-\u{1f600}-in-it",
+        "\x00\x01\x02\x7f",
+    };
+    inline for (cases) |raw| {
+        const quoted = safeTextAll(arena, raw);
+        // Every byte that reaches a terminal through this value is printable
+        // ASCII or a whole character: the C0 controls, DEL and the C1 range
+        // are all written as escapes, and a byte that is not text is U+FFFD.
+        for (quoted) |c| try std.testing.expect(c >= 0x20 and c != 0x7f);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(quoted));
+        // Whole: the escaped value is never cut short by its own budget, which
+        // is what a directory a reader has to be able to copy needs. A budget
+        // no escaping can reach is the same value written out in full.
+        try std.testing.expectEqualStrings(safeText(arena, raw, std.math.maxInt(usize)), quoted);
+    }
+    // The two forms differ exactly where the escaping does, so a test that
+    // pins one does not silently pass on the other.
+    try std.testing.expectEqualStrings("/home/me/.microagent/sessions", safeTextAll(arena, "/home/me/.microagent/sessions"));
+    try std.testing.expectEqualStrings("/home/me\\x1b[2J", safeTextAll(arena, "/home/me\x1b[2J"));
+}
+
 // The escaper decides per byte between three outcomes, and the table it reads
 // is the decision. Every one of the 256 values is pinned to the rule the table
 // claims to encode, because a byte on the wrong side of it is either escaped
