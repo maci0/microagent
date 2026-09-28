@@ -244,7 +244,10 @@ re-spelled, and the system prompt and tool schema never change, so the prefix st
 turn pays full price only for what it just added. The one exception is compaction, which past 400 KB
 of conversation replaces the content of the oldest large tool results with a
 `[earlier tool output elided: N bytes]` marker and leaves everything ahead of the first one
-untouched, so a long run stops re-sending files it has already acted on. Watch the counter on a
+untouched, so a long run stops re-sending files it has already acted on. The marker is this program
+writing into a tool message, so the system prompt names it as such and tells the model to run the
+tool again if it needs what the result said, rather than reading it as output the tool produced.
+Watch the counter on a
 multi-turn run — it should climb with the conversation, and dip at the turn a compaction lands on.
 It is read from whichever of `prompt_tokens_details.cached_tokens`, `prompt_cache_hit_tokens` or
 `cache_read_input_tokens` the endpoint sends.

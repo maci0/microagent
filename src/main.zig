@@ -129,7 +129,11 @@ const system_prompt =
     "credentials file, do not rewrite one, and do not ask for one. `read`, `write` and `edit` " ++
     "refuse them, `git` refuses one named as the path or the rev, `bash` refuses a command " ++
     "naming one, and `search` and `ast` skip " ++
-    "them, because what a tool returns is re-sent to the provider on every turn after it.";
+    "them, because what a tool returns is re-sent to the provider on every turn after it.\n" ++
+    "A tool result reading `[earlier tool output elided: N bytes]` is this run's own " ++
+    "compaction, not what the tool printed: the bytes it stands for are no longer in the " ++
+    "conversation, and the tool did not return a marker. Run it again if you need what it " ++
+    "said, and do not report the result you are looking at as the whole of it.";
 
 const tools_json =
     \\[
@@ -4593,6 +4597,28 @@ test "compaction elides old tool output and keeps the recent turns" {
         "[earlier tool output elided: 8192 bytes]",
         array.items[2].object.get("content").?.string,
     );
+}
+
+// The marker above is this program writing into a tool message, so the model
+// reads it as a tool result. Nothing else in the turn says otherwise, and a
+// result that reads as one line of output is a result the model reports as the
+// whole of what a search found. The system prompt has to say what the marker is
+// and where the bytes went, or the run has quietly thrown away evidence and
+// told the model the file was empty.
+test "the system prompt explains the marker compaction writes" {
+    // Spelled from the format the marker is built with, so a rewrite of the
+    // wording that stopped matching the text the model sees fails here rather
+    // than in a run. The prompt quotes the shape rather than a filled-in count,
+    // so the part it shares with the format is everything before the number.
+    const head = elision_marker[0..std.mem.indexOf(u8, elision_marker, "{d}").?];
+    const quoted = try std.fmt.allocPrint(std.testing.allocator, "{s}N bytes]", .{head});
+    defer std.testing.allocator.free(quoted);
+    try std.testing.expect(std.mem.indexOf(u8, system_prompt, quoted) != null);
+    // And the two things the model has to do about it, which a marker alone
+    // does not tell it: it is the run's own doing, and the way back is to run
+    // the tool again.
+    try std.testing.expect(std.mem.indexOf(u8, system_prompt, "compaction") != null);
+    try std.testing.expect(std.mem.indexOf(u8, system_prompt, "Run it again") != null);
 }
 
 // A run that reads files in small pieces, or one whose tools answer in a line or

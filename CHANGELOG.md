@@ -61,6 +61,12 @@ release, and `microagent update` moves you to it.
   context models, and `ruff.toml` selects `TC` so the next one lands the same
   way.
 
+- The system prompt explains the `[earlier tool output elided: N bytes]` marker
+  that compaction writes into a tool message. Nothing in the turn said the
+  marker was this program rather than a tool that printed it, so a result the
+  model read as one line of output was a result it reported as the whole of what
+  a search found, and the way back to the bytes was to run the tool again.
+
 - `microagent --help` lists `MICROAGENT_SESSION_DIR` under its own heading rather
   than under "reply style", where a session directory read as a third style
   level, and says that a `--max-spend-tokens` run warns on stderr once 80% of
