@@ -27,7 +27,9 @@ a fragment with no invocation surface to hold a contract.
 1. **Options the parser takes but nothing documents.** Every branch in `parseArgs` in
    `src/main.zig` and in the update argument loop at `src/update.zig` names a flag. Find
    the branches that no line of `help_text` or of the update help text mentions, and the
-   help lines with no branch: search `isFlag(name, "`, `--`, and compare the two lists.
+   help lines with no branch. Parse branches are written two ways (`isFlag(short, long)`
+   and a direct `std.mem.eql` on the name), so search `isFlag(`, `std.mem.eql(u8, name, "`,
+   and `"--`, and compare the list of names with the help text.
 
 2. **README options that the binary does not take.** The `README.md` "Use" block
    reproduces the flag list. Any flag or env var named there that `parseArgs` and the
@@ -36,9 +38,11 @@ a fragment with no invocation surface to hold a contract.
 
 3. **Precedence that the code and the docs disagree about.** The help states that a flag
    wins over the environment variable for the same option. Trace one option end to end
-   (for example `max_turns`, `ca_bundle`, `style`) from the parse loop through the
-   `envValue` overrides in `main.zig:177`-`184` and the config resolution, and confirm the
-   order in the code is the order the docs promise.
+   (for example `--max-turns` with `MICROAGENT_MAX_TURNS`, `--ca-bundle` with
+   `MICROAGENT_CA_BUNDLE`) from the parse loop through the run of `envValue` overrides in
+   `main` and the config resolution, and confirm the order in the code is the order the
+   docs promise. Find those overrides by searching `envValue(`, not by line number: they
+   move whenever a variable is added.
 
 4. **Empty-string semantics drift.** `help_text` names a specific set of variables that
    keep their default when set to the empty string, and a second set that falls through to
@@ -61,11 +65,11 @@ a fragment with no invocation surface to hold a contract.
 7. **Update subcommand contract.** The help advertises `update [-c|--check]
    [--repo owner/name]`, that `--check` writes the release page URL to stdout and installs
    nothing, and that `GITHUB_TOKEN` lifts the rate limit. Check the update help text, the
-   argument loop at `src/update.zig:576`-`583`, the token lookup, and the `README.md`
+   argument loop in `src/update.zig` (search `"--repo"`), the token lookup, and the `README.md`
    mention of the subcommand for agreement on the flag spellings, including the
    `--repo=OWNER/NAME` form, and on which paths fetch an asset.
 
-8. **Emitted JSON that no document matches.** `usage_fields` at `src/main.zig:139` fixes
+8. **Emitted JSON that no document matches.** `usage_fields` in `src/main.zig` fixes
    the order of the five token counters in both the usage line and the per-response usage
    object, and the session log has its own key set. Compare those writers against the
    README and CHANGELOG claims about the log, and against `src/style.zig` for the fields
@@ -111,8 +115,9 @@ a fragment with no invocation surface to hold a contract.
   JSON key inventories; `zig build test` and `make check` for the gate, before and after;
   a locally built binary's `--help`, `--version`, and `update --help` for what the tool
   actually prints, which outranks any document. Read `parseArgs`, the `envValue`
-  overrides, and the writers directly: a prompt's reading of the contract differs from
-  what the binary does. Never install tools, and never let a check reach the network.
+  overrides, and the writers directly, and locate them by name: a line number in this
+  prompt goes stale on the next edit, and a stale anchor sends the pass to the wrong code.
+  Never install tools, and never let a check reach the network.
 
 ## For each finding include:
 
