@@ -1297,7 +1297,20 @@ fn spendCeilingReached(spent: u64, cap: ?u64) bool {
 fn spendAlarmDue(spent: u64, cap: ?u64) bool {
     const limit = cap orelse return false;
     if (limit < 2) return false;
-    return spent >= limit *| spend_alarm_percent / 100;
+    return spent >= spendAlarmThreshold(limit);
+}
+
+/// The token count the alarm is due at: `spend_alarm_percent` of the cap.
+///
+/// The percentage is applied in two parts, `limit / 100` times the percent plus
+/// what the remainder carries, rather than as `limit * percent / 100`. That
+/// spelling drops the percent off every cap below a hundred of them: a cap of
+/// ten gave a threshold of zero, so the alarm fired on the first turn of a run
+/// that had spent nothing. The two parts keep the answer within one token of
+/// the exact value, and the multiply cannot wrap because its left operand is
+/// already scaled down.
+fn spendAlarmThreshold(limit: u64) u64 {
+    return (limit / 100) *| spend_alarm_percent + (limit % 100) *| spend_alarm_percent / 100;
 }
 
 /// Why a run stopped at its spend ceiling, in the words the operator reads, and
@@ -3291,18 +3304,27 @@ test "a run stops at the spend ceiling, and announces itself before it does" {
     try std.testing.expect(!spendAlarmDue(0, 1));
     try std.testing.expect(!spendAlarmDue(1, 1));
 
-    // A cap far past what any provider reports. The percentage multiplies
-    // first, so it saturates rather than wrapping, and a wrapped threshold
-    // would be a small number that alarms on the first turn. The saturation
-    // makes such a cap alarm early, which is the safe direction: it says so
-    // sooner rather than never.
+    // A cap far past what any provider reports. The percent divides before it
+    // multiplies, so nothing wraps and the threshold stays a fraction of the
+    // cap rather than a small number that alarms on the first turn.
     const huge = std.math.maxInt(u64);
-    const threshold = huge *| spend_alarm_percent / 100;
-    try std.testing.expectEqual(huge, huge *| spend_alarm_percent);
+    const threshold = huge / 100 * spend_alarm_percent + huge % 100 * spend_alarm_percent / 100;
+    try std.testing.expect(threshold > huge / 2);
     try std.testing.expect(!spendAlarmDue(threshold - 1, huge));
     try std.testing.expect(spendAlarmDue(threshold, huge));
     try std.testing.expect(!spendCeilingReached(huge - 1, huge));
     try std.testing.expect(spendCeilingReached(huge, huge));
+
+    // A cap small enough that the percent is a fraction of a token. An
+    // announcement after a turn that spent nothing would name a run approaching
+    // a limit it had not touched.
+    try std.testing.expectEqual(@as(u64, 8), spendAlarmThreshold(10));
+    try std.testing.expect(!spendAlarmDue(0, 10));
+    try std.testing.expect(!spendAlarmDue(7, 10));
+    try std.testing.expect(spendAlarmDue(8, 10));
+    try std.testing.expectEqual(@as(u64, 99), spendAlarmThreshold(124));
+    try std.testing.expect(!spendAlarmDue(98, 124));
+    try std.testing.expect(spendAlarmDue(99, 124));
 }
 
 test "the spend ceiling is set from a flag or its variable, and the run trace names it" {
