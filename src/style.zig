@@ -62,19 +62,6 @@ pub const PonytailLevel = enum {
     }
 };
 
-/// The most prompt fragments both blocks together can contribute: six from
-/// caveman (header, level, newline, the wenyan line, the body, the shared tail)
-/// and six from ponytail (separator, header, level, newline, body, shared tail).
-const max_style_parts = 12;
-
-/// Appends one fragment, refusing to run past the array rather than writing
-/// past it: the count and the capacity are two numbers that have to agree.
-fn push(parts: *[max_style_parts][]const u8, n: *usize, part: []const u8) void {
-    std.debug.assert(n.* < parts.len);
-    parts[n.*] = part;
-    n.* += 1;
-}
-
 /// The two levels in force for a run.
 pub const Style = struct {
     caveman: CavemanLevel = .ultra,
@@ -84,26 +71,23 @@ pub const Style = struct {
     /// `off`/`off` run sends exactly the system prompt it sent before styles
     /// existed.
     pub fn ruleset(self: Style, allocator: std.mem.Allocator) ![]u8 {
-        var parts: [max_style_parts][]const u8 = undefined;
-        var n: usize = 0;
-
+        var parts: std.ArrayList([]const u8) = .empty;
+        // The list borrows the compiled-in fragments, so only its own array is
+        // released; `concat` copies them into the returned slice.
+        defer parts.deinit(allocator);
         if (self.caveman != .off) {
-            push(&parts, &n, "CAVEMAN MODE ACTIVE - level: ");
-            push(&parts, &n, self.caveman.name());
-            push(&parts, &n, "\n");
-            if (isWenyan(self.caveman)) push(&parts, &n, wenyan_line);
-            push(&parts, &n, cavemanBody(self.caveman));
-            push(&parts, &n, caveman_shared);
+            try parts.appendSlice(allocator, &.{ "CAVEMAN MODE ACTIVE - level: ", self.caveman.name(), "\n" });
+            if (isWenyan(self.caveman)) try parts.append(allocator, wenyan_line);
+            try parts.appendSlice(allocator, &.{ cavemanBody(self.caveman), caveman_shared });
         }
         if (self.ponytail != .off) {
-            if (n > 0) push(&parts, &n, "\n");
-            push(&parts, &n, "PONYTAIL MODE ACTIVE - level: ");
-            push(&parts, &n, self.ponytail.name());
-            push(&parts, &n, "\n");
-            push(&parts, &n, ponytailBody(self.ponytail));
-            push(&parts, &n, ponytail_shared);
+            if (parts.items.len > 0) try parts.append(allocator, "\n");
+            try parts.appendSlice(allocator, &.{
+                "PONYTAIL MODE ACTIVE - level: ", self.ponytail.name(), "\n",
+                ponytailBody(self.ponytail),      ponytail_shared,
+            });
         }
-        return std.mem.concat(allocator, u8, parts[0..n]);
+        return std.mem.concat(allocator, u8, parts.items);
     }
 
     /// Read the levels out of a TOML document. A missing key keeps the
@@ -372,8 +356,8 @@ test "the wenyan levels ask for classical Chinese" {
 
 // The longest ruleset is wenyan caveman with ponytail both on: the wenyan line
 // is the one fragment the caveman block adds conditionally, so this is the
-// combination that fills `max_style_parts` exactly.
-test "both blocks at their longest fill the parts array without overrunning it" {
+// combination that contributes the most fragments.
+test "the longest ruleset carries both blocks in full" {
     const gpa = std.testing.allocator;
     const block = try (Style{ .caveman = .wenyan_ultra, .ponytail = .ultra }).ruleset(gpa);
     defer gpa.free(block);

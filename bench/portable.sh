@@ -1,22 +1,10 @@
 #!/bin/sh
-# Sourced by the benchmark scripts for the two things GNU coreutils give a
-# Linux machine and a BSD one does not: a fractional clock and `timeout`.
-# Both are probed for, not selected by OS name, and each falls back to
-# something POSIX that costs accuracy, not the run.
+# Sourced by the benchmark scripts for the one thing GNU coreutils gives a
+# Linux machine and a BSD one does not: `timeout`. It is probed for, not
+# selected by OS name, and falls back to something POSIX that costs accuracy,
+# not the run. The clock lives in monotonic.sh, which is sourced alongside.
 #
-#   now_s                     -> seconds since the epoch, fractional where the
-#                                local date(1) can manage it
-#   elapsed_s END START       -> the difference between two now_s readings
 #   run_limited SECS DIR CMD.. -> run CMD in DIR, TERM it after SECS
-
-# GNU date prints fractional seconds; BSD date prints a literal "N".
-if [ "$(date +%N 2>/dev/null)" != "N" ]; then
-	now_s() { date +%s.%N; }
-	elapsed_s() { awk -v end="$1" -v start="$2" 'BEGIN{printf "%.1f", end-start}'; }
-else
-	now_s() { date +%s; }
-	elapsed_s() { echo $(( $1 - $2 )); }
-fi
 
 # macOS ships neither `timeout` nor `gtimeout` without coreutils installed.
 if command -v timeout >/dev/null 2>&1; then

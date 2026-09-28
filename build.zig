@@ -12,7 +12,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             // Debug keeps symbols so a panic is readable; release builds are
             // stripped because nothing reads them at runtime.
-            .strip = b.option(bool, "strip", "strip debug info") orelse (optimize != .Debug),
+            .strip = optimize != .Debug,
         }),
     });
     // The release version comes from build.zig.zon, so `--version` and the

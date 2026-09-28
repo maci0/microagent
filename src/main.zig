@@ -203,8 +203,8 @@ pub fn main(init: std.process.Init) !void {
     if (envValue(init.environ_map, "MICROAGENT_MODEL")) |v| opts.model = v;
     if (envValue(init.environ_map, "MICROAGENT_BASE_URL")) |v| opts.base_url = v;
     if (envValue(init.environ_map, "MICROAGENT_REASONING_EFFORT")) |v| opts.reasoning_effort = reasoningEffort(io, v);
-    if (envValue(init.environ_map, "MICROAGENT_MAX_TURNS")) |v| opts.max_turns = turnCeiling(io, "MICROAGENT_MAX_TURNS", v);
-    if (envValue(init.environ_map, "MICROAGENT_MAX_TOKENS")) |v| opts.max_tokens = tokenCeiling(io, "MICROAGENT_MAX_TOKENS", v);
+    if (envValue(init.environ_map, "MICROAGENT_MAX_TURNS")) |v| opts.max_turns = ceiling(usize, io, "MICROAGENT_MAX_TURNS", v);
+    if (envValue(init.environ_map, "MICROAGENT_MAX_TOKENS")) |v| opts.max_tokens = ceiling(u32, io, "MICROAGENT_MAX_TOKENS", v);
     opts.ca_bundle = net.caBundlePath(init.environ_map);
     if (envValue(init.environ_map, "MICROAGENT_BUDGET_SECONDS")) |v|
         opts.budget_s = budgetSeconds(v) orelse
@@ -394,23 +394,14 @@ fn reasoningEffort(io: Io, value: []const u8) []const u8 {
     return configError(io, "reasoning effort '{s}' is not one of: {s}", .{ value, reasoning_effort_names });
 }
 
-/// The tool-loop ceiling from a flag or a variable, checked the same way on
-/// both paths. Zero is refused: a run with no turns sends no request, prints no
-/// answer and no usage line, and exits 0, which a harness reads as a finished
-/// review rather than as a ceiling that was set wrong.
-fn turnCeiling(io: Io, from: []const u8, value: []const u8) usize {
-    const n = std.fmt.parseInt(usize, std.mem.trim(u8, value, " \t\r\n"), 10) catch
-        return configError(io, "{s} must be a number, got '{s}'", .{ from, value });
-    if (n == 0) return configError(io, "{s} must be at least 1", .{from});
-    return n;
-}
-
-/// The per-response generation ceiling from a flag or a variable, checked the
-/// same way on both paths. Zero is refused for the same reason a turn ceiling
-/// of zero is: it is a number the provider rejects, and learning that costs a
-/// whole turn. The value is a `u32` because `max_tokens` is one on the wire.
-fn tokenCeiling(io: Io, from: []const u8, value: []const u8) u32 {
-    const n = std.fmt.parseInt(u32, std.mem.trim(u8, value, " \t\r\n"), 10) catch
+/// A ceiling from a flag or a variable, checked the same way on both paths:
+/// a number, and at least one. Zero is refused because a run with no turns
+/// sends no request, prints no answer and no usage line, and exits 0, which a
+/// harness reads as a finished review rather than as a ceiling that was set
+/// wrong; the same number sent as `max_tokens` is one the provider rejects, and
+/// learning that costs a whole turn. `T` is the wire type of the option.
+fn ceiling(comptime T: type, io: Io, from: []const u8, value: []const u8) T {
+    const n = std.fmt.parseInt(T, std.mem.trim(u8, value, " \t\r\n"), 10) catch
         return configError(io, "{s} must be a number, got '{s}'", .{ from, value });
     if (n == 0) return configError(io, "{s} must be at least 1", .{from});
     return n;
@@ -551,12 +542,12 @@ fn parseArgs(io: Io, buf: []u8, argv: []const []const u8, opts: *Options) ?[]con
         } else if (std.mem.eql(u8, name, "--max-turns")) {
             const v = joined orelse flagValue(argv, i) orelse return "--max-turns needs a number";
             if (v.len == 0) return "--max-turns needs a number";
-            opts.max_turns = turnCeiling(io, "--max-turns", v);
+            opts.max_turns = ceiling(usize, io, "--max-turns", v);
             if (joined == null) i += 1;
         } else if (std.mem.eql(u8, name, "--max-tokens")) {
             const v = joined orelse flagValue(argv, i) orelse return "--max-tokens needs a number";
             if (v.len == 0) return "--max-tokens needs a number";
-            opts.max_tokens = tokenCeiling(io, "--max-tokens", v);
+            opts.max_tokens = ceiling(u32, io, "--max-tokens", v);
             if (joined == null) i += 1;
         } else if (arg.len > 0 and arg[0] != '-') {
             // A bare argument is the prompt. gauntlet's custom-agent
