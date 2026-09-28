@@ -222,18 +222,23 @@ a laptop before the tag exists:
 ```sh
 make release-assets TAG=v0.2.0   # the four cross-built assets, in dist/
 make checksums                   # the sha256 sidecars `update` verifies
-make check-assets                # the host binary's version, and every asset's object format
+make check-assets                # the host binary's version, and every asset's object format and machine
 ```
 
 `make check-assets` reads `dist/` back rather than trusting the build that
 wrote it: it runs the host binary and compares its `--version` with the tag
 being built (the `TAG=` above, or the version `build.zig.zon` declares when
-there is none), and checks that each of the four assets starts with the object
-format its target name promises, because a cross build that produced the wrong
-object, or an empty one, publishes green and fails on a user's machine. It is
-the same target `ci.yml` runs over the rehearsal build and `release.yml` runs
-over the tagged one, so the check a laptop runs before a tag is the check the
-tag will run.
+there is none), and reads each of the four assets for the object format its
+target name promises and for the machine that format carries, because a cross
+build that ignored `-Dtarget` and produced the host's architecture, or an empty
+one, publishes green and fails on a user's machine. The magic alone would not
+catch that: every Mach-O 64 file starts with `cffaedfe` whatever the CPU, and
+every ELF with `7f454c46`, so `e_machine` at offset 18 and `cputype` at offset
+4 are what say which. Both are declared per target, so a target added to
+`RELEASE_TARGETS` says what it is before it can be published. It is the same
+target `ci.yml` runs over the rehearsal build and `release.yml` runs over the
+tagged one, so the check a laptop runs before a tag is the check the tag will
+run.
 
 The three rules a tag is refused for are commands here rather than shell inside
 `release.yml`, so a release note is written against something runnable:
