@@ -22,7 +22,7 @@ bare `ubuntu`, and distroless images alike.
 
 ```sh
 uv venv ~/harbor-venv && uv pip install --python ~/harbor-venv/bin/python \
-  -r integrations/harbor/requirements.txt
+  -r integrations/harbor/requirements.lock
 
 export MICROAGENT_API_KEY=...            # or OPENROUTER_API_KEY
 export MICROAGENT_REASONING_EFFORT=none  # see "Reasoning" below
@@ -40,7 +40,12 @@ Harbor's registry work the same way; only the dataset name changes.
 
 Harbor itself is pinned in [requirements.txt](requirements.txt), because the
 adapter subclasses its agent API and a score is only the same score against the
-Harbor release that produced it.
+Harbor release that produced it. The install above reads
+[requirements.lock](requirements.lock), which is that pin plus Harbor's whole
+dependency tree with a sha256 per published artifact, so the venv a number in
+[BENCHMARK.md](../../BENCHMARK.md) was measured in is the one the next run
+installs. The command that regenerates it is in the comment at the top of
+`requirements.txt`.
 
 ## Environment
 

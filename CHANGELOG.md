@@ -63,6 +63,11 @@ release, and `microagent update` moves you to it.
 - The Harbor adapter's own dependency is declared. `integrations/harbor/requirements.txt` pins
   `harbor` exactly, because the adapter subclasses its agent API and a benchmark score is only
   the same score against the Harbor release that produced it.
+- The benchmark venv installs from `integrations/harbor/requirements.lock`, which pins Harbor's
+  whole dependency tree to one sha256 per published artifact, and is `uv pip compile` output
+  from `requirements.txt`. A pinned `harbor` alone still left 89 packages resolved at install
+  time, so the pair that produced a number in `BENCHMARK.md` was not the pair the next run
+  installed.
 - A style config that is present but unreadable, is a directory, or is over the 64 KB cap says so on
   stderr, not only one a flag or `MICROAGENT_CONFIG` named. A file that is simply absent stays quiet.
 - `GITHUB_TOKEN` is trimmed before it becomes an `Authorization` header, like the provider key file
