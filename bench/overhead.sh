@@ -38,7 +38,17 @@ for agent in $agents; do
 		&& awk -F'[:,]' '/"mean"/{printf "%.1f", $2*1000; exit}' "$work/startup.json")
 	[ -z "$startup" ] && startup=-
 
-	start=$(monotonic_ns)
+	# The startup column above comes from hyperfine, which has the resolution
+	# for a sub-millisecond figure. This clock does not: two back-to-back
+	# readings of /proc/uptime differ by 0 ns, because it has 10 ms
+	# granularity. It is right for the one-shot wall time below and wrong for
+	# anything shorter, which is why nothing short is measured with it.
+	if ! start=$(monotonic_ns); then
+		printf '%-14s %10s %10s %10s\n' "$agent" "$startup" no-clock -
+		rm -rf "$work"
+		continue
+	fi
+
 	# The harness's own spelling of a one-shot prompt, so a CLI that needs a
 	# subcommand is measured through it instead of through a `-p` it refuses.
 	# Splitting the words apart is the point: the name and its subcommand are

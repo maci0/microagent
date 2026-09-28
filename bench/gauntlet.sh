@@ -50,7 +50,16 @@ for agent in $agents; do
 	git clone -q --no-hardlinks "$source_repo" "$dir" || exit 1
 	( cd "$dir" && git checkout -q "$(git -C "$source_repo" rev-parse HEAD)" )
 
-	start=$(monotonic_ns)
+	# No clock, no wall time. A review measured off a wall clock would be
+	# recorded beside reviews that were not, and the row would look like a
+	# review that finished instantly.
+	if ! start=$(monotonic_ns); then
+		printf '%-40s %6s %6s %7s %8s %8s %8s  %s\n' "$agent" - - - no-clock - - -
+		printf '{"agent":"%s","passed":null,"failed":null,"changed_files":null,"wall_s":null,"tokens":null,"verify":null,"rc":null}\n' \
+			"$agent" >>"$root/bench/gauntlet-results.jsonl"
+		continue
+	fi
+
 	( cd "$dir" && gauntlet -a "$agent" -r "$reviews" --max-reviews "$max_reviews" --once \
 		-C "$dir" -t "$timeout_per_review" -y --no-color ) >"$dir/.gauntlet.log" 2>&1
 	rc=$?
