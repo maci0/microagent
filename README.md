@@ -266,11 +266,13 @@ means the check or the install failed, 2 is a usage error.
 ## Versioning
 
 The version is `build.zig.zon` and nothing else, and [CHANGELOG.md](CHANGELOG.md) is the record of
-what changed in it. The project is under `0.y`, so the minor takes features and any change to what a
-run does by default, and the patch takes fixes: upgrading a patch must not change an existing
-invocation. Breaking changes to the flags, the environment variables or the stdout and session-log
-JSON come with a changelog entry naming the before and the after, before the tag. Only the latest
-release is supported, with no backport window: a fix ships in the next release.
+what changed in it. The project is under `0.y`, so the minor takes features, any change to what a
+run does by default, and anything taken away, and the patch takes fixes: upgrading a patch must not
+change an existing invocation. The release workflow refuses a patch tag whose changelog section
+carries an `Added`, a `Changed` or a `Removed` entry, and refuses any tag while `## [Unreleased]`
+still holds entries. Breaking changes to the flags, the environment variables or the stdout and
+session-log JSON come with a changelog entry naming the before and the after, before the tag. Only
+the latest release is supported, with no backport window: a fix ships in the next release.
 
 ## Tools
 

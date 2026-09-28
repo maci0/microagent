@@ -151,20 +151,20 @@ verdict that installs it.
 The version is `.version` in `build.zig.zon` and nowhere else. Every change that
 lands gets a [CHANGELOG.md](CHANGELOG.md) entry under `## [Unreleased]`, in the
 Keep a Changelog sections already in use, in their order: `Added`, `Changed`,
-`Fixed`, `Security`, one of each at most. A fix that closes a way for text the
-model or the tree controls to reach the prompt or the terminal is a `Security`
-entry, not a `Fixed` one, so a reader scanning for those finds it. Under `0.y`
-the minor carries features and anything that changes what a run does by
-default; the patch carries fixes,
+`Removed`, `Fixed`, `Security`, one of each at most. A fix that closes a way for
+text the model or the tree controls to reach the prompt or the terminal is a
+`Security` entry, not a `Fixed` one, so a reader scanning for those finds it.
+Under `0.y` the minor carries features, anything that changes what a run does by
+default, and anything taken away; the patch carries fixes,
 and a patch must not change what an existing invocation does. A change to the
 flags, the environment variables, or the stdout and session-log JSON names the
 before and the after in its entry.
 
 Releases are tags: the release workflow publishes only when the tag names the
 `build.zig.zon` version, that version has a `CHANGELOG.md` entry, and the bump
-matches what the entry says. A patch tag whose section carries an `Added` or a
-`Changed` entry is refused, because under `0.y` those are what the minor
-carries. The four
+matches what the entry says. A patch tag whose section carries an `Added`, a
+`Changed` or a `Removed` entry is refused, because under `0.y` those are what
+the minor carries. The four
 published binaries and their asset names are spelled once, in the
 [Makefile](Makefile), so a release can be built and checksummed on a laptop
 before the tag exists:

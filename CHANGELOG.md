@@ -127,6 +127,10 @@ release, and `microagent update` moves you to it.
   there was no way to see which one answered.
 - `config.example.toml` is a commented template for the reply-style file, with both keys, their
   levels and their defaults.
+- `PERFORMANCE.md`: what a turn costs inside the harness itself, the four changes that bought
+  what they bought, and the four that were measured and left out, so the next round reads the
+  refusals rather than re-running the experiment. `BENCHMARK.md` still says what the harness
+  measures against other harnesses.
 
 ### Changed
 
@@ -597,6 +601,33 @@ release, and `microagent update` moves you to it.
 - A `git` `limit` of 0 returned the whole output rather than no lines: the loop that stops at the limit
   never reaches a limit of zero, so the cap fell open. It is one line now, and a count a 32-bit build
   cannot hold (`read`'s `offset` and `limit` too) is clamped rather than trapping the cast.
+- The loop kept going after a turn that asked for a tool. `.wants_tools` returned out of the run
+  the way `.cut_off` does, so the run ended on the first turn that called a tool, which is every
+  turn of a run that does any work: the tool results were appended to the conversation and then
+  nothing ever sent the request that would have read them. The next iteration asks again, and the
+  turn ceiling and the budget are the two things that still end a run.
+- A backoff that could not be taken is no longer reported as one. Both the retry path and the
+  `Retry-After` wait caught the sleep failure and carried on, so the attempt after a 429 went out
+  immediately, which is the one thing the header asked the run not to do, and the line above it had
+  already promised a delay. The attempt is abandoned instead, and the reason is named on stderr.
+- A token count the provider spelled as something other than a number is counted rather than folded
+  in as a zero. `maybeNum` dropped such a field silently, so a stream that carried `900` and then
+  `"many"` reported the total the provider never sent, and a monitor billing from the usage line
+  read it as a run that spent nothing. The count the provider really sent stays, the frame is
+  counted as unreadable, and the existing note now says a frame can be unreadable in its counts as
+  well as its JSON.
+- A key file this process cannot read is named, rather than read as no key. `readSecret` answered
+  only found-or-absent, so a file whose permissions or ownership stopped the run reading it was
+  reported as absent and the run went on to print the missing-api-key message naming a key to go
+  and find. It now answers unreadable as well, with the reason, and the run says the file may hold
+  a key it cannot reach.
+- The session store's quiet failures are named. A store that could not be opened for pruning, a
+  walk that failed part way, a delete that failed and a run that used up its eight log names each
+  returned as nothing: the store stayed over its limit while every later run pruned nothing and
+  said nothing, and the log going missing looked the same as a log the operator turned off. The
+  pruning pass is abandoned whole when the walk fails, because pruning from a partial list deletes
+  whichever logs it saw rather than the oldest ones, and the failures that leave the store over
+  its limit are counted and named once.
 
 ### Security
 

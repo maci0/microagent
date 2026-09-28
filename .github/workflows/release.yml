@@ -161,9 +161,10 @@ jobs:
       # The policy CONTRIBUTING.md and README state is that under 0.y the minor
       # carries features and anything that changes what a run does by default,
       # and a patch carries fixes. Nothing else checks that the tag agrees with
-      # the entries it publishes, so a patch tag carrying an `Added` or a
-      # `Changed` section would ship a feature or a changed default under a
-      # version whose own number promises it did not happen.
+      # the entries it publishes, so a patch tag carrying an `Added`, a
+      # `Changed` or a `Removed` section would ship a feature, a changed
+      # default or a removal under a version whose own number promises it did
+      # not happen.
       - name: the tag matches the entries it publishes
         run: |
           set -euo pipefail
@@ -184,12 +185,12 @@ jobs:
             if awk -v want="$version" '
                 index($0, "## [" want "]") == 1 { inside=1; next }
                 /^## / { inside=0 }
-                inside && /^### (Added|Changed)$/ { found=1 }
+                inside && /^### (Added|Changed|Removed)$/ { found=1 }
                 END { exit found ? 0 : 1 }
               ' CHANGELOG.md; then
-              echo "tag ${GITHUB_REF_NAME} is a patch over ${prev}, and its section has an Added or a Changed entry" >&2
-              echo "under 0.y the minor carries features and anything that changes what a run does by default:" >&2
-              echo "bump the minor in build.zig.zon and CHANGELOG.md, or move those entries out of this section" >&2
+              echo "tag ${GITHUB_REF_NAME} is a patch over ${prev}, and its section has an Added, a Changed or a Removed entry" >&2
+              echo "under 0.y the minor carries features, anything that changes what a run does by default," >&2
+              echo "and anything taken away: bump the minor in build.zig.zon and CHANGELOG.md, or move those entries out of this section" >&2
               exit 1
             fi
           fi
