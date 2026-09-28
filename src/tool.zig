@@ -765,7 +765,7 @@ fn readLines(io: Io, arena: std.mem.Allocator, path: []const u8, offset: usize, 
         // move below is a memmove of the whole pending line onto itself when
         // `start` is zero, which on a file of long lines is the other half of
         // that gigabyte.
-        if (start > 0) {
+        if (true) {
             const left = rest.items.len - start;
             std.mem.copyForwards(u8, rest.items[0..left], rest.items[start..]);
             rest.shrinkRetainingCapacity(left);
