@@ -184,11 +184,14 @@ pub fn main(init: std.process.Init) !void {
     if (parseArgs(&err_buf, args.items[1..], &opts)) |msg| return usageError(io, "{s}", .{msg});
     switch (opts.action) {
         .help => {
-            net.writeOut(io, help_text);
+            // The text a caller may have piped at something that read a few
+            // lines and left: nothing is waiting on the rest, so a closed
+            // stream costs the caller nothing.
+            net.writeOut(io, help_text) catch {};
             return;
         },
         .version => {
-            net.writeOut(io, "microagent " ++ version ++ "\n");
+            net.writeOut(io, "microagent " ++ version ++ "\n") catch {};
             return;
         },
         .run => {},
@@ -1281,7 +1284,13 @@ fn streamChat(
             }
             var err_transfer: [8 * 1024]u8 = undefined;
             const err_reader = response.reader(&err_transfer);
-            const err_body = err_reader.allocRemaining(arena, .limited(max_error_body_bytes)) catch "";
+            // The body is the only thing that says why the provider refused the
+            // turn, so a read of it that fails is named rather than answered
+            // with an empty body: `http 500:` on its own reads as a provider
+            // that said nothing, which is a different thing from a body this
+            // run could not read.
+            const err_body = err_reader.allocRemaining(arena, .limited(max_error_body_bytes)) catch |err|
+                try std.fmt.allocPrint(arena, "(the error body could not be read: {s})", .{@errorName(err)});
             const msg = try std.fmt.allocPrint(arena, "http {d}: {s}\n", .{
                 @intFromEnum(response.head.status),
                 tool_mod.terminalSafe(arena, err_body),
@@ -1371,7 +1380,7 @@ fn streamChat(
             pending.shrinkRetainingCapacity(rest);
             scanned -|= start;
         }
-        flushOut(io, &out_buf);
+        try flushOut(io, arena, &out_buf, shown_url);
     }
 
     if (unparsable > 0)
@@ -1395,7 +1404,7 @@ fn streamChat(
             shown_url, opts.max_tokens, result.content.items.len, calls.items.len,
         });
     if (result.content.items.len > 0) try out_buf.append(gpa, '\n');
-    flushOut(io, &out_buf);
+    try flushOut(io, arena, &out_buf, shown_url);
     result.calls = calls;
     dropNamelessCalls(gpa, &result.calls);
     return result;
@@ -1521,7 +1530,14 @@ fn applyDeclared(
     calls: *std.ArrayList(chat_mod.ToolCall),
     out_buf: *std.ArrayList(u8),
 ) !bool {
-    const parsed = std.json.parseFromSlice(StreamFrame, scratch, payload, .{ .ignore_unknown_fields = true }) catch return false;
+    // A frame the shapes cannot hold is the slow path's job. An allocation that
+    // failed is not a frame that would not parse, so it is not answered with
+    // "that is not JSON": the run cannot pay for another parse, and the two
+    // failures leave the run in very different states.
+    const parsed = std.json.parseFromSlice(StreamFrame, scratch, payload, .{ .ignore_unknown_fields = true }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return false,
+    };
     const frame = parsed.value;
 
     if (frame.usage) |u| {
@@ -1663,9 +1679,16 @@ fn applyFrame(
     // this is a speedup and not a narrowing of what is accepted.
     if (try applyDeclared(scratch, gpa, payload, result, calls, out_buf)) return;
 
-    const parsed = std.json.parseFromSlice(std.json.Value, scratch, payload, .{}) catch {
-        unparsable.* += 1;
-        return;
+    const parsed = std.json.parseFromSlice(std.json.Value, scratch, payload, .{}) catch |err| switch (err) {
+        // Counted as unreadable only when it really was: a frame that would not
+        // parse is the provider's, and an allocation that failed is this
+        // machine's, and telling the operator to look at the provider for the
+        // second one sends them the wrong way.
+        error.OutOfMemory => return error.OutOfMemory,
+        else => {
+            unparsable.* += 1;
+            return;
+        },
     };
     const root = parsed.value;
     if (root != .object) {
@@ -1808,11 +1831,17 @@ fn compactMessages(
     try msgs.appendSlice(gpa, jb.items());
 }
 
-/// Hands the buffered tokens to stdout. A failed write is ignored: a closed
-/// pipe means the reader left, not that the run should be abandoned.
-fn flushOut(io: Io, out_buf: *std.ArrayList(u8)) void {
+/// Hands the buffered tokens to stdout, and says so when stdout refuses them.
+/// A closed pipe and a full disk both arrive as a failed write, and neither is
+/// worth abandoning a run over on its own: the model sees the fault on its next
+/// turn and can stop. Swallowing it instead is what leaves a caller reading an
+/// empty answer off a run that exited 0.
+fn flushOut(io: Io, arena: std.mem.Allocator, out_buf: *std.ArrayList(u8), shown_url: []const u8) !void {
     if (out_buf.items.len == 0) return;
-    net.writeOut(io, out_buf.items);
+    net.writeOut(io, out_buf.items) catch |err| {
+        net.note(io, arena, "microagent: the text streamed from {s} could not be written to stdout ({s}); the rest of this run's output is not on it either, and the run fails rather than finishing with a partial answer\n", .{ shown_url, @errorName(err) });
+        return err;
+    };
     out_buf.clearRetainingCapacity();
 }
 
@@ -1899,7 +1928,13 @@ fn logUsage(io: Io, arena: std.mem.Allocator, usage: *chat_mod.Usage, result: *c
         usage.prompt, usage.cached, usage.completion, usage.reasoning, usage.total,
     });
     try w.writeAll("}}\n");
-    net.writeOut(io, usage_line.items());
+    // The usage line is what a live reader parses tokens out of, so a stdout
+    // that refuses it is said on stderr: a monitor that sees the run's counters
+    // stop and no line for the last response learns why from the run's end.
+    net.writeOut(io, usage_line.items()) catch |err| {
+        net.note(io, arena, "microagent: the usage line for this response could not be written to stdout ({s})\n", .{@errorName(err)});
+        return err;
+    };
 }
 
 fn appendMessage(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), role: []const u8, content: []const u8) !void {
@@ -3129,6 +3164,30 @@ test "a frame the parser cannot read is counted, not dropped in silence" {
     // The frames around the bad ones still landed, so the turn is short rather
     // than empty: only the count says how much is missing.
     try std.testing.expectEqualStrings("keptalso kept", sink.result.content.items);
+}
+
+// A frame the parser cannot read is the provider's; an allocation that failed
+// is this machine's. Counting the second as the first tells the operator to go
+// and look at a provider that was answering correctly, and it hides the one
+// failure the run cannot get past.
+test "a frame that cannot be parsed for want of memory is not counted as bad JSON" {
+    const gpa = std.testing.allocator;
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    var result: chat_mod.ChatResult = .{};
+    var calls: std.ArrayList(chat_mod.ToolCall) = .empty;
+    var out_buf: std.ArrayList(u8) = .empty;
+    var unparsable: usize = 0;
+
+    var failing: std.testing.FailingAllocator = .init(arena, .{ .fail_index = 0 });
+    try std.testing.expectError(
+        error.OutOfMemory,
+        applyFrame(failing.allocator(), arena, "{\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}", &result, &calls, &out_buf, &unparsable),
+    );
+    try std.testing.expectEqual(@as(usize, 0), unparsable);
+    try std.testing.expectEqual(@as(usize, 0), result.content.items.len);
 }
 
 test "token counters read the OpenAI and OpenRouter spellings" {

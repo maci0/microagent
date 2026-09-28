@@ -512,7 +512,9 @@ const usage_text =
 ;
 
 pub fn printUsage(io: std.Io) void {
-    net.writeOut(io, usage_text);
+    // Text the caller may have piped at something that read a few lines and
+    // left; a closed stream costs it nothing.
+    net.writeOut(io, usage_text) catch {};
 }
 
 /// The run arena, not `gpa`: the header outlives every fetch and nothing here
@@ -638,7 +640,7 @@ pub fn run(
             return 0;
         },
         .version => {
-            net.writeOut(io, "microagent " ++ version ++ "\n");
+            net.writeOut(io, "microagent " ++ version ++ "\n") catch {};
             return 0;
         },
         .bad_flag => |msg| return updateUsageError(io, "{s}", .{msg}),
@@ -700,8 +702,12 @@ fn runChecked(
 
     if (!fetchesAsset(check_only, version, rel.tag)) {
         if (check_only) {
-            net.writeOut(io, page);
-            net.writeOut(io, "\n");
+            // The one line a script reads, so a stdout that refuses it is a
+            // failed check rather than an empty answer and exit 0.
+            net.writeOut(io, page) catch |err|
+                return fail(io, "could not write the release page to stdout ({s})", .{@errorName(err)});
+            net.writeOut(io, "\n") catch |err|
+                return fail(io, "could not write the release page to stdout ({s})", .{@errorName(err)});
         }
         return 0;
     }
@@ -756,8 +762,10 @@ fn runChecked(
         return fail(io, "could not replace {s} ({s}); the binary was not replaced", .{ exe, @errorName(err) });
     const installed = formatInstalled(&line_buf, rel.tag, exe) catch
         return fail(io, "could not format the install line", .{});
-    net.writeOut(io, installed);
-    net.writeOut(io, "\n");
+    net.writeOut(io, installed) catch |err|
+        return fail(io, "{s} was installed, but the install line could not be written to stdout ({s})", .{ exe, @errorName(err) });
+    net.writeOut(io, "\n") catch |err|
+        return fail(io, "{s} was installed, but the install line could not be written to stdout ({s})", .{ exe, @errorName(err) });
     return 0;
 }
 

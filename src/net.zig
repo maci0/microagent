@@ -39,8 +39,14 @@ pub fn writeErr(io: Io, bytes: []const u8) void {
 }
 
 /// Bytes on stdout: the model's own words and the one line a caller parses.
-pub fn writeOut(io: Io, bytes: []const u8) void {
-    Io.File.stdout().writeStreamingAll(io, bytes) catch {};
+///
+/// The error is the caller's, because a stream that refuses the bytes is a
+/// different fault depending on what they were: a full disk or a closed pipe
+/// means the answer this run was asked for never arrives, which is a run that
+/// failed rather than one that finished. Text nobody is waiting on (the help
+/// text, `--version`) may drop it; the model's own words may not.
+pub fn writeOut(io: Io, bytes: []const u8) !void {
+    try Io.File.stdout().writeStreamingAll(io, bytes);
 }
 
 /// A line on stderr, which is where gauntlet shows harness notes; stdout stays
