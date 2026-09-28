@@ -94,12 +94,10 @@ const ToolChild = struct {
 };
 
 /// Runs a tool subprocess and reaps it with everything it started.
-/// A key file under `$HOME/.secrets`, read whole and trimmed. A secret is one
-/// key, not a document, so it is read under a cap of its own rather than the
-/// one `read` uses for source.
-pub fn readSecret(init: std.process.Init, name: []const u8) ?[]const u8 {
-    const home = init.environ_map.get("HOME") orelse return null;
-    const path = std.fs.path.join(init.arena.allocator(), &.{ home, ".secrets", name }) catch return null;
+/// A key file, read whole and trimmed. A secret is one key, not a document, so
+/// it is read under a cap of its own rather than the one `read` uses for
+/// source.
+pub fn readSecret(init: std.process.Init, path: []const u8) ?[]const u8 {
     const raw = std.Io.Dir.cwd().readFileAlloc(init.io, path, init.arena.allocator(), .limited(max_secret_bytes)) catch return null;
     return std.mem.trim(u8, raw, " \t\r\n");
 }
@@ -131,8 +129,8 @@ pub fn runToolProcess(
     // wait: `fill` arms its wait from now each time, so a child that keeps
     // answering never spends it, and `yes` or a chatty build outlives a
     // ten-minute ceiling by never going quiet for ten minutes. The reap on
-    // the way out is what kills it, and `budget.toolTimeoutMs` is only true
-    // of a tool that can be cut.
+    // the way out is what kills it, and the ceiling it runs under is only set
+    // for a tool that can be cut.
     const deadline = timeout.toDeadline(io);
     while (multi.fill(64, deadline)) |_| {
         if (multi.reader(0).bufferedLen() > stdout_limit) return error.StreamTooLong;

@@ -677,7 +677,7 @@ fn resolveKey(io: Io, init: std.process.Init, given: []const u8) Key {
         ".secrets",
         "openrouter",
     }) catch return .{ .value = "", .source = "none" };
-    if (tool_mod.readSecret(init, "openrouter")) |v| {
+    if (tool_mod.readSecret(init, fallback)) |v| {
         if (v.len != 0) return .{ .value = v, .source = fallback };
         net.note(io, init.arena.allocator(), "microagent: {s} is empty; no key in it\n", .{fallback});
     }
@@ -867,17 +867,6 @@ const Budget = struct {
     fn toolCeilingMs(self: Budget, io: Io) ?u64 {
         const left = self.remainingMs(io) orelse return null;
         return @max(left, tool_timeout_floor_ms);
-    }
-
-    /// A tool's own timeout, cut down to what is left of the budget.
-    ///
-    /// Without this the budget is a promise the tools do not keep: a bash call
-    /// with a two-minute timeout starts happily at second 779 of a 780-second
-    /// budget and the caller kills the run mid-command, which is what the budget
-    /// exists to prevent.
-    fn toolTimeoutMs(self: Budget, io: Io, wanted_ms: u64) u64 {
-        const cap = self.toolCeilingMs(io) orelse return wanted_ms;
-        return @min(wanted_ms, cap);
     }
 
     /// The same budget with `seconds` more to run. The final push is the one
@@ -3167,28 +3156,29 @@ test "a tool timeout is cut to what is left of the budget" {
     const io = std.testing.io;
     const now = Io.Timestamp.now(io, .awake).nanoseconds;
 
-    // No budget: every tool keeps the timeout it asked for.
+    // No budget: every tool keeps the timeout it asked for, so there is no
+    // ceiling to hand one.
     try std.testing.expectEqual(@as(?u64, null), (Budget{}).remainingMs(io));
-    try std.testing.expectEqual(@as(u64, 120_000), (Budget{}).toolTimeoutMs(io, 120_000));
+    try std.testing.expectEqual(@as(?u64, null), (Budget{}).toolCeilingMs(io));
 
     // Ten minutes of budget left: a shorter request is untouched, a longer one
-    // is not, because it cannot finish before the deadline it would cross.
+    // is cut, because it cannot finish before the deadline it would cross. The
+    // ceiling is the only thing a tool's own timeout is measured against, so it
+    // is the only thing asserted here; the min is `boundedMs`'s, and that it
+    // does the min is the tool's own test.
     const fresh = Budget.of(now, 600);
-    try std.testing.expectEqual(@as(u64, 30_000), fresh.toolTimeoutMs(io, 30_000));
-    // A range, not an equality: the clock moves between building the budget and
-    // asking it, and by a millisecond or two that is not a defect.
-    const wanted = fresh.toolTimeoutMs(io, 600_000);
-    try std.testing.expect(wanted <= 600_000 and wanted > 599_000);
+    const left = fresh.toolCeilingMs(io).?;
+    try std.testing.expect(left <= 600_000 and left > 599_000);
 
-    // Nearly spent: clamped, but never to zero, which would fail before the
-    // tool started and read as a broken tool rather than a spent budget.
+    // Nearly spent: the floor, but never zero, which would fail before the tool
+    // started and read as a broken tool rather than a spent budget.
     const nearly = Budget{ .deadline_ns = now + 2 * std.time.ns_per_s };
-    try std.testing.expectEqual(tool_timeout_floor_ms, nearly.toolTimeoutMs(io, 120_000));
+    try std.testing.expectEqual(tool_timeout_floor_ms, nearly.toolCeilingMs(io).?);
 
-    // Spent: remaining is zero, and the clamp still leaves the floor.
+    // Spent: remaining is zero, and the ceiling still leaves the floor.
     const spent = Budget{ .deadline_ns = now - 1 };
     try std.testing.expectEqual(@as(u64, 0), spent.remainingMs(io).?);
-    try std.testing.expectEqual(tool_timeout_floor_ms, spent.toolTimeoutMs(io, 120_000));
+    try std.testing.expectEqual(tool_timeout_floor_ms, spent.toolCeilingMs(io).?);
     try std.testing.expect(spent.expired(io));
 }
 
