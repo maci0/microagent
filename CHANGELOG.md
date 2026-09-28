@@ -587,6 +587,11 @@ release, and `microagent update` moves you to it.
   asset host serves unauthenticated, so a token carrying repository scope was being presented to a
   host the download never needed to authenticate to. Both URLs already passed the GitHub host
   allowlist, so this narrows the grant rather than the hosts it is allowed to reach.
+- The release tag and asset name reach stderr through the same quoting a `--repo` argument gets. Both
+  are the release body's own bytes, and a tag carrying ESC, BEL or a C1 control put an escape sequence
+  on the operator's terminal through the version line, the missing-asset message, the sidecar note and
+  both download failures. The decision still reads the bytes the body carried, so a release is neither
+  refused nor matched on a name this quoting changed.
 
 ## [0.2.0] - 2026-09-29
 

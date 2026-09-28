@@ -21,16 +21,31 @@ const exec_mode: std.Io.File.Permissions = @enumFromInt(@as(std.posix.mode_t, 0o
 const max_api_bytes: usize = 10 * 1024 * 1024;
 const max_sidecar_bytes: usize = 64 * 1024;
 const max_asset_bytes: usize = 256 * 1024 * 1024;
-/// How much of a `--repo` argument an error message quotes back.
-const repo_in_error_bytes: usize = 80;
+/// How much of a value this program does not spell an error message quotes
+/// back. Bounded on the bytes that come out rather than the bytes that went in,
+/// so a value of control characters cannot cost a line four times its length.
+const quoted_value_bytes: usize = 80;
 
-/// A `--repo` short of the quote: the value is whatever the user typed, so it
-/// is cut on a codepoint boundary (a partial codepoint in a diagnostic reads
-/// as a replacement character in the middle of the flag they got wrong) and
-/// the bytes a terminal cannot be shown are escaped. One spelling of it, with
-/// the one the agent's own diagnostics use.
+/// A value this program does not spell, as the operator can be shown it: cut on
+/// a codepoint boundary (a partial codepoint in a diagnostic reads as a
+/// replacement character in the middle of the name), with every control
+/// character, DEL and C1 control written as its two-character escape.
+///
+/// Two kinds of value reach it. A `--repo` is whatever the user typed. A tag,
+/// an asset name and a release page are the release body's own bytes: GitHub
+/// publishes them, but this program treats that body as untrusted everywhere
+/// else (the release and sidecar harnesses read it as exactly that), and a tag
+/// carrying ESC, BEL or a C1 control puts an escape sequence on the operator's
+/// terminal through every line that prints it as written. The tag decides
+/// which version line is printed, and the asset name reaches four messages
+/// about a download that failed.
+fn quoteUntrusted(arena: std.mem.Allocator, text: []const u8) []const u8 {
+    return chat.safeText(arena, text, quoted_value_bytes);
+}
+
+/// A `--repo` short of the quote, under the one name both kinds of value share.
 fn quoteRepo(arena: std.mem.Allocator, repo: []const u8) []const u8 {
-    return chat.safeText(arena, repo, repo_in_error_bytes);
+    return quoteUntrusted(arena, repo);
 }
 
 pub const Verdict = enum {
@@ -621,6 +636,11 @@ const Decision = struct {
     rel: ?Release,
     in: Inputs,
     verdict: Verdict,
+    /// The tag as a line may quote it: the value the run's diagnostics name,
+    /// rather than the one the decision reads.
+    shown_tag: []const u8,
+    /// The asset name the same way, since the tag is inside it.
+    shown_asset: []const u8,
 };
 
 /// The first listed asset, paired with a sidecar that matches the bytes, so the
@@ -650,7 +670,13 @@ fn decideFromBody(arena: std.mem.Allocator, body: []const u8) !Decision {
         .sidecar = sidecar,
         .basename = name,
     };
-    return .{ .rel = rel, .in = in, .verdict = decide(in) };
+    return .{
+        .rel = rel,
+        .in = in,
+        .verdict = decide(in),
+        .shown_tag = quoteUntrusted(arena, tag),
+        .shown_asset = quoteUntrusted(arena, name),
+    };
 }
 
 /// One sentence for the two ways `--repo` can arrive without a value, so the
@@ -768,6 +794,11 @@ fn runChecked(
         return fail(io, "the latest release from {s} could not be read ({s})", .{ api, @errorName(err) });
     const page = releasePageLine(rel.page) catch
         return fail(io, "refusing to install unverified binary", .{});
+    // The tag is the release body's own bytes, and every line below quotes one,
+    // so what is printed is the quoted spelling. The comparison and the lookup
+    // below read `rel.tag` itself: what a tag says is what decides, and what a
+    // line says is only what a reader is shown.
+    const tag = quoteUntrusted(arena, rel.tag);
 
     var line_buf: [256]u8 = undefined;
     const order = compareVersions(version, rel.tag);
@@ -778,11 +809,11 @@ fn runChecked(
         // pre-release the run goes on to install: calling that "is current"
         // printed one thing and did the other.
         .eq => if (sameRelease(version, rel.tag))
-            formatCurrent(&line_buf, tool_name, version, rel.tag)
+            formatCurrent(&line_buf, tool_name, version, tag)
         else
-            formatUncompared(&line_buf, tool_name, version, rel.tag),
-        .gt => formatAhead(&line_buf, version, rel.tag),
-        .lt => formatNewRelease(&line_buf, rel.tag, version),
+            formatUncompared(&line_buf, tool_name, version, tag),
+        .gt => formatAhead(&line_buf, version, tag),
+        .lt => formatNewRelease(&line_buf, tag, version),
     } catch |err| return fail(io, "could not format the version comparison ({s})", .{@errorName(err)});
     net.writeErr(io, line);
     net.writeErr(io, "\n");
@@ -807,9 +838,13 @@ fn runChecked(
     var side_name_buf: [208]u8 = undefined;
     const side_name = writeSidecarName(&side_name_buf, asset_name) catch
         return fail(io, "release asset name does not fit", .{});
+    // What the four messages below name the download with. The lookup, the
+    // sidecar's basename and the verdict all read `asset_name` itself: what the
+    // release published is the name to match against, not the one to print.
+    const asset_name_text = quoteUntrusted(arena, asset_name);
 
     const a_url = assetUrl(rel, asset_name) orelse
-        return fail(io, "missing release asset {s}; the binary was not replaced", .{asset_name});
+        return fail(io, "missing release asset {s}; the binary was not replaced", .{asset_name_text});
     const s_url = assetUrl(rel, side_name) orelse
         return fail(io, "missing checksum sidecar; the binary was not replaced", .{});
     if (!trustedGithubUrl(a_url) or !trustedGithubUrl(s_url)) {
@@ -817,12 +852,13 @@ fn runChecked(
     }
 
     // The URL the response named is unbounded, and these lines print into a
-    // fixed buffer, so the asset name is what identifies the download.
+    // fixed buffer, so the asset name is what identifies the download. The name
+    // is the tag inside it, so it is quoted for a reader the way the tag is.
     var asset = fetchAsset(&client, gpa, a_url, bearerFor(a_url, bearer), max_asset_bytes, &status) catch |err|
-        return downloadFailure(io, asset_name, status, err);
+        return downloadFailure(io, asset_name_text, status, err);
     defer asset.deinit();
     var side_what_buf: [320]u8 = undefined;
-    const side_what = std.fmt.bufPrint(&side_what_buf, "the checksum sidecar for {s}", .{asset_name}) catch asset_name;
+    const side_what = std.fmt.bufPrint(&side_what_buf, "the checksum sidecar for {s}", .{asset_name_text}) catch asset_name_text;
     const sidecar = fetchBody(&client, gpa, arena, s_url, bearerFor(s_url, bearer), max_sidecar_bytes, &status) catch |err|
         return downloadFailure(io, side_what, status, err);
 
@@ -848,7 +884,7 @@ fn runChecked(
         return fail(io, "could not locate the running binary ({s})", .{@errorName(err)});
     replaceExecutable(io, exe, asset.bytes) catch |err|
         return fail(io, "could not replace {s} ({s}); the binary was not replaced", .{ exe, @errorName(err) });
-    const installed = formatInstalled(&line_buf, rel.tag, exe) catch
+    const installed = formatInstalled(&line_buf, tag, exe) catch
         return fail(io, "could not format the install line", .{});
     net.writeOut(io, installed) catch |err|
         return fail(io, "{s} was installed, but the install line could not be written to stdout ({s})", .{ exe, @errorName(err) });
@@ -1158,7 +1194,7 @@ fn fuzzUpdateArgs(_: void, smith: *std.testing.Smith) !void {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const quoted = quoteRepo(arena, repo);
-    try std.testing.expect(quoted.len <= repo_in_error_bytes);
+    try std.testing.expect(quoted.len <= quoted_value_bytes);
     try std.testing.expect(std.unicode.utf8ValidateSlice(quoted));
     for (quoted) |c| try std.testing.expect(c >= 0x20 and c != 0x7f);
     // The budget cuts the escaped text, never the repo, so what is quoted is
@@ -1167,7 +1203,7 @@ fn fuzzUpdateArgs(_: void, smith: *std.testing.Smith) !void {
     const whole = chat.safeText(arena, repo, std.math.maxInt(usize));
     try std.testing.expect(std.mem.startsWith(u8, whole, quoted));
     // And a short repo is quoted whole, escapes and all.
-    if (repo.len <= repo_in_error_bytes) try std.testing.expectEqualStrings(whole, quoted);
+    if (repo.len <= quoted_value_bytes) try std.testing.expectEqualStrings(whole, quoted);
 }
 
 test "update: --check and an equal version do not fetch an asset" {
@@ -1337,7 +1373,7 @@ test "update: a repo quoted back in an error keeps whole characters" {
     try std.testing.expectEqualStrings("maci0/microagent", quoteRepo(gpa, "maci0/microagent"));
     const long = "日本語/" ++ "x" ** 200;
     const quoted = quoteRepo(gpa, long);
-    try std.testing.expect(quoted.len <= repo_in_error_bytes);
+    try std.testing.expect(quoted.len <= quoted_value_bytes);
     try std.testing.expect(std.unicode.utf8ValidateSlice(quoted));
     try std.testing.expect(std.mem.startsWith(u8, long, quoted));
     // Three-byte characters throughout: the cut is on one of them, so the
@@ -1346,6 +1382,40 @@ test "update: a repo quoted back in an error keeps whole characters" {
     // A byte that is not text, and a control character, reach the line as
     // text rather than as mojibake or as a cursor the operator did not ask for.
     try std.testing.expectEqualStrings("bad\\x1b[31m\u{fffd}", quoteRepo(gpa, "bad\x1b[31m\xff"));
+}
+
+// The release body's tag and asset name reach every line this run prints
+// about a version, a missing asset or a failed download. They are the only
+// values in the update path this program did not spell, and a tag carrying
+// ESC, BEL or a C1 control would otherwise put an escape sequence on the
+// operator's terminal through a line that looks like the four this run writes
+// on an ordinary day.
+test "update: a tag and an asset name from the release body are quoted before a line prints them" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const hostile = "{\"tag_name\":\"v0.1.0\\u001b[2J\\u0007\\u009b31m\",\"html_url\":\"https://github.com/o/r\",\"assets\":[" ++
+        "{\"name\":\"microagent-v0.1.0\\u001b[2J-x86_64-linux-musl\",\"browser_download_url\":\"https://github.com/o/r/a\"}]}";
+    const d = try decideFromBody(arena, hostile);
+
+    // The decision reads the bytes the body carried: a control character in a
+    // tag is not a reason to refuse a release, and the name to match is the one
+    // published.
+    try std.testing.expectEqualStrings("v0.1.0\x1b[2J\x07\u{009b}31m", d.in.tag);
+    try std.testing.expectEqualStrings("microagent-v0.1.0\x1b[2J-x86_64-linux-musl", d.in.basename);
+    try std.testing.expectEqualStrings("v0.1.0\\x1b[2J\\x07\\x9b31m", d.shown_tag);
+    for (d.shown_tag) |c| try std.testing.expect(c >= 0x20 and c != 0x7f);
+
+    // And the install line carries the quoted tag, so an operator reading what
+    // the update installed is not shown what the response said.
+    var line_buf: [256]u8 = undefined;
+    const line = try formatInstalled(&line_buf, d.shown_tag, "/usr/local/bin/microagent");
+    try std.testing.expectEqualStrings(
+        "Installed v0.1.0\\x1b[2J\\x07\\x9b31m to /usr/local/bin/microagent",
+        line,
+    );
+    for (line) |c| try std.testing.expect(c >= 0x20 and c != 0x7f);
 }
 
 test "update: comparison and install lines use the release wording" {
@@ -1509,6 +1579,7 @@ const release_corpus = [_][]const u8{
     "{\"tag_name\":\"v0.1.0\",\"html_url\":\"https://github.com/o/r\",\"assets\":[" ++ asset_base_fixture ++ "," ++ abc_sha ++ "]}",
     lookalike_release,
     "{\"tag_name\":\"\\u0000\\ud83d\\ude80\",\"html_url\":\"https://github.com/o/r\",\"assets\":[{\"name\":\"\\u0000\",\"browser_download_url\":\"https://github.com/o/r/\\u0000\"}]}",
+    "{\"tag_name\":\"v0.1.0\\u001b[2J\\u0007\",\"html_url\":\"https://github.com/o/r\",\"assets\":[{\"name\":\"microagent-v0.1.0\\u001b[2J-x86_64-linux-musl\",\"browser_download_url\":\"https://github.com/o/r/a\"}]}",
 };
 
 test "update: fuzz: a release body only reaches a replacement it earns" {
@@ -1556,6 +1627,16 @@ fn fuzzRelease(_: void, smith: *std.testing.Smith) !void {
     try std.testing.expect(sameRelease(bare, tag));
     try std.testing.expect(sameRelease(tag, bare));
     try std.testing.expect(!sameRelease(bare, try std.fmt.allocPrint(arena, "{s}x", .{bare})));
+
+    // What a diagnostic quotes is the quoted form, and nothing in it is a byte
+    // a terminal acts on. The tag and the asset name are the release body's own
+    // bytes, and every line this run prints about a version, a missing asset or
+    // a failed download names one of them.
+    for ([_][]const u8{ d.shown_tag, d.shown_asset }) |shown| {
+        try std.testing.expect(shown.len <= quoted_value_bytes);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(shown));
+        for (shown) |c| try std.testing.expect(c >= 0x20 and c != 0x7f);
+    }
 }
 
 // The sidecar is the last untrusted input the updater reads and the only thing
