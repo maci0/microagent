@@ -647,7 +647,10 @@ fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_
     // wrong: a build that printed every error before it hung is the case this
     // is for. Its output comes back with the reason, and a command that printed
     // nothing is the bare reason it always was.
-    var got: Partial = undefined;
+    // Empty rather than undefined, for the reason `runSearchTool` gives: a
+    // spawn that fails on its own never writes the out-param, and the failure
+    // below reads it to say what the child printed before it did.
+    var got: Partial = .{ .stdout = &.{}, .stderr = &.{}, .dropped = .{ false, false } };
     const res = runCapped(io, arena, &.{ "/bin/sh", "-c", command }, capture_limit, net.durationMs(timeout_ms), environ_map, &got) catch |err| switch (err) {
         error.Timeout => return failedOutput(arena, got, try std.fmt.allocPrint(arena, "error: command timed out after {d}ms", .{timeout_ms})),
         else => return failedOutput(arena, got, try std.fmt.allocPrint(arena, "error: {s}", .{@errorName(err)})),
@@ -874,8 +877,14 @@ fn toolRead(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]const
         return std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_read_bytes)) catch |err|
             return readFailed(arena, path, err);
 
+    // Both counts are ceilings, so zero is one line rather than no lines, for
+    // the reason `gitLineLimit` gives: a `limit` of `"3"` read as a limit of
+    // zero once, and the call came back empty and the model read that as a file
+    // with nothing in it. The same rule on the read side, the same answer. An
+    // offset past the end of the file is a count too, and the cap the cast can
+    // reach is a line no file here has.
     const offset: usize = @max(1, std.math.cast(usize, countArg(args.get("offset")) orelse 1) orelse std.math.maxInt(usize));
-    const limit: usize = std.math.cast(usize, countArg(args.get("limit")) orelse std.math.maxInt(u64)) orelse std.math.maxInt(usize);
+    const limit: usize = @max(1, std.math.cast(usize, countArg(args.get("limit")) orelse std.math.maxInt(u64)) orelse std.math.maxInt(usize));
     return readLines(io, arena, path, offset, limit);
 }
 

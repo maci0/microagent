@@ -188,12 +188,18 @@ pub fn open(io: Io, arena: std.mem.Allocator, session_dir: []const u8, model: []
         net.note(io, arena, "microagent: the session directory {s} could not be created ({s}); the rest of this run is not recorded\n", .{ shown, @errorName(err) });
         return null;
     };
+    // The store is pruned before the log is opened, not after: a run whose
+    // stamp is a name the store already holds is exactly the run that needs
+    // the retention window, and it is the one that returned above without
+    // reaching a prune placed after the open. The clock a wrong machine reads
+    // is the ordinary way to get there, and every pre-1970 stamp is zero, so
+    // every later run collides on the same names.
+    pruneSessions(io, arena, session_dir);
     const stamp = logStamp(Io.Clock.real.now(io).nanoseconds);
     const file = createSessionLog(io, arena, session_dir, stamp) orelse {
         net.note(io, arena, "microagent: no session log could be opened under {s}; the rest of this run is not recorded\n", .{shown});
         return null;
     };
-    pruneSessions(io, arena, session_dir);
     return .{ .file = file, .cwd = cwd, .model = model, .dir = session_dir };
 }
 

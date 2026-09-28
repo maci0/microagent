@@ -23,6 +23,13 @@ const max_api_bytes: usize = 10 * 1024 * 1024;
 const max_sidecar_bytes: usize = 64 * 1024;
 const max_asset_bytes: usize = 256 * 1024 * 1024;
 
+// The install line carries the one value the run does not bound itself: the
+// path the OS reports for the executable. The line is formatted after the
+// binary has already been replaced, so a line that did not fit is a run that
+// reports a failure for an install that happened, and the buffer is sized to
+// hold one rather than to look tidy.
+const install_line_bytes: usize = net.quoted_value_bytes + std.fs.max_path_bytes + 32;
+
 /// A value this program does not spell, as the operator can be shown it: cut on
 /// a codepoint boundary (a partial codepoint in a diagnostic reads as a
 /// replacement character in the middle of the name), with every control
@@ -115,23 +122,23 @@ fn parseTriple(release: []const u8) ?[3]u64 {
 /// The release matrix names macOS `aarch64-macos` and `x86_64-macos` (no abi)
 /// and Linux `arch-linux-musl`. Zig's abi tag for those macOS targets is
 /// `none`; appending it asks for an asset the release does not publish.
-fn targetTriple(buf: []u8, arch: []const u8, os_name: []const u8, abi: []const u8) []const u8 {
+fn targetTriple(buf: []u8, arch: []const u8, os_name: []const u8, abi: []const u8) error{NameTooLong}![]const u8 {
     if (std.mem.eql(u8, abi, "none")) {
-        return std.fmt.bufPrint(buf, "{s}-{s}", .{ arch, os_name }) catch buf[0..0];
+        return std.fmt.bufPrint(buf, "{s}-{s}", .{ arch, os_name }) catch error.NameTooLong;
     }
-    return std.fmt.bufPrint(buf, "{s}-{s}-{s}", .{ arch, os_name, abi }) catch buf[0..0];
+    return std.fmt.bufPrint(buf, "{s}-{s}-{s}", .{ arch, os_name, abi }) catch error.NameTooLong;
 }
 
 /// The asset to ask for. Linux ships one static musl binary per arch, and a
 /// static musl binary runs on a glibc host, so a `-gnu` build asks for the
 /// musl asset instead of one the release does not publish. macOS has no abi
 /// tag in its asset name.
-fn assetTriple(buf: []u8, arch: []const u8, os_name: []const u8, abi: []const u8) []const u8 {
+fn assetTriple(buf: []u8, arch: []const u8, os_name: []const u8, abi: []const u8) error{NameTooLong}![]const u8 {
     if (std.mem.eql(u8, os_name, "linux")) return targetTriple(buf, arch, "linux", "musl");
     return targetTriple(buf, arch, os_name, abi);
 }
 
-fn thisAssetTriple(buf: []u8) []const u8 {
+fn thisAssetTriple(buf: []u8) error{NameTooLong}![]const u8 {
     return assetTriple(buf, @tagName(builtin.cpu.arch), @tagName(builtin.os.tag), @tagName(builtin.abi));
 }
 
@@ -943,7 +950,8 @@ fn runChecked(
     }
 
     var target_buf: [64]u8 = undefined;
-    const target = thisAssetTriple(&target_buf);
+    const target = thisAssetTriple(&target_buf) catch
+        return fail(io, "release target name does not fit", .{});
     var name_buf: [192]u8 = undefined;
     const asset_name = writeAssetName(&name_buf, rel.tag, target) catch
         return fail(io, "release asset name does not fit", .{});
@@ -998,6 +1006,7 @@ fn runChecked(
         .untrusted_url => return fail(io, "refusing to install unverified binary", .{}),
     }
 
+    var install_buf: [install_line_bytes]u8 = undefined;
     const exe = std.process.executablePathAlloc(io, arena) catch |err|
         return fail(io, "could not locate the running binary ({s})", .{@errorName(err)});
     // The two notes below name the path, and a path is whatever the machine's
@@ -1008,8 +1017,8 @@ fn runChecked(
     const shown_exe = chat.safeTextAll(arena, exe);
     replaceExecutable(io, exe, asset.bytes) catch |err|
         return fail(io, "could not replace {s} ({s}); the binary was not replaced", .{ shown_exe, @errorName(err) });
-    const installed = formatInstalled(&line_buf, tag, exe) catch
-        return fail(io, "could not format the install line", .{});
+    const installed = formatInstalled(&install_buf, tag, exe) catch
+        return fail(io, "{s} was installed, but the install line did not fit", .{shown_exe});
     net.writeOut(io, installed) catch |err|
         return fail(io, "{s} was installed, but the install line could not be written to stdout ({s})", .{ shown_exe, @errorName(err) });
     net.writeOut(io, "\n") catch |err|
@@ -1131,7 +1140,7 @@ test "update: this target is the name the release matrix publishes" {
     };
     inline for (rows) |row| {
         var triple_buf: [64]u8 = undefined;
-        const triple = targetTriple(&triple_buf, row[0], row[1], row[2]);
+        const triple = try targetTriple(&triple_buf, row[0], row[1], row[2]);
         try std.testing.expectEqualStrings(row[3], triple);
         var name_buf: [112]u8 = undefined;
         const asset = try writeAssetName(&name_buf, "v0.1.0", triple);
@@ -1139,14 +1148,14 @@ test "update: this target is the name the release matrix publishes" {
     }
     // A glibc build asks for the static musl asset; macOS keeps its own name.
     var gnu_buf: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("x86_64-linux-musl", assetTriple(&gnu_buf, "x86_64", "linux", "gnu"));
-    try std.testing.expectEqualStrings("aarch64-linux-musl", assetTriple(&gnu_buf, "aarch64", "linux", "gnu"));
-    try std.testing.expectEqualStrings("x86_64-macos", assetTriple(&gnu_buf, "x86_64", "macos", "none"));
+    try std.testing.expectEqualStrings("x86_64-linux-musl", try assetTriple(&gnu_buf, "x86_64", "linux", "gnu"));
+    try std.testing.expectEqualStrings("aarch64-linux-musl", try assetTriple(&gnu_buf, "aarch64", "linux", "gnu"));
+    try std.testing.expectEqualStrings("x86_64-macos", try assetTriple(&gnu_buf, "x86_64", "macos", "none"));
 
     var live_buf: [64]u8 = undefined;
     var via_buf: [64]u8 = undefined;
-    const want = assetTriple(&via_buf, @tagName(builtin.cpu.arch), @tagName(builtin.os.tag), @tagName(builtin.abi));
-    const got = thisAssetTriple(&live_buf);
+    const want = try assetTriple(&via_buf, @tagName(builtin.cpu.arch), @tagName(builtin.os.tag), @tagName(builtin.abi));
+    const got = try thisAssetTriple(&live_buf);
     try std.testing.expectEqualStrings(want, got);
     try std.testing.expect(!std.mem.endsWith(u8, got, "-none"));
     if (builtin.os.tag == .linux) try std.testing.expect(std.mem.endsWith(u8, got, "-linux-musl"));

@@ -1851,15 +1851,6 @@ fn streamChat(
         };
         if (n == 0) break;
         pending.items.len += n;
-        // A line that has not ended by now is not one this turn can carry, and
-        // the buffer below only shrinks on a newline, so the run says so and
-        // ends the turn rather than growing with the rest of the stream.
-        if (pending.items.len > max_frame_bytes) {
-            net.note(io, arena, "microagent: a line of the completion stream from {s} passed {d} byte(s) without ending; the turn is discarded\n", .{
-                shown_url, pending.items.len,
-            });
-            return error.StreamTruncated;
-        }
 
         var start: usize = 0;
         while (net.nextLineEnd(pending.items, &scanned)) |pos| {
@@ -1882,6 +1873,20 @@ fn streamChat(
             std.mem.copyForwards(u8, pending.items[0..rest], pending.items[start..]);
             pending.shrinkRetainingCapacity(rest);
             scanned -|= start;
+        }
+        // What is left above is the one line that has not ended, and a line
+        // that has not ended by now is not one this turn can carry, so the run
+        // says so and ends the turn rather than growing with the rest of the
+        // stream. The check reads what the split left rather than the buffer
+        // as it arrived, because a read lands whole lines beside the partial
+        // one: asked before the split, a complete line of exactly the ceiling
+        // was refused for its own newline, and a short frame read alongside a
+        // partial line counted the short frame against the long one.
+        if (pending.items.len > max_frame_bytes) {
+            net.note(io, arena, "microagent: a line of the completion stream from {s} passed {d} byte(s) without ending; the turn is discarded\n", .{
+                shown_url, pending.items.len,
+            });
+            return error.StreamTruncated;
         }
         try flushCompleteOut(io, arena, &out_buf, shown_url);
     }
@@ -2486,6 +2491,13 @@ fn elideToolResults(
         };
         if (text.len <= threshold) continue;
         const marker = try std.fmt.allocPrint(arena, elision_marker, .{text.len});
+        // A marker that is not shorter than the result it replaces saves
+        // nothing, and the subtraction below wraps a usize rather than
+        // undercounts when it is longer. The second pass asks for results down
+        // to `min_marker_bytes`, which is the marker spelling its own size, so
+        // a result a few bytes over that is replaced by a marker a few bytes
+        // bigger than itself.
+        if (marker.len >= text.len) continue;
         size += text.len - marker.len;
         content.* = .{ .string = marker };
     }
@@ -2714,7 +2726,7 @@ fn finishTurn(
         // under that ceiling: a turn of two dozen `git status` calls otherwise
         // reserves the whole cap for each of them.
         const result_bytes = try tool_mod.toolResult(arena, output);
-        var tool_msg = chat_mod.JsonBuf.initCapacity(arena, @min(tool_result_message_bytes, result_bytes.len + 512));
+        var tool_msg = chat_mod.JsonBuf.initCapacity(arena, @min(tool_result_message_bytes, result_bytes.len + tool_result_message_scaffolding_bytes));
         try tool_msg.writer().writeAll(",{\"role\":\"tool\",\"tool_call_id\":");
         try chat_mod.writeJsonString(tool_msg.writer(), call.id);
         try tool_msg.writer().writeAll(",\"content\":");
@@ -4139,7 +4151,8 @@ test "the argument ceiling is spent across the response, not handed to each call
 test "a stream line that never ends is bounded" {
     try std.testing.expect(max_frame_bytes < max_response_bytes);
 
-    // The check is on the buffer, so it is the buffer that has to stop growing.
+    // The check is on what the split left, so that is the buffer that has to
+    // stop growing.
     var state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer state.deinit();
     const gpa = state.allocator();
@@ -4148,12 +4161,17 @@ test "a stream line that never ends is bounded" {
     try pending.appendNTimes(gpa, 'd', max_frame_bytes + 1);
     try std.testing.expect(pending.items.len > max_frame_bytes);
 
-    // A line that does end is consumed and dropped, as the loop does, so the
-    // check is on what is left rather than on what has passed through.
+    // A line that does end is consumed by the split before the ceiling is
+    // read, so what the ceiling is applied to is the residual rather than
+    // everything the read carried: a line of exactly the ceiling, plus the
+    // newline that ends it, is a line this turn carries.
     var complete: std.ArrayList(u8) = .empty;
     try complete.appendNTimes(gpa, 'd', max_frame_bytes);
     try complete.append(gpa, '\n');
-    try std.testing.expect(complete.items.len > max_frame_bytes);
+    var scanned: usize = 0;
+    const end = net.nextLineEnd(complete.items, &scanned).?;
+    try std.testing.expectEqual(@as(usize, max_frame_bytes), end);
+    try std.testing.expect(complete.items[end + 1 ..].len <= max_frame_bytes);
 }
 
 test "usage counters land on the result" {
@@ -4329,6 +4347,35 @@ fn appendToolResults(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), count: us
         msg.list.deinit(gpa);
     }
     try msgs.append(gpa, ']');
+}
+
+// The second compaction pass replaces results down to `min_marker_bytes`, which
+// is a marker spelling its own size, so a result a few bytes over that is
+// replaced by a marker a few bytes bigger than itself. Counting that as a
+// saving subtracted a wrapped `usize` from the conversation size, and the run
+// reported a size no conversation has.
+test "a result a marker cannot shrink is left as it stands" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    const gpa = std.testing.allocator;
+    // One result a byte over the marker size, which the second pass asks for.
+    const content = "y" ** (min_marker_bytes + 1);
+    var msgs: std.ArrayList(u8) = .empty;
+    defer msgs.deinit(gpa);
+    try msgs.appendSlice(gpa, "[{\"role\":\"user\",\"content\":\"look\"},");
+    try msgs.appendSlice(gpa, "{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call_0\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}]},");
+    try msgs.appendSlice(gpa, "{\"role\":\"tool\",\"tool_call_id\":\"call_0\",\"content\":\"" ++ content ++ "\"}]");
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, msgs.items, .{});
+    defer parsed.deinit();
+    const size = try elideToolResults(arena, parsed.value.array, min_marker_bytes, std.math.maxInt(usize));
+    // Nothing elided, and nothing counted: a marker that grew the result it
+    // replaced used to subtract a wrapped `usize` from the saving.
+    try std.testing.expectEqual(@as(usize, 0), size);
+    const kept = parsed.value.array.items[2].object.get("content").?.string;
+    try std.testing.expectEqualStrings(content, kept);
 }
 
 test "compaction elides old tool output and keeps the recent turns" {
