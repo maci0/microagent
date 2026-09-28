@@ -514,7 +514,7 @@ fn githubBearer(arena: std.mem.Allocator, env: *std.process.Environ.Map) ?[]cons
     // wrapper arrives with the newline that file ended with, and a header
     // carrying one is refused as an invalid credential rather than as a
     // whitespace mistake.
-    const tok = std.mem.trim(u8, env.get("GITHUB_TOKEN") orelse return null, " \t\r\n");
+    const tok = std.mem.trim(u8, env.get("GITHUB_TOKEN") orelse return null, net.env_surrounding);
     if (tok.len == 0) return null;
     return std.fmt.allocPrint(arena, "Bearer {s}", .{tok}) catch null;
 }

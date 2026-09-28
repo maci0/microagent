@@ -10,6 +10,12 @@
 const std = @import("std");
 const Io = std.Io;
 
+/// What a wrapper that reads its environment out of a file leaves around every
+/// value it exported. It is spelled here, in the module every reader imports,
+/// so trimming an environment value has one set behind it rather than one per
+/// reader.
+pub const env_surrounding = " \t\r\n";
+
 /// Points the TLS client at a PEM file when one was named. Many container
 /// images (bare ubuntu, distroless) ship no ca-certificates at all, and the
 /// client's own rescan then fails with TlsInitializationFailed before a single
@@ -63,11 +69,11 @@ pub fn note(io: Io, arena: std.mem.Allocator, comptime fmt: []const u8, args: an
 /// nothing but whitespace, which is not a path any filesystem holds.
 pub fn caBundlePath(env: *const std.process.Environ.Map) []const u8 {
     if (env.get("MICROAGENT_CA_BUNDLE")) |v| {
-        const p = std.mem.trim(u8, v, " \t\r\n");
+        const p = std.mem.trim(u8, v, env_surrounding);
         if (p.len > 0) return p;
     }
     if (env.get("SSL_CERT_FILE")) |v| {
-        const p = std.mem.trim(u8, v, " \t\r\n");
+        const p = std.mem.trim(u8, v, env_surrounding);
         if (p.len > 0) return p;
     }
     return "";

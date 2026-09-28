@@ -124,8 +124,10 @@ whitespace reads as the empty case above. A wrapper that populates the
 environment from a file exports the newline that file ended with, and that
 newline is a different failure per option: an api key reaches the provider as an
 `Authorization` header carrying a byte a header may not hold, so every request
-is refused, and a base url stops parsing, so the run claims the key would go out
-in the clear about a value that is otherwise fine.
+is refused, a base url stops parsing, and a session directory names a directory
+the run creates and no monitor ever looks in. A base url that does not parse
+anyway is refused as the typo it is, before the plaintext check that would
+report it as a key about to go out in the clear.
 
 The prompt may also be the last bare argument. That matters for gauntlet: a custom-agent
 definition inserts the model flags immediately after `-p`, so an agent defined as

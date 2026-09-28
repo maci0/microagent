@@ -145,6 +145,20 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- A base url that is not a url is refused as one. `--base-url api.openai.com/v1` and
+  `MICROAGENT_BASE_URL` set the same way were reported as "the API key would go to ... in the
+  clear", a security warning about a value that never reaches the network; the plaintext check
+  still says what it says about a url that does parse.
+- `MICROAGENT_SESSION_DIR` is trimmed before it is read, like every other environment value. A
+  wrapper that populates the environment from a file exports the newline that file ended with, and
+  a session directory carrying one is a directory the run created and the monitor never looks in,
+  so the log it kept was a log nothing read. The reader now takes the environment map rather than
+  the whole `Init`, so the trimming, the empty-means-off reading and the `$HOME` default are
+  covered by a test rather than by the run that reads them.
+- The session log is written in one place. `main.zig` carried a second, unused copy of the whole
+  module, its own `MICROAGENT_SESSION_DIR` reader and its own copy of every session test, while the
+  run itself used `session.zig`. The dead copy is removed, which is what let the live reader go
+  untrimmed while a trimmed one sat beside it looking tested.
 - `integrations/harbor/microagent_agent.py` is formatted the way `ruff format` writes it, so the
   `ruff format --check` step that `make lint-python` and CI both run passes. The file had drifted
   from the formatter after the log-formatting change above it, which left `make check` red on a

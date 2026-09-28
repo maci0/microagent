@@ -16,11 +16,46 @@ const net = @import("net.zig");
 
 /// Where the session log goes: MICROAGENT_SESSION_DIR, else a directory beside
 /// the other per-run state under $HOME. An empty value turns the log off, and
-/// so does a home that is not there.
-pub fn sessionDir(init: std.process.Init) []const u8 {
-    if (init.environ_map.get("MICROAGENT_SESSION_DIR")) |v| return v;
-    const home = init.environ_map.get("HOME") orelse return "";
-    return std.fs.path.join(init.arena.allocator(), &.{ home, ".microagent", "sessions" }) catch "";
+/// so does a home that is not there. The variable is read rather than trimmed
+/// by the caller because an empty one means off here instead of falling through
+/// to $HOME, but it is trimmed the same way every other variable is: a wrapper
+/// that populates the environment from a file exports the newline that file
+/// ended with, and a directory name carrying one is a directory the run creates
+/// and the monitor never looks in, so the log it keeps is a log nobody reads.
+/// Takes the environment map rather than the whole `Init`, so the precedence is
+/// testable without one.
+pub fn sessionDir(env: *const std.process.Environ.Map, arena: std.mem.Allocator) []const u8 {
+    if (env.get("MICROAGENT_SESSION_DIR")) |v| return std.mem.trim(u8, v, net.env_surrounding);
+    const home = env.get("HOME") orelse return "";
+    return std.fs.path.join(arena, &.{ home, ".microagent", "sessions" }) catch "";
+}
+
+test "the session directory is trimmed, and an empty one turns the log off" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+
+    try env.put("HOME", "/home/me");
+    try std.testing.expectEqualStrings("/home/me/.microagent/sessions", sessionDir(&env, arena));
+
+    try env.put("MICROAGENT_SESSION_DIR", "/var/log/ma\n");
+    try std.testing.expectEqualStrings("/var/log/ma", sessionDir(&env, arena));
+
+    // Empty is the switch that turns the log off, not a request for the
+    // default: a caller who turned it off must not find a log under $HOME.
+    try env.put("MICROAGENT_SESSION_DIR", "");
+    try std.testing.expectEqualStrings("", sessionDir(&env, arena));
+
+    try env.put("MICROAGENT_SESSION_DIR", "  ");
+    try std.testing.expectEqualStrings("", sessionDir(&env, arena));
+
+    // No home and no variable: there is nowhere to put the log, and no error.
+    var bare: std.process.Environ.Map = .init(std.testing.allocator);
+    defer bare.deinit();
+    try std.testing.expectEqualStrings("", sessionDir(&bare, arena));
 }
 
 /// One session log per run, one JSONL record per model response, which is what
