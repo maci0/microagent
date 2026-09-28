@@ -1,6 +1,6 @@
-{"agent":"microagent","task":"cli-flag","wall_s":12.0,"tokens":5835,"lines":"+4/-1","result":"pass"}
-{"agent":"microagent","task":"empty-mean","wall_s":9.3,"tokens":5212,"lines":"+2/-0","result":"pass"}
-{"agent":"microagent","task":"parse-bug","wall_s":9.3,"tokens":6566,"lines":"+2/-2","result":"pass"}
-{"agent":"kimi","task":"cli-flag","wall_s":12.7,"tokens":null,"lines":"+4/-1","result":"pass"}
-{"agent":"kimi","task":"empty-mean","wall_s":14.3,"tokens":null,"lines":"+2/-0","result":"pass"}
-{"agent":"kimi","task":"parse-bug","wall_s":12.2,"tokens":null,"lines":"+3/-8","result":"pass"}
+{"agent":"microagent","task":"cli-flag","wall_s":13.7,"tokens":5758,"lines":"+4/-1","result":"pass"}
+{"agent":"microagent","task":"empty-mean","wall_s":8.8,"tokens":5224,"lines":"+2/-0","result":"pass"}
+{"agent":"microagent","task":"parse-bug","wall_s":17.8,"tokens":6140,"lines":"+2/-2","result":"pass"}
+{"agent":"kimi","task":"cli-flag","wall_s":20.8,"tokens":null,"lines":"+7/-1","result":"pass"}
+{"agent":"kimi","task":"empty-mean","wall_s":29.4,"tokens":null,"lines":"+2/-0","result":"pass"}
+{"agent":"kimi","task":"parse-bug","wall_s":17.2,"tokens":null,"lines":"+2/-2","result":"pass"}

@@ -226,35 +226,65 @@ fn streamChat(
     const uri = std.Uri.parse(url) catch return error.InvalidUrl;
     const auth = try std.fmt.allocPrint(arena, "Bearer {s}", .{opts.api_key});
 
-    var req = try client.request(.POST, uri, .{
-        .redirect_behavior = .unhandled,
-        .extra_headers = &.{
-            .{ .name = "authorization", .value = auth },
-            .{ .name = "content-type", .value = "application/json" },
-            .{ .name = "accept", .value = "text/event-stream" },
-        },
-    });
-    defer req.deinit();
-    req.transfer_encoding = .{ .content_length = body.len };
-    try req.sendBodyComplete(@constCast(body));
+    // The request lives in a slot so `Response.request` stays valid for the
+    // reader handed back out of the retry loop below.
+    var req_slot: ?std.http.Client.Request = null;
+    defer if (req_slot) |*r| r.deinit();
 
-    if (debugOn()) std.debug.print("[mdebug] request sent, body={d} bytes\n", .{body.len});
     var redirect_buffer: [8 * 1024]u8 = undefined;
-    var response = try req.receiveHead(&redirect_buffer);
-    if (debugOn()) std.debug.print("[mdebug] head status={d} enc={s}\n", .{ @intFromEnum(response.head.status), @tagName(response.head.content_encoding) });
-    if (response.head.status != .ok) {
-        var transfer: [8 * 1024]u8 = undefined;
-        const reader = response.reader(&transfer);
-        const err_body = reader.allocRemaining(arena, .limited(16 * 1024)) catch "";
-        const msg = try std.fmt.allocPrint(arena, "http {d}: {s}\n", .{ @intFromEnum(response.head.status), err_body });
-        std.Io.File.stderr().writeStreamingAll(io, msg) catch {};
-        return error.ApiError;
-    }
-
     var transfer: [16 * 1024]u8 = undefined;
     var decompress: std.http.Decompress = undefined;
     var decompress_buffer: [std.compress.flate.max_window_len]u8 = undefined;
-    const reader = response.readerDecompressing(&transfer, &decompress, &decompress_buffer);
+
+    var attempt: u32 = 0;
+    // A rate limit or a dropped connection is the provider's weather, not the
+    // review's verdict: retry here rather than making gauntlet redo the whole
+    // review against a tree the agent has already partly changed.
+    const reader = retry: while (true) {
+        attempt += 1;
+        if (req_slot) |*r| {
+            r.deinit();
+            req_slot = null;
+        }
+        const req = client.request(.POST, uri, .{
+            .redirect_behavior = .unhandled,
+            .extra_headers = &.{
+                .{ .name = "authorization", .value = auth },
+                .{ .name = "content-type", .value = "application/json" },
+                .{ .name = "accept", .value = "text/event-stream" },
+            },
+        }) catch |err| {
+            if (waitBeforeRetry(io, attempt, @errorName(err))) continue;
+            return err;
+        };
+        req_slot = req;
+        var open = &req_slot.?;
+        open.transfer_encoding = .{ .content_length = body.len };
+        open.sendBodyComplete(@constCast(body)) catch |err| {
+            if (waitBeforeRetry(io, attempt, @errorName(err))) continue;
+            return err;
+        };
+        if (debugOn()) std.debug.print("[mdebug] request sent, body={d} bytes\n", .{body.len});
+
+        var response = open.receiveHead(&redirect_buffer) catch |err| {
+            if (waitBeforeRetry(io, attempt, @errorName(err))) continue;
+            return err;
+        };
+        if (debugOn()) std.debug.print("[mdebug] head status={d} enc={s}\n", .{ @intFromEnum(response.head.status), @tagName(response.head.content_encoding) });
+        if (response.head.status != .ok) {
+            if (retryableStatus(response.head.status) and attempt < max_attempts) {
+                try waitFor(io, attempt);
+                continue;
+            }
+            var err_transfer: [8 * 1024]u8 = undefined;
+            const err_reader = response.reader(&err_transfer);
+            const err_body = err_reader.allocRemaining(arena, .limited(16 * 1024)) catch "";
+            const msg = try std.fmt.allocPrint(arena, "http {d}: {s}\n", .{ @intFromEnum(response.head.status), err_body });
+            std.Io.File.stderr().writeStreamingAll(io, msg) catch {};
+            return error.ApiError;
+        }
+        break :retry response.readerDecompressing(&transfer, &decompress, &decompress_buffer);
+    };
 
     var result: ChatResult = .{};
     var calls: std.ArrayList(ToolCall) = .empty;
@@ -643,6 +673,31 @@ fn num(v: ?std.json.Value) u64 {
     };
 }
 
+const max_attempts: u32 = 3;
+
+/// Statuses worth another attempt: the provider is busy, not the request wrong.
+fn retryableStatus(status: std.http.Status) bool {
+    return switch (@intFromEnum(status)) {
+        408, 409, 425, 429 => true,
+        else => @intFromEnum(status) >= 500,
+    };
+}
+
+/// Logs and sleeps before the next attempt. False means attempts are spent and
+/// the caller should surface the error.
+fn waitBeforeRetry(io: Io, attempt: u32, what: []const u8) bool {
+    if (attempt >= max_attempts) return false;
+    std.debug.print("microagent: {s} failed, retrying (attempt {d}/{d})\n", .{ what, attempt + 1, max_attempts });
+    waitFor(io, attempt) catch {};
+    return true;
+}
+
+/// Exponential backoff, 1 s then 2 s.
+fn waitFor(io: Io, attempt: u32) !void {
+    const ms = 1000 * (@as(u64, 1) << @intCast(attempt - 1));
+    try io.sleep(.{ .nanoseconds = @intCast(ms * std.time.ns_per_ms) }, .awake);
+}
+
 /// A monotonic duration for `Io.Timeout`, from milliseconds.
 fn durationMs(ms: u64) Io.Timeout {
     return .{ .duration = .{ .raw = .{ .nanoseconds = @intCast(ms * std.time.ns_per_ms) }, .clock = .awake } };
@@ -696,6 +751,15 @@ test "conversation and tool schema serialize as one valid request body" {
         try std.testing.expect(f.get("name").?.string.len > 0);
     }
     opts.max_turns = 1;
+}
+
+test "only weather-shaped statuses are retried" {
+    try std.testing.expect(retryableStatus(.too_many_requests));
+    try std.testing.expect(retryableStatus(.bad_gateway));
+    try std.testing.expect(retryableStatus(.service_unavailable));
+    try std.testing.expect(!retryableStatus(.bad_request));
+    try std.testing.expect(!retryableStatus(.unauthorized));
+    try std.testing.expect(!retryableStatus(.not_found));
 }
 
 test "token counters read the OpenAI and OpenRouter spellings" {

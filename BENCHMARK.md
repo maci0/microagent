@@ -58,12 +58,12 @@ tool, and the prompt says not to touch the test.
 
 | harness | model | task | wall | tokens | diff | result |
 | --- | --- | --- | --- | --- | --- | --- |
-| microagent | deepseek/deepseek-v4-flash (OpenRouter) | cli-flag | 12.0 s | 5835 | +4/-1 | pass |
-| microagent | " | empty-mean | 9.3 s | 5212 | +2/-0 | pass |
-| microagent | " | parse-bug | 9.3 s | 6566 | +2/-2 | pass |
-| kimi | kimi default | cli-flag | 12.7 s | n/a | +4/-1 | pass |
-| kimi | " | empty-mean | 14.3 s | n/a | +2/-0 | pass |
-| kimi | " | parse-bug | 12.2 s | n/a | +3/-8 | pass |
+| microagent | deepseek/deepseek-v4-flash (OpenRouter) | cli-flag | 13.7 s | 5758 | +4/-1 | pass |
+| microagent | " | empty-mean | 8.8 s | 5224 | +2/-0 | pass |
+| microagent | " | parse-bug | 17.8 s | 6140 | +2/-2 | pass |
+| kimi | kimi default | cli-flag | 20.8 s | n/a | +7/-1 | pass |
+| kimi | " | empty-mean | 29.4 s | n/a | +2/-0 | pass |
+| kimi | " | parse-bug | 17.2 s | n/a | +2/-2 | pass |
 
 Both harnesses solved 3/3; wall time tracks the model behind each harness, not the harness. Tokens
 are run-cumulative for microagent (summed over every turn) and unavailable for kimi, which prints no
@@ -90,9 +90,25 @@ Two independent runs on scratch repositories:
 | `calc.py` (empty-iterable crash) | code-review | passed | 2m41s | 1,833 reported | +5/-1 |
 | `duration.py` (wrong unit math) | code-review | passed | 1m00s | 3,173 reported | +2/-2 |
 | `calc.py` (empty-iterable crash) | code-review | passed | 1m04s | 3,012 reported | +2/-0 |
+| `wc.py` (missing CLI flag) | code-review | passed | 47s | 2,151 reported | +7/-1 |
 
 Both diffs were the correct fix, and gauntlet read the token counts out of microagent's stdout
 usage lines with no `usage.roots` session-store entry configured.
+
+## Fault injection
+
+A local OpenAI-compatible endpoint that answers 503 twice and then streams a valid completion
+(`/tmp/flaky.py`, not committed) confirms the retry path rather than assuming it:
+
+| request | server | client |
+| --- | --- | --- |
+| 1 | 503 | waits 1 s |
+| 2 | 503 | waits 2 s |
+| 3 | 200 SSE | parses `pong`, prints usage, exits 0 |
+
+Total 3.0 s, dominated by the backoff. A 400 (invalid model) is not retried: it fails immediately
+with the provider's message on stderr and exit code 1. The same run also proves plain-HTTP base
+URLs work, so a local vLLM or LiteLLM endpoint needs no TLS.
 
 ## Reproducing
 

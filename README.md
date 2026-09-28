@@ -66,9 +66,13 @@ Six tools, all of them thin wrappers over tools you already have:
 | `ast` | `ast-grep run` for structural match, or `--rewrite --update-all` to apply one |
 
 The system prompt tells the model to search with ripgrep and rewrite structurally with `ast-grep`
-rather than reimplementing either in the harness. `bash` is there for builds, tests and git. Retries
-and session resume are gauntlet's job (`--retries`, `--continue-sessions`), not the harness's, so a
-failed request is reported and exits non-zero.
+rather than reimplementing either in the harness. `bash` is there for builds, tests and git.
+
+A transient failure — 429, any 5xx, a dropped connection — is retried twice with 1 s and 2 s of
+backoff before the run exits non-zero, so a provider's bad minute does not make gauntlet redo a
+review against a tree the agent has already half-changed. A rejected request (400/401/404) fails
+immediately instead. Session resume is deliberately absent; gauntlet's `--retries` covers a whole
+review, and a missing feature is cheaper than a half-working one.
 
 ## gauntlet
 
