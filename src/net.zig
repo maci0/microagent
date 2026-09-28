@@ -1,5 +1,5 @@
-//! What the two HTTP clients share: the CA-bundle escape hatch and the stderr
-//! note line.
+//! What the two HTTP clients share: the CA-bundle escape hatch and the two
+//! output sinks, stderr for notes and stdout for the answers a caller parses.
 //!
 //! A leaf module. It imports nothing from the rest of the program, so the
 //! agent run and `update` can both use it without either of them importing
@@ -31,11 +31,22 @@ pub fn loadCaBundle(
     client.now = now;
 }
 
+/// Bytes on stderr, which is where gauntlet shows harness notes. A closed
+/// stream costs the run nothing: the reader left, it is not a fault.
+pub fn writeErr(io: Io, bytes: []const u8) void {
+    Io.File.stderr().writeStreamingAll(io, bytes) catch {};
+}
+
+/// Bytes on stdout: the model's own words and the one line a caller parses.
+pub fn writeOut(io: Io, bytes: []const u8) void {
+    Io.File.stdout().writeStreamingAll(io, bytes) catch {};
+}
+
 /// A line on stderr, which is where gauntlet shows harness notes; stdout stays
 /// the model's own words and the usage line.
 pub fn note(io: Io, arena: std.mem.Allocator, comptime fmt: []const u8, args: anytype) void {
     const msg = std.fmt.allocPrint(arena, fmt, args) catch return;
-    Io.File.stderr().writeStreamingAll(io, msg) catch {};
+    writeErr(io, msg);
 }
 
 /// Where a CA bundle is named, for the agent run and for `update` alike: the

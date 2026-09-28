@@ -188,11 +188,11 @@ pub fn main(init: std.process.Init) !void {
     if (parseArgs(io, &err_buf, args.items[1..], &opts)) |msg| return usageError(io, "{s}", .{msg});
     switch (opts.action) {
         .help => {
-            std.Io.File.stdout().writeStreamingAll(io, help_text) catch {};
+            net.writeOut(io, help_text);
             return;
         },
         .version => {
-            std.Io.File.stdout().writeStreamingAll(io, "microagent " ++ version ++ "\n") catch {};
+            net.writeOut(io, "microagent " ++ version ++ "\n");
             return;
         },
         .run => {},
@@ -222,7 +222,7 @@ pub fn main(init: std.process.Init) !void {
 
     run(&client, io, gpa, init.arena.allocator(), opts, &msgs) catch |err| {
         const msg = try std.fmt.allocPrint(init.arena.allocator(), "microagent: {s}\n", .{@errorName(err)});
-        std.Io.File.stderr().writeStreamingAll(io, msg) catch {};
+        net.writeErr(io, msg);
         std.process.exit(1);
     };
 }
@@ -316,8 +316,8 @@ fn configError(io: Io, comptime fmt: []const u8, args: anytype) noreturn {
 }
 
 fn die(io: Io, msg: []const u8) noreturn {
-    std.Io.File.stderr().writeStreamingAll(io, msg) catch {};
-    std.Io.File.stderr().writeStreamingAll(io, help_text) catch {};
+    net.writeErr(io, msg);
+    net.writeErr(io, help_text);
     std.process.exit(2);
 }
 
@@ -607,12 +607,7 @@ fn run(
                 // with a small diff, and the model has already done the reading.
                 net.note(io, arena, "microagent: budget of {d}s reached after {d} turn(s); one final turn\n", .{ budget, turn });
                 try appendMessage(gpa, msgs, "user", final_push);
-                const body = try buildBody(turn_arena, opts, msgs.items);
-                const asked = Io.Timestamp.now(io, .awake).nanoseconds;
-                var result = try streamChat(client, io, gpa, turn_arena, opts, body);
-                defer result.deinit(gpa);
-                try finishTurn(io, turn_arena, gpa, msgs, &result, &usage);
-                writeSessionRecord(io, turn_arena, session, elapsedMs(io, asked), &result);
+                _ = try runTurn(client, io, turn_arena, gpa, opts, msgs, session, &usage);
                 return;
             }
         }
@@ -622,15 +617,32 @@ fn run(
         if (turn + 1 == opts.max_turns)
             net.note(io, arena, "microagent: last turn (--max-turns {d})\n", .{opts.max_turns});
         try compactMessages(gpa, msgs, turn_arena);
-        const body = try buildBody(turn_arena, opts, msgs.items);
-        const asked = Io.Timestamp.now(io, .awake).nanoseconds;
-        var result = try streamChat(client, io, gpa, turn_arena, opts, body);
-        defer result.deinit(gpa);
-        try finishTurn(io, turn_arena, gpa, msgs, &result, &usage);
-        writeSessionRecord(io, turn_arena, session, elapsedMs(io, asked), &result);
-        if (result.calls.items.len == 0) return;
+        // The model stopped asking for tools, so the run is over.
+        if (!try runTurn(client, io, turn_arena, gpa, opts, msgs, session, &usage)) return;
     }
     net.note(io, arena, "microagent: stopped at the --max-turns ceiling ({d})\n", .{opts.max_turns});
+}
+
+/// One request and everything its answer causes: the completion, the assistant
+/// message and tool results it appends, the usage line, and the session record.
+/// False when the response asked for no tools, which ends the loop.
+fn runTurn(
+    client: *std.http.Client,
+    io: Io,
+    arena: std.mem.Allocator,
+    gpa: std.mem.Allocator,
+    opts: Options,
+    msgs: *std.ArrayList(u8),
+    session: ?Session,
+    usage: *Usage,
+) !bool {
+    const body = try buildBody(arena, opts, msgs.items);
+    const asked = Io.Timestamp.now(io, .awake).nanoseconds;
+    var result = try streamChat(client, io, gpa, arena, opts, body);
+    defer result.deinit(gpa);
+    try finishTurn(io, arena, gpa, msgs, &result, usage);
+    writeSessionRecord(io, arena, session, elapsedMs(io, asked), &result);
+    return result.calls.items.len != 0;
 }
 
 /// Where the session log goes: MICROAGENT_SESSION_DIR, else a directory beside
@@ -886,7 +898,7 @@ fn streamChat(
                 @intFromEnum(response.head.status),
                 terminalSafe(arena, err_body),
             });
-            std.Io.File.stderr().writeStreamingAll(io, msg) catch {};
+            net.writeErr(io, msg);
             return error.ApiError;
         }
         break :retry response.readerDecompressing(&transfer, &decompress, &decompress_buffer);
@@ -1286,7 +1298,7 @@ fn compactMessages(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), scratch: st
 /// pipe means the reader left, not that the run should be abandoned.
 fn flushOut(io: Io, out_buf: *std.ArrayList(u8)) void {
     if (out_buf.items.len == 0) return;
-    Io.File.stdout().writeStreamingAll(io, out_buf.items) catch {};
+    net.writeOut(io, out_buf.items);
     out_buf.clearRetainingCapacity();
 }
 
@@ -1358,7 +1370,7 @@ fn logUsage(io: Io, arena: std.mem.Allocator, usage: *Usage, result: *const Chat
         usage.prompt, usage.cached, usage.completion, usage.reasoning, usage.total,
     });
     try w.writeAll("}}\n");
-    std.Io.File.stdout().writeStreamingAll(io, usage_line.items()) catch {};
+    net.writeOut(io, usage_line.items());
 }
 
 fn runTool(io: Io, arena: std.mem.Allocator, call: ToolCall) ![]u8 {
@@ -1397,7 +1409,7 @@ fn noteToolCall(io: Io, arena: std.mem.Allocator, name: []const u8, args: std.js
     buf.append(arena, ' ') catch return;
     writeGutterText(arena, &buf, clamp(detail, 120)) catch return;
     buf.append(arena, '\n') catch return;
-    std.Io.File.stderr().writeStreamingAll(io, buf.items) catch {};
+    net.writeErr(io, buf.items);
 }
 
 /// Gutter text with every C0 control and DEL written as `\xNN`, and bytes that
@@ -1581,13 +1593,13 @@ fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
 fn appendMessage(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), role: []const u8, content: []const u8) !void {
     if (msgs.items.len > 1) try msgs.append(gpa, ',');
     var buf = JsonBuf.init(gpa);
+    defer buf.list.deinit(gpa);
     try buf.writer().writeAll("{\"role\":");
     try writeJsonString(buf.writer(), role);
     try buf.writer().writeAll(",\"content\":");
     try writeJsonString(buf.writer(), content);
     try buf.writer().writeAll("}");
     try msgs.appendSlice(gpa, buf.items());
-    buf.list.deinit(gpa);
 }
 
 /// A byte buffer that hands out an `Io.Writer` (the std ArrayList lost its

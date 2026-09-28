@@ -325,14 +325,6 @@ pub fn assetUrl(rel: Release, name: []const u8) ?[]const u8 {
     return null;
 }
 
-fn writeErr(io: std.Io, bytes: []const u8) void {
-    std.Io.File.stderr().writeStreamingAll(io, bytes) catch {};
-}
-
-fn writeOut(io: std.Io, bytes: []const u8) void {
-    std.Io.File.stdout().writeStreamingAll(io, bytes) catch {};
-}
-
 /// A response body that stops at a cap while the bytes are arriving. Testing
 /// the length after the fetch bounds what is accepted, not what is allocated:
 /// the body is buffered whole first, so a response past the cap costs its full
@@ -396,7 +388,7 @@ fn fail(io: std.Io, comptime fmt: []const u8, args: anytype) u8 {
     var buf: [512]u8 = undefined;
     const line = std.fmt.bufPrint(&buf, "microagent update: " ++ fmt ++ "\n", args) catch
         "microagent update: failed\n";
-    writeErr(io, line);
+    net.writeErr(io, line);
     return 1;
 }
 
@@ -497,8 +489,8 @@ fn fetchBody(
     return try arena.dupe(u8, capped.body.written());
 }
 
-fn replaceExecutable(io: std.Io, gpa: std.mem.Allocator, asset: []const u8) ![]const u8 {
-    const exe = try std.process.executablePathAlloc(io, gpa);
+fn replaceExecutable(io: std.Io, arena: std.mem.Allocator, asset: []const u8) ![]const u8 {
+    const exe = try std.process.executablePathAlloc(io, arena);
     const base = std.fs.path.basename(exe);
     if (std.fs.path.dirname(exe)) |dir_path| {
         var dir = try std.Io.Dir.cwd().openDir(io, dir_path, .{});
@@ -540,13 +532,15 @@ const usage_text =
 ;
 
 pub fn printUsage(io: std.Io) void {
-    writeOut(io, usage_text);
+    net.writeOut(io, usage_text);
 }
 
-fn githubBearer(gpa: std.mem.Allocator, env: *std.process.Environ.Map) ?[]const u8 {
+/// The run arena, not `gpa`: the header outlives every fetch and nothing here
+/// owns the copy, so there is nothing to hand back.
+fn githubBearer(arena: std.mem.Allocator, env: *std.process.Environ.Map) ?[]const u8 {
     const tok = env.get("GITHUB_TOKEN") orelse return null;
     if (tok.len == 0) return null;
-    return std.fmt.allocPrint(gpa, "Bearer {s}", .{tok}) catch null;
+    return std.fmt.allocPrint(arena, "Bearer {s}", .{tok}) catch null;
 }
 
 /// The two HTTP codes whose cause is worth naming: no release is published for
@@ -577,7 +571,7 @@ pub fn run(
             printUsage(io);
             return 0;
         } else if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-V")) {
-            writeOut(io, "microagent " ++ version ++ "\n");
+            net.writeOut(io, "microagent " ++ version ++ "\n");
             return 0;
         } else if (std.mem.eql(u8, arg, "--check") or std.mem.eql(u8, arg, "-c")) {
             check_only = true;
@@ -599,7 +593,7 @@ pub fn run(
         const line = std.fmt.bufPrint(&msg, "microagent update: want owner/repo, not a URL (got '{s}')\n", .{
             repo[0..@min(repo.len, 80)],
         }) catch "microagent update: want owner/repo, not a URL\n";
-        writeErr(io, line);
+        net.writeErr(io, line);
         return 2;
     };
 
@@ -622,27 +616,18 @@ pub fn run(
 
     var line_buf: [256]u8 = undefined;
     const order = compareVersions(version, rel.tag);
-    if (order == .eq) {
-        const line = formatCurrent(&line_buf, tool_name, version, rel.tag) catch
-            return fail(io, "could not format the version comparison", .{});
-        writeErr(io, line);
-        writeErr(io, "\n");
-    } else if (order == .gt) {
-        const line = formatAhead(&line_buf, version, rel.tag) catch
-            return fail(io, "could not format the version comparison", .{});
-        writeErr(io, line);
-        writeErr(io, "\n");
-    } else {
-        const line = formatNewRelease(&line_buf, rel.tag, version) catch
-            return fail(io, "could not format the version comparison", .{});
-        writeErr(io, line);
-        writeErr(io, "\n");
-    }
+    const line = switch (order) {
+        .eq => formatCurrent(&line_buf, tool_name, version, rel.tag),
+        .gt => formatAhead(&line_buf, version, rel.tag),
+        .lt => formatNewRelease(&line_buf, rel.tag, version),
+    } catch |err| return fail(io, "could not format the version comparison ({s})", .{@errorName(err)});
+    net.writeErr(io, line);
+    net.writeErr(io, "\n");
 
     if (!fetchesAsset(check_only, version, rel.tag)) {
         if (check_only) {
-            writeOut(io, page);
-            writeOut(io, "\n");
+            net.writeOut(io, page);
+            net.writeOut(io, "\n");
         }
         return 0;
     }
@@ -689,12 +674,12 @@ pub fn run(
         .untrusted_url => return fail(io, "refusing to install unverified binary", .{}),
     }
 
-    const exe = replaceExecutable(io, gpa, asset) catch |err|
+    const exe = replaceExecutable(io, arena, asset) catch |err|
         return fail(io, "could not replace the binary ({s})", .{@errorName(err)});
     const installed = formatInstalled(&line_buf, rel.tag, exe) catch
         return fail(io, "could not format the install line", .{});
-    writeOut(io, installed);
-    writeOut(io, "\n");
+    net.writeOut(io, installed);
+    net.writeOut(io, "\n");
     return 0;
 }
 
@@ -704,8 +689,8 @@ fn updateUsageError(io: std.Io, comptime fmt: []const u8, args: anytype) u8 {
     var buf: [512]u8 = undefined;
     const line = std.fmt.bufPrint(&buf, "microagent update: " ++ fmt ++ "\n", args) catch
         "microagent update: bad arguments\n";
-    writeErr(io, line);
-    writeErr(io, usage_text);
+    net.writeErr(io, line);
+    net.writeErr(io, usage_text);
     return 2;
 }
 
@@ -714,7 +699,8 @@ fn unknownArgument(io: std.Io, arg: []const u8) u8 {
 }
 
 /// The same CA-bundle escape hatch the agent run has: an image that ships no
-/// ca-certificates can still reach GitHub by naming a PEM file.
+/// ca-certificates can still reach GitHub by naming a PEM file. An empty path
+/// is the no-bundle case and `net.loadCaBundle` returns on it.
 fn loadCaBundle(
     client: *std.http.Client,
     io: std.Io,
@@ -722,9 +708,7 @@ fn loadCaBundle(
     arena: std.mem.Allocator,
     env: *std.process.Environ.Map,
 ) void {
-    const path: []const u8 = net.caBundlePath(env);
-    if (path.len == 0) return;
-    net.loadCaBundle(client, io, gpa, path, arena);
+    net.loadCaBundle(client, io, gpa, net.caBundlePath(env), arena);
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
