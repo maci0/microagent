@@ -59,7 +59,17 @@ for agent in $agents; do
 	dir="$work_root/$(printf '%s' "$agent" | tr '/:@' '___')"
 	rm -rf "$dir"
 	git clone -q --no-hardlinks "$source_repo" "$dir" || exit 1
-	( cd "$dir" && git checkout -q "$(git -C "$source_repo" rev-parse HEAD)" )
+	# Checked, not run and ignored. A commit the clone did not fetch leaves the
+	# clone on the default branch, and the review below then runs against that
+	# tree and records its numbers as if they described this one: the shape of
+	# failure this script refuses everywhere else, reached through the one
+	# command here that had no answer.
+	head_sha=$(git -C "$source_repo" rev-parse HEAD) || exit 2
+	( cd "$dir" && git checkout -q "$head_sha" ) || {
+		printf '%s: the clone has no %s, so the review would run against a different tree and every number below would be wrong\n' \
+			"$0" "$head_sha" >&2
+		exit 2
+	}
 
 	# No clock, no wall time. A review measured off a wall clock would be
 	# recorded beside reviews that were not, and the row would look like a
@@ -89,7 +99,13 @@ for agent in $agents; do
 	passed=$(awk '/^  Passed:/{print $2}' "$dir/.gauntlet.log" | tail -1)
 	failed=$(awk '/^  Failed:/{print $2}' "$dir/.gauntlet.log" | tail -1)
 	tokens=$(awk '/^Tokens:/{print $2}' "$dir/.gauntlet.log" | tail -1 | tr -d ,)
-	changed=$(git -C "$dir" diff HEAD --numstat | wc -l)
+	# The two logs above are this script's, not the review's, and are excluded
+	# from the count for that reason. Everything else is staged first, because
+	# `git diff HEAD` leaves an untracked file out of the diff entirely: a
+	# review whose whole fix is a new file reported zero files changed, and
+	# this column is the one that says a review landed something at all.
+	changed=$(git -C "$dir" add -A -- . ':!.gauntlet.log' ':!.verify.log' &&
+		git -C "$dir" diff --cached --numstat | wc -l)
 	[ -z "${passed:-}" ] && passed=0
 	[ -z "${failed:-}" ] && failed=0
 	[ -z "${changed:-}" ] && changed=0

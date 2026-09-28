@@ -117,6 +117,20 @@ is linted too. `make lint` is that whole list, and both workflows call it rather
 than repeating the targets, so a linter added to the Makefile gates a push and
 a tag as well as a laptop.
 
+The three jobs in that workflow are the checks a merge has to be behind:
+`test`, `lint` and `release-assets`. The first two are the gate itself, the
+third builds the four published targets and refuses one whose rebuild is not
+byte-identical, so a merge that leaves the release unreproducible is caught
+before the tag rather than at it. Mark all three required on the default
+branch, and require them to be up to date rather than merely passing: `test`
+runs on two macOS runners as well, and a merge that has not seen them is not
+one this project has measured. Branch protection is a repository setting no
+file in the tree can declare, so it is written down here instead. Neither
+workflow reads a repository secret: the release publishes with the automatic
+`GITHUB_TOKEN`, and the token scope is `contents: read` for a push and
+`contents: write` for the release job alone, so there is nothing to configure
+for CI to run.
+
 ## Tests
 
 A `test` block lives in the file it covers, next to the code, named for the
@@ -234,6 +248,19 @@ is never published from a commit that has not passed it.
 one run's assets: the release workflow publishes the glob `dist/microagent-*`,
 and a rehearsal's or a previous tag's binaries left in that directory would go
 out under this tag.
+
+A published release is never replaced: the publish step refuses a tag whose
+release exists and is not a draft, because a consumer may already have fetched
+it and which bytes they end up with is not this workflow's call. There is no
+automated rollback, and the fix ships as the next release, which is what
+[CHANGELOG.md](CHANGELOG.md) already states: only the latest release is
+supported. A release that has to be withdrawn before that lands is removed in
+the GitHub UI, and the tag with it. `microagent update` reads
+`releases/latest`, so a withdrawn release stops being the one it resolves to; a
+build already ahead of what remains is reported as ahead rather than downgraded
+to an older asset. Deleting the tag is what keeps a withdrawn release from
+coming back, since recreating the tag and re-running the workflow publishes it
+again.
 
 Contributors do not tag or publish.
 

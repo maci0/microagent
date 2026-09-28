@@ -97,16 +97,28 @@ for agent in $agents; do
 		fi
 		wall=$(echo "$end $start" | awk '{printf "%.1f", ($1-$2)/1000000000}')
 
-		lines=$(cd "$work" && git diff --numstat | awk '{a+=$1; d+=$2} END {printf "+%d/-%d", a, d}')
+		# `git add -A` first, because a bare `git diff` compares the worktree
+		# with the index and an untracked file is in neither, so a task whose
+		# answer is a new file reported +0/-0: the row charged a harness for
+		# writing nothing. Staging puts every file the run left behind into the
+		# index, and the diff against the base commit is then the whole change.
+		# .gitignore is honoured, so build products the run left are not counted.
+		lines=$(cd "$work" && git add -A && git diff --cached --numstat | awk '{a+=$1; d+=$2} END {printf "+%d/-%d", a, d}')
 		[ -z "$lines" ] && lines=+0/-0
 		# microagent prints cumulative usage per response; the last line is the run total.
 		tokens=$(grep -o '"total_tokens":[0-9]*' "$work/.out" 2>/dev/null | tail -1 | cut -d: -f2)
 		[ -z "$tokens" ] && tokens=-
 
-		if ( cd "$work" && sh "$task_dir/check.sh" ) >"$work/.check" 2>&1; then
+		# The row is about the check, so it reports the check's own exit code.
+		# The harness's rc answers a different question, and a row reading
+		# "fail(rc=0)" said a harness exited 0 having produced a tree that does
+		# not pass, which is the run the reader most needs the shape of.
+		( cd "$work" && sh "$task_dir/check.sh" ) >"$work/.check" 2>&1
+		check_rc=$?
+		if [ "$check_rc" -eq 0 ]; then
 			result=pass
 		else
-			result="fail(rc=$rc)"
+			result="fail(check=$check_rc,agent=$rc)"
 		fi
 
 		printf '%-10s %-14s %8s %10s %8s  %s\n' "$agent" "$task" "$wall" "$tokens" "$lines" "$result"
