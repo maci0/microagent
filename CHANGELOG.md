@@ -63,6 +63,10 @@ release, and `microagent update` moves you to it.
   there was no way to see which one answered.
 - `config.example.toml` is a commented template for the reply-style file, with both keys, their
   levels and their defaults.
+- A bare `--` ends the flags, as it does for git and every other tool whose arguments are
+  words: `microagent -- --version in main.zig` runs the task instead of failing with
+  `unknown or incomplete argument '--'`. Only the first `--` is the separator; a later one is
+  prompt text like any other word, and after it `--help` and `--version` are too.
 
 ### Changed
 
@@ -123,6 +127,10 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- The help text no longer says exit 2 means only a wrong command line. A bad environment value and
+  a missing API key exit 2 as well, and the README made the same claim, so a script branching on
+  the documented contract was told the wrong thing about half the exits. Both now say the command
+  line or the configuration, and that a refused value is named before it is used.
 - `bench/run.sh` and `bench/gauntlet.sh` skip a harness that is not on `PATH`, naming it on
   stderr, as `bench/overhead.sh` already did. They invoked each harness by bare name, so a first
   run on a machine without the binary built every task against an empty tree and appended a

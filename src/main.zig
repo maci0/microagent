@@ -278,7 +278,8 @@ const help_text =
     \\  -V, --version          version
     \\
     \\every long flag also takes --flag=value. A flag wins over the environment
-    \\variable for the same option.
+    \\variable for the same option. A bare -- ends the flags, so a task that
+    \\opens with a dash is just the task: microagent -- --version in main.zig
     \\
     \\reply style (MICROAGENT_CAVEMAN / MICROAGENT_PONYTAIL, or the same two keys
     \\in the config named above):
@@ -304,8 +305,9 @@ const help_text =
     \\  microagent --max-turns 20 "review the diff and stop"
     \\  microagent --print "$(cat task.txt)"
     \\
-    \\exit status: 0 the run finished, 1 the run failed, 2 the command line was
-    \\wrong.
+    \\exit status: 0 the run finished, 1 the run failed, 2 the command line or
+    \\the configuration was wrong. A value refused on either one is named
+    \\before it is used, and so is a missing api key.
     \\
     \\output: stdout carries the model's text and one JSON line per response,
     \\{"type":"usage","usage":{...}}, and nothing else. stderr carries the tool
@@ -576,11 +578,25 @@ fn setValued(
 /// refused where they are set, through `configError`. Every long flag also takes
 /// `--flag=value`, the form `microagent update` already took, so both commands
 /// spell an option the same way. `--help` and `--version` win wherever they
-/// appear, and stop the parse there.
+/// appear, and stop the parse there; after a bare `--` they are prompt text
+/// like any other word.
 fn parseArgs(buf: []u8, argv: []const []const u8, opts: *Options) ?[]const u8 {
     var i: usize = 0;
+    var literal = false;
     while (i < argv.len) : (i += 1) {
         const arg = argv[i];
+        // A bare `--` ends the flags, the way it does for git and every other
+        // tool whose arguments are words: everything after it is the prompt,
+        // so a task that opens with a dash needs no quoting or escaping. The
+        // first `--` is the separator and a later one is a word.
+        if (!literal and std.mem.eql(u8, arg, "--")) {
+            literal = true;
+            continue;
+        }
+        if (literal) {
+            if (setPrompt(buf, opts, arg)) |m| return m;
+            continue;
+        }
         // `--flag=value` splits into a name and an joined value; a short flag
         // never does, so `-p=x` stays the unknown argument it is.
         var name = arg;
@@ -2111,6 +2127,30 @@ test "help and version win wherever they appear" {
     try std.testing.expectEqual(Action.version, v.action);
 }
 
+test "a bare -- ends the flags, so a prompt that opens with a dash is itself" {
+    var buf: [512]u8 = undefined;
+
+    // Without the separator this is an unknown argument and exit 2, which is
+    // the whole problem: the task is a word, not a flag.
+    var bare: Options = .{};
+    try std.testing.expectEqualStrings("unknown or incomplete argument '--nope'", parseArgs(&buf, &.{"--nope"}, &bare).?);
+
+    var after: Options = .{};
+    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &.{ "--", "--help" }, &after));
+    try std.testing.expectEqual(Action.run, after.action);
+    try std.testing.expectEqualStrings("--help", after.prompt);
+
+    // Only the first one is the separator; a later one is prompt text, and two
+    // prompt words are still the mistake they were before it.
+    var twice: Options = .{};
+    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &.{ "--model", "some/model", "--", "--" }, &twice));
+    try std.testing.expectEqualStrings("some/model", twice.model);
+    try std.testing.expectEqualStrings("--", twice.prompt);
+
+    var two: Options = .{};
+    try std.testing.expect(parseArgs(&buf, &.{ "--", "one", "two" }, &two) != null);
+}
+
 // The command line is the one input surface that is always untrusted: a
 // wrapper script, a CI job and a human all spell it, and every one of them can
 // put a value where a flag belongs. `std.testing.fuzz` runs this corpus on
@@ -2160,6 +2200,10 @@ const args_corpus = [_][]const u8{
     "\u{0}\u{1}\u{7f}",
     "--print \u{65e5}\u{8a00}",
     "--",
+    "-- --help",
+    "-- -x --nope",
+    "--model x -- --print y",
+    "-- -- one two",
     "-m --budget",
     "-m",
     "--print",
@@ -2190,9 +2234,16 @@ fn fuzzArgs(_: void, smith: *std.testing.Smith) !void {
     if (msg) |m| try std.testing.expect(m.len > 0);
 
     // `--help` and `--version` stop the parse where they are, so an argument
-    // after one of them sets nothing, whatever it says.
+    // after one of them sets nothing, whatever it says. After a bare `--` they
+    // are prompt text, so the walk stops looking for them there too.
     const stops = blk: {
+        var literal = false;
         for (argv[0..n]) |arg| {
+            if (literal) continue;
+            if (std.mem.eql(u8, arg, "--")) {
+                literal = true;
+                continue;
+            }
             if (isFlag(arg, "-h", "--help")) break :blk Action.help;
             if (isFlag(arg, "-V", "--version")) break :blk Action.version;
         }

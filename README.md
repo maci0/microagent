@@ -101,9 +101,12 @@ MDEBUG=1                trace a stuck stream on stderr, and print the
 ```
 
 Every long flag also takes `--flag=value`, a flag wins over the environment variable for the same
-option, and the exit status is 0 for a finished run, 1 for a failed one and 2 for a wrong command
-line. `microagent --help` and `microagent update --help` are the full text; a wrong flag prints the
-reason and that help on stderr, so a script reading stdout gets nothing from a failed invocation.
+option, and a bare `--` ends the flags so a task that opens with a dash is just the task:
+`microagent -- --version in main.zig`. The exit status is 0 for a finished run, 1 for a failed one
+and 2 for a wrong command line or a wrong configuration, and a value refused on either one is named
+before it is used. `microagent --help` and `microagent update --help` are the full text; a wrong flag
+prints the reason and that help on stderr, so a script reading stdout gets nothing from a failed
+invocation.
 
 Every value is checked where it is set, so a mistyped level, a ceiling of zero
 or a non-numeric budget is refused before the first request rather than becoming
