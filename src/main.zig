@@ -1056,6 +1056,11 @@ fn run(
     var usage: chat_mod.Usage = .{};
     var compaction_floor: usize = 0;
     var verify_asked = false;
+    // What the calls dispatched across the whole run did to the tree, folded
+    // into as each one is dispatched. The verification turn below is decided on
+    // it rather than on the conversation, which carries every file the run read
+    // and every commit message it printed.
+    var effect: tool_mod.Effect = .{};
     while (turn < opts.max_turns) : (turn += 1) {
         _ = turn_state.reset(.{ .retain_with_limit = turn_arena_retain_bytes });
         if (budget.expired(io)) {
@@ -1065,7 +1070,7 @@ fn run(
             // with a small diff, and the model has already done the reading.
             net.note(io, arena, "microagent: budget of {d}s reached after {d} turn(s); one final turn\n", .{ opts.budget_s.?, turn });
             try appendMessage(gpa, msgs, "user", final_push);
-            _ = try runTurn(client, io, turn_arena, gpa, opts, msgs, &session, &usage, budget.withGraceNs(final_push_grace_s), tool_env);
+            _ = try runTurn(client, io, turn_arena, gpa, opts, msgs, &session, &usage, budget.withGraceNs(final_push_grace_s), tool_env, &effect);
             return;
         }
         // The ceiling is announced on the turn it applies to, before it is
@@ -1078,8 +1083,8 @@ fn run(
         // ever running a test, ask for that once rather than accepting the
         // answer: a fix nobody ran is the failure mode this loop exists to
         // catch, and one extra turn is a cheap way to catch it.
-        if (!try runTurn(client, io, turn_arena, gpa, opts, msgs, &session, &usage, budget, tool_env)) {
-            if (!verify_asked and madeEdit(msgs.items) and !ranTests(msgs.items)) {
+        if (!try runTurn(client, io, turn_arena, gpa, opts, msgs, &session, &usage, budget, tool_env, &effect)) {
+            if (!verify_asked and effect.edited and !effect.tested) {
                 verify_asked = true;
                 net.note(io, arena, "microagent: no test runner was used; asking for one verification turn\n", .{});
                 try appendMessage(gpa, msgs, "user", verify_push);
@@ -1089,35 +1094,6 @@ fn run(
         }
     }
     net.note(io, arena, "microagent: stopped at the --max-turns ceiling ({d})\n", .{opts.max_turns});
-}
-
-/// Test runners worth recognising, so a run that never touched one can be
-/// asked to verify itself once before it is allowed to finish.
-const test_runners = [_][]const u8{
-    "pytest",      "unittest",       "runtests",   "manage.py test", "cargo test",
-    "go test",     "npm test",       "yarn test",  "pnpm test",      "make test",
-    "ctest",       "zig build test", "tox",        "nox",            "jest",
-    "vitest",      "mocha",          "rspec",      "phpunit",        "dotnet test",
-    "gradle test", "mvn test",       "bazel test", "swift test",     "mix test",
-};
-
-/// True when some tool call in this conversation ran a test runner. It reads
-/// the conversation rather than instrumenting each tool, so it counts a command
-/// from any earlier turn too.
-fn ranTests(msgs: []const u8) bool {
-    for (test_runners) |runner| {
-        if (std.mem.indexOf(u8, msgs, runner) != null) return true;
-    }
-    return false;
-}
-
-/// True when the conversation shows the agent changed something, so a missing
-/// test run is a gap rather than a run that had nothing to verify.
-fn madeEdit(msgs: []const u8) bool {
-    for ([_][]const u8{ "\"name\":\"edit\"", "\"name\":\"write\"", "\"name\":\"ast\"" }) |call| {
-        if (std.mem.indexOf(u8, msgs, call) != null) return true;
-    }
-    return false;
 }
 
 /// One request and everything its answer causes: the completion, the assistant
@@ -1135,6 +1111,7 @@ fn runTurn(
     usage: *chat_mod.Usage,
     budget: Budget,
     tool_env: *const std.process.Environ.Map,
+    effect: *tool_mod.Effect,
 ) !bool {
     const body = try buildBody(arena, opts, msgs.items);
     const asked = Io.Timestamp.now(io, .awake).nanoseconds;
@@ -1150,7 +1127,7 @@ fn runTurn(
     // the record says how long the model generated, and a gap that spans the
     // tools would report a rate for a generation that was never continuous.
     const model_ms = session_mod.elapsedMs(io, asked);
-    try finishTurn(io, arena, gpa, msgs, &result, usage, budget, tool_env);
+    try finishTurn(io, arena, gpa, msgs, &result, usage, budget, tool_env, effect);
     session_mod.writeRecord(io, arena, session, model_ms, &result);
     return result.calls.items.len != 0;
 }
@@ -1834,6 +1811,15 @@ fn elideToolResults(
 /// prompt bounded, so a buffer that stops being compactable is a run whose
 /// cost grows turn after turn. The buffer is one this program wrote, so a parse
 /// that fails on it is said on stderr rather than swallowed.
+///
+/// The buffer holds the array's messages, not the brackets around them:
+/// `buildBody` writes the `]` that closes it, and a turn appends `,` and a
+/// message, so nothing in the run ever writes one. A parse of the buffer alone
+/// is therefore a parse of an unterminated array, which is a syntax error rather
+/// than a compaction, and a run that only ever parsed the buffer compacted
+/// nothing at all while reporting the failure on every turn past the limit.
+/// The bracket is added for the parse and taken off again on the way out, and
+/// the tests model the run's shape rather than a closed array of their own.
 fn compactMessages(
     io: Io,
     gpa: std.mem.Allocator,
@@ -1848,7 +1834,8 @@ fn compactMessages(
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const parsed = std.json.parseFromSlice(std.json.Value, arena, msgs.items, .{}) catch |err| {
+    const closed = try std.fmt.allocPrint(arena, "{s}]", .{msgs.items});
+    const parsed = std.json.parseFromSlice(std.json.Value, arena, closed, .{}) catch |err| {
         net.note(io, arena, "microagent: the {d} byte conversation could not be read back for compaction ({s}); it is sent as it stands\n", .{
             msgs.items.len, @errorName(err),
         });
@@ -1892,8 +1879,14 @@ fn compactMessages(
     var jb = chat_mod.JsonBuf.init(gpa);
     defer jb.list.deinit(gpa);
     try std.json.Stringify.value(parsed.value, .{}, jb.writer());
+    // The value stringified is the whole array, brackets and all, and the buffer
+    // carries the messages alone: the bracket the writer closed it with is the
+    // one `buildBody` writes on the way out, so keeping it here would leave two
+    // of them in the body.
+    const written = jb.items();
+    std.debug.assert(written[written.len - 1] == ']');
     msgs.clearRetainingCapacity();
-    try msgs.appendSlice(gpa, jb.items());
+    try msgs.appendSlice(gpa, written[0 .. written.len - 1]);
 }
 
 /// Hands the buffered tokens to stdout, and says so when stdout refuses them.
@@ -1921,6 +1914,7 @@ fn finishTurn(
     usage: *chat_mod.Usage,
     budget: Budget,
     tool_env: *const std.process.Environ.Map,
+    effect: *tool_mod.Effect,
 ) !void {
     try msgs.appendSlice(gpa, ",");
     try msgs.appendSlice(gpa, try assistantMessage(arena, result));
@@ -1937,7 +1931,7 @@ fn finishTurn(
         const output = if (budget.expired(io))
             try std.fmt.allocPrint(arena, "error: not run, the run's time budget is exhausted", .{})
         else
-            tool_mod.runTool(io, arena, call, ceiling_ms, tool_env) catch |err|
+            tool_mod.runTool(io, arena, call, ceiling_ms, tool_env, effect) catch |err|
                 // A tool that fails outright (rather than reporting its own
                 // failure as text) is named here, so a result reading
                 // `error: OutOfMemory` says which of the calls ran out.
@@ -2544,7 +2538,6 @@ test "a long run keeps the conversation bounded and the cache alive between comp
     try msgs.appendSlice(arena, "[");
     try appendMessage(arena, &msgs, "system", system_prompt);
     try appendMessage(arena, &msgs, "user", "fix the failing test in the parser");
-    try msgs.append(arena, ']');
 
     var previous = try arena.dupe(u8, msgs.items);
     var floor: usize = 0;
@@ -2555,8 +2548,11 @@ test "a long run keeps the conversation bounded and the cache alive between comp
     var turn: usize = 0;
     while (turn < 120) : (turn += 1) {
         // A turn that reads two files and says what it found: an assistant
-        // message and two tool results of the size a `read` of source returns.
-        msgs.shrinkRetainingCapacity(msgs.items.len - 1);
+        // message and two tool results of the size a `read` of source returns,
+        // appended the way `finishTurn` appends them. The array is never closed
+        // here either: `buildBody` is what writes the `]`, so a turn that
+        // appended one of its own would be a conversation the run does not
+        // send.
         try msgs.appendSlice(arena, ",{\"role\":\"assistant\",\"content\":\"looking at the parser\"}");
         var t: usize = 0;
         while (t < 2) : (t += 1) {
@@ -2564,7 +2560,6 @@ test "a long run keeps the conversation bounded and the cache alive between comp
             try msgs.appendNTimes(arena, 'x', 8 * 1024);
             try msgs.appendSlice(arena, "\"}");
         }
-        try msgs.append(arena, ']');
 
         // Under the soft limit compaction returns before it reads anything, so
         // the turn only appended and shares all of the last one. Measuring that
@@ -2598,14 +2593,26 @@ test "a long run keeps the conversation bounded and the cache alive between comp
     // inside the limit it is meant to stay inside, so no turn ever re-sends more
     // than this regardless of how long the run runs.
     try std.testing.expect(msgs.items.len <= conversation_soft_limit);
-    try std.testing.expect(compactions > 0);
-    // Compaction is not supposed to fire on every turn. If it does, the soft
+    try std.testing.expect(compactions > 0); // Compaction is not supposed to fire on every turn. If it does, the soft
     // limit is below what one turn adds and the run is re-sending a prompt it
     // cannot shrink.
     try std.testing.expect(compactions < 120 / 4);
     // And between them the prefix the provider can reuse is most of the prompt,
     // which is the whole reason the conversation is kept in wire form.
     try std.testing.expect(sum_cacheable * 100 / sum_sent > 50);
+
+    // The loop above has to model the conversation a run actually builds, or
+    // every number above is a figure about a different thing. One message per
+    // appended turn and the two the run opened with, and no message lost to a
+    // rewrite: compaction elides content in place, it does not drop messages.
+    const body = try std.fmt.allocPrint(arena, "{s}]", .{msgs.items});
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena, body, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 2 + 3 * 120), parsed.value.array.items.len);
+    try std.testing.expectEqualStrings("system", parsed.value.array.items[0].object.get("role").?.string);
+    try std.testing.expectEqualStrings("user", parsed.value.array.items[1].object.get("role").?.string);
+    try std.testing.expectEqualStrings("assistant", parsed.value.array.items[2].object.get("role").?.string);
+    try std.testing.expectEqualStrings("tool", parsed.value.array.items[3].object.get("role").?.string);
 }
 
 test "one request body is the previous one plus its new messages" {
@@ -3122,11 +3129,20 @@ fn conversationHeader(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), system: 
 
 /// The `[` and the first two messages a run starts from, in the bytes the
 /// agent appends. `appendToolResults` follows it with the tool results that
-/// push a conversation past the compaction limit.
+/// push a conversation past the compaction limit. Nothing here closes the
+/// array: the buffer a run keeps is the messages alone, and `buildBody` writes
+/// the bracket that closes them.
 fn openConversation(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), system: []const u8, user: []const u8) !void {
     try msgs.appendSlice(gpa, "[");
     try appendMessage(gpa, msgs, "system", system);
     try appendMessage(gpa, msgs, "user", user);
+}
+
+/// The conversation as a parseable document, which is the buffer plus the
+/// bracket `buildBody` writes on the way out. A test that reads the messages
+/// back gets them from here, so no test parses a shape the run never sends.
+fn closedConversation(arena: std.mem.Allocator, msgs: *const std.ArrayList(u8)) ![]u8 {
+    return std.fmt.allocPrint(arena, "{s}]", .{msgs.items});
 }
 
 fn appendToolResults(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), count: usize, blob: []const u8) !void {
@@ -3142,7 +3158,6 @@ fn appendToolResults(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), count: us
         try msgs.appendSlice(gpa, msg.items());
         msg.list.deinit(gpa);
     }
-    try msgs.append(gpa, ']');
 }
 
 test "compaction elides old tool output and keeps the recent turns" {
@@ -3166,7 +3181,9 @@ test "compaction elides old tool output and keeps the recent turns" {
     try std.testing.expectEqual(conversation_soft_limit, floor);
 
     try std.testing.expect(msgs.items.len < before / 2);
-    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, msgs.items, .{});
+    const closed = try closedConversation(gpa, &msgs);
+    defer gpa.free(closed);
+    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, closed, .{});
     defer parsed.deinit();
     const array = parsed.value.array;
     try std.testing.expectEqual(@as(usize, 122), array.items.len);
@@ -3205,7 +3222,9 @@ test "a conversation of small tool results is still bounded" {
     // The bound is the point: a run that cannot elide a large result is still
     // brought under the limit rather than left growing.
     try std.testing.expect(msgs.items.len <= conversation_soft_limit);
-    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, msgs.items, .{});
+    const closed = try closedConversation(gpa, &msgs);
+    defer gpa.free(closed);
+    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, closed, .{});
     defer parsed.deinit();
     const array = parsed.value.array;
     // Nothing is dropped, so every tool_call_id still has its message, and the
@@ -3290,7 +3309,6 @@ test "a conversation with nothing to elide is not re-parsed every turn" {
     // Every message is the model's own, so neither pass of compaction has
     // anything to replace and the conversation is well past the soft limit.
     try conversationHeader(gpa, &msgs, "you are a coding agent");
-    try msgs.append(gpa, ']');
     var i: usize = 0;
     while (i < 100) : (i += 1) try growConversation(gpa, &msgs, "assistant", "x" ** 8192);
     const before = msgs.items.len;
@@ -3316,9 +3334,9 @@ test "a conversation with nothing to elide is not re-parsed every turn" {
     try std.testing.expect(msgs.items.len < grown);
 }
 
-// Appends a message to an already-closed conversation, the way a turn does.
+// Appends a message to the conversation, the way a turn does: a comma and the
+// message, with the array left open the way the run leaves it.
 fn growConversation(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), role: []const u8, blob: []const u8) !void {
-    msgs.shrinkRetainingCapacity(msgs.items.len - 1);
     try msgs.append(gpa, ',');
     var msg = chat_mod.JsonBuf.init(gpa);
     try msg.writer().writeAll("{\"role\":");
@@ -3328,7 +3346,6 @@ fn growConversation(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), role: []co
     try msg.writer().writeAll("}");
     try msgs.appendSlice(gpa, msg.items());
     msg.list.deinit(gpa);
-    try msgs.append(gpa, ']');
 }
 
 // Prompt caching keys on the exact bytes of the request prefix. Compaction is
@@ -3358,8 +3375,9 @@ test "compaction leaves the cached prefix byte-identical" {
 
     try std.testing.expect(msgs.items.len > prefix.len);
     try std.testing.expectEqualStrings(prefix, msgs.items[0..prefix.len]);
-    // The prefix is cached, not just unchanged: the newest turn is still whole.
-    try std.testing.expect(std.mem.endsWith(u8, msgs.items, "\"content\":\"" ++ blob ++ "\"}]"));
+    // The prefix is cached, not just unchanged: the newest turn is still whole,
+    // and the buffer is left open the way a turn leaves it.
+    try std.testing.expect(std.mem.endsWith(u8, msgs.items, "\"content\":\"" ++ blob ++ "\"}"));
 }
 
 test "the api key is sent as the request's authorization header" {
@@ -3375,15 +3393,45 @@ test "the api key is sent as the request's authorization header" {
     }
 }
 
-test "a conversation without a test runner is recognised" {
-    const with_pytest = "[{\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\\\"python -m pytest tests/\\\"}\"}}]}]";
-    try std.testing.expect(ranTests(with_pytest));
-    try std.testing.expect(madeEdit("[{\"name\":\"edit\"}]"));
-    try std.testing.expect(!madeEdit("[{\"name\":\"search\"}]"));
+// The verification turn is decided on what the run dispatched, not on the
+// conversation: a `read` of a test file, a `search` for `pytest` and a `git log`
+// quoting a commit message all put the word in the prompt, and reading the text
+// back took any of them for a test run.
+test "only a dispatched call counts as an edit or as a test run" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const gpa = arena_state.allocator();
+    var effect: tool_mod.Effect = .{};
 
-    const reading_only = "[{\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"a.py\\\"}\"}}]}]";
-    try std.testing.expect(!ranTests(reading_only));
-    try std.testing.expect(!ranTests(""));
+    // The tools that read rather than run, each carrying the text a
+    // conversation would have been searched for.
+    const reading = [_]struct { name: []const u8, key: []const u8, value: []const u8 }{
+        .{ .name = "read", .key = "path", .value = "tests/test_parser.py" },
+        .{ .name = "search", .key = "pattern", .value = "pytest" },
+        .{ .name = "git", .key = "cmd", .value = "log" },
+        // A `bash` call that only lists a directory is not a test run either.
+        .{ .name = "bash", .key = "command", .value = "ls tests" },
+    };
+    for (reading) |call| {
+        var args: std.json.ObjectMap = .empty;
+        try args.put(gpa, call.key, .{ .string = call.value });
+        tool_mod.noteEffect(&effect, call.name, args);
+    }
+    try std.testing.expect(!effect.edited);
+    try std.testing.expect(!effect.tested);
+
+    var write_args: std.json.ObjectMap = .empty;
+    try write_args.put(gpa, "path", .{ .string = "a.txt" });
+    tool_mod.noteEffect(&effect, "write", write_args);
+    try std.testing.expect(effect.edited);
+    try std.testing.expect(!effect.tested);
+
+    // The one tool a test runner is ever run through, so the command behind it
+    // is what the check reads.
+    var run_args: std.json.ObjectMap = .empty;
+    try run_args.put(gpa, "command", .{ .string = "python -m pytest tests/" });
+    tool_mod.noteEffect(&effect, "bash", run_args);
+    try std.testing.expect(effect.tested);
 }
 
 test "a tool timeout is cut to what is left of the budget" {

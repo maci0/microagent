@@ -351,7 +351,54 @@ fn firstLines(arena: std.mem.Allocator, text: []const u8, limit: usize) ![]u8 {
     return std.fmt.allocPrint(arena, "{s}... [output truncated at {d} lines]", .{ text[0..end], limit });
 }
 
-pub fn runTool(io: Io, arena: std.mem.Allocator, call: chat.ToolCall, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map) ![]u8 {
+/// What the calls dispatched so far did to the machine: whether the tree was
+/// changed, and whether a test runner was run. The loop asks for one
+/// verification turn on the strength of it, so it is recorded from the call
+/// being dispatched, where its name and its arguments are already parsed.
+///
+/// It was read back out of the conversation instead, by searching the
+/// serialized messages for `"name":"edit"` and for each test runner's name.
+/// That reads text the run never acted on: a `read` of a test file, a `search`
+/// over a repository, a `git log` quoting a commit message. Any of them
+/// satisfied the check, and a run that edited the tree and then only read about
+/// its tests was allowed to finish as verified.
+pub const Effect = struct {
+    edited: bool = false,
+    tested: bool = false,
+};
+
+/// Test runners worth recognising, so a run that never touched one can be asked
+/// to verify itself once before it is allowed to finish. Matched against the
+/// command a `bash` call was given, which is the only place a test runner is
+/// ever run.
+const test_runners = [_][]const u8{
+    "pytest",      "unittest",       "runtests",   "manage.py test", "cargo test",
+    "go test",     "npm test",       "yarn test",  "pnpm test",      "make test",
+    "ctest",       "zig build test", "tox",        "nox",            "jest",
+    "vitest",      "mocha",          "rspec",      "phpunit",        "dotnet test",
+    "gradle test", "mvn test",       "bazel test", "swift test",     "mix test",
+};
+
+/// What `name` with these `args` does to the machine, folded into what the
+/// calls before it did. A call that never reaches a tool leaves no trace here,
+/// so a call the budget refused to run does not count as a change.
+pub fn noteEffect(effect: *Effect, name: []const u8, args: std.json.ObjectMap) void {
+    for (editing_tools) |tool| {
+        if (std.mem.eql(u8, name, tool)) effect.edited = true;
+    }
+    if (!std.mem.eql(u8, name, "bash")) return;
+    const command = chat.str(args.get("command")) orelse return;
+    for (test_runners) |runner| {
+        if (std.mem.indexOf(u8, command, runner) != null) effect.tested = true;
+    }
+}
+
+/// The tools that write to the tree. `ast` is here because a call that rewrote
+/// matches changed the files a `read` would show, whether or not it was given a
+/// replacement to apply.
+const editing_tools = [_][]const u8{ "write", "edit", "ast" };
+
+pub fn runTool(io: Io, arena: std.mem.Allocator, call: chat.ToolCall, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map, effect: *Effect) ![]u8 {
     const parsed = std.json.parseFromSlice(std.json.Value, arena, call.args.items, .{}) catch
         return std.fmt.allocPrint(arena, "error: tool arguments are not valid JSON", .{});
     const args = switch (parsed.value) {
@@ -359,6 +406,7 @@ pub fn runTool(io: Io, arena: std.mem.Allocator, call: chat.ToolCall, ceiling_ms
         else => return std.fmt.allocPrint(arena, "error: tool arguments must be an object", .{}),
     };
 
+    noteEffect(effect, call.name, args);
     noteToolCall(io, arena, call.name, args);
     if (std.mem.eql(u8, call.name, "bash")) return toolBash(io, arena, args, ceiling_ms, environ_map);
     if (std.mem.eql(u8, call.name, "read")) return toolRead(io, arena, args);
@@ -1023,7 +1071,8 @@ pub fn dispatch(arena: std.mem.Allocator, name: []const u8, args: []const u8) ![
         .name = try arena.dupe(u8, name),
     };
     try call.args.appendSlice(arena, args);
-    return runTool(std.testing.io, arena, call, null, null);
+    var effect: Effect = .{};
+    return runTool(std.testing.io, arena, call, null, null, &effect);
 }
 
 /// The line range a `read` with `offset` and `limit` returns: every line in

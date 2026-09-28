@@ -207,6 +207,20 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- Compaction runs again. The conversation buffer holds the messages without the
+  bracket that closes them, since `buildBody` writes it on the way out, and the
+  pass that read the buffer back parsed an unterminated array: every run past
+  400 KB said the conversation could not be read for compaction and sent it
+  whole from there, so the prompt grew for the rest of the run and the elision
+  the pass exists for never happened. The bracket is now added for the parse and
+  taken off again on the way out, and the tests build the conversation the way a
+  run builds it rather than closing it themselves.
+- Whether a run changed the tree and whether it ran a test is read off the tool
+  calls it dispatched, not off the serialized conversation. A `read` of a test
+  file, a `search` for `pytest` and a `git log` quoting a commit message each put
+  the word in the prompt, and reading the text back took any of them for a test
+  run, so a review that edited the tree and only read about its tests finished
+  as verified.
 - A turn that reaches the 16 MB per-response ceiling says so on stderr. Past it
   the streamed content and the streamed tool-call arguments are dropped rather
   than held, so a call whose arguments were cut arrived as
