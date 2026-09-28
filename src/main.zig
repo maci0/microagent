@@ -305,7 +305,8 @@ const help_text =
     \\  microagent --print "$(cat task.txt)"
     \\
     \\exit status: 0 the run finished, 1 the run failed, 2 the command line was
-    \\wrong.
+    \\wrong, 130 interrupted (Ctrl+C or kill), which takes the tool subprocess
+    \\with it.
     \\
     \\output: stdout carries the model's text and one JSON line per response,
     \\{"type":"usage","usage":{...}}, and nothing else. stderr carries the tool

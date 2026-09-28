@@ -121,6 +121,42 @@ jobs:
             exit 1
           fi
 
+      # The policy CONTRIBUTING.md and README state is that under 0.y the minor
+      # carries features and anything that changes what a run does by default,
+      # and a patch carries fixes. Nothing else checks that the tag agrees with
+      # the entries it publishes, so a patch tag carrying an `Added` or a
+      # `Changed` section would ship a feature or a changed default under a
+      # version whose own number promises it did not happen.
+      - name: the tag matches the entries it publishes
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          # The changelog reads newest first, so the version this one follows is
+          # the next numbered heading after it, empty when this is the first.
+          prev="$(awk -v want="$version" '
+            /^## \[/ {
+              heading=$0; sub(/^## \[/, "", heading); sub(/\].*/, "", heading)
+              if (heading == want) { found=1; next }
+              if (found && heading ~ /^[0-9]+\.[0-9]+\.[0-9]+$/) { print heading; exit }
+            }
+          ' CHANGELOG.md)"
+          # A patch bump is one that leaves major.minor alone.
+          line_of() { printf '%s\n' "$1" | awk -F. '{ print $1 "." $2 }'; }
+          if [ -n "$prev" ] && [ "$(line_of "$prev")" = "$(line_of "$version")" ] \
+            && [ "$prev" != "$version" ]; then
+            if awk -v want="$version" '
+                index($0, "## [" want "]") == 1 { inside=1; next }
+                /^## / { inside=0 }
+                inside && /^### (Added|Changed)$/ { found=1 }
+                END { exit found ? 0 : 1 }
+              ' CHANGELOG.md; then
+              echo "tag ${GITHUB_REF_NAME} is a patch over ${prev}, and its section has an Added or a Changed entry" >&2
+              echo "under 0.y the minor carries features and anything that changes what a run does by default:" >&2
+              echo "bump the minor in build.zig.zon and CHANGELOG.md, or move those entries out of this section" >&2
+              exit 1
+            fi
+          fi
+
       - name: publish
         env:
           GH_TOKEN: ${{ github.token }}

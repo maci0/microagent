@@ -118,6 +118,10 @@ release, and `microagent update` moves you to it.
   `make release-assets TAG=v0.2.0`. `ci.yml` rehearses the release with that target and
   `release.yml` publishes what it builds, so a release can be built on a laptop the way the tag
   builds it, and a renamed target no longer has to be renamed in two workflows.
+- `release.yml` refuses a patch tag whose changelog section carries an `Added` or a `Changed`
+  entry, and names the version above it in the message. The policy is in the README and in
+  CONTRIBUTING, but nothing checked that the tag agreed with the entries it publishes, so a
+  feature or a changed default could ship as `0.2.1` under a number that promises it did not.
 - `microagent --help` carries three worked invocations, and its subcommand line spells the flag
   the way `microagent update --help` does (`update [--check]`, not `update [-c|--check]`).
 
@@ -149,6 +153,9 @@ release, and `microagent update` moves you to it.
 - `microagent --help` states the output contract: stdout carries the model's text and one
   `{"type":"usage",...}` line per response and nothing else, stderr carries the tool gutter, the notes
   and every error. The README said it; the help a script author reads first did not.
+- The exit status for an interrupt, 130, is in `--help` and in the README beside the 0, 1 and 2
+  they already named. The run has exited 130 since Ctrl+C and `kill` took the tool subprocess
+  with it, and a script that reads the exit status could only find the code in the source.
 - The session-close test helper named `ChatResult` without the module it lives in, so no build
   compiled: `zig build` and `make build` failed on the whole program, not only on a test.
 - A tool call is now cut off by its deadline rather than by how long it stayed quiet. Both runners

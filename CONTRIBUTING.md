@@ -111,7 +111,10 @@ flags, the environment variables, or the stdout and session-log JSON names the
 before and the after in its entry.
 
 Releases are tags: the release workflow publishes only when the tag names the
-`build.zig.zon` version and that version has a `CHANGELOG.md` entry. The four
+`build.zig.zon` version, that version has a `CHANGELOG.md` entry, and the bump
+matches what the entry says. A patch tag whose section carries an `Added` or a
+`Changed` entry is refused, because under `0.y` those are what the minor
+carries. The four
 published binaries and their asset names are spelled once, in the
 [Makefile](Makefile), so a release can be built and checksummed on a laptop
 before the tag exists:
