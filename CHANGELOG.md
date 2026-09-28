@@ -12,6 +12,15 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+### Added
+
+- The bench shell, the Harbor adapter and the workflows are linted. `make check` now runs
+  `shellcheck` over `bench/*.sh` and `bench/tasks/*/*.sh`, `ruff check` over
+  `integrations/harbor` (rules in `ruff.toml`) and `yamllint` over `.github/workflows`
+  (rules in `.yamllint`), and CI runs all three as their own blocking job. A defect in
+  the bench scripts or the adapter is a wrong benchmark result rather than a failing
+  test, so nothing caught it before.
+
 ### Fixed
 
 - Bytes that are not UTF-8 no longer corrupt a request. Text from a tool result, a file, the working

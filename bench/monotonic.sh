@@ -1,3 +1,4 @@
+# shellcheck shell=sh
 # Monotonic nanoseconds, as a sourced shell function. Not meant to be run.
 # shellcheck shell=sh
 #

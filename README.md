@@ -25,11 +25,13 @@ Every target is also a make target, and `make help` lists them:
 make                                   # ReleaseFast build
 make test                              # the whole suite
 make test-one FILTER="usage counters"  # one test, by name substring
-make check                             # fmt --check plus the tests, the CI gate
+make check                             # fmt --check, the linters, and the tests, the CI gate
 ```
 
 `make check` is exactly what [CI](.github/workflows/ci.yml) runs on a push, on
-the Zig version `build.zig.zon` names, so run it before pushing.
+the Zig version `build.zig.zon` names, so run it before pushing. It needs
+`shellcheck`, `ruff` and `yamllint` on `PATH` for the bench, Harbor and
+workflow sources; `zig fmt` covers the Zig and needs nothing else.
 
 ## Use
 

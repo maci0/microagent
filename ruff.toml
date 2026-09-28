@@ -1,0 +1,28 @@
+# The Python in integrations/harbor is small but real: it drives the benchmark
+# adapter, so a typo in it silently reports the wrong reward. `make check` runs
+# `ruff check` against this file, and CI runs the same command.
+line-length = 120
+
+lint.select = [
+    "E",    # pycodestyle
+    "F",    # pyflakes
+    "W",    # pycodestyle warnings
+    "I",    # import order
+    "UP",   # pyupgrade
+    "B",    # bugbear
+    "C4",   # comprehensions
+    "SIM",  # simplify
+    "RUF",  # ruff-specific correctness
+    "PIE",  # misc lints
+    "RET",  # return statements
+    "PL",   # pylint
+    "ARG",  # unused arguments
+    "PTH",  # pathlib
+    "TID",  # tidy imports
+]
+
+lint.ignore = [
+    # A literal compared against len(sys.argv) reads as the arity it checks;
+    # naming it would only move the number somewhere else.
+    "PLR2004",
+]

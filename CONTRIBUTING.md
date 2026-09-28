@@ -15,14 +15,18 @@ make small      # the ReleaseSmall binary
 ## Before you push
 
 ```sh
-make check                  # zig fmt --check plus the whole test suite
+make check                  # zig fmt --check, the linters, and the whole test suite
 make test-one FILTER="..."  # one test, while you are mid-edit
+make lint                   # shellcheck, ruff and yamllint on their own
 ```
 
-`make check` is the whole gate: it is the same `zig fmt --check` and
-`zig build test` that [.github/workflows/ci.yml](.github/workflows/ci.yml) runs,
-on the same Zig version. `make help` lists every target. Source is formatted
-with `zig fmt`; `make fmt` applies it.
+`make check` is the whole gate: it is the same `zig fmt --check`, the same
+`ruff check` and `yamllint`, and the same `zig build test` that
+[.github/workflows/ci.yml](.github/workflows/ci.yml) runs, on the same Zig
+version. `make help` lists every target. Source is formatted with `zig fmt`;
+`make fmt` applies it. The three linters cover what `zig fmt` cannot: the bench
+shell, the Harbor adapter under `integrations/harbor` (rules in
+[ruff.toml](ruff.toml)) and the workflows (rules in [.yamllint](.yamllint)).
 
 ## Tests
 

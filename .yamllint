@@ -1,0 +1,12 @@
+extends: default
+
+rules:
+  # Workflow steps are long shell blocks; a comment column at 80 would wrap
+  # every explanation line in them.
+  line-length: disable
+  document-start: disable
+  # `on:` is the GitHub Actions key, not a boolean.
+  truthy:
+    check-keys: false
+  comments:
+    min-spaces-from-content: 1

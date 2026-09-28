@@ -68,7 +68,7 @@ def main() -> int:
     for name, reward, agent, started, finished in rows:
         tokens = f"{agent.get('n_input_tokens', 0)}/{agent.get('n_output_tokens', 0)}"
         wall = seconds_between(started, finished)
-        print(f"  {str(reward):>5}  in/out {tokens:>14}  {wall:>7}  {name}")
+        print(f"  {reward!s:>5}  in/out {tokens:>14}  {wall:>7}  {name}")
     scored = [r for _, r, *_ in rows if r is not None]
     if scored:
         print(f"mean reward over {len(scored)} scored: {sum(scored) / len(scored):.3f}")

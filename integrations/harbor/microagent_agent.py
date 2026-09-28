@@ -19,7 +19,6 @@ baked into the image.
 
 from __future__ import annotations
 
-import base64
 import json
 import os
 import shlex
@@ -51,7 +50,7 @@ def binary_path() -> Path:
 
 def host_ca_bundle() -> Path | None:
     override = os.environ.get("SSL_CERT_FILE")
-    candidates = (override,) + HOST_CA_CANDIDATES if override else HOST_CA_CANDIDATES
+    candidates = (override, *HOST_CA_CANDIDATES) if override else HOST_CA_CANDIDATES
     for candidate in candidates:
         path = Path(candidate)
         if path.is_file():
@@ -201,8 +200,8 @@ class Microagent(BaseAgent):
 
 def last_usage(stdout: str) -> dict:
     """microagent prints one cumulative usage JSON line per model response."""
-    for line in reversed(stdout.splitlines()):
-        line = line.strip()
+    for raw in reversed(stdout.splitlines()):
+        line = raw.strip()
         if line.startswith('{"type":"usage"'):
             try:
                 return json.loads(line).get("usage", {})

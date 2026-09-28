@@ -7,7 +7,7 @@ BIN := zig-out/bin/microagent
 # run cannot install or benchmark a truncated binary.
 .DELETE_ON_ERROR:
 
-.PHONY: help build small musl test test-one fmt check bench overhead install clean
+.PHONY: help build small musl test test-one fmt lint lint-shell lint-python lint-yaml check bench overhead install clean
 
 # `make check` is what CI runs; run it before pushing.
 help:
@@ -18,7 +18,8 @@ help:
 	  'test                  the whole unit test suite' \
 	  'test-one FILTER=...   only tests whose name contains FILTER' \
 	  'fmt                   rewrite src and build.zig in zig fmt style' \
-	  'check                 fmt --check plus the tests, the CI gate' \
+	  'check                 fmt --check, the linters, and the tests, the CI gate' \
+	  'lint                  shellcheck, ruff, and yamllint over the non-Zig sources' \
 	  'bench AGENTS=...      three coding tasks through each harness' \
 	  'overhead              startup and first-request cost per harness' \
 	  'install               install the binary into ~/.local/bin' \
@@ -46,10 +47,26 @@ test-one:
 fmt:
 	$(ZIG) fmt src build.zig
 
-# The CI gate, so a formatting or test failure shows up here rather than after
-# a push. Keep these in step with .github/workflows/ci.yml.
+# The Zig sources have no linter beyond zig fmt, which check runs; the shell,
+# Python and YAML around them do, and a shell that only fails when a benchmark
+# runs is a shell nobody has read. Keep these in step with
+# .github/workflows/ci.yml.
+lint: lint-shell lint-python lint-yaml
+
+lint-shell:
+	shellcheck -x bench/*.sh bench/tasks/*/*.sh
+
+lint-python:
+	ruff check --config ruff.toml integrations/harbor
+
+lint-yaml:
+	yamllint -c .yamllint .github/workflows/
+
+# The CI gate, so a formatting, lint or test failure shows up here rather than
+# after a push. Keep these in step with .github/workflows/ci.yml.
 check:
 	$(ZIG) fmt --check src build.zig
+	$(MAKE) lint
 	$(ZIG) build test --summary all
 
 # The bench scripts invoke each harness by bare name and skip the ones that are

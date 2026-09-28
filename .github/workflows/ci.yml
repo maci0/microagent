@@ -4,7 +4,8 @@
 # the release publishes build on every push, so a macOS-only break
 # (`/bin/sh` differences, a glibc-only call, a path that resolves differently)
 # lands as a failed check rather than as a broken update asset. Release assets
-# are built by release.yml on a version tag.
+# are built by release.yml on a version tag. The shell, Python and YAML linters
+# `make check` also runs have their own job below.
 name: ci
 
 on:
@@ -51,6 +52,34 @@ jobs:
           set -euo pipefail
           ./zig-out/bin/microagent --version
           ./zig-out/bin/microagent update --help >/dev/null
+
+  # The Zig sources are covered by zig fmt in the test job above. The shell,
+  # Python and YAML around them are not, and a defect in bench/run.sh or the
+  # Harbor adapter is a wrong benchmark rather than a failed test, so they get
+  # their own gate rather than riding along unreviewed. The tool versions are
+  # pinned so a new release cannot turn a green run red on its own.
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: install the linters
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check \
+            ruff==0.16.4 yamllint==1.38.0
+
+      - name: the shell scripts parse and are shellcheck-clean
+        run: make lint-shell
+
+      - name: the Harbor adapter is ruff-clean
+        run: make lint-python
+
+      - name: the workflows are yamllint-clean
+        run: make lint-yaml
 
   release-assets:
     # Every target the `update` subcommand asks for, built the way release.yml
