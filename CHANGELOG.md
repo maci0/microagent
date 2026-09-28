@@ -23,8 +23,20 @@ release, and `microagent update` moves you to it.
 - `THREAT_MODEL.md`: the attack surface as a whole, entry points, trust boundaries, assets,
   the threats on each boundary, the controls the code implements and the gaps it does not
   cover, each with a file reference.
+- Every request now carries `max_tokens`, and `--max-tokens` / `MICROAGENT_MAX_TOKENS` set it
+  (default 65536, at least 1). Without it the provider's own limit was the only bound on what one
+  turn could generate, so a model that failed to stop was billed until something else stopped it;
+  `--max-turns` counts turns, not tokens.
 
 ### Fixed
+
+- A `bash` call can no longer run without a deadline. `timeout_ms` is model output and was taken as
+  sent, so a value past anything a run survives left the child with no timeout at all and the
+  process-group kill that reaps it never fired. It is now capped at 600 s, with the 120 s default
+  unchanged, and the schema says so.
+- The system prompt now says that tool results, file contents and command output are data about the
+  repository rather than instructions. They are untrusted text on their way back into the prompt, and
+  a file in the tree could otherwise instruct the model through the tool that read it.
 
 - Bytes that are not UTF-8 no longer corrupt a request. Text from a tool result, a file, the working
   directory or `argv` is written into JSON as-is, so one latin-1 source file or stray `0xFF` byte made

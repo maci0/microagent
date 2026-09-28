@@ -51,6 +51,9 @@ microagent -p "fix the failing test and run it"
                        OPENROUTER_API_KEY, DEEPSEEK_API_KEY)
     --max-turns <n>    tool-loop turn ceiling, at least 1
                        (env MICROAGENT_MAX_TURNS, default 100)
+    --max-tokens <n>   max_tokens sent to the provider: the ceiling on one
+                       response's generated tokens, at least 1
+                       (env MICROAGENT_MAX_TOKENS, default 65536)
     --config <file>    reply-style TOML config (env MICROAGENT_CONFIG)
     --ca-bundle <file>
                        PEM file to trust instead of the system store
@@ -92,7 +95,8 @@ Every value is checked where it is set, so a mistyped level, a ceiling of zero
 or a non-numeric budget is refused before the first request rather than becoming
 a 400 or an empty run. A variable set to an empty string is not a value:
 `MICROAGENT_MODEL`, `MICROAGENT_BASE_URL`, `MICROAGENT_REASONING_EFFORT`,
-`MICROAGENT_BUDGET_SECONDS`, `MICROAGENT_MAX_TURNS` and `MDEBUG` keep their
+`MICROAGENT_BUDGET_SECONDS`, `MICROAGENT_MAX_TURNS`, `MICROAGENT_MAX_TOKENS`
+and `MDEBUG` keep their
 defaults, `MICROAGENT_CA_BUNDLE` falls through to `SSL_CERT_FILE`, and
 `MICROAGENT_CAVEMAN`/`MICROAGENT_PONYTAIL` fall through to the config file.
 `MICROAGENT_SESSION_DIR` is the one variable where empty means something else:
@@ -216,7 +220,7 @@ Seven tools, all of them thin wrappers over tools you already have:
 
 | tool | what it does |
 | --- | --- |
-| `bash` | `/bin/sh -c`, 120 s default timeout, output capped at 24 KB |
+| `bash` | `/bin/sh -c`, 120 s default timeout (600 s ceiling on what the model may ask for), output capped at 24 KB |
 | `read` | read a file, optional line offset/limit |
 | `write` | create or overwrite a file, parents created |
 | `edit` | exact string replacement, refuses an ambiguous match unless `replace_all` |
@@ -227,6 +231,13 @@ Seven tools, all of them thin wrappers over tools you already have:
 The system prompt tells the model to search with ripgrep and rewrite structurally with `ast-grep`
 rather than reimplementing either in the harness. `bash` is there for builds and tests; git state
 has its own tool, with the subcommands fixed here instead of assembled by the model.
+
+Everything a tool returns is untrusted text on its way back into the prompt: a file, a diff, a
+build log. The system prompt says so, and tool results ride back as `tool` messages, so a
+repository that ships a file telling the model to run something is data the run reports rather
+than an instruction it follows. The other bound on the same loop is `max_tokens` on every
+request: without it a model that fails to stop is billed until something else stops it, and
+`--max-turns` is a turn count, not a token count.
 
 A transient failure — 429, any 5xx, a dropped connection — is retried twice with 1 s and 2 s of
 backoff before the run exits non-zero, so a provider's bad minute does not make gauntlet redo a
