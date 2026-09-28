@@ -558,6 +558,14 @@ fn readLines(io: Io, arena: std.mem.Allocator, path: []const u8, offset: usize, 
     var line: usize = 0;
     var taken: usize = 0;
     var start: usize = 0;
+    // How much of `rest` has already been searched for a newline. Without this
+    // the search restarts at the front of the buffer on every read, so a file
+    // whose line is longer than a read is searched once per read: four megabytes
+    // with no newline in it costs about a gigabyte of searching. A minified
+    // bundle, a JSON blob, a lockfile or a base64 row is an ordinary thing for
+    // the model to ask for, and a ranged read cannot stop at the first line it
+    // wants because it has to find where that line ends.
+    var searched: usize = 0;
     var consumed: usize = 0;
     while (consumed < max_read_bytes) {
         const want = @min(read_chunk, max_read_bytes - consumed);
@@ -569,21 +577,35 @@ fn readLines(io: Io, arena: std.mem.Allocator, path: []const u8, offset: usize, 
         };
         if (n == 0) break;
         consumed += n;
+        // Resume where the search left off, not where the buffer starts. The
+        // bytes between `start` and there were searched on an earlier read and
+        // held no newline, so the line in hand still runs from `start`.
+        const search_from = @max(start, searched);
         try rest.appendSlice(arena, chunk[0..n]);
-        while (std.mem.indexOfScalarPos(u8, rest.items, start, '\n')) |at| {
+        var at = search_from;
+        while (std.mem.indexOfScalarPos(u8, rest.items, at, '\n')) |pos| {
             line += 1;
             if (line >= offset) {
                 if (taken >= limit) return buf.items;
-                try buf.appendSlice(arena, rest.items[start..at]);
+                try buf.appendSlice(arena, rest.items[start..pos]);
                 try buf.append(arena, '\n');
                 taken += 1;
             }
-            start = at + 1;
+            at = pos + 1;
+            // Only a found newline ends a line, so this is the only thing that
+            // moves the start. Anything else would drop bytes the line is made
+            // of, and truncate it.
+            start = at;
         }
-        const left = rest.items.len - start;
-        std.mem.copyForwards(u8, rest.items[0..left], rest.items[start..]);
-        rest.shrinkRetainingCapacity(left);
-        start = 0;
+        // Nothing consumed means nothing to move: copying the whole buffer onto
+        // itself once per read is the other half of the same quadratic.
+        if (start > 0) {
+            const left = rest.items.len - start;
+            std.mem.copyForwards(u8, rest.items[0..left], rest.items[start..]);
+            rest.shrinkRetainingCapacity(left);
+            start = 0;
+        }
+        searched = rest.items.len;
     }
     // Out of cap rather than out of file, which is what a whole-file read of
     // the same file reports, so one file over the cap reads the same whichever
@@ -952,6 +974,39 @@ test "a read of a file that is not there says the same whether or not it is a ra
 // The cap is what keeps a file over it out of the turn's memory, and it is a
 // property of the file rather than of the range asked for: streaming the bytes
 // a range needs must not be a way round it.
+// The scan has to resume where it left off, and the copy has to move only what
+// a newline ended. Both go wrong on the same input: a line longer than the
+// 8 KB read, so nothing is consumed until the far end of the file. That is a
+// minified bundle or a JSON blob, not a corner case, and a ranged read cannot
+// stop early because it has to find where the line ends.
+test "a line longer than the read comes back whole, and is searched once" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_path = dir_buf[0..try tmp.dir.realPath(std.testing.io, &dir_buf)];
+    const path = try std.fs.path.join(arena, &.{ dir_path, "long-line.txt" });
+
+    const width = read_chunk * 4 + 137;
+    var text: std.ArrayList(u8) = .empty;
+    try text.appendSlice(arena, "before\n");
+    try text.appendNTimes(arena, 'z', width);
+    try text.appendSlice(arena, "\nafter\n");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "long-line.txt", .data = text.items });
+
+    var arena2 = std.heap.ArenaAllocator.init(arena);
+    defer arena2.deinit();
+    const got = try readLines(std.testing.io, arena2.allocator(), path, 2, 1);
+
+    var want: std.ArrayList(u8) = .empty;
+    try want.appendNTimes(arena, 'z', width);
+    try want.append(arena, '\n');
+    try std.testing.expectEqualStrings(want.items, got);
+}
+
 test "a ranged read of a file over the cap is refused like a whole-file read" {
     var state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer state.deinit();
