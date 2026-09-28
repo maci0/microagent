@@ -29,12 +29,29 @@ pub fn loadCaBundle(
     arena: std.mem.Allocator,
 ) void {
     if (path.len == 0) return;
-    const abs = std.fs.path.resolve(arena, &.{path}) catch path;
     const now = Io.Clock.real.now(io);
-    client.ca_bundle.addCertsFromFilePathAbsolute(gpa, io, now, abs) catch |err| {
+    const before = client.ca_bundle.map.count();
+    // The bundle is read through the path form that takes the directory, not the
+    // one that asserts an absolute path: `std.fs.path.resolve` does not make a
+    // path absolute, so `MICROAGENT_CA_BUNDLE=ca.pem` reached an API that
+    // asserts and took the process down with a panic.
+    const added = if (std.fs.path.isAbsolute(path))
+        client.ca_bundle.addCertsFromFilePathAbsolute(gpa, io, now, path)
+    else
+        client.ca_bundle.addCertsFromFilePath(gpa, io, now, Io.Dir.cwd(), path);
+    added catch |err| {
         note(io, arena, "microagent: cannot read CA bundle {s}: {s}; scanning the system store instead\n", .{ path, @errorName(err) });
         return;
     };
+    // A file that is readable but holds no PEM parses as zero certificates
+    // rather than as an error, and marking the bundle populated then leaves the
+    // client with an empty trust store: every request fails as if the machine
+    // shipped no ca-certificates, and the bundle the operator named is never
+    // mentioned. The system store is the documented fallback, so take it.
+    if (client.ca_bundle.map.count() == before) {
+        note(io, arena, "microagent: CA bundle {s} holds no certificates; scanning the system store instead\n", .{path});
+        return;
+    }
     // Non-null `now` is how the client knows the bundle is already populated.
     client.now = now;
 }

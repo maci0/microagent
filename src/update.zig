@@ -282,6 +282,14 @@ pub fn formatCurrent(buf: []u8, tool: []const u8, running: []const u8, tag: []co
     return std.fmt.bufPrint(buf, "{s} {s} is current (latest release: {s})", .{ tool, running, tag });
 }
 
+/// A tag that is not a plain triple, so no order can be claimed for it. It is
+/// installed all the same, because `sameRelease` did not match and the caller
+/// cannot prove the running build is newer; the line only says that the
+/// comparison was not made, which "is current" would not.
+pub fn formatUncompared(buf: []u8, tool: []const u8, running: []const u8, tag: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(buf, "{s} {s} is not the latest release ({s}), which is not a version triple to compare against", .{ tool, running, tag });
+}
+
 pub fn formatNewRelease(buf: []u8, tag: []const u8, running: []const u8) ![]const u8 {
     return std.fmt.bufPrint(buf, "New release: {s} (running {s})", .{ tag, running });
 }
@@ -750,7 +758,15 @@ fn runChecked(
     var line_buf: [256]u8 = undefined;
     const order = compareVersions(version, rel.tag);
     const line = switch (order) {
-        .eq => formatCurrent(&line_buf, tool_name, version, rel.tag),
+        // `.eq` is exact equality only when the two really are the same
+        // release. A tag that is not a triple compares as `.eq` too, and
+        // `sameRelease` is what says whether it is the same build or a
+        // pre-release the run goes on to install: calling that "is current"
+        // printed one thing and did the other.
+        .eq => if (sameRelease(version, rel.tag))
+            formatCurrent(&line_buf, tool_name, version, rel.tag)
+        else
+            formatUncompared(&line_buf, tool_name, version, rel.tag),
         .gt => formatAhead(&line_buf, version, rel.tag),
         .lt => formatNewRelease(&line_buf, rel.tag, version),
     } catch |err| return fail(io, "could not format the version comparison ({s})", .{@errorName(err)});

@@ -29,11 +29,9 @@ const max_edit_bytes: usize = 8 * 1024 * 1024;
 const max_secret_bytes: usize = 4096;
 
 /// Ceilings shared by every tool that shells out: how long a read-only
-/// subprocess may run, and how much of its stderr is worth keeping. stdout gets
-/// `max_tool_output * 4` everywhere, and is trimmed to `max_tool_output` by
-/// `clamp` before it reaches the model.
+/// subprocess may run. `max_tool_output * 4` is how much of each stream is kept
+/// before `clamp` trims the result to `max_tool_output` for the model.
 const tool_timeout_ms: u64 = 60_000;
-const tool_stderr_limit: usize = 4096;
 /// Ceiling on the `timeout_ms` a model may ask `bash` for. The value is model
 /// output, so it arrives with the same trust as a path or a command string: an
 /// unbounded one leaves a build running with no deadline, and the process-group
@@ -201,11 +199,23 @@ pub fn forwardInterruptsToToolGroup() void {
 /// argv, and the failure text, the empty result and the two output streams are
 /// handled the same way for each of them.
 fn runSearchTool(io: Io, arena: std.mem.Allocator, argv: []const []const u8, what: []const u8, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map) ![]u8 {
-    const res = runToolProcess(io, arena, argv, max_tool_output * 4, tool_stderr_limit, net.durationMs(boundedMs(tool_timeout_ms, ceiling_ms)), environ_map) catch |err|
+    // The cap drains rather than fails, for the reason `runCapped` gives: a
+    // broad ripgrep over a large tree passed the capture limit and came back
+    // as `error: StreamTooLong` with no output at all, so the model was told
+    // the search had failed rather than that it had found too much.
+    const res = runCapped(io, arena, argv, max_tool_output * 4, net.durationMs(boundedMs(tool_timeout_ms, ceiling_ms)), environ_map) catch |err|
         return std.fmt.allocPrint(arena, "error: {s} failed: {s}", .{ what, @errorName(err) });
-    if (res.stdout.len > 0) return res.stdout;
+    if (res.stdout.len > 0) return withCaptureNote(arena, res.stdout, res);
     if (res.stderr.len > 0) return res.stderr;
     return std.fmt.allocPrint(arena, "(no matches)", .{});
+}
+
+/// The captured stream with a line saying that it is the beginning of a longer
+/// output. A half-read match list reads as the whole one otherwise, and the
+/// model narrows its next search against what it did not see.
+fn withCaptureNote(arena: std.mem.Allocator, text: []u8, res: Captured) ![]u8 {
+    if (!atCaptureLimit(res)) return text;
+    return std.fmt.allocPrint(arena, "{s}\n[output truncated at the tool's cap]", .{text});
 }
 
 /// Lines of git output a call keeps when the model asks for no limit: a raw
@@ -291,9 +301,26 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
     }
     // `--` keeps a path from being read as an option.
     try argv.append(arena, "--");
-    if (path) |p| try argv.append(arena, p);
+    if (path) |p| {
+        try argv.append(arena, p);
+    } else if (std.mem.eql(u8, cmd, "diff") or std.mem.eql(u8, cmd, "show")) {
+        // The refusal above only covers a credential the model named. A
+        // `git show HEAD` with no path prints the whole commit, and a `.env`,
+        // a `.pem` or a `.secrets/` file that was ever committed comes back in
+        // it as a tool result, which is re-sent to the provider on every later
+        // turn. The names come from the same tables `search` and `ast` exclude
+        // by, so a credential is out of the git tool's results as well as out
+        // of the ones it is asked for by name.
+        for (credential_globs) |glob| {
+            try argv.append(arena, try std.fmt.allocPrint(arena, ":(exclude,icase){s}", .{glob[1..]}));
+        }
+    }
 
-    const res = runToolProcess(io, arena, argv.items, max_tool_output * 4, tool_stderr_limit, net.durationMs(boundedMs(tool_timeout_ms, ceiling_ms)), environ_map) catch |err|
+    // The cap drains rather than fails, for the reason `runCapped` gives: the
+    // documented ceiling here is 400 lines, and 400 long diff lines pass the
+    // capture cap, so a call the model asked to be trimmed to 400 lines came
+    // back as `error: git diff failed: StreamTooLong` with no lines at all.
+    const res = runCapped(io, arena, argv.items, max_tool_output * 4, net.durationMs(boundedMs(tool_timeout_ms, ceiling_ms)), environ_map) catch |err|
         return std.fmt.allocPrint(arena, "error: git {s} failed: {s}", .{ cmd, @errorName(err) });
     const text = if (res.stdout.len > 0) res.stdout else res.stderr;
     if (text.len == 0) return std.fmt.allocPrint(arena, "(git {s}: no output)", .{cmd});
@@ -555,6 +582,24 @@ const credential_glob_table: [credential_globs_capacity][]const u8 = blk: {
 const credential_globs_capacity = credential_names.len + credential_extensions.len + credential_dirs.len + 3;
 
 const credential_globs: []const []const u8 = credential_glob_table[0..credential_globs_capacity];
+
+test "every credential the name rule refuses is in the exclusion set git carries" {
+    // The `git show`/`git diff` exclusions are the globs above rewritten as
+    // pathspecs, so a name added to the tables and left out of this check is
+    // a credential the name rule refuses and the git tool still prints.
+    for (credential_globs) |glob| {
+        const pattern = glob[1..];
+        const leaf = if (std.mem.startsWith(u8, pattern, "*")) pattern[1..] else pattern;
+        if (isCredentialName(leaf)) continue;
+        // A directory is a component, not a leaf name, and `.env*` covers a
+        // spelling the leaf check reads through its own rules.
+        var is_dir = false;
+        for (credential_dirs) |dir| {
+            if (std.mem.eql(u8, pattern, dir)) is_dir = true;
+        }
+        try std.testing.expect(is_dir or std.mem.startsWith(u8, pattern, ".env"));
+    }
+}
 
 /// True when a path names a credential file, so `read` refuses it. The path is
 /// model-supplied text and never touches the filesystem before this runs, so
