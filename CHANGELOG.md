@@ -338,6 +338,18 @@ release, and `microagent update` moves you to it.
   already exists keeps the mode they gave it. `THREAT_MODEL.md` records the two modes as
   controls, and its `src/session.zig` references point at the declarations they name again.
 
+- A path whose symlink lands on a credentials file is refused, by the same rule and
+  the same message as one named outright. The name rule reads the bytes the model sent,
+  and a repository can commit a link whose own name is ordinary and whose target is a
+  credential: `docs/setup.md -> /home/someone/.aws/credentials` passed every check
+  `read`, `write`, `edit`, `search` and `ast` make, and each of them follows the link
+  when it opens the path. So the key came back as a tool result that is re-sent to the
+  provider on every later turn, and a `write` through the same link replaced the
+  operator's key with the model's guess. `read`, `write`, `edit`, `search` and `ast` now
+  ask the name rule of the path the link resolves to as well, and name that file in the
+  refusal. A link to an ordinary file is still followed and still read, so the cost is
+  one readlink per call and the tools are otherwise unchanged.
+
 ## [0.2.0] - 2026-09-29
 
 ### Added

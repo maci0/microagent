@@ -309,7 +309,7 @@ Seven tools, all of them thin wrappers over tools you already have:
 | tool | what it does |
 | --- | --- |
 | `bash` | `/bin/sh -c`, 120 s default timeout (600 s ceiling on what the model may ask for), output capped at 24 KB; a command naming a credentials file is refused, and the child inherits no provider credential |
-| `read` | read a file, optional line offset/limit; refuses credentials (`.env`, key and keystore files, anything under `.secrets` or `.ssh`) |
+| `read` | read a file, optional line offset/limit; refuses credentials (`.env`, key and keystore files, anything under `.secrets` or `.ssh`), including a path that is a symlink to one |
 | `write` | create or overwrite a file, parents created; refuses a credentials path, and a call with no `content` |
 | `edit` | exact string replacement, refuses a credentials path, refuses an ambiguous match unless `replace_all`, and refuses an edit that would leave `old_string` matchable in the rewritten file, so a repeated call cannot apply the change again |
 | `search` | `rg --line-number --no-heading`, optional glob; credentials files excluded |
@@ -345,8 +345,11 @@ and a `cat` are all tool results. `write` and `edit` refuse the same names, beca
 may not read a key file has no business replacing one with a guess. The run's own credentials
 are the other half, and it is closed structurally: every tool subprocess gets the environment
 minus the variables this binary sends in an `Authorization` header, so `bash: env` and
-`bash: printenv` have nothing to print. What is left is the name rule itself: a credential the
-tables do not recognize, and a path a command assembles at run time, are still read.
+`bash: printenv` have nothing to print. The name is read twice, once over the bytes the model
+sent and once over the path a symlink on it resolves to, so a link committed in a repository
+under an ordinary name does not carry a key out through the file it points at. What is left is
+the name rule itself: a credential the tables do not recognize, and a path a command assembles
+at run time, are still read.
 
 A transient failure — 429, any 5xx, a connection that dies before the request reached the provider —
 is retried twice with 1 s and 2 s of backoff before the run exits non-zero, so a provider's bad

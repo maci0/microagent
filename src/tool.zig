@@ -887,6 +887,45 @@ fn isCredentialPath(path: []const u8) bool {
     return false;
 }
 
+/// The credential a tool call may not touch, or null when it may.
+///
+/// Two questions, not one. The name rule above reads the bytes the model sent,
+/// and a repository can commit a link whose own name is ordinary and whose
+/// target is a credential: `docs/setup.md -> /home/someone/.aws/credentials`.
+/// Opening that path follows the link, so the key's bytes came back as a tool
+/// result, and a tool result is re-sent to the provider on every later turn. The
+/// same link pointed at `~/.secrets/openrouter` is a `write` that replaces the
+/// operator's key with whatever the model guessed. So the second question is
+/// asked of the file those bytes reach, once every symlink on the path is
+/// followed, which is the only place the target's own name appears.
+///
+/// The walk costs one readlink per call and nothing more: a path that is not a
+/// link is returned as it went in, so the read is the whole of it. A link the
+/// walk cannot settle (a chain longer than the kernel allows, a name it cannot
+/// hold) answers null, and the tool does what it would have done: a write then
+/// fails on its own `SymlinkLoop` rather than on a guess made here.
+///
+/// The chain followed is the one the last component holds, which is where a
+/// committed link sits. A directory link in the middle of a path is not
+/// followed here, and does not have to be for the common case: a credential
+/// under such a directory carries a name the rule already refuses, so
+/// `links/.aws/credentials` is turned away on its own spelling and only a
+/// `links/.aws/config` is the name rule's own hole rather than this one's.
+fn credentialPath(io: Io, arena: std.mem.Allocator, path: []const u8) ?[]const u8 {
+    if (isCredentialPath(path)) return path;
+    var name_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var cur_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
+    var next_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
+    const target = net.resolveSymlinkTarget(io, std.Io.Dir.cwd(), path, &name_buf, &cur_buf, &next_buf) catch return null;
+    if (!isCredentialPath(target)) return null;
+    // The name to report is the file that was actually refused, which is the
+    // target's own path rather than the link the model named. The slices above
+    // belong to this frame, so a target that differs from the path is copied
+    // out; one that is the path is the caller's own bytes already.
+    if (std.mem.eql(u8, target, path)) return path;
+    return arena.dupe(u8, target) catch path;
+}
+
 /// What a tool returns instead of a credential. It names the file, so a model
 /// that asked for it knows which one was refused, and it says what to do
 /// instead, because a bare error reads as a broken tool and gets retried.
@@ -917,7 +956,7 @@ fn credentialRefusal(arena: std.mem.Allocator, tool: chat.Tool, path: []const u8
 
 fn toolRead(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]const u8 {
     const path = chat.str(args.get("path")) orelse return std.fmt.allocPrint(arena, "error: missing path", .{});
-    if (isCredentialPath(path)) return try credentialRefusal(arena, .read, path, false);
+    if (credentialPath(io, arena, path)) |refused| return try credentialRefusal(arena, .read, refused, false);
     if (!args.contains("offset") and !args.contains("limit"))
         return std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_read_bytes)) catch |err|
             return readFailed(arena, path, err);
@@ -1039,7 +1078,7 @@ fn toolWrite(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]cons
     // model that gets the path from a file in the tree and the content from a
     // guess replaces the operator's working key with a placeholder, and the
     // next run of the agent cannot authenticate at all.
-    if (isCredentialPath(path)) return try credentialRefusal(arena, .write, path, true);
+    if (credentialPath(io, arena, path)) |refused| return try credentialRefusal(arena, .write, refused, true);
     // A call that names a path and no content is a call the model got cut
     // short on, not one asking for an empty file: a `write` is the one tool
     // result a run cannot undo, and emptying a source file is worse than
@@ -1103,7 +1142,7 @@ fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]const
     // match, and the operator's key is the one file in a tree where a match the
     // model guessed at and a rewrite of the value beside it is damage nobody
     // asked for.
-    if (isCredentialPath(path)) return try credentialRefusal(arena, .edit, path, true);
+    if (credentialPath(io, arena, path)) |refused| return try credentialRefusal(arena, .edit, refused, true);
     const old = chat.str(args.get("old_string")) orelse return std.fmt.allocPrint(arena, "error: missing old_string", .{});
     const new = chat.str(args.get("new_string")) orelse return std.fmt.allocPrint(arena, "error: missing new_string", .{});
     const all = if (args.get("replace_all")) |v| v == .bool and v.bool else false;
@@ -1188,9 +1227,9 @@ fn toolSearch(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceilin
     // The globs below are traversal rules: ripgrep applies them while it walks,
     // and a file named as the search path is read whatever they say, so
     // `{"path": ".env"}` came back with the key's line in it. The name is
-    // checked here instead, which is what the globs and this test between them
-    // make true.
-    if (isCredentialPath(path)) return try credentialRefusal(arena, .search, path, false);
+    // checked here instead, the name the path resolves to through a link with
+    // it, and that pair is what the globs and this test between them make true.
+    if (credentialPath(io, arena, path)) |refused| return try credentialRefusal(arena, .search, refused, false);
     const glob = chat.str(args.get("glob"));
     var max_count: [16]u8 = undefined;
     var argv: std.ArrayList([]const u8) = .empty;
@@ -1227,7 +1266,7 @@ fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
     // it found it, and a rewrite passes it to `--update-all`, so the refusal
     // for the second is the one that says no tool rewrites a key.
     const rewrite = chat.str(args.get("rewrite"));
-    if (isCredentialPath(path)) return try credentialRefusal(arena, .ast, path, rewrite != null);
+    if (credentialPath(io, arena, path)) |refused| return try credentialRefusal(arena, .ast, refused, rewrite != null);
     if (rewrite) |r| {
         if (try astRewriteRefusal(arena, pattern, r)) |why| return why;
     }
@@ -2665,6 +2704,66 @@ test "the writing tools refuse a credentials path through dispatch" {
     ));
     try std.testing.expect(std.mem.startsWith(u8, ok, "wrote "));
     try std.testing.expectEqualStrings("x", try tmp.dir.readFileAlloc(std.testing.io, "notes.txt", arena, .limited(64)));
+}
+
+// A name the rule does not know is the way round it, and a committed symlink
+// is a name the rule never sees: the link is checked under an ordinary name and
+// the credential is the target. Every tool that opens a model-supplied path
+// follows the link, so the key's bytes came back as a tool result and a
+// `write` through it replaced the operator's key with the model's guess.
+test "a link with an ordinary name is refused when it reaches a credential" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const key = try std.fmt.allocPrint(arena, "{s}/.aws/credentials", .{root});
+    try tmp.dir.createDirPath(io, ".aws");
+    try tmp.dir.writeFile(io, .{
+        .sub_path = ".aws/credentials",
+        .data = "aws_secret_access_key=THE-REAL-ONE\n",
+    });
+    try tmp.dir.symLink(io, key, "setup.md", .{});
+    const link = try std.fmt.allocPrint(arena, "{s}/setup.md", .{root});
+
+    const read = try dispatch(arena, "read", try std.fmt.allocPrint(arena, "{{\"path\":\"{s}\"}}", .{link}));
+    try std.testing.expect(std.mem.startsWith(u8, read, "refused: "));
+    try std.testing.expect(std.mem.indexOf(u8, read, "THE-REAL-ONE") == null);
+    // The name it reports is the file that was actually reached, not the link
+    // the model named: a model told about `setup.md` retries the same thing.
+    try std.testing.expect(std.mem.indexOf(u8, read, key) != null);
+
+    const wrote = try dispatch(arena, "write", try std.fmt.allocPrint(
+        arena,
+        "{{\"path\":\"{s}\",\"content\":\"aws_secret_access_key=A-GUESS\"}}",
+        .{link},
+    ));
+    try std.testing.expect(std.mem.startsWith(u8, wrote, "refused: "));
+    try std.testing.expect(std.mem.indexOf(u8, wrote, "A-GUESS") == null);
+    try std.testing.expectEqualStrings("aws_secret_access_key=THE-REAL-ONE\n", try tmp.dir.readFileAlloc(
+        std.testing.io,
+        ".aws/credentials",
+        arena,
+        .limited(64),
+    ));
+
+    // A link to an ordinary file is still a link the tools follow, so the
+    // refusal is the credential the target names and not `readlink` failing.
+    const notes = try std.fmt.allocPrint(arena, "{s}/notes.txt", .{root});
+    try tmp.dir.writeFile(io, .{ .sub_path = "notes.txt", .data = "ordinary\n" });
+    try tmp.dir.symLink(io, notes, "readme.md", .{});
+    const allowed = try dispatch(arena, "read", try std.fmt.allocPrint(
+        arena,
+        "{{\"path\":\"{s}/readme.md\"}}",
+        .{root},
+    ));
+    try std.testing.expectEqualStrings("ordinary\n", allowed);
 }
 
 // The refusal `read` makes is no protection to the operator when the same
