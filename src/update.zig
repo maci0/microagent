@@ -774,8 +774,6 @@ fn updateUsageError(io: std.Io, comptime fmt: []const u8, args: anytype) u8 {
     return 2;
 }
 
-// ── Tests ───────────────────────────────────────────────────────────────────
-
 const abc_sha = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 const asset_base = "microagent-v0.1.0-x86_64-linux-musl";
 
