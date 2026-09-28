@@ -2585,42 +2585,67 @@ test "a truncated tool result keeps whole codepoints" {
     try std.testing.expect(std.unicode.utf8ValidateSlice(chat.clamp("abc日本語のテキスト", 8)));
 }
 
+/// A temporary directory the process is standing in, so a tool that resolves
+/// paths against the working directory edits the file the test wrote. The
+/// directory is removed and the previous directory restored on deinit.
+const CwdFixture = struct {
+    state: std.heap.ArenaAllocator,
+    tmp: std.testing.TmpDir,
+    cwd_buf: [std.fs.max_path_bytes]u8 = undefined,
+    previous: []const u8,
+
+    fn init() !CwdFixture {
+        var self: CwdFixture = .{
+            .state = std.heap.ArenaAllocator.init(std.testing.allocator),
+            .tmp = std.testing.tmpDir(.{}),
+            .previous = undefined,
+        };
+        errdefer self.state.deinit();
+        self.previous = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, ".", self.state.allocator());
+        const here = self.cwd_buf[0..try self.tmp.dir.realPath(std.testing.io, &self.cwd_buf)];
+        try std.process.setCurrentPath(std.testing.io, here);
+        return self;
+    }
+
+    fn deinit(self: *CwdFixture) void {
+        std.process.setCurrentPath(std.testing.io, self.previous) catch {};
+        self.tmp.cleanup();
+        self.state.deinit();
+    }
+
+    fn arena(self: *CwdFixture) std.mem.Allocator {
+        return self.state.allocator();
+    }
+};
+
 // The edit tool rewrites a file the model named, and the one-match case has to
 // come out the same whether or not `replace_all` was asked for: the count
 // checks above refuse an ambiguous match, so both paths have exactly the
 // occurrences they are going to replace. The tool resolves paths against the
 // process directory, so the test runs from the temp directory it edits.
 test "edit replaces one match, or every match when asked" {
-    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer state.deinit();
-    const arena = state.allocator();
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const tmp_path = cwd_buf[0..try tmp.dir.realPath(std.testing.io, &cwd_buf)];
-    const orig = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, ".", arena);
-    try std.process.setCurrentPath(std.testing.io, tmp_path);
-    defer std.process.setCurrentPath(std.testing.io, orig) catch {};
+    var cwd = try CwdFixture.init();
+    defer cwd.deinit();
+    const arena = cwd.arena();
 
     var args: std.json.ObjectMap = .empty;
     try args.put(arena, "path", .{ .string = "a.txt" });
     try args.put(arena, "old_string", .{ .string = "x" });
     try args.put(arena, "new_string", .{ .string = "y" });
 
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.txt", .data = "a x b" });
+    try cwd.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.txt", .data = "a x b" });
     try std.testing.expectEqualStrings("replaced 1 occurrence(s) in a.txt", try toolEdit(std.testing.io, arena, args));
-    try std.testing.expectEqualStrings("a y b", try tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
+    try std.testing.expectEqualStrings("a y b", try cwd.tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
 
     // An ambiguous match is refused rather than guessed at, so the file the
     // model was shown is still the file on disk.
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.txt", .data = "x and x" });
+    try cwd.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.txt", .data = "x and x" });
     try std.testing.expect(std.mem.startsWith(u8, try toolEdit(std.testing.io, arena, args), "error: old_string occurs 2 times"));
-    try std.testing.expectEqualStrings("x and x", try tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
+    try std.testing.expectEqualStrings("x and x", try cwd.tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
 
     try args.put(arena, "replace_all", .{ .bool = true });
     try std.testing.expectEqualStrings("replaced 2 occurrence(s) in a.txt", try toolEdit(std.testing.io, arena, args));
-    try std.testing.expectEqualStrings("y and y", try tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
+    try std.testing.expectEqualStrings("y and y", try cwd.tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
 }
 
 // One edit, issued twice, on a file the two runs cannot tell apart.
@@ -2634,17 +2659,9 @@ test "edit replaces one match, or every match when asked" {
 // an applied edit and an already-applied one leave the same bytes, so
 // nothing at the tool can tell them apart afterwards.
 test "an edit issued twice leaves the file the first run left" {
-    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer state.deinit();
-    const arena = state.allocator();
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const tmp_path = cwd_buf[0..try tmp.dir.realPath(std.testing.io, &cwd_buf)];
-    const orig = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, ".", arena);
-    try std.process.setCurrentPath(std.testing.io, tmp_path);
-    defer std.process.setCurrentPath(std.testing.io, orig) catch {};
+    var cwd = try CwdFixture.init();
+    defer cwd.deinit();
+    const arena = cwd.arena();
 
     var args: std.json.ObjectMap = .empty;
     try args.put(arena, "path", .{ .string = "a.txt" });
@@ -2653,25 +2670,25 @@ test "an edit issued twice leaves the file the first run left" {
     // refused and the file keeps the first run's bytes.
     try args.put(arena, "old_string", .{ .string = "x" });
     try args.put(arena, "new_string", .{ .string = "y" });
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.txt", .data = "a x b" });
+    try cwd.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.txt", .data = "a x b" });
     try std.testing.expectEqualStrings("replaced 1 occurrence(s) in a.txt", try toolEdit(std.testing.io, arena, args));
     try std.testing.expect(std.mem.startsWith(u8, try toolEdit(std.testing.io, arena, args), "error: old_string not found"));
-    try std.testing.expectEqualStrings("a y b", try tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
+    try std.testing.expectEqualStrings("a y b", try cwd.tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
 
     // The nesting shape, refused on the first run rather than applied and
     // nested again on the second.
     try args.put(arena, "old_string", .{ .string = "x" });
     try args.put(arena, "new_string", .{ .string = "xy" });
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.txt", .data = "a x b" });
+    try cwd.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.txt", .data = "a x b" });
     try std.testing.expect(std.mem.startsWith(u8, try toolEdit(std.testing.io, arena, args), "error: new_string contains old_string"));
-    try std.testing.expectEqualStrings("a x b", try tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
+    try std.testing.expectEqualStrings("a x b", try cwd.tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
 
     // Replacing text with itself writes nothing, so a duplicate of it is not a
     // second write either.
     try args.put(arena, "old_string", .{ .string = "x" });
     try args.put(arena, "new_string", .{ .string = "x" });
     try std.testing.expect(std.mem.startsWith(u8, try toolEdit(std.testing.io, arena, args), "no change:"));
-    try std.testing.expectEqualStrings("a x b", try tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
+    try std.testing.expectEqualStrings("a x b", try cwd.tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
 }
 
 /// Asserts that a tool call took its whole process tree down with it. The

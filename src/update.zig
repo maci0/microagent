@@ -476,10 +476,9 @@ fn fail(io: std.Io, comptime fmt: []const u8, args: anytype) u8 {
     return 1;
 }
 
-/// One GET into `capped`, whose `limit` is the cap the body is refused past.
-/// The
-/// fetch itself, with the headers and the two status cases every caller wants
-/// the same answer to. `client` is shared across the three fetches a run makes
+/// One GET into `capped`, whose `limit` is the cap the body is refused past,
+/// with the headers and the two status cases every caller wants the same answer
+/// to. `client` is shared across the three fetches a run makes
 /// so the CA store is loaded once. On an HTTP error `status_out` carries the
 /// code, which is the difference between "no release yet" and "rate limit".
 ///

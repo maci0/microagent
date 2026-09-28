@@ -122,8 +122,8 @@ or a non-numeric budget is refused before the first request rather than becoming
 a 400 or an empty run. A variable set to an empty string is not a value:
 `MICROAGENT_MODEL`, `MICROAGENT_BASE_URL`, `MICROAGENT_REASONING_EFFORT`,
 `MICROAGENT_BUDGET_SECONDS`, `MICROAGENT_MAX_TURNS`, `MICROAGENT_MAX_TOKENS`
-and `MDEBUG` keep their
-defaults, `MICROAGENT_CA_BUNDLE` falls through to `SSL_CERT_FILE`, and
+and `MDEBUG` keep their defaults, `MICROAGENT_CA_BUNDLE` falls through to
+`SSL_CERT_FILE`, and
 `MICROAGENT_CAVEMAN`/`MICROAGENT_PONYTAIL` fall through to the config file.
 Two variables are the exception: `MICROAGENT_CONFIG` and `MICROAGENT_SESSION_DIR`
 read empty as off, so no style file and no session log.
@@ -262,8 +262,8 @@ microagent update --repo you/microagent   # track a fork
 The release publishes `microagent-<tag>-<triple>` for `x86_64-linux-musl`, `aarch64-linux-musl`,
 `x86_64-macos` and `aarch64-macos`, each with a `.sha256` sidecar. Linux has one asset per arch and
 not one per libc: the static musl binary runs on a glibc host, so a `-gnu` build updates to it. The
-download is verified against
-that sidecar and the running binary is replaced (atomically, following a symlink to the real file)
+download is verified against that sidecar and the running binary is replaced
+(atomically, following a symlink to the real file)
 only when the digest matches: a mismatch, a missing asset, or a release page that is not a GitHub
 https URL leaves the binary untouched. `GITHUB_TOKEN` lifts the anonymous API rate limit. Exit 1
 means the check or the install failed, 2 is a usage error.

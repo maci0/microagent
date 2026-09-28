@@ -308,9 +308,8 @@ pub fn main(init: std.process.Init) !void {
 /// reading, so it is asked for the edit rather than another investigation
 /// (`final_push`, below). Asked once when a run that already edited the tree
 /// stops without having run any test runner. The measured failure mode: a
-/// SWE-bench instance that ended
-/// after 20 turns and zero test commands, against 5-15 test commands in every
-/// instance that passed.
+/// SWE-bench instance that ended after 20 turns and zero test commands, against
+/// 5-15 test commands in every instance that passed.
 const verify_push =
     "Nothing in this session has run a test, so nothing verifies the change. Run the tests that " ++
     "cover what you changed, using the project's own test command, and fix whatever they report. " ++
@@ -1371,22 +1370,21 @@ fn incompleteAnswer(arena: std.mem.Allocator, result: *const chat_mod.ChatResult
     return null;
 }
 
-/// The request body, with `messages` last.
-///
-/// Prompt caching keys on the exact byte prefix of a request, so a turn's body
-/// has to be the previous turn's body plus the new messages. That only holds
-/// while nothing constant sits *behind* the growing array: the tool schema is
-/// a few kilobytes, and written after `messages` it fell outside the cacheable
-/// prefix
-/// on every turn of every run, so the provider re-read it each time. Member
-/// order is not significant in JSON, so the constant fields go first and the
-/// conversation ends the body.
 /// Everything in a request body that is not the conversation: the tool schema
 /// is 3.0 KB, and the rest is the model, the token ceiling and the keys. A
 /// reservation rather than a bound, and the buffer still grows if it does not
 /// cover the body, which a long model name would do.
 const body_scaffolding_bytes = tools_json.len + 1024;
 
+/// The request body, with `messages` last.
+///
+/// Prompt caching keys on the exact byte prefix of a request, so a turn's body
+/// has to be the previous turn's body plus the new messages. That only holds
+/// while nothing constant sits *behind* the growing array: the tool schema is
+/// a few kilobytes, and written after `messages` it fell outside the cacheable
+/// prefix on every turn of every run, so the provider re-read it each time.
+/// Member order is not significant in JSON, so the constant fields go first and
+/// the conversation ends the body.
 fn buildBody(arena: std.mem.Allocator, opts: Options, messages: []const u8) ![]u8 {
     // The body is the conversation plus the constant fields, and both sizes are
     // in hand before the first write. Reserving them costs one allocation:

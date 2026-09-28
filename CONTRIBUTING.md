@@ -91,8 +91,8 @@ before a push that touches a hot path and re-record
 
 `make check` is the whole gate: it is the same `zig fmt --check`, the same
 `ruff check`, `ruff format --check` and `yamllint`, the same `zig build test`,
-the same `make lint-versions` and `make lint-lock`, and the same `ReleaseSmall` build whose binary
-it then runs, that
+the same `make lint-versions` and `make lint-lock`, and the same `ReleaseSmall`
+build whose binary it then runs, that
 [.github/workflows/ci.yml](.github/workflows/ci.yml) runs, on the same Zig
 version (`make zig-version` is that first step, so a laptop on a different
 compiler is told rather than assumed). Two things it does not stand in for: the
@@ -104,9 +104,8 @@ at another path) and the other runners, where the same gate also
 runs on macOS. `make help` lists every target.
 Source is formatted with `zig fmt`; `make fmt` applies it, and `ruff format`
 does the same for the Harbor adapter. The three linters cover what `zig fmt`
-cannot: the bench
-shell, the Harbor adapter under `integrations/harbor` (rules in
-[ruff.toml](ruff.toml)) and the workflows, the composite toolchain action and
+cannot: the bench shell, the Harbor adapter under `integrations/harbor` (rules
+in [ruff.toml](ruff.toml)) and the workflows, the composite toolchain action and
 the Dependabot config (rules in [.yamllint](.yamllint)). Each takes its file
 list from git, so a Python or YAML file added outside the paths named above is
 linted too.
@@ -127,16 +126,15 @@ with the command that produces it in the comment at the top of
 `integrations/harbor/requirements.txt`. `make lint-lock` reads both and refuses
 a lock that no longer carries the manifest's pin, or that has an entry with no
 `sha256`, so a lock left behind by an earlier pin fails the gate instead of
-quietly benchmarking a Harbor release the manifest no longer names. The only build output
-is `zig-out/`, and `make clean` removes it along with `.zig-cache/`. `make musl`
-also copies the static binary to
+quietly benchmarking a Harbor release the manifest no longer names. The only
+build output is `zig-out/`, and `make clean` removes it along with
+`.zig-cache/`. `make musl` also copies the static binary to
 `integrations/harbor/microagent-<arch>-linux-musl`, named for the host's own
-architecture, for the Harbor adapter; that one and the `.tmp` it is renamed from
-are ignored, so nothing under `integrations/` is ever a build output a commit
-picks up. A
-bench run appends its own line to the committed `bench/results.jsonl`; that file
-is results, not code, so leave the appended line out of a change that did not run
-a benchmark.
+architecture, for the Harbor adapter; that one and the `.tmp` it is renamed
+from are ignored, so nothing under `integrations/` is ever a build output a
+commit picks up. A bench run appends its own line to the committed
+`bench/results.jsonl`; that file is results, not code, so leave the appended line
+out of a change that did not run a benchmark.
 
 ### Fuzz targets
 
@@ -172,10 +170,9 @@ Releases are tags: the release workflow publishes only when the tag names the
 `build.zig.zon` version, that version has a `CHANGELOG.md` entry, and the bump
 matches what the entry says. A patch tag whose section carries an `Added`, a
 `Changed` or a `Removed` entry is refused, because under `0.y` those are what
-the minor carries. The four
-published binaries and their asset names are spelled once, in the
-[Makefile](Makefile), so a release can be built and checksummed on a laptop
-before the tag exists:
+the minor carries. The four published binaries and their asset names are spelled
+once, in the [Makefile](Makefile), so a release can be built and checksummed on
+a laptop before the tag exists:
 
 ```sh
 make release-assets TAG=v0.2.0   # the four cross-built assets, in dist/

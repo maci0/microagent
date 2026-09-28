@@ -613,86 +613,94 @@ test "a run that drops its session log closes the handle once" {
     try std.testing.expectEqualStrings("kept", kept);
 }
 
+/// A store directory of this program's own, in a temporary directory that
+/// cleans itself up, with the arena and the threaded io the store calls need.
+/// The setup every store test below shares: what varies between them is what
+/// they put in the directory and what they then prune or open.
+const StoreFixture = struct {
+    arena_state: std.heap.ArenaAllocator,
+    threaded: std.Io.Threaded,
+    tmp: std.testing.TmpDir,
+    path_buf: [std.fs.max_path_bytes]u8 = undefined,
+
+    fn init(gpa: std.mem.Allocator) !StoreFixture {
+        return .{
+            .arena_state = std.heap.ArenaAllocator.init(gpa),
+            .threaded = std.Io.Threaded.init(gpa, .{}),
+            .tmp = std.testing.tmpDir(.{}),
+        };
+    }
+
+    fn deinit(self: *StoreFixture) void {
+        self.tmp.cleanup();
+        self.threaded.deinit();
+        self.arena_state.deinit();
+    }
+
+    fn io(self: *StoreFixture) Io {
+        return self.threaded.io();
+    }
+
+    fn arena(self: *StoreFixture) std.mem.Allocator {
+        return self.arena_state.allocator();
+    }
+
+    /// The absolute path of the temporary directory, which is where a store
+    /// test writes its logs.
+    fn path(self: *StoreFixture) ![]const u8 {
+        return self.path_buf[0..try self.tmp.dir.realPath(self.io(), &self.path_buf)];
+    }
+};
+
 // The session store is a per-run directory nothing used to delete from, so a
 // long-lived machine accumulated one log per review forever. The bound is the
 // behavior: oldest first, only this program's own files, recent runs kept.
 test "the session store keeps the most recent logs and drops the rest" {
-    const gpa = std.testing.allocator;
-    var arena_state = std.heap.ArenaAllocator.init(gpa);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    var threaded = std.Io.Threaded.init(gpa, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_path = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+    var store = try StoreFixture.init(std.testing.allocator);
+    defer store.deinit();
+    const io = store.io();
+    const arena = store.arena();
+    const dir_path = try store.path();
 
     const total = max_session_logs + 25;
     var i: usize = 0;
     while (i < total) : (i += 1) {
         const name = try std.fmt.allocPrint(arena, "{d}.jsonl", .{i + 1});
-        try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "{}" });
+        try store.tmp.dir.writeFile(io, .{ .sub_path = name, .data = "{}" });
     }
     // A file this program did not write is not ours to delete.
-    try tmp.dir.writeFile(io, .{ .sub_path = "notes.jsonl", .data = "keep me" });
+    try store.tmp.dir.writeFile(io, .{ .sub_path = "notes.jsonl", .data = "keep me" });
     // A dash with no attempt number after it is one of those, and it is the
     // case a name-shaped check gets wrong: read as a plain log it sorts into
     // the window as the oldest thing in the store, so a name no run of this
     // program ever wrote is the first one the retention window removes.
-    try tmp.dir.writeFile(io, .{ .sub_path = "1-.jsonl", .data = "keep me too" });
+    try store.tmp.dir.writeFile(io, .{ .sub_path = "1-.jsonl", .data = "keep me too" });
 
     pruneSessions(io, arena, dir_path);
 
-    var dir = try std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true });
-    defer dir.close(io);
-    var walker = try dir.walk(arena);
-    defer walker.deinit();
-    var left: usize = 0;
-    var notes_present = false;
-    var dangling_present = false;
-    while (try walker.next(io)) |entry| {
-        if (!std.mem.endsWith(u8, entry.basename, ".jsonl")) continue;
-        if (std.mem.eql(u8, entry.basename, "notes.jsonl")) {
-            notes_present = true;
-            continue;
-        }
-        if (std.mem.eql(u8, entry.basename, "1-.jsonl")) {
-            dangling_present = true;
-            continue;
-        }
-        left += 1;
-    }
-    try std.testing.expectEqual(max_session_logs, left);
-    try std.testing.expect(notes_present);
-    try std.testing.expect(dangling_present);
+    try std.testing.expectEqual(max_session_logs, try countSessionLogs(io, arena, dir_path));
+    try store.tmp.dir.access(io, "notes.jsonl", .{});
+    try store.tmp.dir.access(io, "1-.jsonl", .{});
     // The survivors are the newest, so a monitor still sees the current run.
     const newest = try std.fmt.allocPrint(arena, "{d}.jsonl", .{total});
-    try tmp.dir.access(io, newest, .{});
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "1.jsonl", .{}));
+    try store.tmp.dir.access(io, newest, .{});
+    try std.testing.expectError(error.FileNotFound, store.tmp.dir.access(io, "1.jsonl", .{}));
 }
 
 // `MICROAGENT_SESSION_DIR=logs/x` names a store through the working directory,
 // and `open` creates it and its log that way, so pruning has to read it the
 // same way rather than insist on an absolute path the caller never promised.
 test "a store named relative to the working directory is pruned where it is" {
-    const gpa = std.testing.allocator;
-    var arena_state = std.heap.ArenaAllocator.init(gpa);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    var threaded = std.Io.Threaded.init(gpa, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var store = try StoreFixture.init(std.testing.allocator);
+    defer store.deinit();
+    const io = store.io();
+    const arena = store.arena();
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
     // The store sits under the test's own temporary directory, which is under
     // the working directory, so the same relative spelling a run would be given
     // reaches it, and the cleanup takes it with the rest.
-    const relative = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}/store", .{tmp.sub_path});
-    try tmp.dir.createDirPath(io, "store");
+    const relative = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}/store", .{store.tmp.sub_path});
+    try store.tmp.dir.createDirPath(io, "store");
     var i: usize = 0;
     while (i < max_session_logs + 1) : (i += 1) {
         const log = createSessionLog(io, arena, relative, @intCast(i + 1)) orelse return error.TestUnexpectedResult;
@@ -701,15 +709,7 @@ test "a store named relative to the working directory is pruned where it is" {
 
     pruneSessions(io, arena, relative);
 
-    var dir = try std.Io.Dir.openDir(std.Io.Dir.cwd(), io, relative, .{ .iterate = true });
-    defer dir.close(io);
-    var walker = try dir.walk(arena);
-    defer walker.deinit();
-    var left: usize = 0;
-    while (try walker.next(io)) |entry| {
-        if (entry.kind == .file and logName(entry.basename) != null) left += 1;
-    }
-    try std.testing.expectEqual(max_session_logs, left);
+    try std.testing.expectEqual(max_session_logs, try countRelativeSessionLogs(io, arena, relative));
 }
 
 // A re-run that reads the same clock stamp writes its log beside the first
@@ -724,18 +724,11 @@ test "a store named relative to the working directory is pruned where it is" {
 // window cuts between the pair and deletes the log of the run that happened
 // second, keeping the older of the two as the newest.
 test "the session store prunes by stamp, not by the bytes of the name" {
-    const gpa = std.testing.allocator;
-    var arena_state = std.heap.ArenaAllocator.init(gpa);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    var threaded = std.Io.Threaded.init(gpa, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_path = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+    var store = try StoreFixture.init(std.testing.allocator);
+    defer store.deinit();
+    const io = store.io();
+    const arena = store.arena();
+    const dir_path = try store.path();
 
     // Stamps 3 through 202, then a re-run that read the oldest of them again,
     // so the one file over the limit is the second half of that oldest pair.
@@ -746,32 +739,25 @@ test "the session store prunes by stamp, not by the bytes of the name" {
     }
     const rerun = createSessionLog(io, arena, dir_path, 3) orelse return error.TestUnexpectedResult;
     rerun.close(io);
-    try std.testing.expectEqual(max_session_logs + 1, countSessionLogs(io, arena, dir_path));
+    try std.testing.expectEqual(max_session_logs + 1, try countSessionLogs(io, arena, dir_path));
 
     pruneSessions(io, arena, dir_path);
 
-    try std.testing.expectEqual(max_session_logs, countSessionLogs(io, arena, dir_path));
+    try std.testing.expectEqual(max_session_logs, try countSessionLogs(io, arena, dir_path));
     // The first of the pair is what goes; the run behind it is still the one a
     // monitor would read if it were the pair's last run.
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "3.jsonl", .{}));
-    try tmp.dir.access(io, "3-1.jsonl", .{});
+    try std.testing.expectError(error.FileNotFound, store.tmp.dir.access(io, "3.jsonl", .{}));
+    try store.tmp.dir.access(io, "3-1.jsonl", .{});
     // And the newest stamp is untouched.
-    try tmp.dir.access(io, "202.jsonl", .{});
+    try store.tmp.dir.access(io, "202.jsonl", .{});
 }
 
 test "the session store prunes the logs a re-run wrote beside the first" {
-    const gpa = std.testing.allocator;
-    var arena_state = std.heap.ArenaAllocator.init(gpa);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    var threaded = std.Io.Threaded.init(gpa, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_path = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+    var store = try StoreFixture.init(std.testing.allocator);
+    defer store.deinit();
+    const io = store.io();
+    const arena = store.arena();
+    const dir_path = try store.path();
 
     var i: usize = 0;
     while (i < max_session_logs) : (i += 1) {
@@ -782,19 +768,19 @@ test "the session store prunes the logs a re-run wrote beside the first" {
         const beside = createSessionLog(io, arena, dir_path, @intCast(i + 1)) orelse return error.TestUnexpectedResult;
         beside.close(io);
     }
-    try std.testing.expectEqual(max_session_logs * 2, countSessionLogs(io, arena, dir_path));
+    try std.testing.expectEqual(max_session_logs * 2, try countSessionLogs(io, arena, dir_path));
 
     pruneSessions(io, arena, dir_path);
 
-    try std.testing.expectEqual(max_session_logs, countSessionLogs(io, arena, dir_path));
+    try std.testing.expectEqual(max_session_logs, try countSessionLogs(io, arena, dir_path));
     // The oldest stamp is gone entirely, the newest is still there in both of
     // its names, so the monitor reading the store still sees this run.
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "1.jsonl", .{}));
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "1-1.jsonl", .{}));
+    try std.testing.expectError(error.FileNotFound, store.tmp.dir.access(io, "1.jsonl", .{}));
+    try std.testing.expectError(error.FileNotFound, store.tmp.dir.access(io, "1-1.jsonl", .{}));
     const newest = try std.fmt.allocPrint(arena, "{d}.jsonl", .{max_session_logs});
-    try tmp.dir.access(io, newest, .{});
+    try store.tmp.dir.access(io, newest, .{});
     const newest_beside = try std.fmt.allocPrint(arena, "{d}-1.jsonl", .{max_session_logs});
-    try tmp.dir.access(io, newest_beside, .{});
+    try store.tmp.dir.access(io, newest_beside, .{});
 }
 
 /// How many of the store's own logs are there, by the same rule `pruneSessions`
@@ -802,6 +788,18 @@ test "the session store prunes the logs a re-run wrote beside the first" {
 fn countSessionLogs(io: Io, arena: std.mem.Allocator, session_dir: []const u8) !usize {
     var dir = try std.Io.Dir.openDirAbsolute(io, session_dir, .{ .iterate = true });
     defer dir.close(io);
+    return countLogsIn(dir, io, arena);
+}
+
+/// `countSessionLogs` for a store named relative to the working directory,
+/// which `open` accepts and an absolute path would not exercise.
+fn countRelativeSessionLogs(io: Io, arena: std.mem.Allocator, session_dir: []const u8) !usize {
+    var dir = try std.Io.Dir.openDir(std.Io.Dir.cwd(), io, session_dir, .{ .iterate = true });
+    defer dir.close(io);
+    return countLogsIn(dir, io, arena);
+}
+
+fn countLogsIn(dir: Io.Dir, io: Io, arena: std.mem.Allocator) !usize {
     var walker = try dir.walk(arena);
     defer walker.deinit();
     var n: usize = 0;
@@ -815,26 +813,19 @@ fn countSessionLogs(io: Io, arena: std.mem.Allocator, session_dir: []const u8) !
 // Pruning walks the store, so a file that only shares a basename with a log is
 // the case that decides whether it deletes a directory's contents by accident.
 test "a log in a subdirectory is pruned where it is, not by its bare name" {
-    const gpa = std.testing.allocator;
-    var arena_state = std.heap.ArenaAllocator.init(gpa);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    var threaded = std.Io.Threaded.init(gpa, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var store = try StoreFixture.init(std.testing.allocator);
+    defer store.deinit();
+    const io = store.io();
+    const arena = store.arena();
+    const dir_path = try store.path();
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_path = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
-
-    try tmp.dir.createDirPath(io, "0archive");
+    try store.tmp.dir.createDirPath(io, "0archive");
     const total = max_session_logs + 1;
     var i: usize = 0;
     while (i < total) : (i += 1) {
         const nested = i == 0;
         const name = if (nested) "0archive/1.jsonl" else try std.fmt.allocPrint(arena, "{d}.jsonl", .{i});
-        try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "log" });
+        try store.tmp.dir.writeFile(io, .{ .sub_path = name, .data = "log" });
     }
 
     pruneSessions(io, arena, dir_path);
@@ -845,20 +836,10 @@ test "a log in a subdirectory is pruned where it is, not by its bare name" {
     // alone taking it out along with the nested log, so the root names run from
     // `1` and the nested log is the only one past the limit. Seeded any other
     // way the assertion about it holds whether or not the two were told apart.
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "0archive/1.jsonl", .{}));
-    try tmp.dir.access(io, "1.jsonl", .{});
-    try tmp.dir.access(io, try std.fmt.allocPrint(arena, "{d}.jsonl", .{total - 1}), .{});
-    var left: usize = 0;
-    {
-        var dir = try std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true });
-        defer dir.close(io);
-        var walker = try dir.walk(arena);
-        defer walker.deinit();
-        while (try walker.next(io)) |entry| {
-            if (entry.kind == .file and logName(entry.basename) != null) left += 1;
-        }
-    }
-    try std.testing.expectEqual(max_session_logs, left);
+    try std.testing.expectError(error.FileNotFound, store.tmp.dir.access(io, "0archive/1.jsonl", .{}));
+    try store.tmp.dir.access(io, "1.jsonl", .{});
+    try store.tmp.dir.access(io, try std.fmt.allocPrint(arena, "{d}.jsonl", .{total - 1}), .{});
+    try std.testing.expectEqual(max_session_logs, try countSessionLogs(io, arena, dir_path));
 }
 
 // A store that cannot be opened is a store that is not pruned, and nothing
@@ -866,58 +847,43 @@ test "a log in a subdirectory is pruned where it is, not by its bare name" {
 // monitor sees a live run and a directory that is quietly over its limit, and
 // every later run prunes nothing and says nothing. The reason is named instead.
 test "a store that cannot be opened is named, and deletes nothing" {
-    const gpa = std.testing.allocator;
-    var arena_state = std.heap.ArenaAllocator.init(gpa);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    var threaded = std.Io.Threaded.init(gpa, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var store = try StoreFixture.init(std.testing.allocator);
+    defer store.deinit();
+    const io = store.io();
+    const arena = store.arena();
 
     // A path nothing holds, under a directory that does exist, so the failure
     // is the store's and not a typo in the test's own temporary directory.
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_path = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
-    const missing = try std.fs.path.join(arena, &.{ dir_path, "not-a-store" });
+    const missing = try std.fs.path.join(arena, &.{ try store.path(), "not-a-store" });
 
     // The call the run makes. It returns rather than propagating, because a
     // store that cannot be pruned costs the run nothing but its disk; what
     // changed is that the run is told, so an operator watching the directory
     // fill knows to look.
     pruneSessions(io, arena, missing);
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "not-a-store", .{}));
+    try std.testing.expectError(error.FileNotFound, store.tmp.dir.access(io, "not-a-store", .{}));
 }
 
 // A run whose store cannot be created records nothing, and from outside a
 // monitor sees the same thing as a run whose log was turned off. Only the
 // first is a problem with the machine, so only the first is named.
 test "a store that cannot be created gives the run no log rather than a silent one" {
-    const gpa = std.testing.allocator;
-    var arena_state = std.heap.ArenaAllocator.init(gpa);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    var threaded = std.Io.Threaded.init(gpa, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_path = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+    var store = try StoreFixture.init(std.testing.allocator);
+    defer store.deinit();
+    const io = store.io();
+    const arena = store.arena();
 
     // A regular file where the store's directory should be. `createDirPath`
     // refuses it, and the run goes on with no log rather than a broken one.
     // The path is the one `open` is given: an absolute one, so nothing is
     // created outside this test's own temporary directory.
-    try tmp.dir.writeFile(io, .{ .sub_path = "blocked", .data = "not a directory" });
-    const store = try std.fmt.allocPrint(arena, "{s}{c}blocked{c}sessions", .{ dir_path, std.fs.path.sep, std.fs.path.sep });
+    try store.tmp.dir.writeFile(io, .{ .sub_path = "blocked", .data = "not a directory" });
+    const blocked = try std.fmt.allocPrint(arena, "{s}{c}blocked{c}sessions", .{ try store.path(), std.fs.path.sep, std.fs.path.sep });
 
-    try std.testing.expectEqual(@as(?Session, null), open(io, arena, store, "test/model"));
+    try std.testing.expectEqual(@as(?Session, null), open(io, arena, blocked, "test/model"));
     // Still not a directory: the refusal left nothing behind for the next run
     // to walk into.
-    const still_a_file = try tmp.dir.readFileAlloc(io, "blocked", arena, .limited(64));
+    const still_a_file = try store.tmp.dir.readFileAlloc(io, "blocked", arena, .limited(64));
     try std.testing.expectEqualStrings("not a directory", still_a_file);
 }
 

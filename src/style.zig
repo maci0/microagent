@@ -99,9 +99,9 @@ pub const Style = struct {
     /// end of the document and every key it does understand still applies.
     ///
     /// Only `key = value` is understood, quoted or bare, at the top level or
-    /// under `[style]`.
-    /// That is the whole config, so it does not need a TOML parser: the rest of
-    /// the format (numbers, arrays, dates, nested tables) has nowhere to go.
+    /// under `[style]`. That is the whole config, so it does not need a TOML
+    /// parser: the rest of the format (numbers, arrays, dates, nested tables)
+    /// has nowhere to go.
     ///
     /// A leading byte order mark is dropped before the first line is read. An
     /// editor that saves UTF-8 with one writes it ahead of the first key, and
