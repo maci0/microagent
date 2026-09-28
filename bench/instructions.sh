@@ -146,10 +146,21 @@ improved=0
 while IFS='|' read -r name filter units; do
 	[ -n "$name" ] || continue
 	value=$(measure "$filter") || exit 2
-	per=$(((value - baseline) / units))
+	# A row that retires fewer instructions than the binary that ran no test at
+	# all has measured less than process start, so the difference is noise
+	# rather than a count of work, and the column has no number to print for
+	# it. Dividing it anyway put a negative in a table of instructions per unit
+	# and, below, a ratio far outside the band that read as a large
+	# improvement. Such a row is reported as unmeasured and the band check has
+	# nothing to compare.
+	if [ "$value" -ge "$baseline" ]; then
+		per=$(((value - baseline) / units))
+	else
+		per=-
+	fi
 	printf '%-32s %14s %14s\n' "$name" "$value" "$per"
 
-	if [ "${1:-}" = --check ]; then
+	if [ "${1:-}" = --check ] && [ "$per" != - ]; then
 		want=$(awk -F'\t' -v n="$name" '$1 == n { print $2 }' "$root/bench/instructions.baseline" 2>/dev/null)
 		if [ -n "$want" ] && [ "$want" -gt 0 ]; then
 			# Compare in tenths so the ratio is an integer and the comparison

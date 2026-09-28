@@ -103,7 +103,16 @@ for agent in $agents; do
 		# writing nothing. Staging puts every file the run left behind into the
 		# index, and the diff against the base commit is then the whole change.
 		# .gitignore is honoured, so build products the run left are not counted.
-		lines=$(cd "$work" && git add -A && git diff --cached --numstat | awk '{a+=$1; d+=$2} END {printf "+%d/-%d", a, d}')
+		#
+		# A binary file gets a `-` in each of the first two numstat columns,
+		# because it has no lines to count. Summing those as numbers is awk
+		# reading an unparseable field as zero, so a task whose answer is a new
+		# image or archive reported +0/-0: the same false zero the untracked
+		# file above caused, reached through a file git did see. They are
+		# counted as files instead, which is the number git can still answer.
+		lines=$(cd "$work" && git add -A && git diff --cached --numstat |
+			awk '$1 == "-" { b += 1; next } { a += $1; d += $2 }
+			    END { printf "+%d/-%d", a, d; if (b > 0) printf " (%d binary)", b }')
 		[ -z "$lines" ] && lines=+0/-0
 		# microagent prints cumulative usage per response; the last line is the run total.
 		tokens=$(grep -o '"total_tokens":[0-9]*' "$work/.out" 2>/dev/null | tail -1 | cut -d: -f2)

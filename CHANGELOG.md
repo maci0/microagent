@@ -128,6 +128,11 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- `bench/run.sh` counts a binary file a run added as a file rather than as zero
+  lines. `git diff --numstat` spells a binary file's two columns as `-`, and the
+  sum read each as a number worth zero, so a task whose answer is a new image or
+  archive reported `+0/-0` for it: the same false zero an untracked file used to
+  cause, reached through a file git did see. The row reads `+1/-0 (1 binary)`.
 - `microagent update` no longer installs a pre-release over a newer build. A tag
   with a `-rc1` suffix was not a version the ordering could read, so it ordered
   as equal to everything and past the guard that stops a downgrade: a build on

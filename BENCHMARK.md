@@ -205,6 +205,10 @@ tool, and the prompt says not to touch the test.
 | opencode | " | empty-mean | 22.3 s | n/a | +2/-0 | pass |
 | opencode | " | parse-bug | 42.4 s | n/a | +2/-2 | pass |
 
+The diff column is `git diff --numstat` over the staged tree. A binary file has no lines to
+count and git spells its two columns as `-`, so a run that added one reads `+0/-0 (1 binary)`
+rather than the `+0/-0` a run that changed nothing reads.
+
 All three harnesses solved 3/3, each with the minimal correct diff. microagent was fastest on every
 task on this machine, but the models differ (a stealth model behind opencode, an unspecified Kimi
 default, deepseek-v4-flash behind microagent), so wall time here compares *stacks*, not harness
