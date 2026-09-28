@@ -128,9 +128,13 @@ fn pruneSessions(io: Io, arena: std.mem.Allocator, session_dir: []const u8) void
         defer walker.deinit();
         while (walker.next(io) catch return) |entry| {
             if (entry.kind != .file) continue;
-            const name = entry.basename;
-            if (!isSessionLogName(name)) continue;
-            names.append(arena, arena.dupe(u8, name) catch return) catch return;
+            if (!isSessionLogName(entry.basename)) continue;
+            // What is kept is the path from the store's root, not the basename.
+            // The walker enters every subdirectory it meets, and a basename
+            // deleted through the root either removes nothing or removes a
+            // different file with the same name, while still counting toward
+            // the limit: the store then looks pruned and is not.
+            names.append(arena, arena.dupe(u8, entry.path) catch return) catch return;
         }
     }
     if (names.items.len <= max_session_logs) return;
@@ -483,4 +487,51 @@ fn countSessionLogs(io: Io, arena: std.mem.Allocator, session_dir: []const u8) !
         if (isSessionLogName(entry.basename)) n += 1;
     }
     return n;
+}
+
+// Pruning walks the store, so a file that only shares a basename with a log is
+// the case that decides whether it deletes a directory's contents by accident.
+// This lived beside a second copy of the store in main, attached to code the
+// run no longer calls; the live one has the check and had no test for it.
+test "a log in a subdirectory is pruned where it is, not by its bare name" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_path = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+
+    try tmp.dir.createDirPath(io, "0archive");
+    const total = max_session_logs + 1;
+    var i: usize = 0;
+    while (i < total) : (i += 1) {
+        const nested = i == 0;
+        const name = if (nested) "0archive/1.jsonl" else try std.fmt.allocPrint(arena, "{d}.jsonl", .{i + 1});
+        try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "log" });
+    }
+
+    pruneSessions(io, arena, dir_path);
+
+    // The oldest is the nested one, and it goes where it is: counted, deleted,
+    // and the root's own `1.jsonl` is still a name the store holds.
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "0archive/1.jsonl", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "1.jsonl", .{}));
+    try tmp.dir.access(io, try std.fmt.allocPrint(arena, "{d}.jsonl", .{total}), .{});
+    var left: usize = 0;
+    {
+        var dir = try std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true });
+        defer dir.close(io);
+        var walker = try dir.walk(arena);
+        defer walker.deinit();
+        while (try walker.next(io)) |entry| {
+            if (entry.kind == .file and isSessionLogName(entry.basename)) left += 1;
+        }
+    }
+    try std.testing.expectEqual(max_session_logs, left);
 }
