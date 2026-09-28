@@ -99,6 +99,17 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- The bidi controls and zero-width characters are written out in every value
+  quoted for the operator. They are well-formed UTF-8 carrying no C0 or C1
+  control, so the escaping every diagnostic already went through passed them,
+  and `deploy/‮gnp.exe` reached the terminal as `deploy/exe.png`: a reader who
+  copied what they were shown named a file the tool was never asked for. The
+  embeddings, overrides, isolates, the marks and the soft hyphen are now spelled
+  as the code points they are, in `chat.safeText` and in the tool module's
+  `terminalSafe` alike. U+200D is left alone, because it is how an emoji
+  sequence is spelled and escaping it would split one glyph into three. The
+  values themselves are unchanged: what reaches a model is the bytes it was
+  given.
 - A run that takes its key from `OPENAI_API_KEY` or `DEEPSEEK_API_KEY` and leaves
   the base url at the built-in `https://openrouter.ai/api/v1` says so on stderr
   before the first request. Every request carries the key in an `Authorization`

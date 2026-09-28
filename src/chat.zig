@@ -337,7 +337,7 @@ fn jsonNeedsEscape(c: u8) bool {
 
 /// The most bytes one UTF-8 character is made of, which bounds how far back
 /// from the end of a string the search for an unfinished character looks.
-const utf8_max_sequence_bytes = 4;
+pub const utf8_max_sequence_bytes = 4;
 
 /// The length of the UTF-8 sequence starting at `i`, or 0 where the bytes are
 /// not one: a bad lead byte, a truncated tail, or an overlong or surrogate
@@ -375,6 +375,50 @@ pub fn partialTailLen(s: []const u8) usize {
         }
     }
     return 0;
+}
+
+/// The code points that change what a terminal shows without contributing a
+/// glyph of their own: the bidi controls that reorder or mirror everything
+/// around them, the zero-width characters, and the soft hyphen. Each of them is
+/// well-formed UTF-8 and none of them is a C0 or C1 control, so the byte tests
+/// every escaper here already has pass them through, and the result is a
+/// diagnostic that names a different thing than the one it quotes:
+/// `deploy/\u{202e}gnp.exe` reaches the screen as `deploy/exe.png`, so a reader
+/// who copies what they were shown types a name that is not the name the tool
+/// was asked for. Whether that is a name a filesystem allowed or a trick
+/// played on the reader is not this function's question; what belongs to it is
+/// that no byte reaches a terminal without being written out first.
+///
+/// U+200D is deliberately not in the set: it is the joiner an emoji sequence is
+/// built from, and escaping it splits `\u{1f469}\u{200d}\u{1f4bb}` into three
+/// glyphs where there was one. It has no display effect on its own, so it
+/// carries nothing that can be hidden behind it.
+pub fn isInvisibleFormat(cp: u21) bool {
+    return switch (cp) {
+        // SOFT HYPHEN, ZERO WIDTH SPACE, ZERO WIDTH NON-JOINER, LEFT-TO-RIGHT
+        // MARK, RIGHT-TO-LEFT MARK, ARABIC LETTER MARK.
+        0x00ad, 0x200b, 0x200c, 0x200e, 0x200f, 0x061c => true,
+        // LRE, RLE, PDF, LRO, RLO: the embeddings and overrides, which are how
+        // a file name is spelled backwards.
+        0x202a...0x202e => true,
+        // WORD JOINER, then the isolates LRI, RLI, FSI and PDI, then the
+        // deprecated format characters the Unicode standard withdrew.
+        0x2060, 0x2066...0x206f => true,
+        // ZERO WIDTH NO-BREAK SPACE, a byte order mark inside a value rather
+        // than ahead of it.
+        0xfeff => true,
+        else => false,
+    };
+}
+
+/// The `\uXXXX` spelling of a code point, six bytes. Longer than the `\xNN`
+/// escape of a control, and only a codepoint above ASCII needs it.
+fn appendCodepointEscape(out: *std.ArrayList(u8), arena: std.mem.Allocator, cp: u21) !void {
+    try out.append(arena, '\\');
+    try out.append(arena, 'u');
+    inline for (.{ 12, 8, 4, 0 }) |shift| {
+        try out.append(arena, hex_digits[@intCast((cp >> shift) & 0xf)]);
+    }
 }
 
 /// A JSON string, and nothing else. A number, a `number_string` or a container
@@ -511,9 +555,10 @@ pub fn stripBom(text: []const u8) []const u8 {
 
 /// Text from outside the process, as an operator reads it on one line: at most
 /// `max` bytes, every C0 control, DEL and C1 control written as `\xNN` so it
-/// cannot end the line or move the cursor, and every byte that is not part of a
-/// valid UTF-8 sequence written as U+FFFD so it does not reach the screen as
-/// mojibake.
+/// cannot end the line or move the cursor, every invisible and bidi control
+/// written as `\uXXXX` so it cannot reorder or hide what is around it, and
+/// every byte that is not part of a valid UTF-8 sequence written as U+FFFD so
+/// it does not reach the screen as mojibake.
 ///
 /// The C1 range is escaped as well as C0 because UTF-8 spells it `C2 80..9F`,
 /// which is above the `c < 0x20` test below, and a terminal acts on U+009B
@@ -587,6 +632,22 @@ pub fn safeText(arena: std.mem.Allocator, s: []const u8, max: usize) []const u8 
             i += len;
             continue;
         }
+        // The characters that reorder a line without a glyph of their own are
+        // well-formed text, so the byte tests above hand them on, and a
+        // diagnostic quoting one names a different thing than the value it
+        // quotes. They are written as the code point they are, which is what
+        // makes the difference visible: the reader sees the override that was
+        // there rather than the file name it reversed.
+        const cp = std.unicode.utf8Decode(s[i..][0..len]) catch {
+            i += len;
+            continue;
+        };
+        if (isInvisibleFormat(cp)) {
+            if (out.items.len + codepoint_escape_bytes > max) break;
+            appendCodepointEscape(&out, arena, cp) catch break;
+            i += len;
+            continue;
+        }
         if (out.items.len + len > max) break;
         out.appendSlice(arena, s[i .. i + len]) catch break;
         i += len;
@@ -594,8 +655,13 @@ pub fn safeText(arena: std.mem.Allocator, s: []const u8, max: usize) []const u8 
     return out.items;
 }
 
-/// The longest `safeText` can be for a byte of input: a C0 control becomes four
-/// bytes, which is more than any other escape it writes. A value a reader has
+/// How many bytes the `\uXXXX` escape of one code point is.
+pub const codepoint_escape_bytes: usize = 6;
+
+/// The longest `safeText` can be for a byte of input. A C0 control is one byte
+/// and becomes four. The shortest code point `isInvisibleFormat` names is two
+/// bytes and becomes six, which is three per input byte and so below the four a
+/// control costs. A value a reader has
 /// to be able to recognize in full (a path they will copy, a url they will
 /// paste) is escaped under a budget no escaping can overrun, and this is the
 /// multiplier that spells it. The quote budget the other callers pass is for a
@@ -618,10 +684,10 @@ pub fn safeTextAll(arena: std.mem.Allocator, s: []const u8) []const u8 {
 // possible, so the two are asserted against the same input rather than
 // separately.
 
-// What `safeTextAll` quoted, read back: a `\xNN` escape is the byte it names
-// and every other byte is the byte it was. The escaper never writes a bare
-// backslash, because `\` is printable ASCII and is copied rather than escaped,
-// so the two forms do not collide.
+// What `safeTextAll` quoted, read back: a `\xNN` escape is the byte it names, a
+// `\uXXXX` escape is the code point it names, and every other byte is the byte
+// it was. The escaper never writes a bare backslash, because `\` is printable
+// ASCII and is copied rather than escaped, so the two forms do not collide.
 fn unescapeSafeText(gpa: std.mem.Allocator, quoted: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
@@ -634,6 +700,17 @@ fn unescapeSafeText(gpa: std.mem.Allocator, quoted: []const u8) ![]u8 {
             i += 4;
             continue;
         }
+        if (quoted[i] == '\\' and i + 5 < quoted.len and quoted[i + 1] == 'u') {
+            var cp: u21 = 0;
+            for (quoted[i + 2 ..][0..4]) |d| {
+                cp = cp * 16 + (std.fmt.charToDigit(d, 16) catch return error.MalformedEscape);
+            }
+            var buf: [4]u8 = undefined;
+            const n = std.unicode.utf8Encode(cp, &buf) catch unreachable;
+            try out.appendSlice(gpa, buf[0..n]);
+            i += 6;
+            continue;
+        }
         try out.append(gpa, quoted[i]);
         i += 1;
     }
@@ -643,7 +720,9 @@ fn unescapeSafeText(gpa: std.mem.Allocator, quoted: []const u8) ![]u8 {
 // The value the escaper was given, written out the way its own documentation
 // says it reads: whole characters keep their bytes and a byte that begins none
 // is U+FFFD. A quoted value that decodes to this is one that dropped nothing
-// and invented nothing.
+// and invented nothing. An invisible or bidi character decodes back to the
+// code point it was written from, so it is the same reference for the two
+// escapers even though only one of them spells it as an escape.
 fn safeTextInputAsQuoted(gpa: std.mem.Allocator, raw: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
@@ -681,21 +760,26 @@ test "a value quoted whole is escaped whole, and nothing in it is a control" {
         "model-with-a-\u{1f600}-in-it",
         "\x00\x01\x02\x7f",
         "a back\\slash and an \x01 escape",
+        "deploy/\u{202e}gnp.exe",
+        "\u{200b}\u{200e}\u{202a}hidden\u{202c}\u{2066}isolate",
     };
     inline for (cases) |raw| {
         const quoted = safeTextAll(arena, raw);
         // Every character that reaches a terminal through this value is
-        // printable ASCII, a whole non-control character, or U+FFFD: the C0
-        // controls, DEL and the C1 range are all written as escapes, and a
-        // byte that is not text is U+FFFD. The C1 range is checked as
-        // characters rather than bytes, because UTF-8 spells it `C2 80..9F`
-        // and every one of those bytes passes a per-byte test.
+        // printable ASCII, a whole character that neither acts on the terminal
+        // nor reorders it, or U+FFFD: the C0 controls, DEL, the C1 range and
+        // the invisible and bidi characters are all written as escapes, and a
+        // byte that is not text is U+FFFD. The C1 range and the invisible
+        // characters are checked as characters rather than bytes, because UTF-8
+        // spells them `C2 80..9F` and `E2 80..8F` and every one of those bytes
+        // passes a per-byte test.
         var i: usize = 0;
         while (i < quoted.len) {
             const len = std.unicode.utf8ByteSequenceLength(quoted[i]) catch unreachable;
             const cp = std.unicode.utf8Decode(quoted[i..][0..len]) catch unreachable;
             const control = cp < 0x20 or cp == 0x7f or (cp >= 0x80 and cp <= 0x9f);
             try std.testing.expect(!control);
+            try std.testing.expect(!isInvisibleFormat(cp));
             i += len;
         }
         // Whole: the budget is four bytes per input byte and no escape is
@@ -832,6 +916,38 @@ test "a value quoted back is text the terminal can be shown" {
     try std.testing.expectEqualStrings("ls\\x9b31m caf\u{00a0}", safeText(arena, "ls\u{009b}31m caf\u{00a0}", 40));
 }
 
+// A name carrying a bidi override is well-formed UTF-8 and passes every byte
+// test the escaper had, so it reached the terminal as a different name than the
+// one the tool was asked for: `deploy/` followed by U+202E and `gnp.exe` reads
+// as `deploy/exe.png`. The override is written out as the code point it is, so
+// the reader sees it instead of the result of it.
+test "a value quoting a bidi override names the override, not the name it reverses" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    try std.testing.expectEqualStrings(
+        "deploy/\\u202egnp.exe",
+        safeTextAll(arena, "deploy/\u{202e}gnp.exe"),
+    );
+    // The embedding, isolate and zero-width characters are the same rule, and
+    // the soft hyphen and a mark inside a value are the two-byte spellings of
+    // it, which is the case the widening budget has to cover.
+    try std.testing.expectEqualStrings("\\u202a\\u2066", safeText(arena, "\u{202a}\u{2066}", 40));
+    try std.testing.expectEqualStrings("\\u00ad\\ufeff", safeText(arena, "\u{00ad}\u{feff}", 40));
+    // ZWJ is not one of them: it is how an emoji sequence is spelled, and
+    // escaping it would split one glyph into three.
+    try std.testing.expectEqualStrings("\u{1f469}\u{200d}\u{1f4bb}", safeText(arena, "\u{1f469}\u{200d}\u{1f4bb}", 40));
+    // The two-byte spellings cost six bytes each and the budget bounds what
+    // comes out rather than what went in, so a cut lands between the escapes
+    // and never inside one.
+    for (0.."\u{00ad}\u{00ad}\u{00ad}".len * safe_text_widening + 1) |max| {
+        const quoted = safeText(arena, "\u{00ad}\u{00ad}\u{00ad}", max);
+        try std.testing.expect(quoted.len <= max);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(quoted));
+    }
+}
+
 test "a leading byte order mark is not part of the value it precedes" {
     // An editor that saves UTF-8 with a BOM writes one ahead of the first byte
     // of the value, and it is invisible in that editor, so nothing on the way
@@ -902,6 +1018,10 @@ const safe_text_corpus = [_][]const u8{
     "\u{65e5}\u{8a00}\u{1f600}",
     "\u{2028}\u{2029}\u{fffd}",
     "a\\b\\x41",
+    "deploy/\u{202e}gnp.exe",
+    "\u{200b}\u{200c}\u{200e}\u{200f}\u{202a}\u{202e}\u{2066}\u{2069}\u{feff}",
+    "\u{200d}",
+    "\u{1f469}\u{200d}\u{1f4bb}",
     "\xc2",
     "\xc2\x9b",
     "\xc3",
@@ -951,6 +1071,19 @@ fn fuzzSafeText(_: void, smith: *std.testing.Smith) !void {
         if (c == 0xc2) {
             try std.testing.expect(i + 1 >= quoted.len or quoted[i + 1] > 0x9f);
             i += 1;
+        }
+        // The invisible and bidi characters are valid sequences too, and they
+        // are the ones that pass every byte test above: nothing a terminal acts
+        // on survives, and nothing that reorders the line around it either.
+        if (c == 0xe2) {
+            const len = std.unicode.utf8ByteSequenceLength(c) catch continue;
+            const end = @min(i + len, quoted.len);
+            const cp = std.unicode.utf8Decode(quoted[i..end]) catch {
+                i = end;
+                continue;
+            };
+            try std.testing.expect(!isInvisibleFormat(cp));
+            i = end - 1;
         }
     }
 

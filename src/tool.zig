@@ -561,16 +561,16 @@ fn toolCallLine(arena: std.mem.Allocator, buf: []u8, tool: chat.Tool, args: std.
 }
 
 /// Bytes a terminal acts on rather than prints: the C0 controls, DEL, the C1
-/// range, which UTF-8 spells as C2 80..9F, and every byte that is not part of a
-/// valid UTF-8 sequence. A tool argument is whatever the model decided to send,
-/// and the model decides that from files in the tree, so a repository can put
-/// an escape sequence on the operator's screen through the gutter line, and a
-/// provider can put a broken byte in an error body. A diagnostic note replaces
-/// each control with a `.`, one byte for one byte, so a two-byte C1 sequence
-/// becomes two dots; the model's own output on stdout is left alone, because
-/// that is the answer the run was asked for. An allocation that fails yields no
-/// text rather than the text unescaped, which is the input this exists to
-/// remove.
+/// range, which UTF-8 spells as C2 80..9F, the invisible and bidi characters,
+/// and every byte that is not part of a valid UTF-8 sequence. A tool argument
+/// is whatever the model decided to send, and the model decides that from files
+/// in the tree, so a repository can put an escape sequence on the operator's
+/// screen through the gutter line, and a provider can put a broken byte in an
+/// error body. A diagnostic note replaces each control with a `.`, one byte for
+/// one byte, so a two-byte C1 sequence becomes two dots; the model's own output
+/// on stdout is left alone, because that is the answer the run was asked for.
+/// An allocation that fails yields no text rather than the text unescaped,
+/// which is the input this exists to remove.
 ///
 /// A byte that is not text is shown as a dot rather than written through. The
 /// body is the provider's own bytes, so a lone `0xff`, a continuation byte with
@@ -582,6 +582,13 @@ fn toolCallLine(arena: std.mem.Allocator, buf: []u8, tool: chat.Tool, args: std.
 /// is what this function already shows for a byte it cannot render. A whole
 /// sequence is copied byte for byte, so the pass is a fixed point: what comes
 /// out has no control and no invalid byte left in it for a second pass to find.
+///
+/// The invisible and bidi characters are the third kind of byte a terminal
+/// acts on, and the only one no byte test can rule out: they are well-formed
+/// UTF-8 with no control in them, and a body carrying one reads as a different
+/// string than it is. `chat.isInvisibleFormat` is the set, and the bytes go the
+/// way a C1 control's do rather than being named, because this pass keeps the
+/// length the caller's assertions are written against.
 pub fn terminalSafe(arena: std.mem.Allocator, s: []const u8) []const u8 {
     const out = arena.alloc(u8, s.len) catch return s[0..0];
     var i: usize = 0;
@@ -605,6 +612,21 @@ pub fn terminalSafe(arena: std.mem.Allocator, s: []const u8) []const u8 {
         if (len == 2 and c == 0xc2 and s[i + 1] <= 0x9f) {
             out[i] = '.';
             out[i + 1] = '.';
+            i += len;
+            continue;
+        }
+        // The invisible and bidi characters are valid sequences that a byte
+        // test cannot rule out, and they reach a terminal as a different
+        // string than the one that was quoted: an error body naming
+        // `deploy/\u{202e}gnp.exe` reads as `deploy/exe.png`. A dot per byte is
+        // what this function already writes for a byte it cannot render, and
+        // one dot per byte is what keeps the fields lined up.
+        const cp = std.unicode.utf8Decode(s[i..][0..len]) catch {
+            i += len;
+            continue;
+        };
+        if (chat.isInvisibleFormat(cp)) {
+            @memset(out[i .. i + len], '.');
         }
         i += len;
     }
@@ -2455,6 +2477,15 @@ test "a tool argument cannot repaint the operator's terminal" {
         .{ .raw = "caf\u{00e9} \u{65e5}\u{8a00} \u{1f600}", .want = "caf\u{00e9} \u{65e5}\u{8a00} \u{1f600}" },
         // C2 A0 is U+00A0, which is text, where C2 9B is a control.
         .{ .raw = "\u{00a0}\u{009b}", .want = "\u{00a0}.." },
+        // A bidi override is well-formed text with no control in it, and the
+        // only way it changes what is on the screen: this name reads as
+        // `deploy/exe.png` on a terminal that takes the override. Dots, one
+        // per byte, because the pass is byte for byte.
+        .{ .raw = "deploy/\u{202e}gnp.exe", .want = "deploy/...gnp.exe" },
+        .{ .raw = "\u{200b}\u{200e}\u{2066}\u{feff}", .want = "............" },
+        // U+200D is how an emoji sequence is spelled, and escaping or dotting
+        // it would split one glyph into three.
+        .{ .raw = "\u{1f469}\u{200d}\u{1f4bb}", .want = "\u{1f469}\u{200d}\u{1f4bb}" },
     };
     inline for (cases) |c| try std.testing.expectEqualStrings(c.want, terminalSafe(arena, c.raw));
 }
@@ -2482,6 +2513,9 @@ const terminal_corpus = [_][]const u8{
     "\xc2\x9f",
     "\xc2\xa0",
     "caf\u{00e9} \u{65e5}\u{8a00} \u{1f600}",
+    "deploy/\u{202e}gnp.exe",
+    "\u{200b}\u{200c}\u{200e}\u{200f}\u{202a}\u{2066}\u{feff}\u{00ad}",
+    "\u{1f469}\u{200d}\u{1f4bb}",
     "\xe6\x97",
     "\xf0\x9f",
     "\xed\xa0\x80",
@@ -2519,11 +2553,13 @@ fn fuzzTerminalSafe(_: void, smith: *std.testing.Smith) !void {
             continue;
         }
         // Every byte above ASCII left in the result is the whole of a valid
-        // sequence, and none of it is a C1 control, so a body the provider
-        // spelled with a broken sequence has no mojibake on the screen.
+        // sequence, and none of it is a C1 control or an invisible one, so a
+        // body the provider spelled with a broken sequence has no mojibake on
+        // the screen and none of it can reorder what is around it.
         const len = chat.utf8SequenceLen(safe, i);
         try std.testing.expect(len > 0);
         try std.testing.expect(!(len == 2 and c == 0xc2 and safe[i + 1] <= 0x9f));
+        try std.testing.expect(!chat.isInvisibleFormat(std.unicode.utf8Decode(safe[i..][0..len]) catch unreachable));
         i += len;
     }
 
@@ -2545,8 +2581,11 @@ fn fuzzTerminalSafe(_: void, smith: *std.testing.Smith) !void {
             i += 1;
             continue;
         }
-        if (len == 2 and c == 0xc2 and text[i + 1] <= 0x9f) {
-            try std.testing.expectEqualStrings("..", safe[i..][0..2]);
+        const cp = std.unicode.utf8Decode(text[i..][0..len]) catch unreachable;
+        if ((len == 2 and c == 0xc2 and text[i + 1] <= 0x9f) or chat.isInvisibleFormat(cp)) {
+            var want: [chat.utf8_max_sequence_bytes]u8 = undefined;
+            @memset(want[0..len], '.');
+            try std.testing.expectEqualStrings(want[0..len], safe[i..][0..len]);
             i += len;
             continue;
         }
