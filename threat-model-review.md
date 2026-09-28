@@ -1,5 +1,6 @@
 You are a senior security engineer reviewing the threat model of this Zig agent
-binary. Your task is to review `THREAT_MODEL.md` and fix the defects listed below.
+binary. Your task is to review `THREAT_MODEL.md` and fix the defects listed
+below. This prompt file is the instrument, not the subject.
 
 ## Your goal is to
 
@@ -28,8 +29,8 @@ surface to model.
    must name a line that still exists and still holds the thing the row claims. The
    function named in parentheses after the line is the anchor: search for that name
    (`parseArgs`, `caBundlePath`, `envValue`, `runTool`, `parseRelease`) and correct the
-   line, because a line number moves on every edit and a function name does not. A few
-   rows name only a line, and a row that does so is repaired the same way: find the
+   line, because a line number moves on every edit and a function name does not. A row
+   that names only a line is repaired the same way: find the
    enclosing `fn` at that line and give the reference that name, so the next pass has an
    anchor that a line move cannot invalidate.
 
