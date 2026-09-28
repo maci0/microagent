@@ -282,6 +282,42 @@ Two things the run says beyond the score:
 The numbers a reader should compare against are published full-set (500-instance) results, not this
 sample; 13 instances carry roughly +/-13% standard error at this rate.
 
+## Head to head with opencode
+
+The same machine, the same 13 SWE-bench instances, the same model
+(`openrouter/deepseek/deepseek-v4-flash`, one OpenRouter key), the same 1200 s per-task timeout,
+harbor 0.23.0, `-n 4`. opencode runs through harbor's built-in adapter (installs node and the CLI
+into each task container); microagent runs through
+[integrations/harbor/microagent_agent.py](integrations/harbor/microagent_agent.py).
+
+| | microagent | opencode 1.18.31 |
+| --- | --- | --- |
+| SWE-bench Verified, 13 instances | 7/13 = **0.538** | 9/13 = **0.692** |
+| Terminal-Bench 2, same 5 tasks | 3/5 = **0.600** | 3/5 = **0.600** |
+| input tokens, SWE run | 4.46 M | 8.19 M |
+| output tokens, SWE run | 224.7 k | 54.7 k |
+| wall, SWE run | 18m07s | 30m25s |
+| wall, TB2 run | 5m10s | 23m26s |
+| exceptions | 0 | 1 (`AgentTimeoutError` on TB2) |
+
+What this does and does not say:
+
+- **The SWE-bench gap is two tasks and is not established.** Thirteen instances carry roughly +/-13%
+  standard error at this rate, so 0.538 against 0.692 is directional, not a result. The same 13
+  instances are also the only sample that exists here; a 50-instance run would be needed before
+  anyone should quote these numbers.
+- **microagent is the smaller engine, measurably.** About half the input tokens, 1.7x less wall time
+  on SWE-bench and 4.5x less on TB2 — most of the TB2 difference is opencode installing a node
+  runtime inside every task container before it can start. It also produced four times the output
+  tokens, because reasoning was on for that run; the reasoning-off run used 84 k output for the same
+  13 instances.
+- **Terminal-Bench 2 is level at 3/5**, and opencode's run lost one task to an agent timeout that
+  microagent's own `--budget` prevents by stopping deliberately.
+
+Neither harness was tuned for the other's benchmark. opencode ships repo-aware tooling and a much
+larger prompt; microagent ships six tools and a 933-token prompt. That trade is the whole point of
+the harness and it is visible in the token columns.
+
 ## Streaming profile## Streaming profile
 
 The harness's only real hot loop is the SSE reader: every token delta is parsed and printed. It was
