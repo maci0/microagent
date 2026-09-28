@@ -10,8 +10,9 @@
 # diffed afterwards: gauntlet reports "Passed" for a review that landed no diff
 # at all, so passes alone would flatter every agent. Set GAUNTLET_VERIFY to the
 # project's check (e.g. "zig build test") to record that too.
-# The external equivalents (SWE-bench Verified/Pro, Terminal-Bench 2) are not
-# wired up here; see BENCHMARK.md for why and what it would take.
+# The external equivalents (SWE-bench Verified, Terminal-Bench 2) are not driven
+# from here; they go through the harbor adapter, see integrations/harbor/README.md
+# and BENCHMARK.md.
 set -u
 
 root=$(cd "$(dirname "$0")/.." && pwd)

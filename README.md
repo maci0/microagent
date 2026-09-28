@@ -3,7 +3,7 @@
 A tiny coding agent in Zig, built to be driven by [gauntlet](https://github.com/maci0/gauntlet)
 loops. One binary, one loop, OpenAI-compatible APIs only.
 
-- **Small.** ~680 KB stripped (`-Doptimize=ReleaseSmall`), no runtime, no node, no python.
+- **Small.** ~690 KB stripped (`-Doptimize=ReleaseSmall`), no runtime, no node, no python.
 - **Fast.** ~2.5 ms to start, so a gauntlet loop spends its time in the model, not the harness.
 - **No features you did not ask for.** No subagents, no plugins, no MCP, no TUI. Streaming chat
   completions, seven tools, done.
@@ -12,7 +12,7 @@ loops. One binary, one loop, OpenAI-compatible APIs only.
 
 ```sh
 zig build -Doptimize=ReleaseFast      # zig-out/bin/microagent
-zig build -Doptimize=ReleaseSmall     # smallest binary, ~680 KB
+zig build -Doptimize=ReleaseSmall     # smallest binary, ~690 KB
 zig build test                        # unit tests
 ```
 
@@ -31,12 +31,33 @@ microagent -p "fix the failing test and run it"
 -m, --model <model>    model id        (env MICROAGENT_MODEL)
 -b, --base-url <url>   OpenAI-compatible base url (env MICROAGENT_BASE_URL)
 -k, --api-key <key>    api key         (env MICROAGENT_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY)
-    --max-turns <n>    tool-loop ceiling (default 100)
+    --max-turns <n>    tool-loop turn ceiling (default 100)
+    --ca-bundle <file>
+                       PEM file to trust instead of the system store
+                       (env MICROAGENT_CA_BUNDLE, SSL_CERT_FILE). Needed in
+                       images that ship no ca-certificates.
     --budget <seconds> stop starting turns after this long, then take one last
                        turn to make the edit (env MICROAGENT_BUDGET_SECONDS)
     --reasoning-effort <level>
                        reasoning.effort sent to the provider: minimal, low,
                        medium, high, or none to disable (env MICROAGENT_REASONING_EFFORT)
+-h, --help             the full usage text
+-V, --version          version
+
+reply style (env, or the TOML config at MICROAGENT_CONFIG, default
+~/.microagent/config.toml with the keys "caveman" and "ponytail"):
+  MICROAGENT_CAVEMAN     how terse the reply is: off, lite, full, ultra,
+                         wenyan-lite, wenyan-full, wenyan-ultra
+                         (default ultra)
+  MICROAGENT_PONYTAIL    how lazy the code is: off, lite, full, ultra
+                         (default full)
+
+subcommand:
+  update [--check] [--repo owner/name]
+                         replace this binary with the latest GitHub
+                         release after verifying its .sha256 sidecar
+                         (--check only reports; GITHUB_TOKEN lifts the
+                         API rate limit)
 ```
 
 The prompt may also be the last bare argument. That matters for gauntlet: a custom-agent
@@ -78,9 +99,9 @@ parser.
   error handling that prevents data loss, security, accessibility, or anything the task asks for.
 
 The file is `MICROAGENT_CONFIG`, else `~/.microagent/config.toml`; a missing or unreadable file just
-means the defaults. `MICROAGENT_CAVEMAN` and `MICROAGENT_PONYTAIL` set a level without touching the
-file and win over it, and an unrecognized level is reported on stderr with that key's default kept.
-With
+means the defaults. `MICROAGENT_CAVEMAN` and `MICROAGENT_PONYTAIL` set a level for one run without
+touching the file and win over it, since naming a level in the environment is the more explicit
+statement. A level that is not recognized is reported on stderr with that key's default kept. With
 `caveman = "off"` and `ponytail = "off"`, the system prompt is exactly the one the harness sent
 before styles existed.
 

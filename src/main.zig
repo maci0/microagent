@@ -1043,8 +1043,8 @@ fn toolSearch(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 
 }
 
 /// Structural search/rewrite through ast-grep. `rewrite` set means the change
-/// is applied to every match (`-U`), so the next turn reads the result back
-/// rather than trusting the tool's summary.
+/// is applied to every match (`--update-all`), so the next turn reads the
+/// result back rather than trusting the tool's summary.
 fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     const pattern = str(args.get("pattern")) orelse return std.fmt.allocPrint(arena, "error: missing pattern", .{});
     const lang = str(args.get("lang")) orelse return std.fmt.allocPrint(arena, "error: missing lang", .{});

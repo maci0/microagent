@@ -3,9 +3,9 @@
 //! Two independent knobs, both a level the task asked for and both a prompt
 //! fragment rather than a code path:
 //!
-//! - `caveman` compresses the prose the agent writes back. The levels are the
-//!   plugin's levels (`lite`, `full`, `ultra`, the three wenyan variants), so a
-//!   run costs fewer output tokens without losing a command or a path.
+//! - `caveman` compresses the prose the agent writes back. `lite`, `full`,
+//!   `ultra` and the three wenyan variants trade words for output tokens
+//!   without losing a command or a path.
 //! - `ponytail` biases what the agent builds: reuse before new code, the
 //!   standard library before a dependency, the smallest diff that fixes the
 //!   root cause.
@@ -107,6 +107,19 @@ pub const Style = struct {
         return std.mem.concat(allocator, u8, parts[0..n]);
     }
 
+    /// Apply a run's environment over what the document already set. The env
+    /// vars are the more explicit statement, so they win over a file on disk;
+    /// a var naming no level is ignored and leaves the document's level in
+    /// force, the same way a bad key in the document keeps its default.
+    pub fn applyEnv(self: *Style, caveman: ?[]const u8, ponytail: ?[]const u8) void {
+        if (caveman) |v| {
+            if (parseCaveman(v)) |level| self.caveman = level;
+        }
+        if (ponytail) |v| {
+            if (parsePonytail(v)) |level| self.ponytail = level;
+        }
+    }
+
     /// Read the levels out of a TOML document. A missing key keeps the
     /// default, and an unrecognized level keeps the default too: the first
     /// offending key is returned so the caller can say so on stderr rather
@@ -161,8 +174,8 @@ fn unquote(raw: []const u8) []const u8 {
     return raw[1..end];
 }
 
-/// Case- and whitespace-insensitive, with the plugin's `wenyan` shorthand for
-/// the full classical level.
+/// Case- and whitespace-insensitive, with a bare `wenyan` shorthand for
+/// `wenyan-full`.
 pub fn parseCaveman(value: []const u8) ?CavemanLevel {
     const v = std.mem.trim(u8, value, " \t\r\n");
     if (std.ascii.eqlIgnoreCase(v, "off")) return .off;
@@ -322,6 +335,28 @@ test "the config reads either root or [style] keys, and nothing else" {
 
     // An empty value is a value the levels do not have.
     try std.testing.expectEqualStrings("caveman", style.applyToml("caveman =\n").?);
+}
+
+test "the environment overrides the config file, and a bad var changes nothing" {
+    var style: Style = .{};
+    try std.testing.expect(style.applyToml("caveman = \"off\"\nponytail = \"lite\"\n") == null);
+
+    // A var naming a level is the run's explicit statement, so it beats the file.
+    style.applyEnv("ultra", "off");
+    try std.testing.expectEqual(CavemanLevel.ultra, style.caveman);
+    try std.testing.expectEqual(PonytailLevel.off, style.ponytail);
+
+    // A var naming no level leaves the file's level alone rather than
+    // resetting it to the built-in default.
+    style.applyEnv("brief", null);
+    try std.testing.expectEqual(CavemanLevel.ultra, style.caveman);
+    try std.testing.expectEqual(PonytailLevel.off, style.ponytail);
+
+    // With no file at all, the vars are the only statement there is.
+    var bare: Style = .{};
+    bare.applyEnv("wenyan", "ultra");
+    try std.testing.expectEqual(CavemanLevel.wenyan_full, bare.caveman);
+    try std.testing.expectEqual(PonytailLevel.ultra, bare.ponytail);
 }
 
 test "the wenyan levels ask for classical Chinese" {

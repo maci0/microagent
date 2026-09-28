@@ -4,9 +4,9 @@ microagent is a static binary with its own bash/file tools, so it runs *inside*
 the task container, where the task's files already are. This adapter uploads the
 binary, then runs one non-interactive turn with the task instruction.
 
-    harbor run --dataset terminal-bench@2.0 -t log-summary-date-ranges \\
-      --agent-import-path microagent_agent:Microagent \\
-      --model deepseek/deepseek-v4-flash
+    PYTHONPATH=integrations/harbor harbor run -d terminal-bench@2.0 \\
+      -i log-summary-date-ranges -a microagent_agent:Microagent \\
+      -m deepseek/deepseek-v4-flash
 
 The binary is found at $MICROAGENT_BINARY, else next to this file as
 `microagent-<arch>-linux-musl` (build with:

@@ -21,17 +21,17 @@ bare `ubuntu`, and distroless images alike.
 ## Run
 
 ```sh
-uv venv /tmp/harbor-venv && uv pip install --python /tmp/harbor-venv/bin/python harbor
+uv venv ~/harbor-venv && uv pip install --python ~/harbor-venv/bin/python harbor
 
 export MICROAGENT_API_KEY=...            # or OPENROUTER_API_KEY
 export MICROAGENT_REASONING_EFFORT=none  # see "Reasoning" below
 export MICROAGENT_BUDGET_SECONDS=1200    # stop below harbor's per-task timeout
 
-PYTHONPATH=$PWD/integrations/harbor /tmp/harbor-venv/bin/harbor run \
+PYTHONPATH=$PWD/integrations/harbor ~/harbor-venv/bin/harbor run \
   -d terminal-bench@2.0 -i log-summary-date-ranges \
   -a microagent_agent:Microagent \
   -m deepseek/deepseek-v4-flash \
-  --jobs-dir /tmp/harbor-jobs -n 2
+  --jobs-dir ~/harbor-jobs -n 2
 ```
 
 `swebench-verified@1.0`, `swebenchpro@1.0`, `aider-polyglot@1.0` and the rest of
@@ -44,6 +44,7 @@ Harbor's registry work the same way; only the dataset name changes.
 | `MICROAGENT_API_KEY` / `OPENROUTER_API_KEY` / `OPENAI_API_KEY` | provider key, passed to the container process only |
 | `MICROAGENT_BASE_URL` | OpenAI-compatible endpoint (default OpenRouter) |
 | `MICROAGENT_BUDGET_SECONDS` | wall-clock budget inside the container (default 600) |
+| `MICROAGENT_MAX_TURNS` | `--max-turns` passed to the binary (default 150, above the binary's own 100) |
 | `MICROAGENT_REASONING_EFFORT` | `none`/`low`/... — reasoning models otherwise spend the whole budget thinking |
 | `MICROAGENT_AGENT_TIMEOUT_SEC` | hard cap on the in-container process (default 1500) |
 | `MICROAGENT_BINARY` | path to the static binary, if not next to this file |

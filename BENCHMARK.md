@@ -12,12 +12,15 @@ below was produced by those scripts, not by hand.
 
 | build | binary |
 | --- | --- |
-| `-Doptimize=ReleaseSmall` (stripped) | 605 KB |
-| `-Doptimize=ReleaseFast` (stripped) | 1.08 MB |
-| `-Doptimize=ReleaseSafe` (stripped) | 1.34 MB |
+| `-Doptimize=ReleaseSmall` (stripped) | 692 KB |
+| `-Doptimize=ReleaseFast` (stripped) | 1.24 MB |
+| `-Doptimize=ReleaseSafe` (stripped) | 1.26 MB |
 | `Debug` (unstripped) | 31 MB |
 
-No runtime, no package manager, no node_modules, no python. One file, 713 lines.
+No runtime, no package manager, no node_modules, no python. Three files under `src/`
+(`main.zig` the agent loop, `style.zig` the reply styles, `update.zig` the self-update), 2 670 lines.
+The sizes in this table are `ls -l` on a fresh build of this tree; every other number below comes
+from the two bench scripts.
 
 ## Startup
 
@@ -48,7 +51,9 @@ First request of a run, from the usage line microagent prints:
 | --- | --- |
 | system prompt + 6 tool schemas + one-line user prompt | **933** |
 
-That is the entire fixed cost of the harness, measured rather than estimated. Competitor CLIs in
+That is the entire fixed cost of the harness, measured rather than estimated. It was measured before
+the `git` tool existed, so today's prompt is slightly larger; the point is the order of magnitude,
+not the last hundred tokens. Competitor CLIs in
 one-shot mode did not report a comparable number on this machine, so none is claimed for them.
 
 ## One trivial request
@@ -182,15 +187,11 @@ not a controlled experiment.
 
 ### Not measured
 
-- **SWE-bench Verified / SWE-bench Pro** — driven by Strands SSA in the local `benchmark-harnesses`
-  checkout, and SSA *is* the agent (a Python loop with its own tool calling). A CLI harness cannot be
-  substituted for it; these datasets would need a microagent-specific runner.
-- **Terminal-Bench 2** — harbor takes an agent as `--agent-import-path`, i.e. a Python adapter class,
-  so microagent is pluggable in principle with one adapter that shells out to `microagent {prompt}`
-  inside the task container. Not built here: it needs the `terminal-bench@2.0` dataset, per-task
-  docker images (`TB2_ECR_MAP`) and a large image pull that is not cached locally.
 - **DSH's own `benchmarks/`** (terminal-io, session-open, active-stream-reconnect, ...) measure that
   harness's internals, not a coding agent's usefulness.
+- **SWE-bench Pro** — only the Verified stride sample above was run here.
+- **A full SWE-bench Verified set** — the 13 instances below are a sample; see "What a full run would
+  take".
 
 ## Terminal-Bench 2
 
@@ -336,8 +337,8 @@ What this does and does not say:
   microagent's own `--budget` prevents by stopping deliberately.
 
 Neither harness was tuned for the other's benchmark. opencode ships repo-aware tooling and a much
-larger prompt; microagent ships seven tools and a 933-token prompt. That trade is the whole point of
-the harness and it is visible in the token columns.
+larger prompt; microagent ships seven tools and a prompt in the same hundreds-of-tokens range. That
+trade is the whole point of the harness and it is visible in the token columns.
 
 ## Prompt cache reuse
 
