@@ -6,6 +6,7 @@
 set -u
 
 root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bench/monotonic.sh"
 agents=${*:-microagent claude gemini codex crush grok kimi opencode cursor-agent clanker dsh}
 prompt="Reply with exactly: pong"
 
@@ -19,10 +20,10 @@ for agent in $agents; do
 	[ -z "$startup" ] && startup=-
 
 	work=$(mktemp -d)
-	start=$(date +%s.%N)
+	start=$(monotonic_ns)
 	( cd "$work" && timeout 180 "$agent" -p "$prompt" ) >"$work/out" 2>&1
-	end=$(date +%s.%N)
-	wall=$(echo "$end $start" | awk '{printf "%.1f", $1-$2}')
+	end=$(monotonic_ns)
+	wall=$(echo "$end $start" | awk '{printf "%.1f", ($1-$2)/1000000000}')
 	# Only microagent prints a machine-readable cumulative total.
 	tokens=$(grep -o '"total_tokens":[0-9]*' "$work/out" 2>/dev/null | tail -1 | cut -d: -f2)
 	[ -z "$tokens" ] && tokens=-

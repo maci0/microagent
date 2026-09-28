@@ -5,7 +5,7 @@
 #   bench/gauntlet.sh [agent ...]        default: microagent
 #
 # Measures outcome, not plumbing: reviews passed, files changed, tokens gauntlet
-# read from the agent, wall time, and whether the patched tree still passes the
+# read from the agent, elapsed time, and whether the patched tree still passes the
 # project's own check. Each agent gets a pristine clone, and the working tree is
 # diffed afterwards: gauntlet reports "Passed" for a review that landed no diff
 # at all, so passes alone would flatter every agent. Set GAUNTLET_VERIFY to the
@@ -16,6 +16,7 @@
 set -u
 
 root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bench/monotonic.sh"
 source_repo="${GAUNTLET_REPO:-$root}"
 reviews="${GAUNTLET_REVIEWS:-quick}"
 max_reviews="${GAUNTLET_MAX_REVIEWS:-3}"
@@ -35,11 +36,12 @@ for agent in $agents; do
 	git clone -q --no-hardlinks "$source_repo" "$dir" || exit 1
 	( cd "$dir" && git checkout -q "$(git -C "$source_repo" rev-parse HEAD)" )
 
-	start=$(date +%s)
+	start=$(monotonic_ns)
 	( cd "$dir" && gauntlet -a "$agent" -r "$reviews" --max-reviews "$max_reviews" --once \
 		-C "$dir" -t "$timeout_per_review" -y --no-color ) >"$dir/.gauntlet.log" 2>&1
 	rc=$?
-	end=$(date +%s)
+	end=$(monotonic_ns)
+	elapsed=$(( (end - start + 500000000) / 1000000000 ))
 
 	passed=$(awk '/^  Passed:/{print $2}' "$dir/.gauntlet.log" | tail -1)
 	failed=$(awk '/^  Failed:/{print $2}' "$dir/.gauntlet.log" | tail -1)
@@ -56,8 +58,8 @@ for agent in $agents; do
 		if ( cd "$dir" && sh -c "$verify_cmd" ) >"$dir/.verify.log" 2>&1; then verify=ok; else verify=FAILED; fi
 	fi
 
-	printf '%-40s %6s %6s %7s %8s %8s %8s  %s\n' "$agent" "$passed" "$failed" "$changed" "$((end - start))" "$tokens" "$verify" "$rc"
+	printf '%-40s %6s %6s %7s %8s %8s %8s  %s\n' "$agent" "$passed" "$failed" "$changed" "$elapsed" "$tokens" "$verify" "$rc"
 	printf '{"agent":"%s","passed":%s,"failed":%s,"changed_files":%s,"wall_s":%s,"tokens":%s,"verify":"%s","rc":%s}\n' \
-		"$agent" "$passed" "$failed" "$changed" "$((end - start))" "$( [ "$tokens" = - ] && echo null || echo "$tokens" )" "$verify" "$rc" \
+		"$agent" "$passed" "$failed" "$changed" "$elapsed" "$( [ "$tokens" = - ] && echo null || echo "$tokens" )" "$verify" "$rc" \
 		>>"$root/bench/gauntlet-results.jsonl"
 done

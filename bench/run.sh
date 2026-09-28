@@ -1,6 +1,8 @@
 #!/bin/sh
 # Harness benchmark: run the same tasks through different agent CLIs and report
-# wall time, token cost and whether the task's own check passes.
+# elapsed time, token cost and whether the task's own check passes. Elapsed time
+# is monotonic (bench/monotonic.sh), so an NTP step cannot make a run's cost
+# negative.
 #
 #   bench/run.sh [agent ...]        default: microagent
 #   bench/run.sh microagent kimi
@@ -11,6 +13,7 @@
 set -u
 
 root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bench/monotonic.sh"
 tasks_dir="$root/bench/tasks"
 work_root="${BENCH_WORK:-/tmp/microagent-bench}"
 results="$root/bench/results.jsonl"
@@ -44,11 +47,11 @@ for agent in $agents; do
 		( cd "$work" && git init -q && git add -A && git -c user.email=b@b -c user.name=b commit -qm base ) >/dev/null 2>&1
 
 		prompt=$(cat "$task_dir/prompt.txt")
-		start=$(date +%s.%N)
+		start=$(monotonic_ns)
 		( cd "$work" && PROMPT="$prompt" timeout "$timeout_s" sh -c "$(argv_for "$agent")" ) >"$work/.out" 2>"$work/.err"
 		rc=$?
-		end=$(date +%s.%N)
-		wall=$(echo "$end $start" | awk '{printf "%.1f", $1-$2}')
+		end=$(monotonic_ns)
+		wall=$(echo "$end $start" | awk '{printf "%.1f", ($1-$2)/1000000000}')
 
 		lines=$(cd "$work" && git diff --numstat | awk '{a+=$1; d+=$2} END {printf "+%d/-%d", a, d}')
 		[ -z "$lines" ] && lines=+0/-0

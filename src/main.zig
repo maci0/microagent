@@ -65,9 +65,10 @@ const Options = struct {
     /// in a gauntlet loop with a per-review timeout that is the difference
     /// between finishing a review and being killed at the ceiling.
     reasoning_effort: ?[]const u8 = null,
-    /// Stop starting turns once this much wall time has passed, so a run ends
-    /// deliberately inside a caller's per-review timeout instead of being
-    /// killed in the middle of one.
+    /// Stop starting turns once this much time has passed on the monotonic
+    /// clock, so a run ends deliberately inside a caller's per-review timeout
+    /// instead of being killed in the middle of one. A clock step inside the
+    /// run does not consume budget.
     budget_s: ?u64 = null,
     /// PEM file to trust instead of scanning the system store. Set by
     /// --ca-bundle, MICROAGENT_CA_BUNDLE or SSL_CERT_FILE.

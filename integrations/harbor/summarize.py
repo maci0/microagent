@@ -10,16 +10,33 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
+
+
+def instant(value: str) -> datetime:
+    """Parse a harbor timestamp into an aware UTC datetime.
+
+    harbor writes UTC, so a timestamp with no offset is read as UTC and not as
+    the reader's local time: the same file has to mean the same thing on every
+    machine that summarizes it. Both fields then subtract cleanly, where one
+    aware and one naive value would raise TypeError.
+    """
+    text = value.strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    stamp = datetime.fromisoformat(text)
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp.astimezone(timezone.utc)
 
 
 def seconds_between(started: str | None, finished: str | None) -> str:
     if not started or not finished:
         return "-"
-    from datetime import datetime
     try:
-        a = datetime.fromisoformat(started.replace("Z", "+00:00"))
-        b = datetime.fromisoformat(finished.replace("Z", "+00:00"))
+        a = instant(started)
+        b = instant(finished)
     except ValueError:
         return "-"
     return f"{(b - a).total_seconds():.0f}s"

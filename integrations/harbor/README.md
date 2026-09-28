@@ -43,7 +43,7 @@ Harbor's registry work the same way; only the dataset name changes.
 | --- | --- |
 | `MICROAGENT_API_KEY` / `OPENROUTER_API_KEY` / `OPENAI_API_KEY` | provider key, passed to the container process only |
 | `MICROAGENT_BASE_URL` | OpenAI-compatible endpoint (default OpenRouter) |
-| `MICROAGENT_BUDGET_SECONDS` | wall-clock budget inside the container (default 600) |
+| `MICROAGENT_BUDGET_SECONDS` | elapsed-time budget inside the container, read from the monotonic clock (default 600) |
 | `MICROAGENT_MAX_TURNS` | `--max-turns` passed to the binary (default 150, above the binary's own 100) |
 | `MICROAGENT_REASONING_EFFORT` | `none`/`low`/... — reasoning models otherwise spend the whole budget thinking |
 | `MICROAGENT_AGENT_TIMEOUT_SEC` | hard cap on the in-container process (default 1500) |
