@@ -26,6 +26,8 @@ const conversation_soft_limit = 400 * 1024;
 const max_turns_default = 100;
 /// Parallel tool calls accepted from one response; higher indices are dropped.
 const max_tool_calls = 64;
+/// The reply-style config is a handful of keys; a bigger file is not one.
+const max_config_bytes: usize = 64 * 1024;
 
 const system_prompt =
     "You are microagent, a coding agent working on the repository in the current directory.\n" ++
@@ -313,23 +315,59 @@ fn readSecret(init: std.process.Init, name: []const u8) ?[]const u8 {
 /// nothing: the levels that were understood still apply.
 fn loadStyle(io: Io, init: std.process.Init, arena: std.mem.Allocator) style_mod.Style {
     var style: style_mod.Style = .{};
-    if (init.environ_map.get("MICROAGENT_CAVEMAN")) |v| {
-        if (style_mod.parseCaveman(v)) |level| style.caveman = level;
+    const path = styleConfigPath(init, arena);
+    const text: ?[]const u8 = if (path) |p|
+        std.Io.Dir.cwd().readFileAlloc(io, p, arena, .limited(max_config_bytes)) catch null
+    else
+        null;
+    if (resolveStyle(&style, text, init.environ_map.get("MICROAGENT_CAVEMAN"), init.environ_map.get("MICROAGENT_PONYTAIL"))) |unknown| {
+        if (unknown.from_config)
+            net.note(io, arena, "microagent: config {s}: '{s}' is not a level; keeping the default\n", .{ path.?, unknown.key })
+        else
+            net.note(io, arena, "microagent: {s} is not a level; keeping the default\n", .{unknown.key});
     }
-    if (init.environ_map.get("MICROAGENT_PONYTAIL")) |v| {
-        if (style_mod.parsePonytail(v)) |level| style.ponytail = level;
-    }
-
-    const path = init.environ_map.get("MICROAGENT_CONFIG") orelse blk: {
-        const home = init.environ_map.get("HOME") orelse return style;
-        break :blk std.fmt.allocPrint(arena, "{s}/.microagent/config.toml", .{home}) catch return style;
-    };
-    if (path.len == 0) return style;
-    const abs = std.fs.path.resolve(arena, &.{path}) catch path;
-    const text = std.Io.Dir.cwd().readFileAlloc(io, abs, arena, .limited(64 * 1024)) catch return style;
-    if (style.applyToml(text)) |key|
-        net.note(io, arena, "microagent: config {s}: '{s}' is not a level; keeping the default\n", .{ path, key });
     return style;
+}
+
+/// Where the style config is read from. An empty MICROAGENT_CONFIG turns the
+/// file off, as does a home that is not there.
+fn styleConfigPath(init: std.process.Init, arena: std.mem.Allocator) ?[]const u8 {
+    if (init.environ_map.get("MICROAGENT_CONFIG")) |path| {
+        if (path.len == 0) return null;
+        return std.fs.path.resolve(arena, &.{path}) catch path;
+    }
+    const home = init.environ_map.get("HOME") orelse return null;
+    const path = std.fmt.allocPrint(arena, "{s}/.microagent/config.toml", .{home}) catch return null;
+    return std.fs.path.resolve(arena, &.{path}) catch path;
+}
+
+/// A level named by a key or a variable that the parser does not have, so the
+/// caller can say so on stderr and keep what it understood.
+const UnknownLevel = struct {
+    key: []const u8,
+    /// The value came from the config file, so the message can name the file.
+    from_config: bool,
+};
+
+/// The levels, in the order the doc comment names: the config file, then the
+/// environment overrides, over the built-in defaults. The first value that is
+/// not a level is returned and the levels understood so far stand.
+fn resolveStyle(
+    style: *style_mod.Style,
+    config: ?[]const u8,
+    caveman_env: ?[]const u8,
+    ponytail_env: ?[]const u8,
+) ?UnknownLevel {
+    if (config) |text| {
+        if (style.applyToml(text)) |key| return .{ .key = key, .from_config = true };
+    }
+    if (caveman_env) |v| {
+        if (style_mod.parseCaveman(v)) |level| style.caveman = level else return .{ .key = "MICROAGENT_CAVEMAN", .from_config = false };
+    }
+    if (ponytail_env) |v| {
+        if (style_mod.parsePonytail(v)) |level| style.ponytail = level else return .{ .key = "MICROAGENT_PONYTAIL", .from_config = false };
+    }
+    return null;
 }
 
 /// The agent loop. Returns the number of chat completions made.
@@ -1554,4 +1592,27 @@ test "a tool call index past the cap is dropped, not allocated" {
     const payload = "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":4000000000,\"function\":{\"name\":\"bash\"}}]}}]}";
     try applyFrame(arena, arena, payload, &result, &calls, &out_buf);
     try std.testing.expectEqual(@as(usize, 0), calls.items.len);
+}
+
+test "the env levels override the config file's, and a bad one is named" {
+    var style: style_mod.Style = .{};
+    try std.testing.expect(resolveStyle(&style, "caveman = \"off\"\nponytail = \"lite\"\n", "wenyan-ultra", "ultra") == null);
+    try std.testing.expectEqual(style_mod.CavemanLevel.wenyan_ultra, style.caveman);
+    try std.testing.expectEqual(style_mod.PonytailLevel.ultra, style.ponytail);
+
+    // The file still decides the knob the environment says nothing about.
+    try std.testing.expect(resolveStyle(&style, "caveman = \"lite\"\n", null, null) == null);
+    try std.testing.expectEqual(style_mod.CavemanLevel.lite, style.caveman);
+
+    // A value that is not a level is reported, and the level that would have
+    // been replaced stands, whichever source it came from.
+    const bad_env = resolveStyle(&style, null, "brief", null).?;
+    try std.testing.expectEqualStrings("MICROAGENT_CAVEMAN", bad_env.key);
+    try std.testing.expect(!bad_env.from_config);
+    try std.testing.expectEqual(style_mod.CavemanLevel.lite, style.caveman);
+
+    const bad_file = resolveStyle(&style, "ponytail = \"lazy\"\n", "lite", null).?;
+    try std.testing.expectEqualStrings("ponytail", bad_file.key);
+    try std.testing.expect(bad_file.from_config);
+    try std.testing.expectEqual(style_mod.PonytailLevel.ultra, style.ponytail);
 }

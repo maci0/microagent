@@ -79,7 +79,8 @@ parser.
 
 The file is `MICROAGENT_CONFIG`, else `~/.microagent/config.toml`; a missing or unreadable file just
 means the defaults. `MICROAGENT_CAVEMAN` and `MICROAGENT_PONYTAIL` set a level without touching the
-file, and an unrecognized level is reported on stderr with that key's default kept. With
+file and win over it, and an unrecognized level is reported on stderr with that key's default kept.
+With
 `caveman = "off"` and `ponytail = "off"`, the system prompt is exactly the one the harness sent
 before styles existed.
 
