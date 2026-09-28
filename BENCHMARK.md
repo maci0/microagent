@@ -47,6 +47,31 @@ A gauntlet loop starts an agent once per review, so this is per-review overhead.
 matters for the tight loops people actually run (`--retries`, short timeouts, hundreds of reviews),
 not for one review.
 
+## Un-cacheable request bytes
+
+Prompt caching keys on the exact byte prefix of a request, so a turn's body has
+to be the previous turn's body plus the new messages. That only holds while
+nothing constant sits *behind* the growing array.
+
+The tool schemas used to be written after `messages`. They are 3,348 bytes for
+nine tools, and behind the conversation they fell outside the cacheable prefix
+on every turn of every run, so the provider re-read them each time:
+
+| | un-cacheable tail per turn |
+| --- | --- |
+| tool schemas written after `messages` | 3,431 bytes (~857 tokens) |
+| written before, as now | **2 bytes** |
+
+Three kilobytes and change per turn, for the whole conversation. Over a
+100-turn review that is 0.34 MB of prefill the provider was being asked to do
+again for no reason, and it was invisible to every counter in this file, because
+`cached_tokens` counts what was reused and never says what was not.
+
+JSON member order is not significant, so the constant fields go first and
+`messages` ends the body. Two tests hold it there: consecutive bodies must share
+a prefix of header-plus-all-messages-so-far, and the schema must appear before
+the conversation.
+
 ## Harness prompt overhead
 
 First request of a run, from the usage line microagent prints:
