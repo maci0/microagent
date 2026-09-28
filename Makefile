@@ -15,7 +15,7 @@ BIN := zig-out/bin/microagent
 export LC_ALL := C
 export TZ := UTC
 
-.PHONY: default help preflight version build small musl test test-one watch fmt fmt-check fmt-python lint lint-versions lint-lock zig-version required-zig-version release-targets check-targets check-assets check-changelog check-unreleased check-release check-reproducible lint-shell lint-python lint-yaml check bench gauntlet instructions overhead install release-assets checksums clean
+.PHONY: default help preflight version build small musl test test-sanitize test-one watch fmt fmt-check fmt-python lint lint-versions lint-lock zig-version required-zig-version release-targets check-targets check-assets check-changelog check-unreleased check-release check-reproducible lint-shell lint-python lint-yaml check bench gauntlet instructions overhead install release-assets checksums clean
 
 # The targets `microagent update` asks for, in the names release.yml publishes.
 # ci.yml rehearses the same list on every push and release.yml publishes it, so
@@ -90,6 +90,7 @@ help:
 	  'musl                  static musl binary for integrations/harbor, for this host ($(MUSL_ARCH))' \
 	  'version               the version build.zig.zon declares' \
 	  'test                  the whole unit test suite' \
+	  'test-sanitize         the same suite under the undefined-behavior sanitizer' \
 	  'test-one FILTER=...   only tests whose name contains FILTER' \
 	  'watch [FILTER=...]    rerun the suite on every source change, until Ctrl-C' \
 	  'preflight             name every tool check and lint need that is not on PATH' \
@@ -171,6 +172,15 @@ musl:
 
 test:
 	$(ZIG) build test --summary all
+
+# The same tests, compiled with the undefined-behavior sanitizer. The suite
+# passing tells a reader the assertions hold, not that no load, store or
+# integer operation inside them is out of its bounds or overflows: those are
+# silent in a ReleaseFast build and are what the release assets carry. This is
+# a second run of the same tests rather than a second set, so a failure names
+# the test the plain run already knows.
+test-sanitize:
+	$(ZIG) build test-sanitize --summary all
 
 # The Zig sources the test names are read out of, for `test-one`, and the ones
 # `fmt` and `fmt-check` read. Taken from git for the reason lint-shell names: a
@@ -381,6 +391,7 @@ check:
 	$(MAKE) fmt-check
 	$(MAKE) lint
 	$(ZIG) build test --summary all
+	$(ZIG) build test-sanitize --summary all
 	$(ZIG) build -Doptimize=ReleaseSmall
 	./$(BIN) --version >/dev/null
 	./$(BIN) update --help >/dev/null
@@ -577,6 +588,15 @@ check-release:
 # consumer's machine. TAG is the tag the assets were built under, empty for the
 # rehearsal ci.yml builds on every push; the version each binary reports is the
 # one the tag names, or the one build.zig.zon declares when there is no tag.
+#
+# The version is read by running one asset, and the one it runs is the one this
+# host can execute, decided from uname rather than named. The four published
+# targets cover two architectures on two systems, so a hardcoded name is a name
+# a third of the hosts cannot run: an Apple silicon laptop running the Linux
+# asset gets an exec format error and reads the assets as broken when they are
+# the ones a tag will publish. Where no published target is this host, the
+# object-format loop still runs and the version read is reported as not taken
+# rather than passed.
 #
 # Each asset is read for its object format and its machine, not its name. The
 # magic alone is half the answer: every Mach-O 64 file starts with cffaedfe
@@ -776,10 +796,18 @@ check-reproducible:
 	  srcdir="$$REPRO_SRC"; \
 	  rm -rf "$$srcdir" "$(REPRO_DIR)"; \
 	  mkdir -p "$$srcdir"; \
-	  git ls-files | while IFS= read -r tracked; do \
-	    mkdir -p "$$srcdir/$$(dirname "$$tracked")" || exit 1; \
-	    cp "$$tracked" "$$srcdir/$$tracked" || exit 1; \
-	  done; \
+	  git ls-files | { \
+	    bad=0; \
+	    while IFS= read -r tracked; do \
+	      mkdir -p "$$srcdir/$$(dirname "$$tracked")" || { bad=1; break; }; \
+	      cp "$$tracked" "$$srcdir/$$tracked" || { bad=1; break; }; \
+	    done; \
+	    exit $$bad; \
+	  } || { \
+	    echo "a tracked file could not be copied into $$srcdir, so the build from another directory" >&2; \
+	    echo "would compare a partial source tree against this one and say nothing about build paths" >&2; \
+	    exit 1; \
+	  }; \
 	  (cd "$$srcdir" && SOURCE_DATE_EPOCH="$$1" LC_ALL="$$2" TZ="$$3" ZIG_GLOBAL_CACHE_DIR="$(REPRO_DIR)/global" $(ZIG) build \
 	    -Dtarget="$$4" -Doptimize=ReleaseSmall \
 	    --cache-dir "$(REPRO_DIR)/cache" -p "$(REPRO_DIR)/out2"); \

@@ -14,6 +14,14 @@ release, and `microagent update` moves you to it.
 
 ### Added
 
+- `make test-sanitize` runs the unit tests a second time with the
+  undefined-behavior sanitizer, and `make check` and both workflows run it. The
+  plain suite says the assertions hold, not that nothing inside them is out of
+  its bounds or overflows, and an overflow that survives to `ReleaseFast` is a
+  miscompiled release asset rather than a failed test. It is a module of its
+  own, so the instrumented code reaches the tests and not the published binary.
+  There is no address-sanitizer run: Zig's needs a libc for its interceptors and
+  nothing here links one.
 - `make check-unreleased` asks that the `## [Unreleased]` entry uses the five
   Keep a Changelog sections, each at most once, in the order CONTRIBUTING.md
   states. The check that reads a changelog section is `check-changelog`, and it
@@ -211,6 +219,12 @@ release, and `microagent update` moves you to it.
   cut first, on a codepoint boundary, and the notes are written into what is
   left, so a tool's result never exceeds the cap and no note is the thing the
   cap takes.
+- `make check-reproducible` built its third binary from a copy of the source it
+  made with `git ls-files | while ... done`, and a `cp` that failed partway
+  through ended the loop's subshell rather than the loop: a later iteration that
+  succeeded decided the exit status, so the build ran against a partial tree and
+  the digest it compared described something other than this checkout. The copy
+  now fails the check by name.
 - The bidi controls and zero-width characters are written out in every value
   quoted for the operator. They are well-formed UTF-8 carrying no C0 or C1
   control, so the escaping every diagnostic already went through passed them,

@@ -65,6 +65,7 @@ nothing about the interpreter the adapter is installed into.
 ```sh
 make check                  # the gate: zig fmt --check, the linters, the tests, an optimized build
 make test-one FILTER="..."  # one test, while you are mid-edit
+make test-sanitize          # the same suite under the undefined-behavior sanitizer
 make watch                  # the suite again on every source change, until Ctrl-C
 make preflight              # name any tool check and lint need that is not on PATH
 make lint                   # the pin checks, shellcheck, ruff and yamllint on their own
@@ -95,12 +96,18 @@ the baseline records, so the baseline is what is stale, and the run says which
 one it found rather than calling both a regression.
 
 `make check` is the whole gate: it is the same `make fmt-check`, the same
-`ruff check`, `ruff format --check` and `yamllint`, the same `zig build test`,
-the same `make lint-versions` and `make lint-lock`, and the same `ReleaseSmall`
+`ruff check`, `ruff format --check` and `yamllint`, the same `zig build test`
+and the same `zig build test-sanitize`, the same `make lint-versions` and
+`make lint-lock`, and the same `ReleaseSmall`
 build whose binary it then runs, that
 [.github/workflows/ci.yml](.github/workflows/ci.yml) runs, on the same Zig
 version (`make zig-version` is that first step, so a laptop on a different
-compiler is told rather than assumed). Two things it does not stand in for: the
+compiler is told rather than assumed). The second test run is the same tests
+compiled with the undefined-behavior sanitizer: the plain run says the
+assertions hold, and only the instrumented one says nothing inside them is out
+of its bounds or overflows, which is otherwise silent in the `ReleaseFast`
+binary the release assets are made of. Two things `check` does not stand in
+for: the
 release-assets cross-build (`make release-assets` runs that, and
 `make check-reproducible` adds a byte-identical rebuild of every published
 target on top of it, with the clock, the locale, the timezone, both compiler

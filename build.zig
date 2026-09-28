@@ -30,7 +30,8 @@ pub fn build(b: *std.Build) void {
     // update check compare against the same number the release was tagged with.
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "version", @import("build.zig.zon").version);
-    exe.root_module.addImport("build_options", build_options.createModule());
+    const build_options_module = build_options.createModule();
+    exe.root_module.addImport("build_options", build_options_module);
     b.installArtifact(exe);
 
     const run = b.addRunArtifact(exe);
@@ -57,4 +58,31 @@ pub fn build(b: *std.Build) void {
     run_tests.setEnvironmentVariable("LC_ALL", "C");
     run_tests.setEnvironmentVariable("TZ", "UTC");
     b.step("test", "Run unit tests").dependOn(&run_tests.step);
+
+    // The same suite again, compiled with the undefined-behavior sanitizer, so
+    // an integer overflow, a misaligned load or a null dereference is a failed
+    // check rather than a miscompiled release asset. It is a second compile of
+    // the same sources and not a second way to run them: `test` and this share
+    // the module options, the filter and the test names, and a bug the
+    // instrumented run finds is a bug the plain run also has.
+    //
+    // It is a module of its own rather than `exe.root_module` with the flag set
+    // on it, because a sanitize option is inherited by every artifact built
+    // from the module: setting it on the executable would put instrumented code
+    // in the asset release.yml publishes. `-fsanitize=address` is not offered
+    // because Zig's address sanitizer needs a libc for its interceptors and
+    // nothing here links one; the undefined-behavior half needs none.
+    const sanitize_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_c = .full,
+    });
+    sanitize_module.addImport("build_options", build_options_module);
+    const sanitize_tests = b.addTest(.{
+        .root_module = sanitize_module,
+        .filters = if (test_filter) |f| &[_][]const u8{f} else &.{},
+    });
+    const run_sanitize = b.addRunArtifact(sanitize_tests);
+    b.step("test-sanitize", "Run unit tests under the undefined-behavior sanitizer").dependOn(&run_sanitize.step);
 }

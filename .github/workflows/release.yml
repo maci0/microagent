@@ -70,6 +70,9 @@ jobs:
       - name: unit tests pass
         run: zig build test --summary all
 
+      - name: unit tests pass under the undefined-behavior sanitizer
+        run: zig build test-sanitize --summary all
+
       # The target list and the asset names come from the Makefile, so a
       # rehearsal with `make release-assets TAG=v0.2.0` builds the same files
       # this step publishes.

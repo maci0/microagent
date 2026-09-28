@@ -26,6 +26,7 @@ Every target is also a make target, and `make help` lists them:
 make                                   # ReleaseFast build, the default target
 make help                              # every target
 make test                              # the whole suite
+make test-sanitize                     # the same suite under the undefined-behavior sanitizer
 make test-one FILTER="usage counters"  # one test, by name substring
 make watch                             # rerun the suite on every source change, Ctrl-C to stop
 make watch FILTER="usage counters"     # the same, narrowed to one test
