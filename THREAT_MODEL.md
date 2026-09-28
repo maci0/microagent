@@ -204,8 +204,8 @@ is no user confirmation between a model decision and a command.
 | Control bytes escaped in the gutter, scrubbed in error bodies | terminal escape injection from repo content | `src/main.zig:1442`, `src/main.zig:1462`, `src/main.zig:1493` |
 | Non-JSON frames counted and dropped; a stream without `[DONE]` fails the turn | a truncated answer read as a finished one | `src/main.zig:1079-1087`, `src/main.zig:1014` |
 | Redirects unhandled on the provider request | the key replayed to a host the provider names | `src/main.zig:901` |
-| Retry with capped exponential backoff on weather-shaped statuses | a dropped connection or a rate limit ending the run | `src/main.zig:1746`, `src/main.zig:1753`, `src/main.zig:1762` |
-| Session log created exclusively, capped at 200 records | one run erasing another's log, unbounded growth | `src/main.zig:716`, `src/main.zig:749`, `src/main.zig:761` |
+| Retry with capped exponential backoff on weather-shaped statuses and on failures before the request is readable; a response head that never arrives is not retried | a dropped connection or a rate limit ending the run; a re-sent turn billed twice | `src/main.zig:1193-1210`, `src/main.zig:2354`, `src/main.zig:2381` |
+| Session log created exclusively, both name shapes pruned at 200 records | one run erasing another's log, unbounded growth | `src/main.zig:944`, `src/main.zig:991`, `src/main.zig:1002` |
 | Values validated where they are set | a mistyped level or ceiling reaching the wire as a 400 | `src/main.zig:369`, `src/main.zig:379`, `src/main.zig:390` |
 | Fuzz corpora for the two parsers that take untrusted bytes, the release body and the completion stream | malformed provider or release input | `src/update.zig:952`, `src/update.zig:1006`, `src/main.zig:2866`, `src/main.zig:2896` |
 

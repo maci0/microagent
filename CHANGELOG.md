@@ -49,6 +49,12 @@ release, and `microagent update` moves you to it.
 
 ### Changed
 
+- A turn whose response never arrives is not sent again. A connection that died while the
+  response head was being read left the request whole on the wire, so the provider may have
+  generated and billed the completion with no response to show for it, and the retry bought a
+  second billable completion for one turn. That failure now ends the run with the connection
+  error named on stderr. A 429, a 5xx and a connection that dies before the request reached the
+  provider are still retried twice.
 - The linters CI installs come from `lint-requirements.txt`, which pins `ruff`, `yamllint` and
   the two packages `yamllint` imports to one sha256 per published artifact, and the lint job
   installs it with `--require-hashes`. A version range was a resolved-at-install-time choice of
@@ -77,6 +83,11 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- The session store prunes the logs a re-run wrote beside the first. A run that read the same
+  clock stamp opened its log under a `<unix-ns>-N.jsonl` name rather than truncating the one
+  already there, and the pruner only recognised `<unix-ns>.jsonl`, so on a machine whose clock
+  repeats a stamp every one of those logs stayed forever while the store reported itself
+  pruned. Both names count now, and the old are dropped by the same bound.
 - A stream frame's `finish_reason` is no longer dropped. The declared-shape parse, the fast
   path every OpenAI-style frame takes, did not carry the field, so a response the provider cut
   at `max_tokens` arrived with no reason at all and the turn ended looking like a finished

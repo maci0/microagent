@@ -259,11 +259,15 @@ than an instruction it follows. The other bound on the same loop is `max_tokens`
 request: without it a model that fails to stop is billed until something else stops it, and
 `--max-turns` is a turn count, not a token count.
 
-A transient failure — 429, any 5xx, a dropped connection — is retried twice with 1 s and 2 s of
-backoff before the run exits non-zero, so a provider's bad minute does not make gauntlet redo a
-review against a tree the agent has already half-changed. A rejected request (400/401/404) fails
-immediately instead. Session resume is deliberately absent; gauntlet's `--retries` covers a whole
-review, and a missing feature is cheaper than a half-working one.
+A transient failure — 429, any 5xx, a connection that dies before the request reached the provider —
+is retried twice with 1 s and 2 s of backoff before the run exits non-zero, so a provider's bad
+minute does not make gauntlet redo a review against a tree the agent has already half-changed. A
+rejected request (400/401/404) fails immediately instead. One failure is not retried at all: a
+response that never arrives after the whole turn was sent. The provider had the request, so the
+completion may already have been generated and billed, and a second POST of the same turn is a
+second billable completion, so that run ends with the connection error named on stderr rather than
+paying twice for one turn. Session resume is deliberately absent; gauntlet's `--retries` covers a
+whole review, and a missing feature is cheaper than a half-working one.
 
 ## gauntlet
 

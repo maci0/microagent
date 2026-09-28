@@ -982,10 +982,23 @@ fn allDigits(text: []const u8) bool {
     return true;
 }
 
+/// True for a name `createSessionLog` could have written: the unix nanoseconds
+/// of a run, and the `-N` a second run with the same stamp was given rather
+/// than the first run's log. The suffixed names matter as much as the plain
+/// ones here: a machine whose clock repeats a stamp is exactly the machine
+/// whose store fills with the logs a re-run wrote beside the first, and a
+/// retention window that skipped them would bound nothing on it.
+fn isSessionLogName(name: []const u8) bool {
+    if (!std.mem.endsWith(u8, name, ".jsonl")) return false;
+    const stem = name[0 .. name.len - ".jsonl".len];
+    const dash = std.mem.indexOfScalar(u8, stem, '-') orelse return allDigits(stem);
+    return allDigits(stem[0..dash]) and allDigits(stem[dash + 1 ..]);
+}
+
 /// Deletes the oldest logs past `max_session_logs`. The names are unix
 /// nanoseconds, so a plain lexicographic sort is oldest first, and only this
-/// program's own `<digits>.jsonl` files are touched. Every failure is ignored:
-/// a store that cannot be pruned costs a run nothing.
+/// program's own `<digits>[-<digits>].jsonl` files are touched. Every failure
+/// is ignored: a store that cannot be pruned costs a run nothing.
 fn pruneSessions(io: Io, arena: std.mem.Allocator, session_dir: []const u8) void {
     var dir = std.Io.Dir.openDirAbsolute(io, session_dir, .{ .iterate = true }) catch return;
     defer dir.close(io);
@@ -1003,8 +1016,7 @@ fn pruneSessions(io: Io, arena: std.mem.Allocator, session_dir: []const u8) void
         while (walker.next(io) catch return) |entry| {
             if (entry.kind != .file) continue;
             const name = entry.basename;
-            if (!std.mem.endsWith(u8, name, ".jsonl")) continue;
-            if (!allDigits(name[0 .. name.len - ".jsonl".len])) continue;
+            if (!isSessionLogName(name)) continue;
             names.append(arena, arena.dupe(u8, name) catch return) catch return;
         }
     }
@@ -1158,9 +1170,12 @@ fn streamChat(
     var decompress_buffer: [std.compress.flate.max_window_len]u8 = undefined;
 
     var attempt: u32 = 0;
-    // A rate limit or a dropped connection is the provider's weather, not the
-    // review's verdict: retry here rather than making gauntlet redo the whole
-    // review against a tree the agent has already partly changed.
+    // A rate limit, or a connection that died before the request was on the
+    // wire, is the provider's weather rather than the review's verdict: retry
+    // those rather than making gauntlet redo the whole review against a tree
+    // the agent has already partly changed. A request the provider has already
+    // read whole is a different case, and the head branch below is where the
+    // two are kept apart.
     const reader = retry: while (true) {
         attempt += 1;
         if (req_slot) |*r| {
@@ -1175,20 +1190,26 @@ fn streamChat(
                 .{ .name = "accept", .value = "text/event-stream" },
             },
         }) catch |err| {
-            if (waitBeforeRetry(io, arena, shown_url, attempt, "opening the request to", err)) continue;
+            if (worthAnotherAttempt(.opened) and waitBeforeRetry(io, arena, shown_url, attempt, "opening the request to", err)) continue;
             return err;
         };
         req_slot = req;
         var open = &req_slot.?;
         open.transfer_encoding = .{ .content_length = body.len };
         open.sendBodyComplete(@constCast(body)) catch |err| {
-            if (waitBeforeRetry(io, arena, shown_url, attempt, "sending the request body to", err)) continue;
+            if (worthAnotherAttempt(.sending) and waitBeforeRetry(io, arena, shown_url, attempt, "sending the request body to", err)) continue;
             return err;
         };
         if (debug_enabled) std.debug.print("[mdebug] request sent, body={d} bytes\n", .{body.len});
 
         var response = open.receiveHead(&redirect_buffer) catch |err| {
-            if (waitBeforeRetry(io, arena, shown_url, attempt, "reading the response head from", err)) continue;
+            // `worthAnotherAttempt` is what says a head is not worth another
+            // one; this is the operator's half of that, so a run that lost a
+            // billable turn says so rather than reporting a connection fault.
+            if (!worthAnotherAttempt(.head))
+                net.note(io, arena, "microagent: the request to {s} was sent in full and its response never arrived ({s}); it is not sent again, because a second POST of one turn is a second billable completion\n", .{
+                    shown_url, @errorName(err),
+                });
             return err;
         };
         if (debug_enabled) std.debug.print("[mdebug] head status={d} enc={s}\n", .{ @intFromEnum(response.head.status), @tagName(response.head.content_encoding) });
@@ -2328,6 +2349,8 @@ const max_backoff_ms: u64 = 60_000;
 const max_backoff_shift: u32 = 6;
 
 /// Statuses worth another attempt: the provider is busy, not the request wrong.
+/// A provider that answered has not generated the completion, so the turn
+/// behind this request is unbilled and sending it again costs nothing twice.
 fn retryableStatus(status: std.http.Status) bool {
     return switch (@intFromEnum(status)) {
         408, 409, 425, 429 => true,
@@ -2335,11 +2358,38 @@ fn retryableStatus(status: std.http.Status) bool {
     };
 }
 
+/// How far one attempt got with the request before it failed.
+const request_stage = enum {
+    /// Nothing of the request reached the wire.
+    opened,
+    /// The body is partly on the wire, so the provider cannot have parsed a
+    /// turn out of it yet.
+    sending,
+    /// Every byte of the turn is on the wire and the provider has had it since.
+    head,
+};
+
+/// Whether a failure at this stage is worth sending the turn again.
+///
+/// Only the head is not. The provider read the whole request, so a connection
+/// that died before the response arrived may have generated and billed the
+/// completion anyway, and a second POST of the same conversation is a second
+/// billable completion for one turn. Losing that turn is the cheaper failure,
+/// so the run ends on the error and the operator is told it was not resent.
+/// An idempotency key would settle it, and the OpenAI-shaped completions API
+/// this speaks takes none, so the request cannot be made safe to send twice.
+fn worthAnotherAttempt(stage: request_stage) bool {
+    return stage != .head;
+}
+
 /// Names the endpoint and the step that failed, then sleeps before the next
 /// attempt. False means attempts are spent and the caller should surface the
-/// error. A retried request says so: without this line a provider that drops
-/// three connections in a row and answers the fourth is a run that merely took
-/// longer, and nothing on the operator's screen explains the gap.
+/// error. A retried request says so: without this line a provider that refuses
+/// two requests in a row and answers the third is a run that merely took
+/// longer, and nothing on the operator's screen explains the gap. Only the
+/// steps that fail before the request is on the wire come through here; one
+/// that fails after is not retried at all, for the reason the head branch in
+/// `streamChat` gives.
 fn waitBeforeRetry(io: Io, arena: std.mem.Allocator, url: []const u8, attempt: u32, what: []const u8, err: anyerror) bool {
     if (attempt >= max_attempts) return false;
     net.note(io, arena, "microagent: {s} {s} failed ({s}), retrying (attempt {d}/{d})\n", .{
@@ -3360,6 +3410,17 @@ test "only weather-shaped statuses are retried" {
     try std.testing.expect(!retryableStatus(.not_found));
 }
 
+// The provider reading a whole request is the point at which the turn behind
+// it may already have been generated and billed. Resending it buys a second
+// billable completion for one turn, so a lost head ends the run instead, while
+// the two failures that happen before the request is readable on the far end
+// are the provider's weather and are still retried.
+test "a turn is resent only while the provider cannot have read it" {
+    try std.testing.expect(worthAnotherAttempt(.opened));
+    try std.testing.expect(worthAnotherAttempt(.sending));
+    try std.testing.expect(!worthAnotherAttempt(.head));
+}
+
 // A stream that ends without the provider's terminator is a dropped
 // connection, not a finished answer. Appending the partial turn as complete is
 // how a truncated response silently becomes the run's result, so the notice is
@@ -4276,6 +4337,64 @@ test "the session store keeps the most recent logs and drops the rest" {
     const newest = try std.fmt.allocPrint(arena, "{d}.jsonl", .{total});
     try tmp.dir.access(io, newest, .{});
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "1.jsonl", .{}));
+}
+
+// A re-run that reads the same clock stamp writes its log beside the first
+// one under a `-N` name, and a store that only recognised `<digits>.jsonl`
+// would keep every one of those forever while still reporting itself pruned.
+// The names are created the way a run creates them, exclusive and in order, so
+// the test exercises the real collision path rather than the pattern.
+test "the session store prunes the logs a re-run wrote beside the first" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_path = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+
+    var i: usize = 0;
+    while (i < max_session_logs) : (i += 1) {
+        const log = createSessionLog(io, arena, dir_path, @intCast(i + 1)) orelse return error.TestUnexpectedResult;
+        log.close(io);
+        // Every run here is a re-run of the one before it: the same stamp, so
+        // the log goes beside the first rather than over it.
+        const beside = createSessionLog(io, arena, dir_path, @intCast(i + 1)) orelse return error.TestUnexpectedResult;
+        beside.close(io);
+    }
+    try std.testing.expectEqual(max_session_logs * 2, countSessionLogs(io, arena, dir_path));
+
+    pruneSessions(io, arena, dir_path);
+
+    try std.testing.expectEqual(max_session_logs, countSessionLogs(io, arena, dir_path));
+    // The oldest stamp is gone entirely, the newest is still there in both of
+    // its names, so the monitor reading the store still sees this run.
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "1.jsonl", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "1-1.jsonl", .{}));
+    const newest = try std.fmt.allocPrint(arena, "{d}.jsonl", .{max_session_logs});
+    try tmp.dir.access(io, newest, .{});
+    const newest_beside = try std.fmt.allocPrint(arena, "{d}-1.jsonl", .{max_session_logs});
+    try tmp.dir.access(io, newest_beside, .{});
+}
+
+/// How many of the store's own logs are there, by the same rule `pruneSessions`
+/// prunes by, so the count a test asserts is the count the pruner sees.
+fn countSessionLogs(io: Io, arena: std.mem.Allocator, session_dir: []const u8) !usize {
+    var dir = try std.Io.Dir.openDirAbsolute(io, session_dir, .{ .iterate = true });
+    defer dir.close(io);
+    var walker = try dir.walk(arena);
+    defer walker.deinit();
+    var n: usize = 0;
+    while (try walker.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        if (isSessionLogName(entry.basename)) n += 1;
+    }
+    return n;
 }
 
 test "a tool call reports the exit status of the command it ran" {
