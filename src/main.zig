@@ -3280,7 +3280,7 @@ test "a session log that cannot be written is dropped, not written to again" {
 fn sessionScope(io: Io, arena: std.mem.Allocator, session: ?Session) void {
     var live = session;
     defer closeSession(io, &live);
-    var result: ChatResult = .{ .prompt_tokens = 1 };
+    var result: chat_mod.ChatResult = .{ .prompt_tokens = 1 };
     writeSessionRecord(io, arena, &live, 1, &result);
 }
 
