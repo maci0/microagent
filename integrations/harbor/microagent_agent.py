@@ -469,6 +469,12 @@ class Microagent(BaseAgent):
         # command line is the one this run would have been given.
         if token_ceiling := max_tokens():
             env["MICROAGENT_MAX_TOKENS"] = token_ceiling
+        # A provider that is merely slow hits the 120 s stall default (NVIDIA
+        # NIM took over two minutes to a first token on a large prompt), and the
+        # timeout is the caller's to raise, so it has to reach the container.
+        stall = trimmed_env("MICROAGENT_STALL_TIMEOUT")
+        if stall:
+            env["MICROAGENT_STALL_TIMEOUT"] = stall
 
         started = self.logs_dir / "microagent-stdout.txt"
         try:
