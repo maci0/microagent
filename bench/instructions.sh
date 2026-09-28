@@ -54,6 +54,7 @@ stream content frame|main.test.a long stream costs|20000
 stream tool-arg frame|main.test.streamed argument fragments|2000
 compaction of a 1 MB conversation|main.test.compaction elides|1
 build the request body 40 times|main.test.one request body|40
+ranged read of a 512 KB line|main.test.a ranged read of a long line|1
 ROWS
 rows="$work/rows"
 
