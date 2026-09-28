@@ -359,6 +359,15 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
             chat.safeText(arena, r, 120),
         });
     };
+    // The same hole without the colon. `git blame .env` and `git diff .env`
+    // take the name as their single revision argument and print the file's
+    // contents: blame one line at a time with its hash and author, diff as
+    // the committed and working-tree text of every hunk. The `:(exclude)`
+    // pathspecs below are arguments after the `--`, so they scope a revision
+    // the model named and never a name it did not: the exclusion set this tool
+    // relies on does not reach a rev that is a bare file, and the key came
+    // back as a tool result either way.
+    if (rev) |r| if (isCredentialPath(r)) return credentialRefusal(arena, "git", r);
     // `git show <rev> -- .env` prints a committed credentials file as a patch,
     // so the path gets the refusal `read` gives it rather than a git one.
     if (path) |p| if (isCredentialPath(p)) return credentialRefusal(arena, "git", p);
@@ -2692,6 +2701,41 @@ test "git tool refuses a rev that names a file through a tree-ish" {
     try head.put(arena, "cmd", .{ .string = "diff" });
     try head.put(arena, "rev", .{ .string = "HEAD" });
     const shown = try toolGit(std.testing.io, arena, head, null, null);
+    try std.testing.expect(!std.mem.startsWith(u8, shown, "error: rev"));
+}
+
+// The same hole with no colon in it. `git blame .env` and `git diff .env` take
+// the name as their one revision argument and print the file: blame line by
+// line with its hash and author, diff as the committed and working-tree text
+// of every hunk. The `:(exclude)` pathspecs are arguments after the `--`, so
+// they scope a revision the model named and never a name it did not, and a
+// committed `.env` came back whole as a tool result.
+test "git tool refuses a rev that is a bare credentials filename" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    for ([_][]const u8{ "blame", "diff", "show" }) |cmd| {
+        var args: std.json.ObjectMap = .empty;
+        try args.put(arena, "cmd", .{ .string = cmd });
+        try args.put(arena, "rev", .{ .string = ".env" });
+        const out = try toolGit(std.testing.io, arena, args, null, null);
+        try std.testing.expect(std.mem.startsWith(u8, out, "refused: .env is a credentials file"));
+    }
+    // A directory is the same argument, and `git blame ~/.ssh` lists its files.
+    for ([_][]const u8{ ".secrets/openrouter", ".ssh/id_ed25519" }) |named| {
+        var args: std.json.ObjectMap = .empty;
+        try args.put(arena, "cmd", .{ .string = "blame" });
+        try args.put(arena, "rev", .{ .string = named });
+        const out = try toolGit(std.testing.io, arena, args, null, null);
+        try std.testing.expect(std.mem.startsWith(u8, out, "refused: "));
+    }
+    // A revision is not a file, and the tool has to keep answering for those.
+    var head: std.json.ObjectMap = .empty;
+    try head.put(arena, "cmd", .{ .string = "diff" });
+    try head.put(arena, "rev", .{ .string = "HEAD~3" });
+    const shown = try toolGit(std.testing.io, arena, head, null, null);
+    try std.testing.expect(!std.mem.startsWith(u8, shown, "refused:"));
     try std.testing.expect(!std.mem.startsWith(u8, shown, "error: rev"));
 }
 
