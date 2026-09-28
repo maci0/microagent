@@ -76,6 +76,11 @@ const exit_incomplete: u8 = 3;
 /// response in it came near this), and low enough that one runaway turn cannot
 /// run up a real bill.
 const default_max_tokens: u32 = 65_536;
+/// How long the response socket may stay silent before its read fails rather
+/// than blocking forever. The budget is checked between reads, and a read that
+/// never returns never reaches that check: a host that accepted the connection
+/// and then said nothing hung a benchmark trial for twenty-five minutes.
+const default_stall_timeout_s: u32 = 120;
 /// Parallel tool calls accepted from one response; higher indices are dropped.
 const max_tool_calls = 64;
 /// Ceiling on what one response may add to the run: visible text, and the
@@ -177,6 +182,8 @@ const Options = struct {
     max_turns: usize = max_turns_default,
     /// Sent as `max_tokens`, the ceiling on one response's generated tokens.
     max_tokens: u32 = default_max_tokens,
+    /// Seconds the response socket may stay silent before a read fails.
+    stall_timeout_s: u32 = default_stall_timeout_s,
     /// Passed to the provider as `reasoning.effort`. Unset by default: on a
     /// reasoning model the thinking is usually most of the output tokens, and
     /// in a gauntlet loop with a per-review timeout that is the difference
@@ -250,6 +257,10 @@ pub fn main(init: std.process.Init) !void {
     if (envValue(init.environ_map, "MICROAGENT_MAX_TOKENS")) |v| {
         var env_buf: [256]u8 = undefined;
         if (ceiling(u32, &env_buf, "MICROAGENT_MAX_TOKENS", v, &opts.max_tokens)) |m| configError(io, "{s}", .{m});
+    }
+    if (envValue(init.environ_map, "MICROAGENT_STALL_TIMEOUT")) |v| {
+        var env_buf: [256]u8 = undefined;
+        if (ceiling(u32, &env_buf, "MICROAGENT_STALL_TIMEOUT", v, &opts.stall_timeout_s)) |m| configError(io, "{s}", .{m});
     }
     opts.ca_bundle = net.caBundlePath(init.environ_map);
     if (envValue(init.environ_map, "MICROAGENT_BUDGET_SECONDS")) |v| {
@@ -363,6 +374,9 @@ const help_text =
     \\                         openrouter and says so on stderr
     \\      --max-turns <n>    tool-loop turn ceiling, at least 1
 ++ (std.fmt.comptimePrint("\n                         (env MICROAGENT_MAX_TURNS, default {d})\n", .{max_turns_default})) ++
+    \\      --stall-timeout <s>  seconds the response socket may stay silent
+    \\                         before the read fails (default 120; env
+    \\                         MICROAGENT_STALL_TIMEOUT)
     \\      --max-tokens <n>   max_tokens sent to the provider: the ceiling on
     \\                         one response's generated tokens, at least 1
 ++ (std.fmt.comptimePrint("\n                         (env MICROAGENT_MAX_TOKENS, default {d})\n", .{default_max_tokens})) ++
@@ -791,6 +805,7 @@ const ValuedOption = enum {
     max_spend_tokens,
     max_turns,
     max_tokens,
+    stall_timeout,
 };
 
 const ValuedFlag = struct {
@@ -820,6 +835,7 @@ const valued_flags = [_]ValuedFlag{
     .{ .short = null, .long = "--max-spend-tokens", .noun = "a number", .option = .max_spend_tokens },
     .{ .short = null, .long = "--max-turns", .noun = "a number", .option = .max_turns },
     .{ .short = null, .long = "--max-tokens", .noun = "a number", .option = .max_tokens },
+    .{ .short = null, .long = "--stall-timeout", .noun = "a number of seconds", .option = .stall_timeout },
 };
 
 /// The flag `name` spells, in either form, or null when it is not one.
@@ -855,6 +871,7 @@ fn setValued(
         .max_spend_tokens => return optionalCeiling(buf, "--max-spend-tokens", value, &opts.max_spend_tokens),
         .max_turns => return ceiling(usize, buf, "--max-turns", value, &opts.max_turns),
         .max_tokens => return ceiling(u32, buf, "--max-tokens", value, &opts.max_tokens),
+        .stall_timeout => return ceiling(u32, buf, "--stall-timeout", value, &opts.stall_timeout_s),
     }
     return null;
 }
@@ -1859,6 +1876,19 @@ fn authHeaders(arena: std.mem.Allocator, api_key: []const u8) !std.http.Client.R
 /// Streams one completion, printing visible text as it arrives and accumulating
 /// tool calls and token counters. Text on stderr is tool activity; stdout is
 /// the model's own output plus one JSON usage line per response.
+/// Makes a silent response socket fail instead of blocking forever.
+///
+/// A read on a connection that is open but never speaks does not return, so
+/// nothing checked between reads — the budget, a stop flag — ever runs. A
+/// receive timeout turns that hang into a read error the loop already handles.
+/// Applied per request because the client pools connections and `std.http` has
+/// no per-request read timeout.
+fn setStallTimeout(handle: std.posix.socket_t, seconds: u32) void {
+    if (@import("builtin").os.tag == .windows or seconds == 0) return;
+    const tv = std.posix.timeval{ .sec = @intCast(seconds), .usec = 0 };
+    std.posix.setsockopt(handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {};
+}
+
 fn streamChat(
     client: *std.http.Client,
     io: Io,
@@ -1923,6 +1953,8 @@ fn streamChat(
             return err;
         };
         req_slot = req;
+        if (req_slot.?.connection) |connection|
+            setStallTimeout(connection.stream_reader.stream.socket.handle, opts.stall_timeout_s);
         var open = &req_slot.?;
         open.transfer_encoding = .{ .content_length = body_now.len };
         open.sendBodyComplete(@constCast(body_now)) catch |err| {
