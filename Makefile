@@ -366,13 +366,30 @@ install: build
 # pins it against this list, so a target cannot be added to one and not the
 # other. Building every target proves the triples still compile; it says
 # nothing about the names, so it is not the check for this.
+#
+# The host's own architecture is the third name, and the same drift reaches it
+# a different way. `MUSL_ARCH` is `uname -m` under the alias table above, and
+# the Harbor adapter looks the binary up under a name spelled the same way, so
+# a host whose `uname -m` is not a published target, or an alias that stops
+# spelling one, yields a `microagent` the adapter cannot find. That is a build
+# that succeeds and a benchmark that fails, so it is asked here rather than by
+# whoever runs Harbor next.
 check-targets:
 	@set -eu; \
 	for target in $(RELEASE_TARGETS); do \
 		grep -q -- "$$target" src/update.zig || { \
 		  echo "$$target is published here but src/update.zig never asks for it, so no update can install it" >&2; \
 		  exit 1; }; \
-	done
+	done; \
+	musl_target="$(MUSL_ARCH)-linux-musl"; \
+	for target in $(RELEASE_TARGETS); do \
+		if [ "$$target" = "$$musl_target" ]; then musl_published=1; break; fi; \
+	done; \
+	test "$${musl_published:-0}" -eq 1 || { \
+	  echo "this host is $(MUSL_ARCH) and 'make musl' builds $(MUSL_BINARY), which is not one of: $(RELEASE_TARGETS)" >&2; \
+	  echo "the release publishes no musl asset for it, so the Harbor adapter has nothing to upload" >&2; \
+	  exit 1; \
+	}
 
 # Every published target, cross-built, under the name release.yml publishes and
 # update.zig asks for. Running it without TAG is the rehearsal ci.yml does on

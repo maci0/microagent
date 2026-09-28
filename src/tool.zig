@@ -464,7 +464,7 @@ fn credentialInCommand(command: []const u8) ?[]const u8 {
     var words = std.mem.tokenizeAny(u8, command, " \t\n\"'`$&;<>|()[]{}*?!#\\");
     while (words.next()) |word| {
         const leaf = std.fs.path.basename(word);
-        if (std.mem.indexOfScalar(u8, word, '/') == null and std.mem.indexOfScalar(u8, leaf, '.') == null) continue;
+        if (std.mem.indexOfScalar(u8, word, std.fs.path.sep) == null and std.mem.indexOfScalar(u8, leaf, '.') == null) continue;
         if (isCredentialPath(word)) return word;
     }
     return null;
@@ -622,6 +622,14 @@ test "every credential the name rule refuses is in the exclusion set git carries
     }
 }
 
+/// The target's own path separator, as `std.mem.trimEnd` wants it. The walk
+/// below reaches for `std.fs.path.dirname` and `basename`, which know the
+/// separator, and the two places that strip or test one by hand read it from
+/// here: a literal `/` beside them is a second spelling of the same rule, and
+/// it is the spelling that stops matching on a target whose separator is not
+/// `/`.
+const path_sep = [_]u8{std.fs.path.sep};
+
 /// True when a path names a credential file, so the tools that read, search or
 /// name a path refuse it: `read`, `search`, `ast`, `git`, and the word check
 /// `bash` runs over its command. The path is
@@ -633,7 +641,7 @@ fn isCredentialPath(path: []const u8) bool {
     // target's own separator, so the walk is right on the platforms this ships
     // to and needs no second spelling. A trailing separator is trimmed first,
     // or the leaf basename comes back empty and the name goes unchecked.
-    var component: ?[]const u8 = std.mem.trimEnd(u8, path, "/");
+    var component: ?[]const u8 = std.mem.trimEnd(u8, path, &path_sep);
     while (component) |c| {
         const name = std.fs.path.basename(c);
         if (name.len != 0 and !std.mem.eql(u8, name, ".") and !std.mem.eql(u8, name, "..")) {
@@ -643,7 +651,7 @@ fn isCredentialPath(path: []const u8) bool {
         }
         component = std.fs.path.dirname(c);
     }
-    return isCredentialName(std.fs.path.basename(std.mem.trimEnd(u8, path, "/")));
+    return isCredentialName(std.fs.path.basename(std.mem.trimEnd(u8, path, &path_sep)));
 }
 
 /// The tools that change a file rather than report one. The credential refusal
@@ -1876,6 +1884,12 @@ test "read refuses a credentials file and leaves every other path alone" {
         "home/user/.git-credentials",
         "home/user/.aws/credentials",
         "vault.keystore",
+        // A trailing separator names the same file, and the walk strips it
+        // with the target's own separator rather than a literal one, so a
+        // target whose separator is not `/` trims it too.
+        "backend/.env/",
+        "/home/someone/.ssh/config/",
+        "certs/server.pem//",
     };
     for (refused) |path| {
         try std.testing.expect(isCredentialPath(path));
