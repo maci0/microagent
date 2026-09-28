@@ -1032,6 +1032,9 @@ fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
     // match and a keystore in the diff of the turn after.
     if (isCredentialPath(path)) return try credentialRefusal(arena, "ast", path);
     const rewrite = chat.str(args.get("rewrite"));
+    if (rewrite) |r| {
+        if (try astRewriteRefusal(arena, pattern, r)) |why| return why;
+    }
 
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(arena, &.{ "ast-grep", "run", "--pattern", pattern, "--lang", lang });
@@ -1044,6 +1047,78 @@ fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
     try argv.appendSlice(arena, &.{ "--", path });
 
     return runSearchTool(io, arena, argv.items, "ast-grep", ceiling_ms, environ_map);
+}
+
+/// The fewest characters of literal text a pattern must carry for its
+/// replacement to be read against it. `=` and `(` are punctuation every
+/// replacement is full of, so a skeleton that short says nothing about whether
+/// the pattern can match its own output; `return` and `foo()` are the text the
+/// match is anchored on, so a replacement carrying one is a replacement the
+/// pattern can match again.
+const ast_skeleton_min = 3;
+
+/// The literal text of `pattern`: every byte that is not part of a
+/// metavariable, with the whitespace at either end trimmed away. Null when
+/// the pattern carries no literal text, which is a pattern of metavariables
+/// alone and matches every node there is.
+///
+/// A metavariable is `$` followed by a name, `$A` / `$_` / `$A1`. A `$` with
+/// nothing name-shaped after it is punctuation the language spelled, and is
+/// literal text like any other.
+fn patternSkeleton(arena: std.mem.Allocator, pattern: []const u8) !?[]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    while (i < pattern.len) {
+        const name_at = i + 1;
+        if (pattern[i] == '$' and name_at < pattern.len and
+            (std.ascii.isAlphabetic(pattern[name_at]) or pattern[name_at] == '_'))
+        {
+            i = name_at;
+            while (i < pattern.len and (std.ascii.isAlphanumeric(pattern[i]) or pattern[i] == '_')) i += 1;
+            continue;
+        }
+        try out.append(arena, pattern[i]);
+        i += 1;
+    }
+    const literal = std.mem.trim(u8, out.items, " \t\r\n");
+    if (literal.len == 0) return null;
+    return literal;
+}
+
+/// Why a rewrite of `pattern` to `rewrite` is refused, or null when it is
+/// applied. A message the model reads, in the shape `toolEdit` refuses in.
+///
+/// A rewrite is a call the model can issue twice, exactly as an edit is: a
+/// turn cut before its result reached the model, a re-read to check the change
+/// landed, a retry after a transport fault. A `write` and an `edit` are safe on
+/// the second run because the first removed the text the second looks for. An
+/// ast-grep rewrite has no such guarantee, because the pattern is matched on
+/// syntax and the replacement is written back as source: a replacement that
+/// still matches its own pattern matches it again, and `return $X` rewritten to
+/// `return [$X]` gives `return [[1]]`, then `return [[[1]]]]`, one wrapper
+/// deeper per duplicate, on every match in the tree. Nothing in the second run
+/// can tell an applied rewrite from a first one, because the two leave the same
+/// bytes.
+///
+/// Three shapes are settled here. A replacement spelled as the pattern is a
+/// no-op. A pattern of metavariables alone matches every node, so it matches
+/// whatever its own replacement produced. A replacement that still carries the
+/// pattern's literal text is a replacement the pattern is anchored on, so the
+/// next run finds the first run's output and rewrites it again.
+///
+/// The last is evidence, not a proof: a replacement that re-matches through a
+/// form the pattern's literal text does not spell is still applied, and a
+/// skeleton too short to anchor a match is not read against the replacement at
+/// all. The model reads the tree back on the next turn rather than taking the
+/// tool's word, which is what a rewrite has always asked of it.
+fn astRewriteRefusal(arena: std.mem.Allocator, pattern: []const u8, rewrite: []const u8) !?[]const u8 {
+    if (std.mem.eql(u8, pattern, rewrite))
+        return try std.fmt.allocPrint(arena, "no change: rewrite is the pattern itself ({s})", .{rewrite});
+    const skeleton = (try patternSkeleton(arena, pattern)) orelse
+        return try std.fmt.allocPrint(arena, "error: the pattern {s} is metavariables alone, so it matches whatever its own rewrite produced and a second run of this rewrite would apply again; match on the literal text around the metavariable, or use `edit`", .{pattern});
+    if (skeleton.len >= ast_skeleton_min and std.mem.indexOf(u8, rewrite, skeleton) != null)
+        return try std.fmt.allocPrint(arena, "error: rewriting {s} to {s} leaves the text the pattern is anchored on ({s}) in the output, so a second run of this rewrite would match the first one's own result and apply again; rewrite to text the pattern no longer matches, or use `edit`", .{ pattern, rewrite, skeleton });
+    return null;
 }
 
 /// Bytes read from a child pipe per operation. Both pipes are drained in one
@@ -2943,6 +3018,85 @@ test "an edit issued twice leaves the file the first run left" {
     try args.put(arena, "new_string", .{ .string = "x" });
     try std.testing.expect(std.mem.startsWith(u8, try toolEdit(std.testing.io, arena, args), "no change:"));
     try std.testing.expectEqualStrings("a x b", try cwd.tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
+}
+
+// An ast-grep rewrite has the same re-run question an edit does and the same
+// answer, refused before anything is written rather than settled afterwards,
+// because an applied rewrite and an already-applied one leave the same bytes.
+// The wrapper shape is the one that does damage: `return $X` to `return [$X]`
+// rewrites the same line again on the second run and gives `return [[1]]`,
+// then a third bracket per run after that.
+test "an ast rewrite whose output still matches its pattern is refused" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The replacement carries the text the pattern is anchored on, so the
+    // pattern can match the first run's own output.
+    const wrapped = (try astRewriteRefusal(arena, "return $X", "return [$X]")).?;
+    try std.testing.expect(std.mem.indexOf(u8, wrapped, "would match the first one's own result") != null);
+    try std.testing.expect((try astRewriteRefusal(arena, "return $X", "raise ValueError($X)")) == null);
+    // A pattern with a keyword in it and a replacement with a different one:
+    // the second run finds nothing, which is the shape that is allowed.
+    try std.testing.expect((try astRewriteRefusal(arena, "print($A)", "log($A)")) == null);
+    // The rename of a call, and a swap of two names inside a call.
+    try std.testing.expect((try astRewriteRefusal(arena, "foo($A)", "bar($A)")) == null);
+    try std.testing.expect((try astRewriteRefusal(arena, "kw($A, $B)", "kw($B, $A)")) == null);
+    // A replacement spelled as the pattern writes the file with its own bytes.
+    try std.testing.expect((try astRewriteRefusal(arena, "foo($A)", "foo($A)")).?.len > 0);
+    // Metavariables alone match every node, so they match whatever they were
+    // rewritten to, and there is no literal text to read the replacement
+    // against either.
+    try std.testing.expect((try astRewriteRefusal(arena, "$A", "[$A]")).?.len > 0);
+    // A skeleton too short to anchor a match says nothing about whether the
+    // replacement re-matches, so it is not read against it.
+    try std.testing.expect((try astRewriteRefusal(arena, "($A)", "($A) == ($A)")) == null);
+    // Punctuation the language spelled, rather than the start of a
+    // metavariable, is literal text and is kept; a `$` with a name after it is
+    // a metavariable, and is the one that leaves nothing behind.
+    try std.testing.expectEqualStrings("a$", (try patternSkeleton(arena, "a$")).?);
+    try std.testing.expectEqualStrings("a", (try patternSkeleton(arena, "a$b")).?);
+    try std.testing.expectEqualStrings("()", (try patternSkeleton(arena, "($A)")).?);
+    try std.testing.expect((try patternSkeleton(arena, "$A $B")) == null);
+}
+
+// The refusal above, through the tool the model actually calls, and before the
+// backend is spawned: the file the run would have grown is left as it was.
+test "ast refuses the rewrite through the tool, not after it ran" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const source = "def f():\n    return 1\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.py", .data = source });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+
+    const refused = try dispatch(arena, "ast", try std.fmt.allocPrint(
+        arena,
+        "{{\"pattern\":\"return $X\",\"lang\":\"python\",\"path\":\"{s}\",\"rewrite\":\"return [$X]\"}}",
+        .{root},
+    ));
+    try std.testing.expect(std.mem.startsWith(u8, refused, "error: rewriting return $X to return [$X]"));
+    try std.testing.expectEqualStrings(source, try tmp.dir.readFileAlloc(io, "a.py", arena, .limited(256)));
+
+    // The rename goes through, and the second run of it finds nothing to
+    // rename, so the bytes are the first run's.
+    const rename = try std.fmt.allocPrint(
+        arena,
+        "{{\"pattern\":\"return $X\",\"lang\":\"python\",\"path\":\"{s}\",\"rewrite\":\"raise $X\"}}",
+        .{root},
+    );
+    _ = try dispatch(arena, "ast", rename);
+    const once = try tmp.dir.readFileAlloc(io, "a.py", arena, .limited(256));
+    try std.testing.expectEqualStrings("def f():\n    raise 1\n", once);
+    _ = try dispatch(arena, "ast", rename);
+    try std.testing.expectEqualStrings(once, try tmp.dir.readFileAlloc(io, "a.py", arena, .limited(256)));
 }
 
 /// Asserts that a tool call took its whole process tree down with it. The
