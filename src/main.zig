@@ -708,8 +708,8 @@ fn valuedFlag(name: []const u8) ?ValuedFlag {
     return null;
 }
 
-fn flagNeeds(buf: []u8, flag: ValuedFlag, fallback: []const u8) []const u8 {
-    return std.fmt.bufPrint(buf, "{s} needs {s}", .{ flag.long, flag.noun }) catch fallback;
+fn flagNeeds(buf: []u8, flag: ValuedFlag) []const u8 {
+    return std.fmt.bufPrint(buf, "{s} needs {s}", .{ flag.long, flag.noun }) catch "bad arguments";
 }
 
 /// The option one valued flag sets. A value the option refuses says so and
@@ -788,8 +788,8 @@ fn parseArgs(buf: []u8, argv: []const []const u8, opts: *Options) ?[]const u8 {
         } else if (valuedFlag(name)) |flag| {
             // A flag that ends the command line and one handed an empty value
             // are the same mistake, so both say the same thing.
-            const v = joined orelse if (i + 1 < argv.len) argv[i + 1] else return flagNeeds(buf, flag, "bad arguments");
-            if (v.len == 0) return flagNeeds(buf, flag, "bad arguments");
+            const v = joined orelse if (i + 1 < argv.len) argv[i + 1] else return flagNeeds(buf, flag);
+            if (v.len == 0) return flagNeeds(buf, flag);
             if (setValued(buf, opts, flag.option, v)) |m| return m;
             if (joined == null) i += 1;
         } else if (arg.len > 0 and arg[0] != '-') {
@@ -1748,14 +1748,14 @@ fn streamChat(
             shown_url, opts.max_tokens, result.content.items.len, calls.items.len,
         });
     if (result.content.items.len > 0) try out_buf.append(gpa, '\n');
-    try flushOut(io, arena, &out_buf, shown_url);
+    try writeOutPrefix(io, arena, &out_buf, out_buf.items.len, shown_url);
     result.calls = calls;
     // Named when the stream delivered a call twice: the turn is still complete,
     // the duplicate is simply not dispatched, and a run that silently ran every
     // call the response carried would be a run whose side effects a reader
     // cannot account for from the turn it read.
-    const dropped = keepRunnableCalls(gpa, &result.calls);
-    if (dropped.duplicate > 0) net.note(io, arena, "microagent: the completion stream from {s} carried {d} tool call(s) whose id this response had already delivered; they are not dispatched a second time\n", .{ shown_url, dropped.duplicate });
+    const duplicates = keepRunnableCalls(gpa, &result.calls);
+    if (duplicates > 0) net.note(io, arena, "microagent: the completion stream from {s} carried {d} tool call(s) whose id this response had already delivered; they are not dispatched a second time\n", .{ shown_url, duplicates });
     return result;
 }
 
@@ -1778,16 +1778,6 @@ fn truncatedNotice(
         .{ url, content_len, calls_len },
     ) catch "microagent: the completion stream ended without [DONE]; the turn is not complete";
 }
-
-/// What the filter below took out of one response, so the caller can say which
-/// of the two reasons applied rather than reporting one number for both.
-pub const DroppedCalls = struct {
-    /// A call the run cannot carry: no id, no name, or arguments that are not a
-    /// JSON object.
-    unusable: usize = 0,
-    /// A call carrying an id the response already delivered under another index.
-    duplicate: usize = 0,
-};
 
 /// A provider that skips a tool-call index leaves an empty slot where `applyFrame`
 /// sized the list by index, and a response cut at `max_tokens` or at the turn's
@@ -1815,25 +1805,29 @@ pub const DroppedCalls = struct {
 /// Two calls with the same id and the same index are not this case: they are one
 /// call whose fragments arrived twice, which `applyCallDelta` folds into the one
 /// slot that index names. What lands here is the same id under two indexes.
-fn keepRunnableCalls(gpa: std.mem.Allocator, calls: *std.ArrayList(chat_mod.ToolCall)) DroppedCalls {
-    var dropped: DroppedCalls = .{};
+///
+/// Returns how many calls it took for want of a second. A call the run cannot
+/// carry outright is not counted: the ceiling and truncation notices above have
+/// already said why a turn is short of its tool calls, so only a repeat the
+/// reader could otherwise count twice is worth a line.
+fn keepRunnableCalls(gpa: std.mem.Allocator, calls: *std.ArrayList(chat_mod.ToolCall)) usize {
+    var duplicates: usize = 0;
     var kept: usize = 0;
     for (calls.items) |*call| {
-        if (call.id.len == 0 or call.name.len == 0 or !argumentsAreAnObject(gpa, call.args.items)) {
-            dropped.unusable += 1;
-        } else if (indexOfCallId(calls.items[0..kept], call.id) != null) {
-            dropped.duplicate += 1;
-        } else {
+        const usable = call.id.len != 0 and call.name.len != 0 and
+            argumentsAreAnObject(gpa, call.args.items);
+        if (usable and indexOfCallId(calls.items[0..kept], call.id) == null) {
             calls.items[kept] = call.*;
             kept += 1;
             continue;
         }
+        if (usable) duplicates += 1;
         if (call.id.len != 0) gpa.free(call.id);
         if (call.name.len != 0) gpa.free(call.name);
         call.args.deinit(gpa);
     }
     calls.shrinkRetainingCapacity(kept);
-    return dropped;
+    return duplicates;
 }
 
 fn indexOfCallId(calls: []const chat_mod.ToolCall, id: []const u8) ?usize {
@@ -2295,15 +2289,6 @@ fn compactMessages(
     try msgs.appendSlice(gpa, jb.items());
 }
 
-/// Hands the buffered tokens to stdout, and says so when stdout refuses them.
-/// A closed pipe and a full disk both arrive as a failed write, and the turn is
-/// given up on either: continuing would put a partial answer on stdout under an
-/// exit status that says the run finished. The reason is on stderr before the
-/// run ends, and the error is re-raised so the caller fails the run.
-fn flushOut(io: Io, arena: std.mem.Allocator, out_buf: *std.ArrayList(u8), shown_url: []const u8) !void {
-    try writeOutPrefix(io, arena, out_buf, out_buf.items.len, shown_url);
-}
-
 /// The flush the stream loop uses. It writes every whole character in the
 /// buffer and keeps a trailing partial one for the next chunk.
 ///
@@ -2347,6 +2332,12 @@ test "a character split across two reads is written once it is whole" {
     try std.testing.expectEqual(@as(usize, 0), buf.items.len);
 }
 
+/// Hands the buffered tokens to stdout, and says so when stdout refuses them.
+/// A closed pipe and a full disk both arrive as a failed write, and the turn is
+/// given up on either: continuing would put a partial answer on stdout under an
+/// exit status that says the run finished. The reason is on stderr before the
+/// run ends, and the error is re-raised so the caller fails the run.
+///
 /// Writes the first `len` bytes of the buffer and keeps the rest at its front,
 /// so the bytes that were not written are the ones the next call starts from.
 fn writeOutPrefix(
@@ -4081,18 +4072,13 @@ test "a conversation with nothing to elide is not re-parsed every turn" {
     try std.testing.expect(msgs.items.len < grown);
 }
 
-// Appends a message to an already-closed conversation, the way a turn does.
+// Appends a message to an already-closed conversation, the way a turn does:
+// the closing bracket comes off, the message goes on in `appendMessage`'s own
+// spelling, and the bracket goes back, so the test exercises the writer the run
+// writes a request with rather than a second copy of it.
 fn growConversation(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), role: []const u8, blob: []const u8) !void {
     msgs.shrinkRetainingCapacity(msgs.items.len - 1);
-    try msgs.append(gpa, ',');
-    var msg = chat_mod.JsonBuf.init(gpa);
-    try msg.writer().writeAll("{\"role\":");
-    try chat_mod.writeJsonString(msg.writer(), role);
-    try msg.writer().writeAll(",\"content\":");
-    try chat_mod.writeJsonString(msg.writer(), blob);
-    try msg.writer().writeAll("}");
-    try msgs.appendSlice(gpa, msg.items());
-    msg.list.deinit(gpa);
+    try appendMessage(gpa, msgs, role, blob);
     try msgs.append(gpa, ']');
 }
 
@@ -4511,8 +4497,7 @@ test "a tool call the stream delivered twice is dispatched once" {
     try std.testing.expectEqual(@as(usize, 3), calls.items.len);
 
     const dropped = keepRunnableCalls(arena, &calls);
-    try std.testing.expectEqual(@as(usize, 0), dropped.unusable);
-    try std.testing.expectEqual(@as(usize, 1), dropped.duplicate);
+    try std.testing.expectEqual(@as(usize, 1), dropped);
     try std.testing.expectEqual(@as(usize, 2), calls.items.len);
     try std.testing.expectEqualStrings("call_1", calls.items[0].id);
     try std.testing.expectEqualStrings("call_2", calls.items[1].id);
@@ -4526,7 +4511,7 @@ test "a tool call the stream delivered twice is dispatched once" {
     var second: std.ArrayList(chat_mod.ToolCall) = .empty;
     try applyFrame(arena, arena, twice, &result, &second, &out_buf, &unparsable);
     const kept = keepRunnableCalls(arena, &second);
-    try std.testing.expectEqual(@as(usize, 0), kept.duplicate);
+    try std.testing.expectEqual(@as(usize, 0), kept);
     try std.testing.expectEqual(@as(usize, 2), second.items.len);
 }
 
