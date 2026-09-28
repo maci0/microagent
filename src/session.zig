@@ -867,7 +867,7 @@ test "a store named relative to the working directory is pruned where it is" {
 
     pruneSessions(io, arena, relative);
 
-    try std.testing.expectEqual(max_session_logs, try countRelativeSessionLogs(io, arena, relative));
+    try std.testing.expectEqual(max_session_logs, try countSessionLogs(io, arena, relative));
 }
 
 // The mode a log and the directory holding it are created with. What a mode
@@ -1081,16 +1081,10 @@ test "the session store prunes the logs a re-run wrote beside the first" {
 }
 
 /// How many of the store's own logs are there, by the same rule `pruneSessions`
-/// prunes by, so the count a test asserts is the count the pruner sees.
+/// prunes by, so the count a test asserts is the count the pruner sees. The
+/// store may be named absolute, or relative to the working directory, which
+/// `open` accepts and an absolute path alone would not exercise.
 fn countSessionLogs(io: Io, arena: std.mem.Allocator, session_dir: []const u8) !usize {
-    var dir = try std.Io.Dir.openDirAbsolute(io, session_dir, .{ .iterate = true });
-    defer dir.close(io);
-    return countLogsIn(dir, io, arena);
-}
-
-/// `countSessionLogs` for a store named relative to the working directory,
-/// which `open` accepts and an absolute path would not exercise.
-fn countRelativeSessionLogs(io: Io, arena: std.mem.Allocator, session_dir: []const u8) !usize {
     var dir = try std.Io.Dir.openDir(std.Io.Dir.cwd(), io, session_dir, .{ .iterate = true });
     defer dir.close(io);
     return countLogsIn(dir, io, arena);
@@ -1298,17 +1292,9 @@ fn fuzzStoreNames(_: void, smith: *std.testing.Smith) !void {
     // than one that was deleted.
     for (deleted.items) |gone| {
         for (survivors.items) |kept| {
-            try std.testing.expect(!keyOlder(kept.key.?, gone.key.?));
+            try std.testing.expect(!kept.key.?.olderThan(gone.key.?));
         }
     }
-}
-
-/// The order `pruneSessions` reads a name's two numbers in: the clock stamp
-/// first, and the `-N` a re-run was given as the second. The pruner breaks a
-/// tie on the path, which a name alone cannot say, so a harness that only has
-/// names compares keys that may well be equal.
-fn keyOlder(a: LogName, b: LogName) bool {
-    return a.olderThan(b);
 }
 
 // A session record is the one thing this module writes for somebody else to

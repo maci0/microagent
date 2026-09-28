@@ -333,11 +333,6 @@ fn lineCount(v: ?std.json.Value, default: usize) usize {
 /// a count past it costs nothing to lose.
 const git_log_line_ceiling: usize = 1 << 20;
 
-/// The `-n` argument for `git log`: the model's limit, cut to what git parses.
-fn gitLogLines(limit: usize) usize {
-    return @min(limit, git_log_line_ceiling);
-}
-
 /// Read-only git, with the subcommands fixed here rather than assembled by the
 /// model. Deterministic, no shell quoting, and the output is capped.
 fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map) ![]const u8 {
@@ -425,7 +420,7 @@ fn gitArgv(
         // (`INT_MAX`) is cut to what it will accept rather than turned into
         // `fatal: not an integer`.
         try argv.appendSlice(arena, &.{ "log", "--oneline", "--no-color", "-n" });
-        try argv.append(arena, try std.fmt.allocPrint(arena, "{d}", .{gitLogLines(limit)}));
+        try argv.append(arena, try std.fmt.allocPrint(arena, "{d}", .{@min(limit, git_log_line_ceiling)}));
     } else if (std.mem.eql(u8, cmd, "show")) {
         try argv.appendSlice(arena, &.{ "show", "--no-color", "--stat", "--patch" });
         try argv.append(arena, rev orelse "HEAD");
@@ -727,7 +722,7 @@ fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_
     }
     // Output the model acts on is cut at the cap, so say so rather than letting
     // a half-read build log or diff read as the whole one.
-    if (atCaptureLimit(res)) {
+    if (res.partial().atCaptureLimit()) {
         if (buf.items.len > 0) try buf.appendSlice(arena, "\n");
         try buf.appendSlice(arena, truncation_note[1..]);
     }
@@ -954,6 +949,12 @@ fn credentialPath(io: Io, arena: std.mem.Allocator, path: []const u8) ?[]const u
 /// `writes` is the caller's answer to "would this call have changed the file",
 /// which the tool's name alone does not always carry.
 fn credentialRefusal(arena: std.mem.Allocator, tool: chat.Tool, path: []const u8, writes: bool) error{OutOfMemory}![]const u8 {
+    // The tools that change a file rather than report one are named too,
+    // because the advice a reading tool gets is wrong for them: there is no
+    // reading of a key file that should be going on, so the answer is the
+    // operator rather than another tool. `ast` is in neither list on its own,
+    // because a search leaves the tree as it found it and a rewrite does not;
+    // `writes` is the caller's answer to which one this was.
     // The advice has to be the one that is true for the tool that was refused.
     // The `bash` branch sends the model to the operator because `bash` runs
     // the same name check over its own words: telling a model that `read` just
@@ -2191,7 +2192,7 @@ fn fuzzToolCall(_: void, smith: *std.testing.Smith) !void {
     // count of zero reads as an empty file, and a deadline of zero is a
     // deadline already spent, so neither may come out of a call.
     try std.testing.expect(gitLineLimit(args) >= 1);
-    try std.testing.expect(gitLogLines(gitLineLimit(args)) <= git_log_line_ceiling);
+    try std.testing.expect(@min(gitLineLimit(args), git_log_line_ceiling) <= git_log_line_ceiling);
     const deadline = bashTimeoutMs(requestedTimeoutMs(args.get("timeout_ms")), null);
     try std.testing.expect(deadline >= 1);
     try std.testing.expect(deadline <= max_bash_timeout_ms);
@@ -3320,12 +3321,12 @@ test "each tool refuses a missing required argument" {
 // the model gets no log at all. What reaches git is a count it accepts, and
 // what reaches the model is still every line the capture cap let through.
 test "a git line limit past what git parses is cut, not handed over" {
-    try std.testing.expectEqual(@as(usize, 1), gitLogLines(1));
-    try std.testing.expectEqual(git_default_limit, gitLogLines(git_default_limit));
-    try std.testing.expectEqual(git_log_line_ceiling, gitLogLines(std.math.maxInt(usize)));
+    try std.testing.expectEqual(@as(usize, 1), @min(1, git_log_line_ceiling));
+    try std.testing.expectEqual(git_default_limit, @min(git_default_limit, git_log_line_ceiling));
+    try std.testing.expectEqual(git_log_line_ceiling, @min(std.math.maxInt(usize), git_log_line_ceiling));
     // Nothing past the ceiling is ever spelled for git, on a 32-bit build or
     // a 64-bit one.
-    try std.testing.expect(gitLogLines(std.math.maxInt(u32)) <= git_log_line_ceiling);
+    try std.testing.expect(@min(std.math.maxInt(u32), git_log_line_ceiling) <= git_log_line_ceiling);
 }
 
 // A missing argument that the model filled with a number is still missing: the
@@ -3356,7 +3357,7 @@ test "a child that outruns the capture cap keeps its first bytes instead of fail
         "/bin/sh", "-c", "head -c 200000 /dev/zero | tr '\\0' 'a'",
     }, cap, net.durationMs(30_000), null, null);
     try std.testing.expectEqual(cap, noisy.stdout.len);
-    try std.testing.expect(atCaptureLimit(noisy));
+    try std.testing.expect(noisy.partial().atCaptureLimit());
     try std.testing.expectEqualStrings("a" ** 8, noisy.stdout[0..8]);
     // The child still ran to its own end, so the status is the command's.
     switch (noisy.term) {
@@ -3369,7 +3370,7 @@ test "a child that outruns the capture cap keeps its first bytes instead of fail
     }, cap, net.durationMs(30_000), null, null);
     try std.testing.expectEqualStrings("hi\n", quiet.stdout);
     try std.testing.expectEqualStrings("bye\n", quiet.stderr);
-    try std.testing.expect(!atCaptureLimit(quiet));
+    try std.testing.expect(!quiet.partial().atCaptureLimit());
 }
 
 // Output that lands exactly on the cap was not cut short, and saying it was
@@ -3383,7 +3384,7 @@ test "output ending exactly on the cap is not reported as truncated" {
         "/bin/sh", "-c", "head -c 4096 /dev/zero | tr '\\0' 'a'",
     }, cap, net.durationMs(30_000), null, null);
     try std.testing.expectEqual(cap, exact.stdout.len);
-    try std.testing.expect(!atCaptureLimit(exact));
+    try std.testing.expect(!exact.partial().atCaptureLimit());
 }
 
 test "both pipes past the cap drain together, so the child never wedges" {

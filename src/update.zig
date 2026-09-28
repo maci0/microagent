@@ -287,7 +287,7 @@ fn checksumMatches(asset: []const u8, sidecar: []const u8, basename: []const u8)
 /// `.current` says nothing about whether an asset was published, and a
 /// release with no asset and no sidecar is `missing_asset` rather than
 /// `missing_sidecar`.
-pub fn decide(in: Inputs) Verdict {
+fn decide(in: Inputs) Verdict {
     if (sameRelease(in.running, in.tag)) return .current;
     const url = in.asset_url orelse return .missing_asset;
     if (!trustedGithubUrl(url)) return .untrusted_url;
@@ -357,14 +357,8 @@ fn parseRelease(arena: std.mem.Allocator, body: []const u8) !Release {
         .object => |o| o,
         else => return error.MalformedRelease,
     };
-    const tag = switch (obj.get("tag_name") orelse return error.MalformedRelease) {
-        .string => |s| s,
-        else => return error.MalformedRelease,
-    };
-    const page = switch (obj.get("html_url") orelse return error.MalformedRelease) {
-        .string => |s| s,
-        else => return error.MalformedRelease,
-    };
+    const tag = stringMember(obj, "tag_name") orelse return error.MalformedRelease;
+    const page = stringMember(obj, "html_url") orelse return error.MalformedRelease;
     const arr = switch (obj.get("assets") orelse return error.MalformedRelease) {
         .array => |a| a,
         else => return error.MalformedRelease,
@@ -375,20 +369,25 @@ fn parseRelease(arena: std.mem.Allocator, body: []const u8) !Release {
             .object => |o| o,
             else => continue,
         };
-        const name = switch (asset_obj.get("name") orelse continue) {
-            .string => |s| s,
-            else => continue,
-        };
-        const url = switch (asset_obj.get("browser_download_url") orelse continue) {
-            .string => |s| s,
-            else => continue,
-        };
+        const name = stringMember(asset_obj, "name") orelse continue;
+        const url = stringMember(asset_obj, "browser_download_url") orelse continue;
         try list.append(arena, .{ .name = name, .url = url });
     }
     return .{
         .tag = tag,
         .page = page,
         .assets = try list.toOwnedSlice(arena),
+    };
+}
+
+/// A member of a decoded object, or null when it is absent or is not a string.
+/// A member of any other type is a payload GitHub did not write, and every
+/// caller treats one exactly as it treats a member that is not there.
+fn stringMember(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
+    const value = obj.get(key) orelse return null;
+    return switch (value) {
+        .string => |s| s,
+        else => null,
     };
 }
 
@@ -730,12 +729,6 @@ const usage_text =
     \\
 ;
 
-fn printUsage(io: std.Io) void {
-    // Text the caller may have piped at something that read a few lines and
-    // left; a closed stream costs it nothing.
-    net.writeOut(io, usage_text) catch {};
-}
-
 /// The run arena, not `gpa`: the header outlives every fetch and nothing here
 /// owns the copy, so there is nothing to hand back.
 fn githubBearer(arena: std.mem.Allocator, env: *std.process.Environ.Map) ?[]const u8 {
@@ -874,7 +867,9 @@ pub fn run(
     const parsed = parseArgs(args);
     switch (parsed) {
         .help => {
-            printUsage(io);
+            // Text the caller may have piped at something that read a few lines
+            // and left; a closed stream costs it nothing.
+            net.writeOut(io, usage_text) catch {};
             return 0;
         },
         .version => {

@@ -198,14 +198,14 @@ pub const Problem = struct {
     bad_value: bool,
 };
 
-/// Whether a trimmed line is this config's own `[style]` table header.
+/// Whether a trimmed line, which the caller has already found opens with `[`,
+/// is this config's own `[style]` table header.
 ///
 /// The name is what is between the brackets, and what follows the closing
 /// bracket may only be whitespace or a comment. Reading the name off the whole
 /// line instead made a labelled header name no table at all, which turned every
 /// key under it into an unknown key.
 fn isStyleTable(line: []const u8) bool {
-    if (line[0] != '[') return false;
     const close = std.mem.indexOfScalar(u8, line, ']') orelse return false;
     const rest = std.mem.trim(u8, line[close + 1 ..], " \t");
     if (rest.len != 0 and rest[0] != '#') return false;

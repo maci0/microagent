@@ -146,6 +146,22 @@ const tools_json =
 /// What the command line asked the binary to do before it does any work.
 const Action = enum { run, help, version };
 
+/// Answers the action a parse settled on. `--help` and `--version` stop the
+/// parse where they appear, before any option value is needed, so the same two
+/// lines are printed here whether the action was found by the early scan or by
+/// the full parse.
+///
+/// The text a caller may have piped at something that read a few lines and
+/// left: nothing is waiting on the rest, so a closed stream costs the caller
+/// nothing.
+fn writeAction(io: Io, action: Action) void {
+    switch (action) {
+        .help => net.writeOut(io, help_text) catch {},
+        .version => net.writeOut(io, "microagent " ++ version ++ "\n") catch {},
+        .run => {},
+    }
+}
+
 const Options = struct {
     prompt: []const u8 = "",
     model: []const u8 = default_model,
@@ -209,11 +225,7 @@ pub fn main(init: std.process.Init) !void {
     // no way left to read that variable's own documentation. `microagent
     // update`, dispatched above, answers the same way.
     if (earlyAction(args.items[1..])) |action| {
-        switch (action) {
-            .help => net.writeOut(io, help_text) catch {},
-            .version => net.writeOut(io, "microagent " ++ version ++ "\n") catch {},
-            .run => {},
-        }
+        writeAction(io, action);
         return;
     }
 
@@ -245,20 +257,8 @@ pub fn main(init: std.process.Init) !void {
 
     var err_buf: [512]u8 = undefined;
     if (parseArgs(&err_buf, args.items[1..], &opts)) |msg| return usageError(io, "{s}", .{msg});
-    switch (opts.action) {
-        .help => {
-            // The text a caller may have piped at something that read a few
-            // lines and left: nothing is waiting on the rest, so a closed
-            // stream costs the caller nothing.
-            net.writeOut(io, help_text) catch {};
-            return;
-        },
-        .version => {
-            net.writeOut(io, "microagent " ++ version ++ "\n") catch {};
-            return;
-        },
-        .run => {},
-    }
+    writeAction(io, opts.action);
+    if (opts.action != .run) return;
 
     if (opts.prompt.len == 0) return usageError(io, "no prompt: pass it as an argument or with --print", .{});
     tool_mod.forwardInterruptsToToolGroup();
@@ -1748,12 +1748,11 @@ fn runTurn(
 ///   * `length`: the response was cut at `max_tokens`, so what it said is a
 ///     prefix of the answer. With tool calls in it the loop continues and the
 ///     next turn says more, so only the toolless turn is an unfinished run.
+const content_filter_notice = "the provider stopped generating this response (finish_reason content_filter); there is no answer to report";
+
 fn incompleteAnswer(arena: std.mem.Allocator, result: *const chat_mod.ChatResult, max_tokens: u32) ?[]const u8 {
     const reason = result.finish_reason;
-    if (std.mem.eql(u8, reason, "content_filter")) {
-        return std.fmt.allocPrint(arena, "the provider stopped generating this response (finish_reason content_filter); there is no answer to report", .{}) catch
-            "the provider stopped generating this response (finish_reason content_filter); there is no answer to report";
-    }
+    if (std.mem.eql(u8, reason, "content_filter")) return content_filter_notice;
     if (result.content.items.len == 0) {
         return std.fmt.allocPrint(arena, "the last response carried no text and no tool call (finish_reason: {s}), so the run ends with nothing to report", .{
             if (reason.len == 0) "none sent" else reason,
@@ -2044,9 +2043,7 @@ fn streamChat(
         }
         // Drop what was consumed, so a long stream does not keep every frame.
         if (start > 0) {
-            const rest = pending.items.len - start;
-            std.mem.copyForwards(u8, pending.items[0..rest], pending.items[start..]);
-            pending.shrinkRetainingCapacity(rest);
+            dropWritten(&pending, start);
             scanned -|= start;
         }
         // What is left above is the one line that has not ended, and a line
@@ -2063,7 +2060,16 @@ fn streamChat(
             });
             return error.StreamTruncated;
         }
-        try flushCompleteOut(io, arena, &out_buf, shown_url);
+        // Write every whole character in the buffer and keep a trailing partial
+        // one for the next chunk. The chunk boundary is the transport's, not
+        // the text's: a `\xe6\x97\xa5` split as `\xe6\x97` and `\xa5` across two
+        // reads is a legal chunking of a legal answer, and writing each half as
+        // it arrives puts a replacement glyph and then a broken byte on the
+        // operator's screen. What is held back is at most three bytes, so
+        // nothing waits on it that would not have waited on the next read
+        // anyway, and the run's last flush writes the tail with the rest.
+        const held = chat_mod.partialTailLen(out_buf.items);
+        try writeOutPrefix(io, arena, &out_buf, out_buf.items.len - held, shown_url);
     }
 
     if (unparsable > 0)
@@ -2803,23 +2809,9 @@ fn compactMessages(
     msgs.appendSliceAssumeCapacity(rewritten);
 }
 
-/// The flush the stream loop uses. It writes every whole character in the
-/// buffer and keeps a trailing partial one for the next chunk.
-///
-/// The chunk boundary is the transport's, not the text's: a `\xe6\x97\xa5` split
-/// as `\xe6\x97` and `\xa5` across two reads is a legal chunking of a legal
-/// answer, and writing each half as it arrives puts a replacement glyph and
-/// then a broken byte on the operator's screen. What is held back is at most
-/// three bytes, so nothing waits on it that would not have waited on the next
-/// read anyway, and the run's last flush writes the tail with the rest.
-fn flushCompleteOut(io: Io, arena: std.mem.Allocator, out_buf: *std.ArrayList(u8), shown_url: []const u8) !void {
-    const held = chat_mod.partialTailLen(out_buf.items);
-    try writeOutPrefix(io, arena, out_buf, out_buf.items.len - held, shown_url);
-}
-
-// The other half of `flushCompleteOut`: what the writer writes, and what the
-// next chunk starts from. A run whose answer carries a character the transport
-// split across two reads writes it as one character rather than as a
+// The other half of the stream loop's flush: what the writer writes, and what
+// the next chunk starts from. A run whose answer carries a character the
+// transport split across two reads writes it as one character rather than as a
 // replacement glyph and a broken byte.
 test "a character split across two reads is written once it is whole" {
     const answer = "a\u{65e5}\u{1f600}z";
@@ -2868,10 +2860,10 @@ fn writeOutPrefix(
     dropWritten(out_buf, len);
 }
 
-/// Drops the `len` bytes just written and moves what is left to the front, so
-/// the bytes the next chunk has to complete are the ones the next call starts
-/// from. The buffer only ever holds one flush's worth, so the move is over a
-/// few bytes.
+/// Drops the `len` bytes just consumed, whether they were written out or parsed
+/// as a line, and moves what is left to the front, so the bytes the next chunk
+/// has to complete are the ones the next call starts from. The buffer only ever
+/// holds one read's worth, so the move is over a few bytes.
 fn dropWritten(out_buf: *std.ArrayList(u8), len: usize) void {
     const kept = out_buf.items.len - len;
     std.mem.copyForwards(u8, out_buf.items[0..kept], out_buf.items[len..]);
@@ -2947,8 +2939,16 @@ fn assistantMessage(arena: std.mem.Allocator, result: *const chat_mod.ChatResult
     // Every byte written below is a byte that arrived over the wire this turn,
     // and the surrounding JSON adds a fixed amount per call, so the message is
     // sized before the first write. On the request arena a buffer grown to that
-    // size leaves every intermediate block behind.
-    var msg = chat_mod.JsonBuf.initCapacity(arena, assistantMessageBytes(result));
+    // size leaves every intermediate block behind. It is a starting size rather
+    // than a bound, since escaping can make a message longer, which is what
+    // `JsonBuf.initCapacity` is for.
+    const json_per_call: usize = 64;
+    const json_per_message: usize = 32;
+    var bytes: usize = result.content.items.len + json_per_message;
+    for (result.calls.items) |call| {
+        bytes += call.id.len + call.name.len + call.args.items.len + json_per_call;
+    }
+    var msg = chat_mod.JsonBuf.initCapacity(arena, bytes);
     try msg.writer().writeAll("{\"role\":\"assistant\",\"content\":");
     if (result.content.items.len == 0 and result.calls.items.len > 0) {
         try msg.writer().writeAll("null");
@@ -2972,21 +2972,6 @@ fn assistantMessage(arena: std.mem.Allocator, result: *const chat_mod.ChatResult
     }
     try msg.writer().writeAll("]}");
     return msg.items();
-}
-
-/// The bytes one assistant message needs: the text and the arguments as they
-/// arrived, plus the JSON around them. The escapes can make a message longer
-/// than this, so it is a starting size rather than a bound, which is what
-/// `JsonBuf.initCapacity` is for.
-const assistant_call_json_bytes: usize = 64;
-const assistant_message_json_bytes: usize = 32;
-
-fn assistantMessageBytes(result: *const chat_mod.ChatResult) usize {
-    var bytes: usize = result.content.items.len + assistant_message_json_bytes;
-    for (result.calls.items) |call| {
-        bytes += call.id.len + call.name.len + call.args.items.len + assistant_call_json_bytes;
-    }
-    return bytes;
 }
 
 // One machine-readable line per response: gauntlet reads these for live
@@ -4695,9 +4680,7 @@ test "a frame split across reads yields the same lines, and is searched once" {
             start = pos + 1;
         }
         if (start > 0) {
-            const rest = pending.items.len - start;
-            std.mem.copyForwards(u8, pending.items[0..rest], pending.items[start..]);
-            pending.shrinkRetainingCapacity(rest);
+            dropWritten(&pending, start);
             scanned -|= start;
         }
     }

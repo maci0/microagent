@@ -453,24 +453,15 @@ pub fn httpDateEpochSeconds(raw: []const u8) ?i64 {
     const second = std.fmt.parseInt(i64, clock.next() orelse return null, 10) catch return null;
     if (clock.next() != null) return null;
 
-    if (year < 1 or year > http_date_year_max) return null;
+    if (year < 1) return null;
 
     const day = std.fmt.parseInt(u32, day_text, 10) catch return null;
-    if (day == 0 or day > daysInMonth(year, month)) return null;
+    if (day == 0 or day > std.time.epoch.getDaysInMonth(@intCast(year), @enumFromInt(month))) return null;
     if (hour < 0 or hour > 23 or minute < 0 or minute > 59 or second < 0 or second > 60) return null;
 
     return daysFromCivil(year, month, day) * @as(i64, std.time.s_per_day) +
         hour * std.time.s_per_hour + minute * std.time.s_per_min + second;
 }
-
-/// The years an IMF-fixdate can spell: its year field is four digits wide, and
-/// RFC 9110 has no longer one. The bound is load-bearing rather than pedantic.
-/// The count below is days times 86 400, and days grows with the year, so a
-/// year a sender has no way of meaning (a gateway that writes the field from a
-/// 64-bit counter) puts that multiply past the 64 bits it has: the header then
-/// reads as a date in the past or the far future by whatever the wrap left
-/// behind, and the wait it asks for is the opposite of the one it named.
-const http_date_year_max: i64 = 9999;
 
 /// The year an IMF-fixdate names, or null when it is not the four digits
 /// RFC 9110 spells it as.
@@ -500,24 +491,6 @@ fn monthFromName(name: []const u8) ?u32 {
         if (std.ascii.eqlIgnoreCase(name, candidate)) return @intCast(number);
     }
     return null;
-}
-
-/// Whether `year` is a leap year under the rule the epoch counts: divisible by
-/// four, and not by a hundred that is not by four hundred.
-fn isLeapYear(year: i64) bool {
-    if (@mod(year, 4) != 0) return false;
-    if (@mod(year, 100) != 0) return true;
-    return @mod(year, 400) == 0;
-}
-
-/// How many days `month` of `year` has, the leap day included. A month the
-/// name cannot have is zero, so a day past the end is refused by the caller
-/// rather than rolling into the next one.
-fn daysInMonth(year: i64, month: u32) u32 {
-    const lengths = [_]u32{ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
-    if (month == 0 or month > lengths.len) return 0;
-    if (month == 2 and isLeapYear(year)) return 29;
-    return lengths[month - 1];
 }
 
 /// Days from 1970-01-01 to `year`-`month`-`day`, by the civil-date algorithm
@@ -930,7 +903,10 @@ fn fuzzHttpDate(_: void, smith: *std.testing.Smith) !void {
     // calendar: a header that overflows is a run that waits for years, or one
     // that stops waiting at all.
     const first = daysFromCivil(1, 1, 1) * @as(i64, std.time.s_per_day);
-    const last = daysFromCivil(http_date_year_max, 12, 31) * @as(i64, std.time.s_per_day) +
+    // The widest year the digit count above can spell, so the bound moves with
+    // the width rather than restating it.
+    const widest_year = std.math.pow(i64, 10, http_date_year_digits) - 1;
+    const last = daysFromCivil(widest_year, 12, 31) * @as(i64, std.time.s_per_day) +
         23 * @as(i64, std.time.s_per_hour) + 59 * @as(i64, std.time.s_per_min) + 60;
     if (got < first or got > last) {
         std.debug.print("\nhttp_date: '{s}' reads as {d}, outside {d}..{d}\n", .{ raw, got, first, last });
@@ -975,7 +951,7 @@ fn fuzzHttpDate(_: void, smith: *std.testing.Smith) !void {
     // instant one second past the last the four-digit year field can carry.
     // Nothing downstream cares (a caller only ever subtracts it from a clock),
     // so it is held to the range above and the round trip starts after it.
-    const last_second_of_the_last_day = daysFromCivil(http_date_year_max, 12, 31) * @as(i64, std.time.s_per_day) +
+    const last_second_of_the_last_day = daysFromCivil(widest_year, 12, 31) * @as(i64, std.time.s_per_day) +
         23 * @as(i64, std.time.s_per_hour) + 59 * @as(i64, std.time.s_per_min) + 60;
     if (got < 0 or got >= last_second_of_the_last_day) return;
     var header: [64]u8 = undefined;
