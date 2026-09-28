@@ -1804,6 +1804,7 @@ const Captured = struct {
 /// big file reached the model as a bare error with no output at all. Here the
 /// bytes past the cap are drained and dropped instead: the child still runs to
 /// its own end, so the exit status and the timeout keep meaning what they did.
+/// The call and everything it started are one process group, signalled together.
 fn runCapped(
     io: Io,
     arena: std.mem.Allocator,
@@ -1813,11 +1814,22 @@ fn runCapped(
 ) !Captured {
     var child = try std.process.spawn(io, .{
         .argv = argv,
+        .pgid = 0, // its own group leader, so the group signal stays ours
         .stdin = .ignore,
         .stdout = .pipe,
         .stderr = .pipe,
     });
-    defer child.kill(io);
+    // `bash` is the one tool whose command builds a tree, so the whole group
+    // goes with the call on every exit path: a timeout or a hit cap left the
+    // shell's children running, holding their own pipe ends, their cwd and
+    // their ports, and one such orphan per call in a long run. A child already
+    // reaped by `wait` is a no-op, and its group still gets the signal, so a
+    // command that backgrounded work and exited does not outlive the call.
+    const pgid: ?std.posix.pid_t = if (builtin.os.tag == .windows) null else @intCast(child.id.?);
+    defer {
+        if (pgid) |group| signalGroup(group);
+        child.kill(io);
+    }
 
     const files = [2]Io.File{ child.stdout.?, child.stderr.? };
     var chunks: [2][capture_chunk]u8 = undefined;
@@ -3062,28 +3074,63 @@ test "a tool call that times out leaves no process of its own behind" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    const pid_path = try grandchildPidPath(arena, io, tmp);
+
+    try std.testing.expectError(
+        error.Timeout,
+        runToolProcess(arena, io, &.{ "/bin/sh", "-c", try backgroundedGrandchild(arena, pid_path) }, 4096, 4096, durationMs(300)),
+    );
+    try std.testing.expect(!try grandchildSurvived(io, tmp, arena));
+}
+
+test "a bash call that times out leaves no process of its own behind" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const pid_path = try grandchildPidPath(arena, io, tmp);
+
+    try std.testing.expectError(
+        error.Timeout,
+        runCapped(io, arena, &.{ "/bin/sh", "-c", try backgroundedGrandchild(arena, pid_path) }, 4096, durationMs(300)),
+    );
+    try std.testing.expect(!try grandchildSurvived(io, tmp, arena));
+}
+
+/// Where the backgrounded grandchild of a tool test records its pid.
+fn grandchildPidPath(arena: std.mem.Allocator, io: Io, tmp: std.testing.TmpDir) ![]const u8 {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const n = try tmp.dir.realPath(io, &path_buf);
-    const pid_path = try std.fs.path.join(arena, &.{ path_buf[0..n], "grandchild.pid" });
-    // The grandchild holds the pipe open, so the read only ends when the
-    // timeout fires, which is the path under test.
-    const script = try std.fmt.allocPrint(arena,
+    return std.fs.path.join(arena, &.{ path_buf[0..n], "grandchild.pid" });
+}
+
+/// A command that backgrounds a grandchild holding the pipes open, so the read
+/// only ends when the timeout fires, which is the path under test.
+fn backgroundedGrandchild(arena: std.mem.Allocator, pid_path: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(arena,
         \\sh -c 'echo $$ > {s}; sleep 30' &
         \\sleep 30
     , .{pid_path});
-    try std.testing.expectError(error.Timeout, runToolProcess(arena, io, &.{ "/bin/sh", "-c", script }, 4096, 4096, durationMs(300)));
+}
 
+/// True when the grandchild is still there a second after the call returned.
+fn grandchildSurvived(io: Io, tmp: std.testing.TmpDir, arena: std.mem.Allocator) !bool {
     const raw = tmp.dir.readFileAlloc(io, "grandchild.pid", arena, .limited(64)) catch return error.GrandchildNotReported;
     const pid = try std.fmt.parseInt(std.posix.pid_t, std.mem.trim(u8, raw, " \t\r\n"), 10);
     // The kill is delivered asynchronously and the orphan is reaped by init
     // afterwards, so "gone" is a short poll rather than an instant check.
     var attempt: usize = 0;
     while (attempt < 50) : (attempt += 1) {
-        std.posix.kill(pid, .CONT) catch return;
+        std.posix.kill(pid, .CONT) catch return false;
         try io.sleep(.{ .nanoseconds = 20 * std.time.ns_per_ms }, .awake);
     }
     std.debug.print("grandchild {d} survived the tool call\n", .{pid});
-    return error.GrandchildSurvived;
+    return true;
 }
 
 // The session store is a per-run directory nothing used to delete from, so a
