@@ -42,6 +42,21 @@ from the two bench scripts.
 Startup for the node-based harnesses moves by hundreds of milliseconds between runs on a loaded
 machine, so a range is reported rather than a single figure.
 
+microagent's own row needs the same caveat more than the others, because at half
+a millisecond it is the one measurement here that the harness around it can
+outweigh. The same `--version` on the same binary measured 442 us and 1.7 ms in
+one session, on a machine that was not doing anything different between them.
+The table above is a comparison and stays as one; microagent's own startup is
+better read from a counter that does not move:
+
+| | |
+| --- | --- |
+| retired instructions | **477,511** |
+| CPU time (`perf stat -e task-clock`) | **0.58 - 0.61 ms** |
+
+Both repeat to within 0.001% across runs and are unaffected by what else the
+machine is doing, which is why the gate measures work rather than time.
+
 Turns after the first reuse the TLS session rather than paying a handshake:
 `keep_alive` defaults to true in `std.http.Client`, so every turn's request
 participates in the client's connection pool, and the request's `deinit` drains
