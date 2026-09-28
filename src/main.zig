@@ -24,6 +24,10 @@ const max_tool_output = 24 * 1024;
 /// long run pays for every file it has ever read, forever: one Terminal-Bench
 /// task reached 1.7M cumulative input tokens that way.
 const conversation_soft_limit = 400 * 1024;
+/// The smallest tool result compaction will replace with a marker. Below it
+/// the marker is not worth the rewrite, so such a result stays whole and the
+/// conversation grows instead.
+const min_elided_bytes = 4096;
 const max_turns_default = 100;
 /// Ceiling on what one response may generate, sent as `max_tokens`. Without it
 /// the provider's own limit is the only bound: a model that fails to stop
@@ -766,6 +770,7 @@ fn run(
     const turn_arena = turn_state.allocator();
     var turn: usize = 0;
     var usage: Usage = .{};
+    var compaction_floor: usize = 0;
     while (turn < opts.max_turns) : (turn += 1) {
         _ = turn_state.reset(.retain_capacity);
         if (budget.expired(io)) {
@@ -783,7 +788,7 @@ fn run(
         // word about the ceiling that cut it.
         if (turn + 1 == opts.max_turns)
             net.note(io, arena, "microagent: last turn (--max-turns {d})\n", .{opts.max_turns});
-        try compactMessages(gpa, msgs, turn_arena);
+        try compactMessages(gpa, msgs, turn_arena, &compaction_floor);
         // The model stopped asking for tools, so the run is over.
         if (!try runTurn(client, io, turn_arena, gpa, opts, msgs, session, &usage, budget)) return;
     }
@@ -1131,6 +1136,7 @@ fn streamChat(
     // an endless run of empty lines instead of reading on).
     var pending: std.ArrayList(u8) = .empty;
     defer pending.deinit(gpa);
+    var scanned: usize = 0;
     var chunk: [8 * 1024]u8 = undefined;
     var done = false;
     var unparsable: usize = 0;
@@ -1156,7 +1162,7 @@ fn streamChat(
         try pending.appendSlice(gpa, chunk[0..n]);
 
         var start: usize = 0;
-        while (std.mem.indexOfScalarPos(u8, pending.items, start, '\n')) |pos| {
+        while (nextLineEnd(pending.items, &scanned)) |pos| {
             const raw = pending.items[start..pos];
             start = pos + 1;
             const line = std.mem.trimEnd(u8, raw, "\r");
@@ -1175,6 +1181,7 @@ fn streamChat(
             const rest = pending.items.len - start;
             std.mem.copyForwards(u8, pending.items[0..rest], pending.items[start..]);
             pending.shrinkRetainingCapacity(rest);
+            scanned -|= start;
         }
         flushOut(io, &out_buf);
     }
@@ -1204,6 +1211,21 @@ fn streamChat(
     result.calls = calls;
     dropNamelessCalls(gpa, &result.calls);
     return result;
+}
+
+/// The index of the next newline in `pending`, or null while the line it would
+/// end is still arriving. `scanned` is how much of `pending` has already been
+/// searched, so a frame longer than one read is not searched for again from the
+/// front each time the next piece of it lands: that made splitting a long frame
+/// quadratic in its length. The caller drops the bytes it consumed and lowers
+/// `scanned` by the same amount.
+fn nextLineEnd(pending: []const u8, scanned: *usize) ?usize {
+    const at = std.mem.indexOfScalarPos(u8, pending, scanned.*, '\n') orelse {
+        scanned.* = pending.len;
+        return null;
+    };
+    scanned.* = at + 1;
+    return at;
 }
 
 /// Why a stream that ended without `[DONE]` is not a finished turn, in the
@@ -1658,8 +1680,23 @@ fn firstLines(arena: std.mem.Allocator, text: []const u8, limit: usize) ![]u8 {
 /// evidence while the pile of file dumps it already acted on stops being
 /// re-sent every turn. Messages are never dropped, so `tool_call_id` pairing
 /// stays valid.
-fn compactMessages(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), scratch: std.mem.Allocator) !void {
+///
+/// `floor` is the length the conversation has to grow past before another pass
+/// is worth its parse. Finding out what is elidable means parsing the whole
+/// conversation, and a run whose tool output is all under `min_elided_bytes` has
+/// nothing left to elide: the same pass would re-parse and re-walk a growing
+/// conversation on every remaining turn to learn the same thing, which is
+/// quadratic in the run. One more soft limit of appended conversation is far
+/// more than enough to have made something elidable again, so the run pays one
+/// wasted parse per soft limit rather than one per turn.
+fn compactMessages(
+    gpa: std.mem.Allocator,
+    msgs: *std.ArrayList(u8),
+    scratch: std.mem.Allocator,
+    floor: *usize,
+) !void {
     if (msgs.items.len <= conversation_soft_limit) return;
+    if (msgs.items.len <= floor.*) return;
 
     var arena_state = std.heap.ArenaAllocator.init(scratch);
     defer arena_state.deinit();
@@ -1686,12 +1723,18 @@ fn compactMessages(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), scratch: st
             .string => |t| t,
             else => continue,
         };
-        if (text.len < 4096) continue;
+        if (text.len < min_elided_bytes) continue;
         const marker = try std.fmt.allocPrint(arena, "[earlier tool output elided: {d} bytes]", .{text.len});
         size -= text.len - marker.len;
         content.* = .{ .string = marker };
     }
-    if (size == msgs.items.len) return;
+    if (size == msgs.items.len) {
+        floor.* = msgs.items.len +| conversation_soft_limit;
+        return;
+    }
+    // Something was elided, so the next turn starts from the usual threshold
+    // and the run compacts on the schedule it did before.
+    floor.* = conversation_soft_limit;
 
     var jb = JsonBuf.init(gpa);
     defer jb.list.deinit(gpa);
@@ -2950,7 +2993,11 @@ test "compaction elides old tool output and keeps the recent turns" {
     const before = msgs.items.len;
     try std.testing.expect(before > conversation_soft_limit);
 
-    try compactMessages(gpa, &msgs, scratch_state.allocator());
+    var floor: usize = 0;
+    try compactMessages(gpa, &msgs, scratch_state.allocator(), &floor);
+    // Something was elided, so the next pass waits for the ordinary threshold
+    // rather than for the conversation to grow another soft limit.
+    try std.testing.expectEqual(conversation_soft_limit, floor);
 
     try std.testing.expect(msgs.items.len < before / 2);
     const parsed = try std.json.parseFromSlice(std.json.Value, gpa, msgs.items, .{});
@@ -2963,6 +3010,115 @@ test "compaction elides old tool output and keeps the recent turns" {
     try std.testing.expectEqualStrings("call_119", last.get("tool_call_id").?.string);
     try std.testing.expectEqual(@as(usize, 8192), last.get("content").?.string.len);
     try std.testing.expect(std.mem.startsWith(u8, array.items[2].object.get("content").?.string, "[earlier tool output elided"));
+}
+
+// The stream arrives in reads of a fixed size, so a frame longer than one read
+// is handed over in pieces. Splitting has to find every line exactly once and
+// search each byte of it once, whether it lands whole or a byte at a time.
+test "a frame split across reads yields the same lines, and is searched once" {
+    const gpa = std.testing.allocator;
+
+    const lines = [_][]const u8{ "data: one", "", "data: two", "data: [DONE]" };
+    var wire: std.ArrayList(u8) = .empty;
+    defer wire.deinit(gpa);
+    for (lines, 0..) |line, i| {
+        if (i > 0) try wire.appendSlice(gpa, "\n");
+        try wire.appendSlice(gpa, line);
+    }
+    try wire.append(gpa, '\n');
+
+    var seen: std.ArrayList([]u8) = .empty;
+    defer {
+        for (seen.items) |l| gpa.free(l);
+        seen.deinit(gpa);
+    }
+
+    // The stream loop's own shape: append what a read brought, drain the lines
+    // it completed, drop what was consumed. One byte at a time is the worst
+    // case for the scan, so the counter is at its most meaningful here.
+    var pending: std.ArrayList(u8) = .empty;
+    defer pending.deinit(gpa);
+    var scanned: usize = 0;
+    var searched: usize = 0;
+    for (wire.items) |b| {
+        try pending.append(gpa, b);
+        var start: usize = 0;
+        while (true) {
+            // Each call looks at exactly the bytes between the old cursor and
+            // the new one, whether it found a newline or ran off the end.
+            const was = scanned;
+            const found = nextLineEnd(pending.items, &scanned);
+            searched += scanned - was;
+            const pos = found orelse break;
+            try seen.append(gpa, gpa.dupe(u8, pending.items[start..pos]) catch return error.OutOfMemory);
+            start = pos + 1;
+        }
+        if (start > 0) {
+            const rest = pending.items.len - start;
+            std.mem.copyForwards(u8, pending.items[0..rest], pending.items[start..]);
+            pending.shrinkRetainingCapacity(rest);
+            scanned -|= start;
+        }
+    }
+    try std.testing.expectEqual(lines.len, seen.items.len);
+    for (lines, seen.items) |want, got| try std.testing.expectEqualStrings(want, got);
+    // Every byte looked at exactly once, not once per line that followed it.
+    try std.testing.expectEqual(wire.items.len, searched);
+}
+
+// A conversation past the soft limit whose tool results are all under the
+// elision floor has nothing to compact, and finding that out costs a full parse
+// of the conversation. Repeating it on every turn is quadratic in the run, so
+// a pass that elided nothing holds the next one off until the conversation has
+// grown by another soft limit. The skip never outlives the reason for it: once
+// the conversation does grow past the floor, the pass runs and elides as
+// before.
+test "a conversation with nothing to elide is not re-parsed every turn" {
+    const gpa = std.testing.allocator;
+    var scratch_state = std.heap.ArenaAllocator.init(gpa);
+    defer scratch_state.deinit();
+
+    var msgs: std.ArrayList(u8) = .empty;
+    defer msgs.deinit(gpa);
+
+    // Every tool result is just under `min_elided_bytes`, so nothing is
+    // elidable and the conversation is well past the soft limit.
+    try conversationHeader(gpa, &msgs, "you are a coding agent");
+    try appendToolResults(gpa, &msgs, 200, "x" ** (min_elided_bytes - 64));
+    const before = msgs.items.len;
+    try std.testing.expect(before > conversation_soft_limit);
+
+    var floor: usize = 0;
+    try compactMessages(gpa, &msgs, scratch_state.allocator(), &floor);
+    try std.testing.expectEqual(before, msgs.items.len);
+    try std.testing.expectEqual(before + conversation_soft_limit, floor);
+
+    // Still over the soft limit, but below the floor: the turn is skipped
+    // rather than paying the parse again.
+    try growConversation(gpa, &msgs, "y" ** 8192);
+    try compactMessages(gpa, &msgs, scratch_state.allocator(), &floor);
+    try std.testing.expect(msgs.items.len > before);
+    try std.testing.expectEqual(before + conversation_soft_limit, floor);
+
+    // Past the floor, a result big enough to elide is picked up again.
+    while (msgs.items.len <= floor) try growConversation(gpa, &msgs, "z" ** 8192);
+    const grown = msgs.items.len;
+    try compactMessages(gpa, &msgs, scratch_state.allocator(), &floor);
+    try std.testing.expectEqual(conversation_soft_limit, floor);
+    try std.testing.expect(msgs.items.len < grown);
+}
+
+// Appends a tool result to an already-closed conversation, the way a turn does.
+fn growConversation(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), blob: []const u8) !void {
+    msgs.shrinkRetainingCapacity(msgs.items.len - 1);
+    try msgs.append(gpa, ',');
+    var msg = JsonBuf.init(gpa);
+    try msg.writer().writeAll("{\"role\":\"tool\",\"tool_call_id\":\"call_x\",\"content\":");
+    try writeJsonString(msg.writer(), blob);
+    try msg.writer().writeAll("}");
+    try msgs.appendSlice(gpa, msg.items());
+    msg.list.deinit(gpa);
+    try msgs.append(gpa, ']');
 }
 
 // Prompt caching keys on the exact bytes of the request prefix. Compaction is
@@ -2987,7 +3143,8 @@ test "compaction leaves the cached prefix byte-identical" {
 
     try std.testing.expect(msgs.items.len > conversation_soft_limit);
 
-    try compactMessages(gpa, &msgs, scratch_state.allocator());
+    var floor: usize = 0;
+    try compactMessages(gpa, &msgs, scratch_state.allocator(), &floor);
 
     try std.testing.expect(msgs.items.len > prefix.len);
     try std.testing.expectEqualStrings(prefix, msgs.items[0..prefix.len]);
