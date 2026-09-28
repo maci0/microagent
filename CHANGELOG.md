@@ -21,6 +21,14 @@ release, and `microagent update` moves you to it.
   `--print`, and anything after `--` are still a task, by the rules that were
   already there, so `microagent -- "help"` and `microagent -p help` run.
 
+### Changed
+
+- The harbor adapter checks `MICROAGENT_BASE_URL` before the container starts, the way it
+  already checks the ceilings and the reasoning level. A url with no scheme, or an http one
+  that is not loopback, is refused by the binary because the api key rides in a header that
+  host reads, and it was refused there: after a container start and a binary upload, in a
+  log the operator was not watching. It is now named at the command line.
+
 ### Fixed
 
 - A tool call the completion stream delivers twice is dispatched once. The
@@ -32,6 +40,24 @@ release, and `microagent update` moves you to it.
   and named on stderr, and the assistant message goes back naming each call
   once, so the tool results still pair one to one. Two calls that happen to be
   identical but carry different ids are still two calls.
+- A tool call is bounded by its timeout while it waits for the child, not only while it
+  drains the child's pipes. Both pipes reach end of stream long before the command does,
+  and the wait that followed took no deadline of its own, so
+  `sh -c 'exec 1>&- 2>&-; sleep 600'` closed them at once and the call then blocked for
+  the ten minutes the command asked for. The turn hung behind one tool call, the
+  process-group reap on the way out never fired, and `--budget` was a promise the tools did
+  not keep. The wait is now raced against the deadline the call was already given, and the
+  group is signalled when it passes, so the call reports the same timeout a timeout during
+  the drain reports. A command that exits first is not held to the poll interval or to its
+  own timeout, and a single-threaded runtime, where the two cannot be raced, is refused
+  loudly rather than blocking on the child the timeout was meant to bound.
+- A session log this run could not name, and a key file whose path could not be built, now
+  say so on stderr. The name, the allocation and the path join in the log's own open each
+  returned a null the run could afford, which left a monitor reading a store that stayed
+  empty with nothing to explain it, and a `~/.secrets/openrouter` this process could not
+  even name was reported as no key at all rather than as a key out of reach. Each names
+  the path that failed and the reason, the way every other way of losing the log already
+  did.
 - A character the transport split across two reads is no longer written to
   stdout in halves. The stream loop flushed each chunk as it arrived, and a
   chunk boundary is a byte boundary rather than a character one: a `日` split
@@ -63,13 +89,18 @@ release, and `microagent update` moves you to it.
   plain log it sorted into the retention window as the oldest thing in the store, so a file this
   program never wrote was the first one the window removed.
 
-### Changed
+### Security
 
-- The harbor adapter checks `MICROAGENT_BASE_URL` before the container starts, the way it
-  already checks the ceilings and the reasoning level. A url with no scheme, or an http one
-  that is not loopback, is refused by the binary because the api key rides in a header that
-  host reads, and it was refused there: after a container start and a binary upload, in a
-  log the operator was not watching. It is now named at the command line.
+- A session log is created readable by its owner alone, and the directory a run makes for
+  its own store with it. A log took the default file mode, `0o666` less the umask, so on the
+  `0o022` an ordinary account carries it landed world-readable under `$HOME`, and the store
+  directory it was made in took `0o755` and exposed the names of the logs even where the logs
+  themselves could not be read. A log is the run's transcript: the prompts, the tool
+  arguments, and every byte a tool read out of the tree, which is the material the tools
+  themselves refuse to hand the provider. The modes are now `0o600` and `0o700`, and only on
+  what this run creates: an operator who pointed `MICROAGENT_SESSION_DIR` at a store that
+  already exists keeps the mode they gave it. `THREAT_MODEL.md` records the two modes as
+  controls, and its `src/session.zig` references point at the declarations they name again.
 
 ## [0.2.0] - 2026-09-29
 
