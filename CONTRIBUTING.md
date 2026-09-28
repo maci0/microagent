@@ -70,7 +70,8 @@ version (`make zig-version` is that first step, so a laptop on a different
 compiler is told rather than assumed). Two things it does not stand in for: the
 release-assets cross-build (`make release-assets` runs that, and
 `make check-reproducible` adds a byte-identical rebuild of every published
-target on top of it) and the second runner, where the same gate also
+target on top of it, with the clock, the locale, the timezone, the compiler's
+cache and the output directory varied) and the second runner, where the same gate also
 runs on macOS. `make help` lists every target.
 Source is formatted with `zig fmt`; `make fmt` applies it, and `ruff format`
 does the same for the Harbor adapter. The three linters cover what `zig fmt`

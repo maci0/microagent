@@ -118,7 +118,8 @@ jobs:
     # what update.zig asks for, fails here instead of at a tag.
     runs-on: ubuntu-24.04
     # The cross build of every target plus the two independent builds of each
-    # that the reproducibility check below makes, so the ceiling has to cover
+    # that the reproducibility check below makes, and the two more of one target
+    # it makes from a second directory, so the ceiling has to cover more than
     # twice the compile work the job used to do.
     timeout-minutes: 40
     steps:
@@ -146,8 +147,10 @@ jobs:
 
       # Two independent builds of the same source must be byte-identical, or a
       # released checksum describes one binary and a rebuild produces another.
-      # The recipe lives in the Makefile, which owns the published target list,
-      # so this job and release.yml run the same check over the same targets.
+      # The recipe lives in the Makefile, which owns the published target list
+      # and varies the clock, the locale, the timezone, the compiler's cache and
+      # the output directory between the two builds of every target, so this
+      # job and release.yml run the same check over the same targets.
       - name: the release build is reproducible
         env:
           REPRO_DIR: ${{ runner.temp }}/microagent-repro

@@ -99,7 +99,9 @@ jobs:
           }
           # Read into a variable and refused when empty: an empty list would
           # leave the loop below unrun and this step green, which is the one
-          # outcome it exists to prevent.
+          # outcome it exists to prevent. The list is the Makefile's, the one
+          # release-assets built from, so a target added there and not here is
+          # covered by this check rather than published unchecked.
           targets="$(make --no-print-directory release-targets)"
           test -n "$targets" || { echo "the Makefile names no published targets to check" >&2; exit 1; }
           for target in $targets; do

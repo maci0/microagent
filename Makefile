@@ -360,7 +360,11 @@ release-assets:
 # The sha256 sidecar `microagent update` verifies before it replaces anything.
 # Only a tagged build names its assets after a version, so a rehearsal in dist/
 # has nothing to checksum and says so. A host with neither hashing command is
-# told so rather than left without the sidecars an update cannot verify.
+# told so rather than left without the sidecars an update cannot verify. Each
+# sidecar is written to a `.tmp` and renamed, the way `musl` stages its binary:
+# a sidecar truncated by an interrupted run is a file `update` hashes the asset
+# against and fails on, and the leftovers of that run are skipped rather than
+# checksummed as if they were an asset.
 checksums:
 	@test -d dist || { echo "no dist/, run 'make release-assets TAG=v0.2.0' first" >&2; exit 2; }
 	cd dist && set -eu && \
@@ -370,12 +374,13 @@ checksums:
 		exit 2; \
 	}; \
 	for asset in microagent-v*; do \
-		case "$$asset" in *.sha256) continue;; esac; \
+		case "$$asset" in *.sha256|*.tmp) continue;; esac; \
 		test -e "$$asset" || { \
 			echo "no tagged assets in dist/, run 'make release-assets TAG=v0.2.0' first" >&2; \
 			exit 2; \
 		}; \
-		$$sum "$$asset" > "$$asset.sha256"; \
+		$$sum "$$asset" > "$$asset.sha256.tmp"; \
+		mv "$$asset.sha256.tmp" "$$asset.sha256"; \
 	done
 
 # Two independent builds of the same source must be byte-identical, or a
