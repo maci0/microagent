@@ -14,8 +14,8 @@ of `CHANGELOG.md`.
 | 1 | Repository content drives shell execution | repo → model → host | high: any content the model reads can carry an instruction | full compromise of the operator's account, its files and its keys | none |
 | 2 | The provider's reply drives shell execution | provider → host | medium: needs a hostile, coerced or MITM'd endpoint | same as 1 | redirect refused, privileged auth header, response caps, timeouts |
 | 3 | The API key is sent to the host the environment names | agent → provider | medium: any `https` host is accepted | provider account takeover, bill abuse | plaintext `http` refused off loopback (`src/main.zig:461`) |
-| 4 | Tools read and write outside the working tree | model → filesystem | high: `read`/`write`/`edit` take any path | read or overwrite `~/.ssh`, `~/.aws`, CI tokens | none |
-| 5 | Tool output carries credentials to the model and on to the provider | host → model → provider | high: the shell inherits the whole environment | secret exfiltration through a routine run | none |
+| 4 | Tools read and write outside the working tree | model → filesystem | high: `read`/`write`/`edit` take any path | read or overwrite `~/.ssh`, `~/.aws`, CI tokens | `read` refuses a credentials file (`src/tool.zig:415`); `write`/`edit` still take any path |
+| 5 | Tool output carries credentials to the model and on to the provider | host → model → provider | high: the shell inherits the whole environment | secret exfiltration through a routine run | `read` refuses a credentials file; `bash` still reaches any of them (gap 2) |
 | 6 | A compromised release replaces the binary | GitHub → host | low: needs the release account or its token | persistent, silent code execution on every later run | sha256 sidecar, host allowlist (`src/update.zig:152`, `src/update.zig:165`) |
 | 7 | The API key is visible in the process table | operator → host | low: needs a local reader | key theft by any other process or user on the box | none |
 | 8 | A hostile or malformed provider response exhausts memory or CPU | provider → agent | medium | run killed, machine memory spent | response caps, timeouts, process-group kill |
@@ -100,7 +100,7 @@ is no user confirmation between a model decision and a command.
 | Provider API key | bills, model access, provider account | `argv` or environment, then process memory |
 | `GITHUB_TOKEN` | release and API access | environment, then request headers |
 | `~/.secrets/openrouter` | the same key, on disk | read at `src/main.zig:655` |
-| Source tree and everything in it | `.env`, keys, unreleased work | read by `read` (`src/main.zig:2141`), sent to the provider in the request body (`src/main.zig:1113`) |
+| Source tree and everything in it | `.env`, keys, unreleased work | read by `read` (`src/tool.zig:445`, a credential refused at `src/tool.zig:415`), sent to the provider in the request body |
 | Host compute and credentials | the shell inherits the environment | `src/main.zig:2110` |
 | The binary itself | a replaced copy runs on every later invocation | replaced at `src/update.zig:731` |
 | Run logs | working directory, model, token counts, finish reason | `~/.microagent/sessions`, pruned at 200 files (`src/main.zig:977`) |
@@ -234,9 +234,12 @@ any of them is the same bug returning.
 1. **No confinement on model-driven execution.** `bash`, `write`, `edit` and `ast
    --rewrite` run with full operator authority, and the instructions that trigger them
    can come from a file the run reads. The model, not the operator, is the last gate.
-2. **No secret hygiene in tool output.** A tool that prints an environment variable, a
-   config file or a `.env` puts those bytes in the model context, and the model context is
-   re-sent to the provider on every turn.
+2. **No secret hygiene in `bash` output.** `read` refuses a credentials file
+   (`src/tool.zig:415`), so that tool cannot put a `.env` or a private key in the model
+   context. `bash` can: a command that prints an environment variable or a config file
+   puts those bytes in the context, and the context is re-sent to the provider on every
+   turn. The refusal is a name-based rule, so a credential under a name it does not know,
+   or one reached through a shell command, is still read.
 3. **No host policy on `base_url`, only a scheme policy.** The key never goes out over
    plaintext `http` off loopback, but `MICROAGENT_BASE_URL` or `--base-url` may name any
    `https` host and the key follows it. A poisoned environment variable turns a review run

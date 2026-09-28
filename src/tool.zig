@@ -81,7 +81,7 @@ const ToolChild = struct {
 /// one `read` uses for source.
 pub fn readSecret(init: std.process.Init, name: []const u8) ?[]const u8 {
     const home = init.environ_map.get("HOME") orelse return null;
-    const path = std.fmt.allocPrint(init.arena.allocator(), "{s}/.secrets/{s}", .{ home, name }) catch return null;
+    const path = std.fs.path.join(init.arena.allocator(), &.{ home, ".secrets", name }) catch return null;
     const raw = std.Io.Dir.cwd().readFileAlloc(init.io, path, init.arena.allocator(), .limited(max_secret_bytes)) catch return null;
     return std.mem.trim(u8, raw, " \t\r\n");
 }
@@ -373,8 +373,79 @@ fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     return buf.items;
 }
 
+/// Directories whose every file is a credential. Matched per path component,
+/// so `~/.secrets/openrouter` and `.ssh/id_ed25519` are refused wherever they
+/// sit in the tree.
+const credential_dirs = [_][]const u8{ ".secrets", ".ssh" };
+
+/// Names that are a credential whatever they sit beside.
+const credential_names = [_][]const u8{
+    ".netrc",      "_netrc",           ".pgpass",   ".npmrc",
+    ".pypirc",     ".git-credentials", ".htpasswd", "credentials",
+    "id_rsa",      "id_dsa",           "id_ecdsa",  "id_ed25519",
+    "id_ecdsa_sk", "id_ed25519_sk",    "identity",  ".dockercfg",
+};
+
+/// Extensions only a key or a keystore carries. A `.crt` is not one: it is the
+/// public half, and refusing it would break reading a bundle someone committed.
+const credential_extensions = [_][]const u8{ ".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".ppk", ".asc" };
+
+fn isCredentialName(name: []const u8) bool {
+    // Case-insensitively: a macOS or Windows filesystem resolves `.ENV` and
+    // `.env` to the same bytes, so a case-sensitive rule is a rule the next
+    // platform does not enforce.
+    for (credential_names) |c| {
+        if (name.len == c.len and std.ascii.eqlIgnoreCase(name, c)) return true;
+    }
+    for (credential_extensions) |ext| {
+        if (std.ascii.endsWithIgnoreCase(name, ext)) return true;
+    }
+    // `.env`, `.env.local`, `.envrc` and `production.env` are the spellings the
+    // same file ships under. `.env.example` and `.env.sample` are refused with
+    // them: a template that was committed with a real value in it is exactly
+    // the file a name-based rule must not wave through.
+    if (name.len >= 4 and std.ascii.eqlIgnoreCase(name[0..4], ".env")) return true;
+    if (name.len > 4 and std.ascii.endsWithIgnoreCase(name, ".env")) return true;
+    return false;
+}
+
+/// True when a path names a credential file, so `read` refuses it. The path is
+/// model-supplied text and never touches the filesystem before this runs, so
+/// the answer is a decision about the name, not about what opened.
+fn isCredentialPath(path: []const u8) bool {
+    // Every component, not just the leaf: `~/.secrets/openrouter` is named by a
+    // directory the path only passes through. dirname and basename are the
+    // target's own separator, so the walk is right on the platforms this ships
+    // to and needs no second spelling.
+    var component: ?[]const u8 = path;
+    while (component) |c| {
+        const name = std.fs.path.basename(c);
+        if (name.len != 0 and !std.mem.eql(u8, name, ".") and !std.mem.eql(u8, name, "..")) {
+            for (credential_dirs) |dir| {
+                if (name.len == dir.len and std.ascii.eqlIgnoreCase(name, dir)) return true;
+            }
+        }
+        component = std.fs.path.dirname(c);
+    }
+    return isCredentialName(std.fs.path.basename(path));
+}
+
+/// What `read` returns instead of a credential. It names the file, so a model
+/// that asked for it knows which one was refused, and it says what to do
+/// instead, because a bare error reads as a broken tool and gets retried.
+fn credentialRefusal(arena: std.mem.Allocator, path: []const u8) error{OutOfMemory}![]u8 {
+    return std.fmt.allocPrint(
+        arena,
+        "refused: {s} is a credentials file. `read` does not return one, because the result " ++
+            "is re-sent to the provider on every later turn. Run the command that needs the key " ++
+            "through `bash`, and do not print it.",
+        .{path},
+    );
+}
+
 fn toolRead(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     const path = chat.str(args.get("path")) orelse return std.fmt.allocPrint(arena, "error: missing path", .{});
+    if (isCredentialPath(path)) return try credentialRefusal(arena, path);
     const raw = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_read_bytes)) catch |err|
         return std.fmt.allocPrint(arena, "error: cannot read {s}: {s}", .{ path, @errorName(err) });
     if (!args.contains("offset") and !args.contains("limit")) return raw;
@@ -718,6 +789,86 @@ test "a tool argument cannot repaint the operator's terminal" {
     const got = terminalSafe(arena, "ls\x1b[2Jrm -rf /\u{009b}31m\x07 caf\u{00e9}");
     try std.testing.expectEqualStrings("ls.[2Jrm -rf /..31m. caf\u{00e9}", got);
     try std.testing.expectEqualStrings("plain text", terminalSafe(arena, "plain text"));
+}
+
+// `read` is the one tool whose result rides back to the provider on every
+// later turn, so a credential it returns is shipped once per turn for the rest
+// of the run. The refusal is a decision about the name alone: the path is
+// model-supplied text and never reaches the filesystem first.
+test "read refuses a credentials file and leaves every other path alone" {
+    const refused = [_][]const u8{
+        ".env",
+        "backend/.env",
+        ".env.production",
+        "deploy/production.env",
+        ".envrc",
+        ".env.example",
+        "/home/someone/.env",
+        "certs/server.pem",
+        "certs/server.PEM",
+        "keys/id_ed25519",
+        "keys/ID_RSA",
+        "keys/id_ed25519_sk",
+        "sops/store.age.key",
+        "/home/someone/.secrets/openrouter",
+        "project/.secrets/team/api",
+        "/home/someone/.ssh/config",
+        "home/user/.netrc",
+        "home/user/_netrc",
+        "home/user/.pgpass",
+        "home/user/.npmrc",
+        "home/user/.pypirc",
+        "home/user/.git-credentials",
+        "home/user/.aws/credentials",
+        "vault.keystore",
+    };
+    for (refused) |path| {
+        try std.testing.expect(isCredentialPath(path));
+    }
+
+    const allowed = [_][]const u8{
+        "src/main.zig",
+        "README.md",
+        ".gitignore",
+        "src/environment.zig",
+        "docs/keyboard.md",
+        "certs/server.crt",
+        "certs/chain.pem.example",
+        "keys/id_ed25519.pub",
+        "src/id.rs",
+        "config/identity.zig",
+        "README",
+    };
+    for (allowed) |path| {
+        try std.testing.expect(!isCredentialPath(path));
+    }
+}
+
+// The refusal names the file, so a model that asked for it knows which one was
+// turned down, and it says what to do instead rather than leaving a bare error
+// that reads as a broken tool.
+test "the credentials refusal names the file and the way out" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const refused = try credentialRefusal(arena, "/home/someone/.secrets/openrouter");
+    try std.testing.expect(std.mem.indexOf(u8, refused, "/home/someone/.secrets/openrouter") != null);
+    try std.testing.expect(std.mem.indexOf(u8, refused, "bash") != null);
+    // Not a single byte of a key is in the message, only the path that names it.
+    try std.testing.expect(std.mem.indexOf(u8, refused, "sk-") == null);
+}
+
+// The guard is on the tool the model calls, not only on the predicate, so a
+// refusal cannot be lost by a later refactor of the dispatch table.
+test "the read tool refuses a credentials path through dispatch" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const refused = try dispatch(arena, "read", "{\"path\":\".env\"}");
+    try std.testing.expect(std.mem.startsWith(u8, refused, "refused: .env is a credentials file"));
+    try std.testing.expect(std.mem.indexOf(u8, refused, "SECRET=") == null);
 }
 
 test "tool output truncation keeps whole lines" {

@@ -95,7 +95,7 @@ const system_prompt =
 const tools_json =
     \\[
     \\{"type":"function","function":{"name":"bash","description":"Run a shell command in the working directory. Use for builds, tests, git, ripgrep, ast-grep.","parameters":{"type":"object","properties":{"command":{"type":"string","description":"Shell command"},"timeout_ms":{"type":"integer","description":"Timeout in milliseconds, default 120000, at most 600000"}},"required":["command"]}}},
-    \\{"type":"function","function":{"name":"read","description":"Read a file as text.","parameters":{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","description":"1-based first line"},"limit":{"type":"integer","description":"Max lines"}},"required":["path"]}}},
+    \\{"type":"function","function":{"name":"read","description":"Read a file as text. Refuses a credentials file (.env, a private key or keystore, a file under .secrets or .ssh): what it returns is re-sent to the provider on every later turn.","parameters":{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","description":"1-based first line"},"limit":{"type":"integer","description":"Max lines"}},"required":["path"]}}},
     \\{"type":"function","function":{"name":"write","description":"Create or overwrite a file. Parent directories are created.","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}},
     \\{"type":"function","function":{"name":"edit","description":"Replace an exact string in a file. old_string must occur exactly once unless replace_all is true.","parameters":{"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean"}},"required":["path","old_string","new_string"]}}},
     \\{"type":"function","function":{"name":"search","description":"Search file contents with ripgrep. Returns file:line:text matches.","parameters":{"type":"object","properties":{"pattern":{"type":"string","description":"Regular expression"},"path":{"type":"string","description":"Directory or file, default ."},"glob":{"type":"string","description":"Glob filter, e.g. *.zig"}},"required":["pattern"]}}},
@@ -634,8 +634,10 @@ fn resolveKey(io: Io, init: std.process.Init, given: []const u8) Key {
     for (key_vars) |n| {
         if (envValue(init.environ_map, n)) |v| return .{ .value = v, .source = n };
     }
-    const fallback = std.fmt.allocPrint(init.arena.allocator(), "{s}/.secrets/openrouter", .{
+    const fallback = std.fs.path.join(init.arena.allocator(), &.{
         init.environ_map.get("HOME") orelse return .{ .value = "", .source = "none" },
+        ".secrets",
+        "openrouter",
     }) catch return .{ .value = "", .source = "none" };
     if (tool_mod.readSecret(init, "openrouter")) |v| {
         if (v.len != 0) return .{ .value = v, .source = fallback };
@@ -731,7 +733,7 @@ fn styleConfigPath(init: std.process.Init, arena: std.mem.Allocator, config: []c
         return .{ .path = std.fs.path.resolve(arena, &.{path}) catch path, .named = true };
     }
     const home = init.environ_map.get("HOME") orelse return .{ .path = null, .named = false };
-    const path = std.fmt.allocPrint(arena, "{s}/.microagent/config.toml", .{home}) catch
+    const path = std.fs.path.join(arena, &.{ home, ".microagent", "config.toml" }) catch
         return .{ .path = null, .named = false };
     return .{ .path = std.fs.path.resolve(arena, &.{path}) catch path, .named = false };
 }
@@ -926,7 +928,7 @@ fn runTurn(
 fn sessionDir(init: std.process.Init) []const u8 {
     if (init.environ_map.get("MICROAGENT_SESSION_DIR")) |v| return v;
     const home = init.environ_map.get("HOME") orelse return "";
-    return std.fmt.allocPrint(init.arena.allocator(), "{s}/.microagent/sessions", .{home}) catch "";
+    return std.fs.path.join(init.arena.allocator(), &.{ home, ".microagent", "sessions" }) catch "";
 }
 
 /// One session log per run, one JSONL record per model response, which is what
@@ -961,7 +963,8 @@ fn createSessionLog(io: Io, arena: std.mem.Allocator, session_dir: []const u8, s
     while (attempt < session_name_attempts) : (attempt += 1) {
         var suffix_buf: [4]u8 = undefined;
         const suffix = if (attempt == 0) "" else std.fmt.bufPrint(&suffix_buf, "-{d}", .{attempt}) catch return null;
-        const path = std.fmt.allocPrint(arena, "{s}/{d}{s}.jsonl", .{ session_dir, stamp, suffix }) catch return null;
+        const name = std.fmt.allocPrint(arena, "{d}{s}.jsonl", .{ stamp, suffix }) catch return null;
+        const path = std.fs.path.join(arena, &.{ session_dir, name }) catch return null;
         return std.Io.Dir.createFileAbsolute(io, path, .{ .exclusive = true }) catch |err| switch (err) {
             error.PathAlreadyExists => continue,
             else => return null,

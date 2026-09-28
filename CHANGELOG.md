@@ -124,8 +124,13 @@ release, and `microagent update` moves you to it.
 - `read` refuses a credentials file. Its result goes into the conversation, and the conversation is
   re-sent to the provider on every turn after it, so a `read` of `.env`, a `.pem`, an `id_ed25519`
   or `$HOME/.secrets/openrouter` shipped a live key to a third party and kept shipping it for the
-  rest of the run. The refusal names the file and says what to do instead; the system prompt tells
-  the model not to ask for one. `bash` still reaches any file.
+  rest of the run. The rule is one on the name: any path component that is `.secrets` or `.ssh`, and
+  any file named `.env*` or `*env`, a private key (`id_rsa`, `id_ed25519`, `identity`), a key or
+  keystore extension (`.pem`, `.key`, `.p12`, `.jks`, ...), or a dotfile credential (`.netrc`,
+  `.pgpass`, `.npmrc`, `.git-credentials`, `credentials`). It matches case-insensitively, because a
+  macOS or Windows filesystem resolves `.ENV` to the same bytes as `.env`. The refusal names the file
+  and says what to do instead; the system prompt tells the model not to ask for one. `bash` still
+  reaches any file.
 - `write` and `edit` replace the file they change instead of truncating it. `Dir.writeFile`
   opens the destination with `O_TRUNC` and writes into it, so a full disk, a signal or a limit
   part way through left the model reading a source file shorter than it was, with the bytes
