@@ -1290,6 +1290,7 @@ const StreamFrame = struct {
 
     const Choice = struct {
         delta: ?Delta = null,
+        finish_reason: ?[]const u8 = null,
     };
     const Delta = struct {
         content: ?[]const u8 = null,
@@ -1348,6 +1349,14 @@ fn applyDeclared(
             result.total_tokens = result.prompt_tokens +| result.completion_tokens;
     }
     if (frame.choices.len == 0) return true;
+    // Why the provider stopped, on the last frame that carries it. A value
+    // that is not a string does not fit the declared shape, so such a frame
+    // falls through to the generic parse, which ignores it.
+    if (frame.choices[0].finish_reason) |reason| {
+        const owned = try gpa.dupe(u8, reason);
+        result.deinitFinish(gpa);
+        result.finish_reason = owned;
+    }
     const delta = frame.choices[0].delta orelse return true;
 
     if (delta.content) |text| {
