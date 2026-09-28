@@ -16,11 +16,16 @@ const net = @import("net.zig");
 
 /// Where the session log goes: MICROAGENT_SESSION_DIR, else a directory beside
 /// the other per-run state under $HOME. An empty value turns the log off, and
-/// so does a home that is not there.
-pub fn sessionDir(init: std.process.Init) []const u8 {
-    if (init.environ_map.get("MICROAGENT_SESSION_DIR")) |v| return v;
-    const home = init.environ_map.get("HOME") orelse return "";
-    return std.fs.path.join(init.arena.allocator(), &.{ home, ".microagent", "sessions" }) catch "";
+/// so does a home that is not there. The variable is read rather than through
+/// the caller's `envValue` because an empty one means off here instead of
+/// falling through to `$HOME`, but it is trimmed the same way: a wrapper that
+/// exports a path read from a file carries the newline that file ended with,
+/// and a directory name with one is not the directory the caller named, so the
+/// run would keep its log where nobody looks for it.
+pub fn sessionDir(env: *const std.process.Environ.Map, arena: std.mem.Allocator) []const u8 {
+    if (env.get("MICROAGENT_SESSION_DIR")) |v| return std.mem.trim(u8, v, " \t\r\n");
+    const home = env.get("HOME") orelse return "";
+    return std.fs.path.join(arena, &.{ home, ".microagent", "sessions" }) catch "";
 }
 
 /// One session log per run, one JSONL record per model response, which is what
@@ -174,7 +179,7 @@ pub fn elapsedMs(io: Io, since: i96) u64 {
 /// One record per response, into the log this run opened.
 ///
 /// A failure to *open* the log is a null and costs the run nothing, which is
-/// why `openSession` can stay quiet. A failure to *write* one is different: the
+/// why `open` can stay quiet. A failure to *write* one is different: the
 /// log was there, the run is producing records, and a store that has gone quiet
 /// (a full disk, a directory removed under the run) would otherwise leave the
 /// monitor reporting a run that stopped long before it did. It is named once and
@@ -223,6 +228,42 @@ fn sessionRecord(
     });
     try w.writeAll("}}\n");
     return jb.items();
+}
+
+// The directory is the run's first configuration decision, and the two ways it
+// can be wrong are a value no filesystem holds and a fallback that never runs:
+// a wrapper that exports `MICROAGENT_SESSION_DIR=` with nothing after it must
+// turn the log off rather than fall through to `$HOME`, and a value that
+// carries the newline the file it was read from ended with must not name a
+// directory that is not there.
+test "the session directory reads the variable, trimmed, then the home" {
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    // The home fallback joins, so the directory it returns belongs to the
+    // allocator it was given, which the run owns for the length of the run.
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    // No home and no variable: no directory, which turns the log off.
+    try std.testing.expectEqualStrings("", sessionDir(&env, arena));
+
+    try env.put("HOME", "/home/one");
+    try std.testing.expectEqualStrings("/home/one/.microagent/sessions", sessionDir(&env, arena));
+
+    try env.put("MICROAGENT_SESSION_DIR", "logs/runs");
+    try std.testing.expectEqualStrings("logs/runs", sessionDir(&env, arena));
+
+    try env.put("MICROAGENT_SESSION_DIR", "logs/runs\n");
+    try std.testing.expectEqualStrings("logs/runs", sessionDir(&env, arena));
+    try env.put("MICROAGENT_SESSION_DIR", "  logs/runs  ");
+    try std.testing.expectEqualStrings("logs/runs", sessionDir(&env, arena));
+
+    // Set to nothing means off, not the home: the caller asked for no log.
+    try env.put("MICROAGENT_SESSION_DIR", "");
+    try std.testing.expectEqualStrings("", sessionDir(&env, arena));
+    try env.put("MICROAGENT_SESSION_DIR", " \t\r\n");
+    try std.testing.expectEqualStrings("", sessionDir(&env, arena));
 }
 
 // A record a monitor reads has to be one JSON object with this response's own

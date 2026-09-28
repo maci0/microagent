@@ -42,14 +42,14 @@ on its own is the API key.
 | `MICROAGENT_CA_BUNDLE`, `SSL_CERT_FILE` | the trust anchors for the provider host and for GitHub | `src/net.zig:64` (`caBundlePath`), loaded at `src/main.zig:212` and `src/update.zig:669` |
 | `MICROAGENT_CONFIG`, `~/.microagent/config.toml` | reply-style levels, 64 KB cap | `src/main.zig:785` (`styleConfigPath`), `src/main.zig:703` (`loadStyle`), cap at `src/main.zig:69` |
 | `MICROAGENT_BUDGET_SECONDS` | wall-clock ceiling on the run | `src/main.zig:495` (`budgetSeconds`), carried by `Budget` at `src/main.zig:840` |
-| `MICROAGENT_SESSION_DIR` | where the JSONL run log is written | `src/main.zig:980` (`sessionDir`) |
+| `MICROAGENT_SESSION_DIR` | where the JSONL run log is written | `src/session.zig:25` (`sessionDir`) |
 | `MDEBUG` | writes protocol notes and the resolved configuration to stderr, never the key | `src/main.zig:387` (`debugEnabled`), `src/main.zig:740` (`traceConfig`) |
 | `GITHUB_TOKEN` | credential, sent to the API and to the asset host | `src/update.zig:512` (`githubBearer`), used at `src/update.zig:671`, `src/update.zig:725`, `src/update.zig:729` |
 | GitHub release JSON | tag, page URL, asset names, download URLs | `src/update.zig:278` (`parseRelease`) |
 | Downloaded asset and `.sha256` sidecar | bytes that become the running executable | fetched at `src/update.zig:725` and `729`, installed at `src/update.zig:444` |
-| Streamed provider response (SSE) | model text and tool calls | `src/main.zig:1217` (`streamChat`), `src/main.zig:1696` (`applyFrame`) |
-| Tool call arguments | what the model wants done | `src/tool.zig:294` (`runTool`) |
-| Files in the working tree | the model's evidence, and its instructions | `src/tool.zig:549` (`toolRead`), system prompt at `src/main.zig:75` |
+| Streamed provider response (SSE) | model text and tool calls | `src/main.zig:1011` (`streamChat`), `src/main.zig:1490` (`applyFrame`) |
+| Tool call arguments | what the model wants done | `src/tool.zig:314` (`runTool`) |
+| Files in the working tree | the model's evidence, and its instructions | `src/tool.zig:555` (`toolRead`), system prompt at `src/main.zig:75` |
 
 There is no network listener, no webhook, no message consumer, no scheduled job and no
 IPC. The only outbound traffic is to the provider's base URL and to GitHub.
