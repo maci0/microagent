@@ -2470,6 +2470,80 @@ test "a ranged read of a long line comes back whole" {
     try std.testing.expectEqualStrings(want.items, got);
 }
 
+// Every turn re-sends the whole conversation, so what the provider can reuse is
+// however many leading bytes this turn shares with the last one. Compaction
+// rewrites the conversation, and elision runs oldest first, so a turn that
+// compacts shares almost nothing and the provider re-reads the prompt. That is
+// the price of keeping the recent evidence the model is acting on, and it is
+// worth knowing the size of it: this is the run the limits were chosen for.
+test "a long run keeps the conversation bounded and the cache alive between compactions" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    var scratch_state = std.heap.ArenaAllocator.init(arena);
+    defer scratch_state.deinit();
+
+    var msgs: std.ArrayList(u8) = .empty;
+    try msgs.appendSlice(arena, "[");
+    try appendMessage(arena, &msgs, "system", system_prompt);
+    try appendMessage(arena, &msgs, "user", "fix the failing test in the parser");
+    try msgs.append(arena, ']');
+
+    var previous = try arena.dupe(u8, msgs.items);
+    var floor: usize = 0;
+    var compactions: usize = 0;
+    var sum_sent: usize = 0;
+    var sum_cacheable: usize = 0;
+
+    var turn: usize = 0;
+    while (turn < 120) : (turn += 1) {
+        // A turn that reads two files and says what it found: an assistant
+        // message and two tool results of the size a `read` of source returns.
+        msgs.shrinkRetainingCapacity(msgs.items.len - 1);
+        try msgs.appendSlice(arena, ",{\"role\":\"assistant\",\"content\":\"looking at the parser\"}");
+        var t: usize = 0;
+        while (t < 2) : (t += 1) {
+            try msgs.appendSlice(arena, ",{\"role\":\"tool\",\"tool_call_id\":\"c\",\"content\":\"");
+            try msgs.appendNTimes(arena, 'x', 8 * 1024);
+            try msgs.appendSlice(arena, "\"}");
+        }
+        try msgs.append(arena, ']');
+
+        // What this turn shares with the last one, before compaction moves it.
+        var shared: usize = 0;
+        while (shared < previous.len and shared < msgs.items.len and previous[shared] == msgs.items[shared]) shared += 1;
+        var cacheable = shared;
+
+        try compactMessages(std.testing.io, arena, &msgs, scratch_state.allocator(), &floor);
+
+        // Compaction rewrote the conversation, so what survived it is the real
+        // figure: on those turns it is next to nothing.
+        var after: usize = 0;
+        while (after < previous.len and after < msgs.items.len and previous[after] == msgs.items[after]) after += 1;
+        if (after < cacheable) {
+            cacheable = after;
+            compactions += 1;
+        }
+        sum_sent += msgs.items.len;
+        sum_cacheable += cacheable;
+        arena.free(previous);
+        previous = try arena.dupe(u8, msgs.items);
+    }
+
+    // The bound that matters: whatever the run does, the conversation stays
+    // inside the limit it is meant to stay inside, so no turn ever re-sends more
+    // than this regardless of how long the run runs.
+    try std.testing.expect(msgs.items.len <= conversation_soft_limit);
+    try std.testing.expect(compactions > 0);
+    // Compaction is not supposed to fire on every turn. If it does, the soft
+    // limit is below what one turn adds and the run is re-sending a prompt it
+    // cannot shrink.
+    try std.testing.expect(compactions < 120 / 4);
+    // And between them the prefix the provider can reuse is most of the prompt,
+    // which is the whole reason the conversation is kept in wire form.
+    try std.testing.expect(sum_cacheable * 100 / sum_sent > 50);
+}
+
 test "one request body is the previous one plus its new messages" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();

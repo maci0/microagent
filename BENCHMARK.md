@@ -60,6 +60,30 @@ the `git` tool existed, so today's prompt is slightly larger; the point is the o
 not the last hundred tokens. Competitor CLIs in
 one-shot mode did not report a comparable number on this machine, so none is claimed for them.
 
+## Conversation growth and the prompt cache
+
+Every turn re-sends the whole conversation, so what the provider can reuse is
+however many leading bytes this turn shares with the last one. Measured by
+`zig build test -Dtest-filter="a long run keeps the conversation bounded"` over
+a 120-turn run whose turns each read two 8 KB files, the shape of a real review:
+
+| | bytes per turn |
+| --- | --- |
+| conversation sent | 293,766 |
+| of which the provider could reuse | 251,400 (86%) |
+
+Eight of those 120 turns compacted the conversation. On those the reusable
+prefix is next to nothing: elision rewrites the message array and runs oldest
+first, so the first changed byte is early and everything after it is re-read.
+That is the price of keeping the evidence the model is acting on, and it is the
+right trade, but it is a real cost: one turn in fifteen pays a full re-prefill.
+
+`conversation_soft_limit` is the knob, and it trades the two directly. Raising
+it means a larger prompt on every turn and fewer full re-prefills; lowering it
+is the reverse. The table above is the argument for looking at it before a run
+dies on a provider timeout, not a reason to change it blind: only a live
+provider can say which side wins.
+
 ## One trivial request
 
 `Reply with exactly: pong`, one-shot, no repository involved. This is harness overhead plus one
