@@ -421,7 +421,13 @@ checksums:
 # check of its own.
 #
 # Each build gets a cache and a prefix of its own, and the previous pair is
-# removed first, so the second is a real build rather than a cache hit. The
+# removed first, so the second is a real build rather than a cache hit. Both
+# caches are moved: `--cache-dir` covers the project's own artifacts, and
+# ZIG_GLOBAL_CACHE_DIR covers the compiled toolchain under the runner's
+# `$HOME/.cache`, which is otherwise state a previous build on the same machine
+# leaves behind and a fresh checkout does not. The scratch is removed on the way
+# out by a trap, so a target that fails the comparison leaves nothing behind
+# either. The
 # clock, timezone and locale are varied between the two, so a timestamp or a
 # locale-dependent ordering leaking into the binary fails here rather than on a
 # consumer's machine. The first target is then built a third time from a copy
@@ -443,9 +449,10 @@ check-reproducible:
 	  exit 2; \
 	}; \
 	REPRO_SRC=$(REPRO_DIR)-src; \
+	trap 'rm -rf "$(REPRO_DIR)" "$$REPRO_SRC"' EXIT; \
 	build_once() { \
 	  rm -rf "$(REPRO_DIR)"; \
-	  SOURCE_DATE_EPOCH="$$1" LC_ALL="$$2" TZ="$$3" $(ZIG) build \
+	  SOURCE_DATE_EPOCH="$$1" LC_ALL="$$2" TZ="$$3" ZIG_GLOBAL_CACHE_DIR="$(REPRO_DIR)/global" $(ZIG) build \
 	    -Dtarget="$$4" -Doptimize=ReleaseSmall \
 	    --cache-dir "$(REPRO_DIR)/cache" -p "$(REPRO_DIR)/out"; \
 	  $$sum "$(REPRO_DIR)/out/bin/microagent" | cut -d' ' -f1; \
@@ -456,7 +463,7 @@ check-reproducible:
 	  mkdir -p "$$srcdir"; \
 	  cp build.zig build.zig.zon CHANGELOG.md LICENSE "$$srcdir/"; \
 	  cp -R src "$$srcdir/src"; \
-	  (cd "$$srcdir" && SOURCE_DATE_EPOCH="$$1" LC_ALL="$$2" TZ="$$3" $(ZIG) build \
+	  (cd "$$srcdir" && SOURCE_DATE_EPOCH="$$1" LC_ALL="$$2" TZ="$$3" ZIG_GLOBAL_CACHE_DIR="$(REPRO_DIR)/global" $(ZIG) build \
 	    -Dtarget="$$4" -Doptimize=ReleaseSmall \
 	    --cache-dir "$(REPRO_DIR)/cache" -p "$(REPRO_DIR)/out2"); \
 	  $$sum "$(REPRO_DIR)/out2/bin/microagent" | cut -d' ' -f1; \

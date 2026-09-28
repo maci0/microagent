@@ -3,11 +3,12 @@
 # gets that far. The tests also run on a macOS runner, and the four binaries
 # the release publishes build on every push, so a macOS-only break
 # (`/bin/sh` differences, a glibc-only call, a path that resolves differently)
-# lands as a failed check rather than as a broken update asset. The two of them
-# a runner here can start are also built for that runner's own target and run,
-# so a shipped asset that cross-compiles but does not start fails on a push
-# rather than at a tag. The other two need a different machine and are covered
-# by the build alone. Release assets are built by release.yml on a version tag.
+# lands as a failed check rather than as a broken update asset. Three of them
+# are also built for that runner's own target and run, so a shipped asset that
+# cross-compiles but does not start fails on a push
+# rather than at a tag. The fourth, `aarch64-linux-musl`, needs a different
+# machine and is covered by the build alone. Release assets are built by
+# release.yml on a version tag.
 # The shell, Python and YAML linters `make check` also runs have their own job
 # below.
 name: ci
@@ -38,6 +39,13 @@ jobs:
             release_target: x86_64-linux-musl
           - os: macos-14
             release_target: aarch64-macos
+          # macos-13 is the last x86_64 image, and it is the only runner that
+          # starts `x86_64-macos`. macos-14 is Apple silicon, so without this
+          # row the second of the two macOS assets the release publishes is
+          # cross-compiled and never run, and a Mach-O that links but does not
+          # start would ship and fail on a user's machine instead of here.
+          - os: macos-13
+            release_target: x86_64-macos
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:

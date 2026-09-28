@@ -12,6 +12,19 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+### Changed
+
+- The reproducibility gate isolates the compiler's global cache as well as the project one.
+  `--cache-dir` moves the project's artifacts, but the compiled toolchain stayed in the
+  runner's `$HOME/.cache/zig`, so a warm cache left by a previous build on the same machine
+  fed the next one and the check was not measuring the cold build it claimed to. Each
+  build now sets `ZIG_GLOBAL_CACHE_DIR` to a scratch of its own, and the scratch is removed
+  by a trap, so a target that fails the comparison leaves nothing behind either.
+- The push workflow runs the `x86_64-macos` asset instead of only building it. The two
+  macOS runners are an Apple silicon one and, now, an x86_64 one, so three of the four
+  published binaries are started on a push rather than cross-compiled and left. The fourth,
+  `aarch64-linux-musl`, still needs a machine of its own and is covered by the build alone.
+
 ### Added
 
 - `make check-reproducible` builds the first published target a third time, from a copy of the
