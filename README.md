@@ -106,7 +106,8 @@ MDEBUG=1                trace a stuck stream on stderr, and print the
 ```
 
 Every long flag also takes `--flag=value`, a flag wins over the environment variable for the same
-option, and the exit status is 0 for a finished run, 1 for a failed one, 2 for a wrong command
+option, `--` ends the flags so a prompt that starts with a dash needs no quoting, and `microagent help`
+prints the same text as `microagent --help`. The exit status is 0 for a finished run, 1 for a failed one, 2 for a wrong command
 line and 130 for an interrupt, which takes the tool subprocess with it. `microagent --help` and `microagent update --help` are the full text; a wrong flag prints the
 reason and that help on stderr, so a script reading stdout gets nothing from a failed invocation.
 

@@ -14,6 +14,13 @@ release, and `microagent update` moves you to it.
 
 ### Added
 
+- `microagent help` prints the help text, the way `microagent update help`
+  already did. The word on its own was a prompt, so the answer to a request for
+  help was a live run that read the repository and edited files.
+- `--` ends the flags, so a wrapper that always passes one can hand over a
+  prompt that starts with a dash without quoting it, and `microagent -- -h` is
+  a run whose prompt is `-h` rather than a request for help.
+
 - `make watch` reruns the unit test suite on every source change, and
   `make watch FILTER=...` narrows it to the tests whose name contains the
   substring, the way `make test-one` narrows one run. It wraps

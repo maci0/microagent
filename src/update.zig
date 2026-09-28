@@ -560,8 +560,8 @@ const usage_text =
     \\
     \\flags:
     \\  -c, --check            report the latest release and install nothing
-    \\      --repo OWNER/NAME  GitHub repository to track (default maci0/microagent);
-    \\                         --repo=OWNER/NAME also works
+    \\      --repo owner/name  GitHub repository to track (default maci0/microagent);
+    \\                         --repo=owner/name also works
     \\  -h, --help             this text ("update help" too)
     \\  -V, --version          version
     \\

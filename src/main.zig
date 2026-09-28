@@ -124,6 +124,14 @@ const tools_json =
 /// What the command line asked the binary to do before it does any work.
 const Action = enum { run, help, version };
 
+/// The word that asks for the help text on its own, the way every tool reads
+/// it and the way `microagent update help` already does.
+const help_word = "help";
+
+fn helpWord(argv: []const []const u8) bool {
+    return argv.len == 1 and std.mem.eql(u8, argv[0], help_word);
+}
+
 const Options = struct {
     prompt: []const u8 = "",
     model: []const u8 = default_model,
@@ -173,6 +181,17 @@ pub fn main(init: std.process.Init) !void {
     // before the agent's own flags so it never needs an API key.
     if (args.items.len > 1 and std.mem.eql(u8, args.items[1], "update")) {
         std.process.exit(update_mod.run(io, gpa, init.arena.allocator(), init.environ_map, args.items[2..]));
+    }
+
+    // `microagent help` is what a user types who has forgotten the flags, and
+    // `microagent update help` already answers it with the subcommand's text.
+    // Dispatched beside the subcommand so the two commands agree; without it the
+    // word is a prompt, and the answer to a request for help is a live run that
+    // reads the repository and edits files. Only on its own: `microagent help me
+    // with this test` is a prompt that starts with the word.
+    if (helpWord(args.items[1..])) {
+        net.writeOut(io, help_text) catch {};
+        return;
     }
 
     // `--help` and `--version` before the environment is read, so a variable
@@ -325,7 +344,9 @@ const help_text =
     \\  -V, --version          version
     \\
     \\every long flag also takes --flag=value. A flag wins over the environment
-    \\variable for the same option.
+    \\variable for the same option. Everything after -- is the prompt, so one
+    \\that starts with a dash needs no quoting. "microagent help" prints this
+    \\text too.
     \\
     \\reply style (MICROAGENT_CAVEMAN / MICROAGENT_PONYTAIL, or the same two keys
     \\in the config named above):
@@ -641,12 +662,32 @@ fn setValued(
 /// with the help text before exiting 2. A reasoning level and a turn ceiling are
 /// refused where they are set, through `configError`. Every long flag also takes
 /// `--flag=value`, the form `microagent update` already took, so both commands
-/// spell an option the same way. `--help` and `--version` win wherever they
-/// appear, and stop the parse there.
+/// spell an option the same way. `--` ends the flags and every word after it is
+/// the prompt. `--help` and `--version` win wherever they appear, and stop the
+/// parse there.
 fn parseArgs(buf: []u8, argv: []const []const u8, opts: *Options) ?[]const u8 {
     var i: usize = 0;
+    var operands_only = false;
     while (i < argv.len) : (i += 1) {
         const arg = argv[i];
+        // `--` ends the flags, the way every other tool reads it: a wrapper
+        // that always passes it has a prompt starting with a dash to hand over
+        // without quoting it, and it was an unknown argument otherwise. What
+        // follows is a word of the prompt, so `-- --help` is a run whose prompt
+        // is `--help` and not a request for help, here and in `earlyAction`.
+        if (!operands_only and std.mem.eql(u8, arg, "--")) {
+            operands_only = true;
+            continue;
+        }
+        if (operands_only) {
+            // Nothing after `--` is read as a flag, so `-h` there is a word of
+            // the prompt and not a request for help. Reaching the branches below
+            // would answer `microagent -- -h` with the help text, which is the
+            // one thing the marker is there to stop.
+            if (arg.len == 0) return "the prompt is empty: pass the task as an argument or with --print";
+            if (setPrompt(buf, opts, arg)) |m| return m;
+            continue;
+        }
         // `--flag=value` splits into a name and an joined value; a short flag
         // never does, so `-p=x` stays the unknown argument it is.
         var name = arg;
@@ -698,6 +739,10 @@ fn earlyAction(argv: []const []const u8) ?Action {
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
         const arg = argv[i];
+        // Nothing after `--` is a flag, so nothing after it is help or a
+        // version request: the parser takes those words as the prompt, and a
+        // walk that answered `.help` here would contradict it.
+        if (std.mem.eql(u8, arg, "--")) return null;
         var name = arg;
         var joined: ?[]const u8 = null;
         if (arg.len > 2 and arg[0] == '-' and arg[1] == '-') {
@@ -2164,6 +2209,44 @@ test "a wrong command line names the flag and the value it was given" {
     try std.testing.expectEqualStrings("the prompt is empty: pass the task as an argument or with --print", parseArgs(&buf, &.{""}, &opts).?);
 }
 
+test "-- ends the flags, so a prompt that starts with a dash needs no quoting" {
+    var opts: Options = .{};
+    var buf: [512]u8 = undefined;
+    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &.{ "--model", "m/x", "--", "-h --version" }, &opts));
+    try std.testing.expectEqualStrings("-h --version", opts.prompt);
+    try std.testing.expectEqualStrings("m/x", opts.model);
+    try std.testing.expectEqual(Action.run, opts.action);
+    // A word that is not a flag on the left of `--` is still the prompt, and
+    // the empty word after it is still an empty prompt.
+    var second: Options = .{};
+    try std.testing.expectEqualStrings("the prompt is empty: pass the task as an argument or with --print", parseArgs(&buf, &.{ "--", "" }, &second).?);
+    // Two prompts are refused after `--` exactly as they are before it.
+    var twice: Options = .{};
+    try std.testing.expectEqualStrings("prompt given twice: 'one' and 'two'", parseArgs(&buf, &.{ "--", "one", "two" }, &twice).?);
+    // The walk that answers help before reading the environment says the same:
+    // nothing after `--` is a request for help or for a version.
+    try std.testing.expectEqual(@as(?Action, null), earlyAction(&.{ "--", "--help" }));
+    try std.testing.expectEqual(@as(?Action, null), earlyAction(&.{ "-m", "x", "--", "-h" }));
+
+    // The flags themselves, one word each, are prompt and not a request: this
+    // is the case the marker exists for, and a parse that read `-h` here would
+    // answer a request for the help text with a run.
+    for ([_][]const []const u8{ &.{ "--", "-h" }, &.{ "--", "--help" }, &.{ "--", "-V" }, &.{ "--", "--version" } }) |argv| {
+        var flag: Options = .{};
+        try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, argv, &flag));
+        try std.testing.expectEqual(Action.run, flag.action);
+        try std.testing.expectEqualStrings(argv[1], flag.prompt);
+    }
+}
+
+test "the word help on its own asks for the help text" {
+    try std.testing.expect(helpWord(&.{"help"}));
+    try std.testing.expect(!helpWord(&.{ "help", "me" }));
+    try std.testing.expect(!helpWord(&.{"--help"}));
+    try std.testing.expect(!helpWord(&.{}));
+    try std.testing.expect(!helpWord(&.{"help "}));
+}
+
 // A zero budget is a deadline that has already passed, not the absence of one:
 // the run takes the forced final push as its only turn and stops, having
 // changed nothing. Every numeric option refuses zero for the same reason, and
@@ -2279,6 +2362,10 @@ const args_corpus = [_][]const u8{
     "-m --budget",
     "-m",
     "--print",
+    "-- --help",
+    "-- -m",
+    "help",
+    "help --help",
 };
 
 test "a fuzzed command line sets an option only from an argument it was given" {
@@ -2306,9 +2393,11 @@ fn fuzzArgs(_: void, smith: *std.testing.Smith) !void {
     if (msg) |m| try std.testing.expect(m.len > 0);
 
     // `--help` and `--version` stop the parse where they are, so an argument
-    // after one of them sets nothing, whatever it says.
+    // after one of them sets nothing, whatever it says. A `--` ends the flags,
+    // so nothing after it is one of them.
     const stops = blk: {
         for (argv[0..n]) |arg| {
+            if (std.mem.eql(u8, arg, "--")) break :blk Action.run;
             if (isFlag(arg, "-h", "--help")) break :blk Action.help;
             if (isFlag(arg, "-V", "--version")) break :blk Action.version;
         }
