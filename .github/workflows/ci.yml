@@ -3,9 +3,13 @@
 # gets that far. The tests also run on a macOS runner, and the four binaries
 # the release publishes build on every push, so a macOS-only break
 # (`/bin/sh` differences, a glibc-only call, a path that resolves differently)
-# lands as a failed check rather than as a broken update asset. Release assets
-# are built by release.yml on a version tag. The shell, Python and YAML linters
-# `make check` also runs have their own job below.
+# lands as a failed check rather than as a broken update asset. The two of them
+# a runner here can start are also built for that runner's own target and run,
+# so a shipped asset that cross-compiles but does not start fails on a push
+# rather than at a tag. The other two need a different machine and are covered
+# by the build alone. Release assets are built by release.yml on a version tag.
+# The shell, Python and YAML linters `make check` also runs have their own job
+# below.
 name: ci
 
 on:
@@ -25,7 +29,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-14]
+        # `release_target` is the asset release.yml publishes for this runner's
+        # platform. The default build above runs the host's own build; this one
+        # runs the shipped artifact itself, so a target that cross-compiles but
+        # cannot start is caught here rather than by whoever downloads it.
+        include:
+          - os: ubuntu-24.04
+            release_target: x86_64-linux-musl
+          - os: macos-14
+            release_target: aarch64-macos
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
@@ -50,6 +62,13 @@ jobs:
       - name: the built binary runs on this platform
         run: |
           set -euo pipefail
+          ./zig-out/bin/microagent --version
+          ./zig-out/bin/microagent update --help >/dev/null
+
+      - name: the release asset for this platform runs
+        run: |
+          set -euo pipefail
+          zig build -Dtarget=${{ matrix.release_target }} -Doptimize=ReleaseSmall
           ./zig-out/bin/microagent --version
           ./zig-out/bin/microagent update --help >/dev/null
 

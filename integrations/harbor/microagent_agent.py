@@ -34,7 +34,17 @@ REMOTE_PATH = "/usr/local/bin/microagent"
 # fails before its first request. The host's bundle is uploaded and named
 # explicitly rather than relying on the image being kind.
 REMOTE_CA_PATH = "/usr/local/bin/microagent-ca.crt"
-HOST_CA_CANDIDATES = ("/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt")
+# Probed, not selected by OS name: a host that ships its trust store somewhere
+# else is found by asking the filesystem. Debian/Ubuntu, RHEL/Fedora, macOS 12+
+# (which has no /etc/ssl/certs at all) and the two Homebrew prefixes, since a
+# Homebrew install is where a macOS host most often keeps one.
+HOST_CA_CANDIDATES = (
+    "/etc/ssl/certs/ca-certificates.crt",
+    "/etc/pki/tls/certs/ca-bundle.crt",
+    "/etc/ssl/cert.pem",
+    "/opt/homebrew/etc/ca-certificates/cert.pem",
+    "/usr/local/etc/ca-certificates/cert.pem",
+)
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 # Keep the agent's own budget under harbor's per-task agent timeout, so
 # microagent stops deliberately instead of being killed mid-turn.
@@ -171,14 +181,17 @@ class Microagent(BaseAgent):
         if reasoning:
             env["MICROAGENT_REASONING_EFFORT"] = reasoning
 
+        # UTF-8 named rather than left to the locale: a host running under
+        # LANG=C or a legacy code page raises on a non-ASCII byte, and the run's
+        # own transcript is the one log that must always land.
         started = self.logs_dir / "microagent-stdout.txt"
         result = await environment.exec(
             command=command,
             env=env,
             timeout_sec=int_env("MICROAGENT_AGENT_TIMEOUT_SEC", "1500"),
         )
-        (self.logs_dir / "microagent-stdout.txt").write_text(result.stdout or "")
-        (self.logs_dir / "microagent-stderr.txt").write_text(result.stderr or "")
+        (self.logs_dir / "microagent-stdout.txt").write_text(result.stdout or "", encoding="utf-8")
+        (self.logs_dir / "microagent-stderr.txt").write_text(result.stderr or "", encoding="utf-8")
 
         usage = last_usage(result.stdout or "")
         context.n_input_tokens = usage.get("prompt_tokens")

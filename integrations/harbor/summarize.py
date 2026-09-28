@@ -47,7 +47,10 @@ def main() -> int:
         print(__doc__.strip(), file=sys.stderr)
         return 2
     job = Path(sys.argv[1])
-    result = json.loads((job / "result.json").read_text())
+    # UTF-8 named rather than left to the locale: harbor writes the same files
+    # on every host, and one that summarizes them under LANG=C or a legacy code
+    # page has to read the same bytes the machine that ran them did.
+    result = json.loads((job / "result.json").read_text(encoding="utf-8"))
     stats = result.get("stats", {})
     print(f"{job.name}: {stats.get('n_completed_trials', 0)} trials, {stats.get('n_errored_trials', 0)} errored")
     print(f"in={stats.get('n_input_tokens')} out={stats.get('n_output_tokens')} tokens")
@@ -57,7 +60,7 @@ def main() -> int:
         trial_result = trial / "result.json"
         if not trial_result.is_file():
             continue
-        data = json.loads(trial_result.read_text())
+        data = json.loads(trial_result.read_text(encoding="utf-8"))
         reward = (data.get("verifier_result") or {}).get("rewards", {}).get("reward")
         agent = data.get("agent_result") or {}
         started, finished = data.get("started_at"), data.get("finished_at")

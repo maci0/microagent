@@ -22,7 +22,10 @@ reviews="${GAUNTLET_REVIEWS:-quick}"
 max_reviews="${GAUNTLET_MAX_REVIEWS:-3}"
 timeout_per_review="${GAUNTLET_TIMEOUT:-8m}"
 verify_cmd="${GAUNTLET_VERIFY:-}"
-work_root="${GAUNTLET_WORK:-/tmp/microagent-gauntlet}"
+# TMPDIR first, as bench/run.sh does: macOS points it at a per-user scratch
+# directory, and /tmp is a world-writable sticky shared by every account on the
+# machine, so two gauntlet runs on one host collide there.
+work_root="${GAUNTLET_WORK:-${TMPDIR:-/tmp}/microagent-gauntlet}"
 agents=${*:-microagent}
 
 printf '%-40s %6s %6s %7s %8s %8s %8s  %s\n' agent passed failed files wall_s tokens verify rc
