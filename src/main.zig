@@ -531,14 +531,9 @@ test "the help text names the default model and base url" {
 /// same reason, and a key file is read trimmed; this makes the environment
 /// itself the one place the whitespace is removed.
 fn envValue(env: *const std.process.Environ.Map, name: []const u8) ?[]const u8 {
-    const v = std.mem.trim(u8, env.get(name) orelse return null, env_surrounding);
+    const v = std.mem.trim(u8, env.get(name) orelse return null, net.env_surrounding);
     return if (v.len == 0) null else v;
 }
-
-/// What a wrapper reading a file leaves around a value it exported. Spelled
-/// in `net`, which every reader of the environment imports, so the set is one
-/// set and not one per reader.
-const env_surrounding = net.env_surrounding;
 
 /// The debugging switch, on unless the variable is set to something that reads
 /// as off. A wrapper that exports the name to pass a flag it has not set yet
@@ -560,7 +555,7 @@ const reasoning_effort_names = "minimal, low, medium, high, none";
 /// The caller decides what a message does with it, because the flag path
 /// hands it back as a usage error while the environment path exits on it.
 fn reasoningEffort(buf: []u8, value: []const u8, out: *?[]const u8) ?[]const u8 {
-    const v = std.mem.trim(u8, value, env_surrounding);
+    const v = std.mem.trim(u8, value, net.env_surrounding);
     for (reasoning_efforts) |level| if (std.mem.eql(u8, v, level)) {
         out.* = v;
         return null;
@@ -578,7 +573,7 @@ fn reasoningEffort(buf: []u8, value: []const u8, out: *?[]const u8) ?[]const u8 
 /// number is written through `out` and a bad value is a message, for the same
 /// reason `reasoningEffort` returns one.
 fn ceiling(comptime T: type, buf: []u8, from: []const u8, value: []const u8, out: *T) ?[]const u8 {
-    const n = std.fmt.parseInt(T, std.mem.trim(u8, value, env_surrounding), 10) catch
+    const n = std.fmt.parseInt(T, std.mem.trim(u8, value, net.env_surrounding), 10) catch
         return std.fmt.bufPrint(buf, "{s} must be a number, got '{s}'", .{ from, clip(value) }) catch
             "must be a number";
     if (n == 0) return std.fmt.bufPrint(buf, "{s} must be at least 1", .{from}) catch
@@ -718,11 +713,6 @@ fn optionalCeiling(buf: []u8, from: []const u8, value: []const u8, out: *?u64) ?
     return null;
 }
 
-/// How much of a value an error message quotes back. The budget itself is
-/// `net.quoted_value_bytes`, which `update` quotes release-supplied names under
-/// too, so the two cannot drift apart.
-const quoted_value_bytes = net.quoted_value_bytes;
-
 /// A value quoted back into a message about itself.
 ///
 /// Cutting the value on a codepoint boundary is only half of what a diagnostic
@@ -739,7 +729,7 @@ const quoted_value_bytes = net.quoted_value_bytes;
 /// formats its own line the same way. Every message here is terminal, and the
 /// process exits on it.
 fn clip(s: []const u8) []const u8 {
-    return chat_mod.safeText(std.heap.page_allocator, s, quoted_value_bytes);
+    return chat_mod.safeText(std.heap.page_allocator, s, net.quoted_value_bytes);
 }
 
 /// The option a flag that takes a value sets.
@@ -1104,7 +1094,7 @@ fn loadStyle(io: Io, init: std.process.Init, arena: std.mem.Allocator, config: [
         };
     }
     if (resolveStyle(&style, text, envValue(init.environ_map, "MICROAGENT_CAVEMAN"), envValue(init.environ_map, "MICROAGENT_PONYTAIL"))) |unknown| {
-        const key = chat_mod.safeText(arena, unknown.key, quoted_value_bytes);
+        const key = chat_mod.safeText(arena, unknown.key, net.quoted_value_bytes);
         if (unknown.from_config) {
             if (unknown.bad_value)
                 net.note(io, arena, "microagent: config {s}: '{s}' is not a level; keeping the default\n", .{ configPathText(arena, source), key })
@@ -1122,7 +1112,7 @@ fn loadStyle(io: Io, init: std.process.Init, arena: std.mem.Allocator, config: [
 /// error path, and most runs take none of them, so computing it up front meant
 /// walking the path byte by byte into a fresh allocation that was then dropped.
 fn configPathText(arena: std.mem.Allocator, source: StyleSource) []const u8 {
-    return chat_mod.safeText(arena, source.path orelse "", quoted_value_bytes);
+    return chat_mod.safeText(arena, source.path orelse "", net.quoted_value_bytes);
 }
 
 /// The configuration this run resolved, on stderr when MDEBUG is on. Precedence
@@ -1165,7 +1155,7 @@ fn traceConfig(io: Io, arena: std.mem.Allocator, opts: Options, style: LoadedSty
 }
 
 /// A configuration value the way the trace should spell it: escaped, and in
-/// full rather than cut to `quoted_value_bytes`, because the trace exists to
+/// full rather than cut to `net.quoted_value_bytes`, because the trace exists to
 /// let a reader recognize the value the run resolved, and a truncated path
 /// names no directory. Same escaping, same reasoning, as `displayUrl` above.
 fn traceText(arena: std.mem.Allocator, value: []const u8) []const u8 {
@@ -1194,7 +1184,7 @@ const StyleSource = struct { path: ?[]const u8, named: bool };
 fn styleConfigPath(env: *const std.process.Environ.Map, arena: std.mem.Allocator, config: []const u8) StyleSource {
     if (config.len > 0) return .{ .path = std.fs.path.resolve(arena, &.{config}) catch config, .named = true };
     if (env.get("MICROAGENT_CONFIG")) |raw| {
-        const path = std.mem.trim(u8, raw, env_surrounding);
+        const path = std.mem.trim(u8, raw, net.env_surrounding);
         if (path.len == 0) return .{ .path = null, .named = false };
         return .{ .path = std.fs.path.resolve(arena, &.{path}) catch path, .named = true };
     }
@@ -1601,7 +1591,7 @@ fn namesWords(haystack: []const u8, needle: []const u8) bool {
 /// only shape `runTool` dispatches a rewrite from.
 fn isEdit(call_name: []const u8, args: []const u8) bool {
     const tool = chat_mod.Tool.fromName(call_name) orelse return false;
-    if (tool == .edit or tool == .write) return true;
+    if (tool.writes()) return true;
     if (tool != .ast) return false;
     // The page allocator, freed on the way out: this is a per-call parse of
     // arguments a few hundred bytes long, once, and the tree it builds is
@@ -3277,7 +3267,7 @@ test "a command line that quotes a value quotes it as text, not as bytes" {
     // whatever the budget.
     for ([_][]const u8{ "--\x1b[2J", "\u{1f600}\u{1f600}\u{1f600}", "ok\xff\xff", "\u{65e5}\u{672c}\u{8a9e}" }) |raw| {
         const quoted = clip(raw);
-        try std.testing.expect(quoted.len <= quoted_value_bytes);
+        try std.testing.expect(quoted.len <= net.quoted_value_bytes);
         try std.testing.expect(std.unicode.utf8ValidateSlice(quoted));
         for (quoted) |c| try std.testing.expect(c >= 0x20 and c != 0x7f);
     }

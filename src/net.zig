@@ -289,9 +289,9 @@ pub fn durationMs(ms: u64) Io.Timeout {
 /// the caller's because the two waits are not the same promise (the run's is
 /// sixty seconds, `update`'s thirty), and a policy spelled twice is a policy
 /// that has already drifted once.
-pub const retry_backoff_base_ms: u64 = 1000;
+const retry_backoff_base_ms: u64 = 1000;
 /// Enough doublings to reach any cap in use; the cap is what bounds the wait.
-pub const retry_backoff_shift: u32 = 6;
+const retry_backoff_shift: u32 = 6;
 
 /// The wait before attempt `attempt + 1`. Saturating, because the shift and
 /// the multiply both overflow long before a u32 attempt counter does, and a

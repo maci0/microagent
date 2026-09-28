@@ -878,16 +878,6 @@ fn isCredentialPath(path: []const u8) bool {
     return false;
 }
 
-/// The tools that change a file rather than report one, whatever else they can
-/// do. The credential refusal names them because the advice a reading tool
-/// gets is wrong for them: there is no reading of a key file that should be
-/// going on, so the answer is the operator rather than another tool. `ast` is
-/// in neither list on its own, because a search leaves the tree as it found it
-/// and a rewrite does not; the caller says which it was.
-fn isWriting(tool: chat.Tool) bool {
-    return tool == .write or tool == .edit;
-}
-
 /// What a tool returns instead of a credential. It names the file, so a model
 /// that asked for it knows which one was refused, and it says what to do
 /// instead, because a bare error reads as a broken tool and gets retried.
@@ -904,7 +894,7 @@ fn credentialRefusal(arena: std.mem.Allocator, tool: chat.Tool, path: []const u8
     // whatever the globs exclude, and is a write by the only test that matters.
     const advice = if (tool == .bash)
         "`bash` does not read it either. Ask the operator for the value you need rather than printing a key."
-    else if (writes or isWriting(tool))
+    else if (writes or tool.writes())
         "No tool rewrites a credentials file. Ask the operator to make that change rather than replacing a key with a guess."
     else
         "Run the command that needs the key through `bash`, and do not print it.";
@@ -1351,13 +1341,13 @@ const Captured = struct {
 /// a child killed on the deadline has a signal this program sent, and a child
 /// that closed its pipes and was still running has nothing at all, so a
 /// `.{ .exited = 0 }` standing in here would read as a command that succeeded.
-pub const Partial = struct {
+const Partial = struct {
     stdout: []u8,
     stderr: []u8,
     dropped: [2]bool,
 
     /// Whether either stream carries a byte the cap cut off.
-    pub fn atCaptureLimit(self: Partial) bool {
+    fn atCaptureLimit(self: Partial) bool {
         return self.dropped[0] or self.dropped[1];
     }
 };
@@ -1589,7 +1579,7 @@ fn waitBounded(
 
 /// True when a stream filled the cap with bytes still arriving, so the captured
 /// bytes are the beginning of the output and not all of it.
-pub fn atCaptureLimit(captured: Captured) bool {
+fn atCaptureLimit(captured: Captured) bool {
     return captured.partial().atCaptureLimit();
 }
 

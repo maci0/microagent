@@ -65,6 +65,13 @@ pub const Tool = enum {
     pub fn fromName(text: []const u8) ?Tool {
         return std.meta.stringToEnum(Tool, text);
     }
+
+    /// Whether calling the tool changes a file. `ast` is in neither list on
+    /// its own, because a search leaves the tree as it found it and a rewrite
+    /// does not; the caller that dispatched it says which it was.
+    pub fn writes(tool: Tool) bool {
+        return tool == .write or tool == .edit;
+    }
 };
 
 /// Every tool, in the order the schema advertises them. One list, so the tools
@@ -119,6 +126,14 @@ test "a tool's wire name and its variant are the same name both ways" {
     // case at this boundary rather than an error.
     for ([_][]const u8{ "", "bash ", "Bash", "delete_everything", "bash\n", "read/write" }) |name| {
         try std.testing.expectEqual(@as(?Tool, null), Tool.fromName(name));
+    }
+}
+
+test "only the tools that change a file say they write" {
+    // The loop and the credential refusal both ask this of the same enum, so a
+    // new variant is classified here once rather than in each of them.
+    for (tools()) |tool| {
+        try std.testing.expectEqual(tool == .write or tool == .edit, tool.writes());
     }
 }
 
