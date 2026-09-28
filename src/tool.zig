@@ -96,7 +96,6 @@ const ToolChild = struct {
     }
 };
 
-/// Runs a tool subprocess and reaps it with everything it started.
 /// A key file, read whole and trimmed. A secret is one key, not a document, so
 /// it is read under a cap of its own rather than the one `read` uses for
 /// source.
@@ -112,6 +111,7 @@ pub fn readSecret(io: Io, arena: std.mem.Allocator, path: []const u8) ?[]const u
     return std.mem.trim(u8, chat.stripBom(raw), " \t\r\n");
 }
 
+/// Runs a tool subprocess and reaps it with everything it started.
 pub fn runToolProcess(
     io: Io,
     arena: std.mem.Allocator,
@@ -831,6 +831,30 @@ fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     const raw = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_edit_bytes)) catch |err|
         return std.fmt.allocPrint(arena, "error: cannot read {s}: {s}", .{ path, @errorName(err) });
     if (old.len == 0) return std.fmt.allocPrint(arena, "error: old_string is empty", .{});
+    // An edit is a tool call the model can issue twice: a turn that was cut
+    // before the result reached it, a re-read to check the change landed, a
+    // retry after a transport fault. Every other shape is already safe, because
+    // the first run removes the text the second one looks for and the second is
+    // refused. The two shapes below are not, and both are settled before
+    // anything is written.
+    //
+    // A replacement that is the text it replaces changes nothing, so it reports
+    // that rather than rewriting the file with its own contents.
+    if (std.mem.eql(u8, old, new)) {
+        return std.fmt.allocPrint(arena, "no change: new_string is the same text as old_string in {s}", .{path});
+    }
+    // A replacement that still contains what it replaces cannot be run twice:
+    // the second execution matches the same text inside the first execution's
+    // own output and nests it again, so `}` -> `},` or `foo` -> `foobar` grows
+    // or re-indents the file a little further with every duplicate. Nothing
+    // here can tell an already-applied edit from a first one, because the two
+    // leave the same bytes, so the shape is refused rather than applied twice
+    // under a second run. The model gets the reason and the way out, and reads
+    // the file again before asking for the edit with more context in
+    // `old_string`, which is also what makes it unambiguous.
+    if (std.mem.indexOf(u8, new, old) != null) {
+        return std.fmt.allocPrint(arena, "error: new_string contains old_string, so a second run of this edit would match inside the first one's output and apply again; include more context in old_string", .{});
+    }
 
     const count = std.mem.count(u8, raw, old);
     if (count == 0) return std.fmt.allocPrint(arena, "error: old_string not found in {s}", .{path});
@@ -2152,6 +2176,57 @@ test "edit replaces one match, or every match when asked" {
     try args.put(arena, "replace_all", .{ .bool = true });
     try std.testing.expectEqualStrings("replaced 2 occurrence(s) in a.txt", try toolEdit(std.testing.io, arena, args));
     try std.testing.expectEqualStrings("y and y", try tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
+}
+
+// One edit, issued twice, on a file the two runs cannot tell apart.
+//
+// The contract is that the second run leaves the file as the first one left
+// it: either the same bytes, or the edit is refused. The case that needs a
+// rule is the one where the replacement still holds the text it replaces,
+// which the first run leaves in the file for the second to match, so the file
+// would grow or re-indent once more per duplicate. That shape is refused
+// before anything is written, which is the only way to make it re-runnable:
+// an applied edit and an already-applied one leave the same bytes, so
+// nothing at the tool can tell them apart afterwards.
+test "an edit issued twice leaves the file the first run left" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_path = cwd_buf[0..try tmp.dir.realPath(std.testing.io, &cwd_buf)];
+    const orig = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, ".", arena);
+    try std.process.setCurrentPath(std.testing.io, tmp_path);
+    defer std.process.setCurrentPath(std.testing.io, orig) catch {};
+
+    var args: std.json.ObjectMap = .empty;
+    try args.put(arena, "path", .{ .string = "a.txt" });
+
+    // The ordinary edit: the second run finds no text to replace, so it is
+    // refused and the file keeps the first run's bytes.
+    try args.put(arena, "old_string", .{ .string = "x" });
+    try args.put(arena, "new_string", .{ .string = "y" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.txt", .data = "a x b" });
+    try std.testing.expectEqualStrings("replaced 1 occurrence(s) in a.txt", try toolEdit(std.testing.io, arena, args));
+    try std.testing.expect(std.mem.startsWith(u8, try toolEdit(std.testing.io, arena, args), "error: old_string not found"));
+    try std.testing.expectEqualStrings("a y b", try tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
+
+    // The nesting shape, refused on the first run rather than applied and
+    // nested again on the second.
+    try args.put(arena, "old_string", .{ .string = "x" });
+    try args.put(arena, "new_string", .{ .string = "xy" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.txt", .data = "a x b" });
+    try std.testing.expect(std.mem.startsWith(u8, try toolEdit(std.testing.io, arena, args), "error: new_string contains old_string"));
+    try std.testing.expectEqualStrings("a x b", try tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
+
+    // Replacing text with itself writes nothing, so a duplicate of it is not a
+    // second write either.
+    try args.put(arena, "old_string", .{ .string = "x" });
+    try args.put(arena, "new_string", .{ .string = "x" });
+    try std.testing.expect(std.mem.startsWith(u8, try toolEdit(std.testing.io, arena, args), "no change:"));
+    try std.testing.expectEqualStrings("a x b", try tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
 }
 
 /// The two runners a tool subprocess can go through, named so the reaping

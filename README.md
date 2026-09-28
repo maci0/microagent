@@ -274,7 +274,7 @@ Seven tools, all of them thin wrappers over tools you already have:
 | `bash` | `/bin/sh -c`, 120 s default timeout (600 s ceiling on what the model may ask for), output capped at 24 KB; a command naming a credentials file is refused, and the child does not inherit the provider key |
 | `read` | read a file, optional line offset/limit; refuses credentials (`.env`, key and keystore files, anything under `.secrets` or `.ssh`) |
 | `write` | create or overwrite a file, parents created; refuses a call with no `content` |
-| `edit` | exact string replacement, refuses an ambiguous match unless `replace_all` |
+| `edit` | exact string replacement, refuses an ambiguous match unless `replace_all`, and refuses a `new_string` that contains `old_string` so a repeated call cannot nest the change again |
 | `search` | `rg --line-number --no-heading`, optional glob; credentials files excluded |
 | `ast` | `ast-grep run` for structural match, or `--rewrite --update-all` to apply one; credentials files excluded |
 | `git` | read-only `status`, `diff`, `log`, `show`, `blame`, capped at 400 lines; a credentials path is refused |
