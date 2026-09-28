@@ -1285,41 +1285,6 @@ test "a truncated tool result keeps whole codepoints" {
     try std.testing.expect(std.unicode.utf8ValidateSlice(chat.clamp("abc日本語のテキスト", 8)));
 }
 
-test "a capped tool call takes its process tree down with it" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const n = try tmp.dir.realPath(io, &path_buf);
-    const pid_path = try std.fs.path.join(arena, &.{ path_buf[0..n], "grandchild.pid" });
-
-    // The shell exits at once; the grandchild holds the pipe open, so the read
-    // only ends at the timeout, which is the path under test. `$!` and not
-    // `$$`: inside a nested `sh -c` the latter is still the outer shell's pid,
-    // which has already exited, so the check below would pass on a process
-    // that was never running.
-    const script = try std.fmt.allocPrint(arena, "sh -c 'sleep 30 & echo $! > {s}; wait' & exit 0", .{pid_path});
-    try std.testing.expectError(error.Timeout, runCapped(io, arena, &.{ "/bin/sh", "-c", script }, 4096, net.durationMs(300)));
-
-    const raw = tmp.dir.readFileAlloc(io, "grandchild.pid", arena, .limited(64)) catch return error.GrandchildNotReported;
-    const pid = try std.fmt.parseInt(std.posix.pid_t, std.mem.trim(u8, raw, " \t\r\n"), 10);
-    // The kill is delivered asynchronously and the orphan is reaped by init
-    // afterwards, so "gone" is a short poll rather than an instant check.
-    var attempt: usize = 0;
-    while (attempt < 50) : (attempt += 1) {
-        std.posix.kill(pid, .CONT) catch return;
-        try io.sleep(.{ .nanoseconds = 20 * std.time.ns_per_ms }, .awake);
-    }
-    std.debug.print("grandchild {d} survived the tool call\n", .{pid});
-    return error.GrandchildSurvived;
-}
-
 // The edit tool rewrites a file the model named, and the one-match case has to
 // come out the same whether or not `replace_all` was asked for: the count
 // checks above refuse an ambiguous match, so both paths have exactly the
@@ -1376,12 +1341,12 @@ const ToolRunner = enum {
 };
 
 /// Asserts that a runner took its whole process tree down with it. The command
-/// backgrounds a grandchild that outlives the shell, writes that grandchild's
-/// pid, and then runs past the timeout: without the group signal the grandchild
-/// is still alive when the call returns, and every timed-out call leaked one.
-/// `pid_name` names the file the grandchild reports itself in, so the two
-/// runners leave separate marks and the message says which one leaked.
-fn expectNoProcessSurvived(runner: ToolRunner, pid_name: []const u8) !void {
+/// backgrounds a grandchild that outlives the shell that started it, writes
+/// that grandchild's pid, and then leaves the pipe held open: without the group
+/// signal the grandchild is still alive when the call returns, and every
+/// timed-out call leaked one.
+fn expectNoProcessSurvived(runner: ToolRunner) !void {
+    const pid_name = "grandchild.pid";
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -1394,12 +1359,12 @@ fn expectNoProcessSurvived(runner: ToolRunner, pid_name: []const u8) !void {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const n = try tmp.dir.realPath(io, &path_buf);
     const pid_path = try std.fs.path.join(arena, &.{ path_buf[0..n], pid_name });
-    // The grandchild holds the pipe open, so the read only ends when the
-    // timeout fires, which is the path under test.
-    const script = try std.fmt.allocPrint(arena,
-        \\sh -c 'echo $$ > {s}; sleep 30' &
-        \\sleep 30
-    , .{pid_path});
+    // The shell exits at once; the grandchild holds the pipe open, so the read
+    // only ends at the timeout, which is the path under test. `$!` and not
+    // `$$`: inside a nested `sh -c` the latter is still the outer shell's pid,
+    // which has already exited, so the check below would pass on a process
+    // that was never running.
+    const script = try std.fmt.allocPrint(arena, "sh -c 'sleep 30 & echo $! > {s}; wait' & exit 0", .{pid_path});
     try std.testing.expectError(error.Timeout, runner.call(arena, io, &.{ "/bin/sh", "-c", script }));
 
     const raw = tmp.dir.readFileAlloc(io, pid_name, arena, .limited(64)) catch return error.GrandchildNotReported;
@@ -1451,14 +1416,8 @@ test "an interrupt during a tool call is forwarded to that call's process group"
     try std.testing.expectEqual(@as(std.posix.pid_t, 0), tool_group.load(.monotonic));
 }
 
-// A tool call must take its whole process tree down with it: without the group
-// signal the grandchild is still alive when the call returns, and every
-
-// A tool call must take its whole process tree down with it: without the group
-// signal the grandchild is still alive when the call returns, and every
-// timed-out call leaked one.
 test "a tool call that times out leaves no process of its own behind" {
-    try expectNoProcessSurvived(.tool_process, "grandchild.pid");
+    try expectNoProcessSurvived(.tool_process);
 }
 
 test "a tool call reports the exit status of the command it ran" {
@@ -1476,5 +1435,5 @@ test "a tool call reports the exit status of the command it ran" {
 // that backgrounds work and then outruns its deadline took the whole tree with
 // it only where the search tools already did.
 test "a bash call that times out leaves no process of its own behind" {
-    try expectNoProcessSurvived(.capped, "bash_grandchild.pid");
+    try expectNoProcessSurvived(.capped);
 }

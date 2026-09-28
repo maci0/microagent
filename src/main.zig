@@ -1489,19 +1489,15 @@ fn applyDeclared(
     const frame = parsed.value;
 
     if (frame.usage) |u| {
-        result.prompt_tokens = chat_mod.num(u.prompt_tokens);
-        result.completion_tokens = chat_mod.num(u.completion_tokens);
-        result.total_tokens = chat_mod.num(u.total_tokens);
-        if (u.completion_tokens_details) |d| result.reasoning_tokens = chat_mod.num(d.reasoning_tokens);
-        // Cached prompt tokens, in the three spellings providers actually send:
-        // the OpenAI/OpenRouter one, DeepSeek's native one, and Anthropic's.
-        if (u.prompt_tokens_details) |d| result.cached_tokens = chat_mod.num(d.cached_tokens);
-        if (result.cached_tokens == 0) result.cached_tokens = chat_mod.num(u.prompt_cache_hit_tokens);
-        if (result.cached_tokens == 0) result.cached_tokens = chat_mod.num(u.cache_read_input_tokens);
-        // Not every provider sends the total, and a reader that divides tokens
-        // by elapsed time reads a missing field as a run that cost nothing.
-        if (result.total_tokens == 0)
-            result.total_tokens = result.prompt_tokens +| result.completion_tokens;
+        applyUsage(result, .{
+            .prompt = u.prompt_tokens,
+            .completion = u.completion_tokens,
+            .total = u.total_tokens,
+            .reasoning = if (u.completion_tokens_details) |d| d.reasoning_tokens else null,
+            .cached = if (u.prompt_tokens_details) |d| d.cached_tokens else null,
+            .cache_hit = u.prompt_cache_hit_tokens,
+            .cache_read = u.cache_read_input_tokens,
+        });
     }
     if (frame.choices.len == 0) return true;
     const choice = frame.choices[0];
@@ -1517,50 +1513,104 @@ fn applyDeclared(
     }
     const delta = choice.delta orelse return true;
 
-    if (delta.content) |text| {
-        const kept = chat_mod.clamp(text, max_response_bytes -| result.streamed);
-        try result.content.appendSlice(gpa, kept);
-        try out_buf.appendSlice(gpa, kept);
-        result.streamed += kept.len;
-    }
+    if (delta.content) |text| try appendStreamed(gpa, text, result, out_buf);
     if (delta.tool_calls) |tcs| {
         for (tcs) |tc| {
-            // `numCount` clamps rather than casting: `num` saturates at the
-            // `u64` ceiling, which a 32-bit build cannot hold, so narrowing it
-            // here would trap a checked build and wrap a release one. A
-            // provider index beyond what a `usize` holds saturates too, so the
-            // cap below sees it and drops the call.
-            const idx = chat_mod.numCount(tc.index);
-            // The index sizes `calls`, so a provider-sent index is capped
-            // before it can ask for billions of empty slots.
-            if (idx >= max_tool_calls) continue;
-            while (calls.items.len <= idx) try calls.append(gpa, .{ .id = "", .name = "" });
-            const call = &calls.items[idx];
-            // A provider may resend the id or the name on a later fragment, so
-            // the previous copy is released rather than left behind.
-            if (tc.id) |v| {
-                const owned = try gpa.dupe(u8, v);
-                // A slot this frame's index walk filled holds the placeholder
-                // rather than a copy, and the placeholder is not the
-                // allocator's to hand back.
-                if (call.id.len != 0) gpa.free(call.id);
-                call.id = owned;
-            }
-            if (tc.function) |f| {
-                if (f.name) |v| {
-                    const owned = try gpa.dupe(u8, v);
-                    if (call.name.len != 0) gpa.free(call.name);
-                    call.name = owned;
-                }
-                if (f.arguments) |v| {
-                    const kept = chat_mod.clamp(v, max_response_bytes -| result.streamed);
-                    try call.args.appendSlice(gpa, kept);
-                    result.streamed += kept.len;
-                }
-            }
+            const f = tc.function;
+            const name = if (f) |v| v.name else null;
+            const args = if (f) |v| v.arguments else null;
+            try applyCallDelta(gpa, tc.index, tc.id, name, args, result, calls);
         }
     }
     return true;
+}
+
+/// One frame's usage block, read the same way whichever parse produced it. A
+/// counter a frame did not carry stays absent, so a later frame that omits it
+/// leaves the count an earlier one set rather than reading as zero tokens.
+const UsageFields = struct {
+    prompt: ?std.json.Value = null,
+    completion: ?std.json.Value = null,
+    total: ?std.json.Value = null,
+    reasoning: ?std.json.Value = null,
+    cached: ?std.json.Value = null,
+    cache_hit: ?std.json.Value = null,
+    cache_read: ?std.json.Value = null,
+};
+
+/// Folds one frame's usage block into the run's counters. Cached prompt tokens
+/// arrive in the three spellings providers actually send: the OpenAI and
+/// OpenRouter one, DeepSeek's native one, and Anthropic's.
+///
+/// A provider that sends no total has it summed from the parts, because a
+/// reader that divides tokens by elapsed time reads a missing field as a run
+/// that cost nothing.
+fn applyUsage(result: *chat_mod.ChatResult, u: UsageFields) void {
+    result.prompt_tokens = chat_mod.num(u.prompt);
+    result.completion_tokens = chat_mod.num(u.completion);
+    result.total_tokens = chat_mod.num(u.total);
+    if (u.reasoning) |v| result.reasoning_tokens = chat_mod.num(v);
+    if (u.cached) |v| result.cached_tokens = chat_mod.num(v);
+    if (result.cached_tokens == 0) result.cached_tokens = chat_mod.num(u.cache_hit);
+    if (result.cached_tokens == 0) result.cached_tokens = chat_mod.num(u.cache_read);
+    if (result.total_tokens == 0)
+        result.total_tokens = result.prompt_tokens +| result.completion_tokens;
+}
+
+/// Appends streamed answer text to the result and to the buffer the caller
+/// prints, under the one response cap.
+fn appendStreamed(
+    gpa: std.mem.Allocator,
+    text: []const u8,
+    result: *chat_mod.ChatResult,
+    out_buf: *std.ArrayList(u8),
+) !void {
+    const kept = chat_mod.clamp(text, max_response_bytes -| result.streamed);
+    try result.content.appendSlice(gpa, kept);
+    try out_buf.appendSlice(gpa, kept);
+    result.streamed += kept.len;
+}
+
+/// Folds one streamed fragment of a tool call into `calls`, growing it to the
+/// fragment's index. `index` is read as a Value, so an index a frame spelled
+/// unusually is read as a count rather than failing the parse and taking the
+/// whole frame down the generic path.
+fn applyCallDelta(
+    gpa: std.mem.Allocator,
+    index: std.json.Value,
+    id: ?[]const u8,
+    name: ?[]const u8,
+    args: ?[]const u8,
+    result: *chat_mod.ChatResult,
+    calls: *std.ArrayList(chat_mod.ToolCall),
+) !void {
+    // `numCount` clamps rather than casting: a provider index beyond what a
+    // `usize` holds saturates, so the cap below sees it and drops the call
+    // instead of the cast trapping or wrapping. The index sizes `calls`, so it
+    // is capped before it can ask for billions of empty slots.
+    const idx = chat_mod.numCount(index);
+    if (idx >= max_tool_calls) return;
+    while (calls.items.len <= idx) try calls.append(gpa, .{ .id = "", .name = "" });
+    const call = &calls.items[idx];
+    // A provider may resend the id or the name on a later fragment, so the
+    // previous copy is released rather than left behind. A slot this frame's
+    // index walk filled holds the placeholder rather than a copy, and the
+    // placeholder is not the allocator's to hand back.
+    if (id) |v| {
+        const owned = try gpa.dupe(u8, v);
+        if (call.id.len != 0) gpa.free(call.id);
+        call.id = owned;
+    }
+    if (name) |v| {
+        const owned = try gpa.dupe(u8, v);
+        if (call.name.len != 0) gpa.free(call.name);
+        call.name = owned;
+    }
+    if (args) |v| {
+        const kept = chat_mod.clamp(v, max_response_bytes -| result.streamed);
+        try call.args.appendSlice(gpa, kept);
+        result.streamed += kept.len;
+    }
 }
 
 fn applyFrame(
@@ -1588,23 +1638,23 @@ fn applyFrame(
     }
 
     if (root.object.get("usage")) |u| if (u == .object) {
-        result.prompt_tokens = chat_mod.num(u.object.get("prompt_tokens"));
-        result.completion_tokens = chat_mod.num(u.object.get("completion_tokens"));
-        result.total_tokens = chat_mod.num(u.object.get("total_tokens"));
+        var reasoning: ?std.json.Value = null;
+        var cached: ?std.json.Value = null;
         if (u.object.get("completion_tokens_details")) |d| {
-            if (d == .object) result.reasoning_tokens = chat_mod.num(d.object.get("reasoning_tokens"));
+            if (d == .object) reasoning = d.object.get("reasoning_tokens");
         }
-        // Cached prompt tokens, in the three spellings providers actually send:
-        // the OpenAI/OpenRouter one, DeepSeek's native one, and Anthropic's.
         if (u.object.get("prompt_tokens_details")) |d| {
-            if (d == .object) result.cached_tokens = chat_mod.num(d.object.get("cached_tokens"));
+            if (d == .object) cached = d.object.get("cached_tokens");
         }
-        if (result.cached_tokens == 0) result.cached_tokens = chat_mod.num(u.object.get("prompt_cache_hit_tokens"));
-        if (result.cached_tokens == 0) result.cached_tokens = chat_mod.num(u.object.get("cache_read_input_tokens"));
-        // Not every provider sends the total, and a reader that divides tokens
-        // by elapsed time reads a missing field as a run that cost nothing.
-        if (result.total_tokens == 0)
-            result.total_tokens = result.prompt_tokens +| result.completion_tokens;
+        applyUsage(result, .{
+            .prompt = u.object.get("prompt_tokens"),
+            .completion = u.object.get("completion_tokens"),
+            .total = u.object.get("total_tokens"),
+            .reasoning = reasoning,
+            .cached = cached,
+            .cache_hit = u.object.get("prompt_cache_hit_tokens"),
+            .cache_read = u.object.get("cache_read_input_tokens"),
+        });
     };
     const choices = root.object.get("choices") orelse return;
     if (choices != .array or choices.array.items.len == 0) return;
@@ -1621,44 +1671,17 @@ fn applyFrame(
     const delta = choice.object.get("delta") orelse return;
     if (delta != .object) return;
 
-    if (chat_mod.str(delta.object.get("content"))) |text| {
-        const kept = chat_mod.clamp(text, max_response_bytes -| result.streamed);
-        try result.content.appendSlice(gpa, kept);
-        try out_buf.appendSlice(gpa, kept);
-        result.streamed += kept.len;
-    }
+    if (chat_mod.str(delta.object.get("content"))) |text| try appendStreamed(gpa, text, result, out_buf);
     if (delta.object.get("tool_calls")) |tcs| if (tcs == .array) {
         for (tcs.array.items) |tc| {
             if (tc != .object) continue;
-            // `numCount`, not a cast, for the reason the fast path gives.
-            const idx = chat_mod.numCount(tc.object.get("index"));
-            // The index sizes `calls`, so a provider-sent index is capped
-            // before it can ask for billions of empty slots.
-            if (idx >= max_tool_calls) continue;
-            while (calls.items.len <= idx) try calls.append(gpa, .{ .id = "", .name = "" });
-            const call = &calls.items[idx];
-            // A provider may resend the id or the name on a later fragment, so
-            // the previous copy is released rather than left behind.
-            if (chat_mod.str(tc.object.get("id"))) |v| {
-                const owned = try gpa.dupe(u8, v);
-                // A slot this frame's index walk filled holds the placeholder
-                // rather than a copy, and the placeholder is not the
-                // allocator's to hand back.
-                if (call.id.len != 0) gpa.free(call.id);
-                call.id = owned;
-            }
+            var name: ?[]const u8 = null;
+            var args: ?[]const u8 = null;
             if (tc.object.get("function")) |f| if (f == .object) {
-                if (chat_mod.str(f.object.get("name"))) |v| {
-                    const owned = try gpa.dupe(u8, v);
-                    if (call.name.len != 0) gpa.free(call.name);
-                    call.name = owned;
-                }
-                if (chat_mod.str(f.object.get("arguments"))) |v| {
-                    const kept = chat_mod.clamp(v, max_response_bytes -| result.streamed);
-                    try call.args.appendSlice(gpa, kept);
-                    result.streamed += kept.len;
-                }
+                name = chat_mod.str(f.object.get("name"));
+                args = chat_mod.str(f.object.get("arguments"));
             };
+            try applyCallDelta(gpa, tc.object.get("index") orelse .null, chat_mod.str(tc.object.get("id")), name, args, result, calls);
         }
     };
 }
@@ -2588,6 +2611,35 @@ test "usage counters land on the result" {
     try std.testing.expectEqual(@as(u64, 7), sink.result.reasoning_tokens);
     // Nothing in this frame says the prompt was cached, so it is a full miss.
     try std.testing.expectEqual(@as(u64, 0), sink.result.cached_tokens);
+}
+
+// The declared shapes are a speedup, not a narrowing: a frame they refuse is
+// parsed into a value tree and read there, and it has to land the same way. A
+// provider that sends `choices` as something other than an array, or `usage`
+// as something other than an object, is what takes that path.
+test "a frame the declared shapes refuse is read the long way" {
+    {
+        var sink = FrameSink.init(std.testing.allocator);
+        defer sink.deinit();
+
+        try sink.feed("{\"choices\":\"none\",\"usage\":{\"prompt_tokens\":900,\"completion_tokens\":24,\"prompt_tokens_details\":{\"cached_tokens\":768},\"completion_tokens_details\":{\"reasoning_tokens\":5}}}");
+        try std.testing.expectEqual(@as(u64, 900), sink.result.prompt_tokens);
+        // No total in the frame, so it is summed from the two that are there.
+        try std.testing.expectEqual(@as(u64, 924), sink.result.total_tokens);
+        try std.testing.expectEqual(@as(u64, 768), sink.result.cached_tokens);
+        try std.testing.expectEqual(@as(u64, 5), sink.result.reasoning_tokens);
+    }
+    {
+        var sink = FrameSink.init(std.testing.allocator);
+        defer sink.deinit();
+
+        try sink.feed("{\"choices\":[{\"delta\":{\"content\":\"hi\",\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"a\\\":1}\"}}]}}],\"usage\":5}");
+        try std.testing.expectEqualStrings("hi", sink.result.content.items);
+        try std.testing.expectEqual(@as(usize, 1), sink.calls.items.len);
+        try std.testing.expectEqualStrings("call_1", sink.calls.items[0].id);
+        try std.testing.expectEqualStrings("bash", sink.calls.items[0].name);
+        try std.testing.expectEqualStrings("{\"a\":1}", sink.calls.items[0].args.items);
+    }
 }
 
 // A provider that sends prompt and completion but no total leaves the run
