@@ -3,6 +3,10 @@ ZIG ?= zig
 OPT ?= ReleaseFast
 BIN := zig-out/bin/microagent
 
+# A recipe that fails mid-copy leaves no half-written target behind, so a later
+# run cannot install or benchmark a truncated binary.
+.DELETE_ON_ERROR:
+
 .PHONY: help build small musl test test-one fmt check bench overhead install clean
 
 # `make check` is what CI runs; run it before pushing.
