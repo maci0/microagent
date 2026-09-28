@@ -15,7 +15,7 @@ BIN := zig-out/bin/microagent
 export LC_ALL := C
 export TZ := UTC
 
-.PHONY: default help preflight version build small musl test test-one fmt fmt-python lint lint-versions zig-version required-zig-version release-targets check-targets lint-shell lint-python lint-yaml check bench overhead install release-assets checksums clean
+.PHONY: default help preflight version build small musl test test-one fmt fmt-python lint lint-versions lint-lock zig-version required-zig-version release-targets check-targets lint-shell lint-python lint-yaml check bench overhead install release-assets checksums clean
 
 # The targets `microagent update` asks for, in the names release.yml publishes.
 # ci.yml rehearses the same list on every push and release.yml publishes it, so
@@ -82,6 +82,7 @@ help:
 	  'check                 preflight, zig-version, fmt --check, the linters, the tests, an optimized build' \
 	  'lint                  shellcheck, ruff, and yamllint over the non-Zig sources' \
 	  'lint-versions         check ruff and yamllint against the versions the gate runs' \
+	  'lint-lock             check the Harbor requirements.txt pins are the ones requirements.lock has' \
 	  'zig-version           check the local zig against the version the release is built with' \
 	  'bench AGENTS=...      three coding tasks through each harness' \
 	  'overhead              startup and first-request cost per harness' \
@@ -157,7 +158,7 @@ fmt-python:
 # Python and YAML around them do, and a shell that only fails when a benchmark
 # runs is a shell nobody has read. Keep these in step with
 # .github/workflows/ci.yml.
-lint: lint-versions lint-shell lint-python lint-yaml
+lint: lint-versions lint-lock lint-shell lint-python lint-yaml
 
 # A version mismatch is reported by name rather than surfacing later as a
 # formatting diff no one can explain, so the message says what to install.
@@ -174,6 +175,44 @@ lint-versions:
 	yamllint_pin="$$(sed -n 's/^yamllint==\([^ ]*\).*/\1/p' lint-requirements.txt)"; \
 	{ [ "$$ruff_pin" = "$(RUFF_VERSION)" ] && [ "$$yamllint_pin" = "$(YAMLLINT_VERSION)" ]; } || { \
 	  echo "lint-requirements.txt pins ruff==$$ruff_pin and yamllint==$$yamllint_pin, not $(RUFF_VERSION) and $(YAMLLINT_VERSION): CI installs that file, so a bump here has to bump the Makefile too" >&2; bad=1; }; \
+	test "$$bad" -eq 0
+
+# The Harbor adapter is the one dependency set here with a manifest and a lock
+# that no check compares. requirements.txt is one pin; requirements.lock is uv's
+# output from it. A lock left behind from an earlier pin still installs, still
+# hashes every artifact, and still runs the adapter, so the Harbor release a
+# score in BENCHMARK.md was measured against stops being the one the pin names
+# and nothing fails until a number is quietly incomparable. The lock is
+# generated, so it is read here and never written: the two checks are that every
+# pin in the manifest is in the lock at the same version, and that no lock entry
+# arrives without a hash, which is what an artifact installed unverified would
+# be. Regenerating is the `uv pip compile` at the top of requirements.txt.
+HARBOR_DIR := integrations/harbor
+lint-lock:
+	@set -eu; \
+	manifest="$(HARBOR_DIR)/requirements.txt"; \
+	lock="$(HARBOR_DIR)/requirements.lock"; \
+	for file in "$$manifest" "$$lock"; do \
+	  test -f "$$file" || { echo "no $$file, so the Harbor adapter's dependency set is undeclared" >&2; exit 1; }; \
+	done; \
+	bad=0; \
+	for pin in $$(sed -n 's/^\([A-Za-z0-9_.-]*==[^ ]*\).*/\1/p' "$$manifest"); do \
+	  grep -q "^$$pin " "$$lock" || { \
+	    echo "$$manifest pins $$pin, which $$lock does not: the lock is older than the pin, so a benchmark would run against a Harbor the manifest no longer names" >&2; \
+	    echo "regenerate it with the 'uv pip compile' at the top of $$manifest" >&2; \
+	    bad=1; \
+	  }; \
+	done; \
+	grep -q -- '-r integrations/harbor/requirements.txt' "$$lock" || { \
+	  echo "$$lock records no root from $$manifest, so it was not generated from it" >&2; \
+	  bad=1; \
+	}; \
+	unhashed="$$(awk '/^[A-Za-z0-9_.-]+==/ { if (name != "" && hashes == 0) print name; name = $$1; sub(/==.*/, "", name); hashes = 0; next } /--hash=sha256:/ { hashes++ } END { if (name != "" && hashes == 0) print name }' "$$lock")"; \
+	if [ -n "$$unhashed" ]; then \
+	  echo "$$lock has entries with no --hash=sha256, which uv installs without verifying them:" >&2; \
+	  echo "$$unhashed" >&2; \
+	  bad=1; \
+	fi; \
 	test "$$bad" -eq 0
 
 # A different zig is a different compiler, and a compiler decides the bytes:

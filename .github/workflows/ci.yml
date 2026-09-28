@@ -97,6 +97,12 @@ jobs:
       - name: the installed linters are the versions the Makefile names
         run: make lint-versions
 
+      # The Harbor adapter's manifest and lock are refreshed by hand, and a lock
+      # left behind by an earlier pin still installs and still hashes, so
+      # nothing but this says the adapter and the pin still agree.
+      - name: the Harbor lock matches the manifest it is generated from
+        run: make lint-lock
+
       - name: the shell scripts parse and are shellcheck-clean
         run: make lint-shell
 

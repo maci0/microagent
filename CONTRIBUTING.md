@@ -50,12 +50,12 @@ lint-versions` fails when a version there and one in the Makefile drift apart.
 make check                  # the gate: zig fmt --check, the linters, the tests, an optimized build
 make test-one FILTER="..."  # one test, while you are mid-edit
 make preflight              # name any tool check and lint need that is not on PATH
-make lint                   # shellcheck, ruff and yamllint on their own
+make lint                   # the pin checks, shellcheck, ruff and yamllint on their own
 ```
 
 `make check` is the whole gate: it is the same `zig fmt --check`, the same
 `ruff check`, `ruff format --check` and `yamllint`, the same `zig build test`,
-the same `make lint-versions`, and the same `ReleaseSmall` build whose binary
+the same `make lint-versions` and `make lint-lock`, and the same `ReleaseSmall` build whose binary
 it then runs, that
 [.github/workflows/ci.yml](.github/workflows/ci.yml) runs, on the same Zig
 version (`make zig-version` is that first step, so a laptop on a different
@@ -84,7 +84,10 @@ There is no generated code, and nothing in the Zig build regenerates a lockfile.
 are inputs to the Python around the Zig and are refreshed by hand: `lint-requirements.txt` pins the
 gate's linters, and `integrations/harbor/requirements.lock` is uv's output for the Harbor adapter,
 with the command that produces it in the comment at the top of
-`integrations/harbor/requirements.txt`. The only build output
+`integrations/harbor/requirements.txt`. `make lint-lock` reads both and refuses
+a lock that no longer carries the manifest's pin, or that has an entry with no
+`sha256`, so a lock left behind by an earlier pin fails the gate instead of
+quietly benchmarking a Harbor release the manifest no longer names. The only build output
 is `zig-out/`, and `make clean` removes it along with `.zig-cache/`. `make musl`
 also copies the static binary to `integrations/harbor/microagent-x86_64-linux-musl`
 for the Harbor adapter; that one and the `.tmp` it is renamed from are ignored,
