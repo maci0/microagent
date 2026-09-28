@@ -504,6 +504,24 @@ returns `401 The API Key appears to be invalid or may have expired` against
 `https://api.kimi.com/coding/v1`. A zero recorded from a failed setup would be a lie, so there is no
 kimi column rather than a zero column.
 
+## Blocked: the provider balance is spent
+
+The third Terminal-Bench 2 pass did not measure the harness. Its first trials answered
+`http 402 ... "You requested up to 65536 tokens, but can only afford N ... lower max_tokens"` — the
+OpenRouter balance behind the shared key is exhausted (200.17 USD used this month), and a request
+whose `max_tokens` exceeds what the account can still afford is refused before the model is asked
+anything. Its numbers (3/23, 14 `RuntimeError`) are recorded here as invalid, not as a score.
+
+What the run did establish, and what it changed:
+
+- `--max-tokens` / `MICROAGENT_MAX_TOKENS` already exists and is the lever: with
+  `MICROAGENT_MAX_TOKENS=2048` the same request succeeds, with the default 65536 it is refused.
+- The harbor adapter now forwards `MICROAGENT_MAX_TOKENS`, which it did not before, so a benchmark
+  run can be pointed at a low balance instead of failing every trial.
+
+Benchmark measurement resumes when the key has credit again; the engineering work (tests, tools,
+adapter) does not depend on it.
+
 ## Terminal-Bench 2, second pass, and what it says about method
 
 A repeat of the same 23-task sample, run for both harnesses **in parallel**, came back much worse

@@ -414,6 +414,13 @@ class Microagent(BaseAgent):
             env["MICROAGENT_CA_BUNDLE"] = REMOTE_CA_PATH
         if reasoning:
             env["MICROAGENT_REASONING_EFFORT"] = reasoning
+        # Forwarded because a provider can refuse a request whose max_tokens
+        # exceeds what the account can still afford: with a low balance the
+        # default 65536 is answered with `402 ... you can only afford N`, and
+        # the only lever the caller has is to ask for less.
+        max_tokens = trimmed_env("MICROAGENT_MAX_TOKENS")
+        if max_tokens:
+            env["MICROAGENT_MAX_TOKENS"] = max_tokens
 
         started = self.logs_dir / "microagent-stdout.txt"
         try:
