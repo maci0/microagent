@@ -426,8 +426,11 @@ fn isLoopbackHost(host: []const u8) bool {
     return std.mem.eql(u8, std.mem.trim(u8, host, "[]"), "::1");
 }
 
-/// `127.x.y.z`, and only when every octet is a number: a name that merely
-/// begins `127.` is a host somebody else can point anywhere.
+const max_ipv4_octet: u16 = 255;
+
+/// `127.x.y.z`, and only when every octet is a number in range: a name that
+/// merely begins `127.` is a host somebody else can point anywhere, and
+/// `127.256.0.1` is not an address at all, so a resolver is what answers it.
 fn isIpv4Loopback(host: []const u8) bool {
     if (!std.mem.startsWith(u8, host, "127.")) return false;
     var octets: usize = 0;
@@ -435,6 +438,10 @@ fn isIpv4Loopback(host: []const u8) bool {
     while (it.next()) |part| {
         if (part.len == 0 or part.len > 3) return false;
         for (part) |c| if (!std.ascii.isDigit(c)) return false;
+        // Parsed wide enough that the comparison is the range check, rather
+        // than a parse that has already refused what it cannot hold.
+        const octet = std.fmt.parseInt(u16, part, 10) catch return false;
+        if (octet > max_ipv4_octet) return false;
         octets += 1;
     }
     return octets == 4;
@@ -1512,9 +1519,11 @@ fn applyDeclared(
     }
     if (delta.tool_calls) |tcs| {
         for (tcs) |tc| {
-            // `numCount` clamps rather than casting: a provider index beyond
-            // what a `usize` holds saturates, so the cap below sees it and
-            // drops the call instead of the cast trapping or wrapping.
+            // `numCount` clamps rather than casting: `num` saturates at the
+            // `u64` ceiling, which a 32-bit build cannot hold, so narrowing it
+            // here would trap a checked build and wrap a release one. A
+            // provider index beyond what a `usize` holds saturates too, so the
+            // cap below sees it and drops the call.
             const idx = chat_mod.numCount(tc.index);
             // The index sizes `calls`, so a provider-sent index is capped
             // before it can ask for billions of empty slots.
@@ -1615,9 +1624,7 @@ fn applyFrame(
     if (delta.object.get("tool_calls")) |tcs| if (tcs == .array) {
         for (tcs.array.items) |tc| {
             if (tc != .object) continue;
-            // `numCount` clamps rather than casting: a provider index beyond
-            // what a `usize` holds saturates, so the cap below sees it and
-            // drops the call instead of the cast trapping or wrapping.
+            // `numCount`, not a cast, for the reason the fast path gives.
             const idx = chat_mod.numCount(tc.object.get("index"));
             // The index sizes `calls`, so a provider-sent index is capped
             // before it can ask for billions of empty slots.
@@ -1935,6 +1942,10 @@ test "the api key is only sent over https, or to a loopback gateway" {
     try std.testing.expect(!baseUrlCarriesKey("http://127.evil.com/api/v1"));
     try std.testing.expect(!baseUrlCarriesKey("http://localhost.evil.com/api/v1"));
     try std.testing.expect(!baseUrlCarriesKey("http://127.0.0/v1"));
+    // Octets past 255 are not addresses, so a resolver is what answers a name
+    // spelled that way, and the resolver is not this machine.
+    try std.testing.expect(!baseUrlCarriesKey("http://127.256.0.1/v1"));
+    try std.testing.expect(!baseUrlCarriesKey("http://127.0.0.999:1234/v1"));
     try std.testing.expect(!baseUrlCarriesKey("http://[::2]:1234/v1"));
     // Anything that is not a url at all carries nothing.
     try std.testing.expect(!baseUrlCarriesKey("not a url"));

@@ -196,6 +196,18 @@ release, and `microagent update` moves you to it.
 - A streamed tool call's name and id are released with the rest of the response. They are copies
   the run allocator owns, and only the argument buffer was handed back, so a long run leaked two
   small strings per call.
+- A `bash` call the model gave a `timeout_ms` of zero, a negative, or something unparsable is no
+  longer killed before it starts. Those all read as 0, and a zero duration is a deadline that has
+  already passed, so every such command returned `command timed out after 0ms`. A value that is not
+  a positive count of milliseconds is now no request at all, and takes the tool's own default.
+- A streamed tool call's index is clamped the way every other provider-sent number already was. The
+  declared-shape fast path narrowed the `u64` `num` returns straight to `usize` before the cap was
+  applied, so an index past a 32-bit `usize` trapped a checked build and wrapped a release one onto
+  a live call slot; the read offsets and the git line limit went through the clamping helper for
+  exactly this reason.
+- The loopback exemption for a plaintext base url checks that every octet is in range. `127.256.0.1`
+  is not an address, so a resolver is what answers a name spelled that way, and the exemption sent
+  the API key to whatever it named.
 - `--budget` and `MICROAGENT_BUDGET_SECONDS` take a value with surrounding whitespace, as
   `--max-turns` and `MICROAGENT_MAX_TURNS` already did. `export MICROAGENT_BUDGET_SECONDS="$(cat f)"`
   kept a trailing newline and was refused where the other ceilings were not.
