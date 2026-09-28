@@ -6,7 +6,7 @@ loops. One binary, one loop, OpenAI-compatible APIs only.
 - **Small.** ~680 KB stripped (`-Doptimize=ReleaseSmall`), no runtime, no node, no python.
 - **Fast.** ~2.5 ms to start, so a gauntlet loop spends its time in the model, not the harness.
 - **No features you did not ask for.** No subagents, no plugins, no MCP, no TUI. Streaming chat
-  completions, six tools, done.
+  completions, seven tools, done.
 
 ## Build
 
@@ -31,7 +31,7 @@ microagent -p "fix the failing test and run it"
 -m, --model <model>    model id        (env MICROAGENT_MODEL)
 -b, --base-url <url>   OpenAI-compatible base url (env MICROAGENT_BASE_URL)
 -k, --api-key <key>    api key         (env MICROAGENT_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY)
-    --max-turns <n>    tool-loop ceiling (default 60)
+    --max-turns <n>    tool-loop ceiling (default 100)
     --budget <seconds> stop starting turns after this long, then take one last
                        turn to make the edit (env MICROAGENT_BUDGET_SECONDS)
     --reasoning-effort <level>
@@ -55,12 +55,19 @@ end to end; see [BENCHMARK.md](BENCHMARK.md).
 stdout carries the model's own text, one JSON usage line per response, and nothing else:
 
 ```json
-{"type":"usage","usage":{"prompt_tokens":910,"completion_tokens":18,"reasoning_tokens":0,"total_tokens":928}}
+{"type":"usage","usage":{"prompt_tokens":910,"cached_tokens":832,"completion_tokens":18,"reasoning_tokens":0,"total_tokens":928}}
 ```
 
 Token counters are cumulative for the run, which is the shape gauntlet's usage reader takes its
 maximum from. Tool activity goes to stderr as a one-line gutter (`⏺ read src/main.zig`) so it never
 pollutes the agent's answer.
+
+`cached_tokens` is the part of the prompt the provider served from its prompt cache. The whole
+conversation is re-sent every turn, byte for byte: messages are only ever appended, and the system
+prompt and tool schema never change, so the prefix stays cacheable and a turn pays full price only
+for what it just added. Watch the counter on a multi-turn run — it should climb with the
+conversation. It is read from whichever of `prompt_tokens_details.cached_tokens`,
+`prompt_cache_hit_tokens` or `cache_read_input_tokens` the endpoint sends.
 
 ### Session log
 
@@ -69,7 +76,7 @@ Each run appends one JSONL record per model response to `~/.microagent/sessions/
 while it is still going:
 
 ```json
-{"ts":1790608347342,"cwd":"/home/maci/Desktop/Projects/microagent","model":"deepseek/deepseek-v4-flash","elapsed_ms":1448,"usage":{"prompt_tokens":998,"completion_tokens":19,"reasoning_tokens":16,"total_tokens":1017}}
+{"ts":1790608347342,"cwd":"/home/maci/Desktop/Projects/microagent","model":"deepseek/deepseek-v4-flash","elapsed_ms":1448,"usage":{"prompt_tokens":998,"cached_tokens":896,"completion_tokens":19,"reasoning_tokens":16,"total_tokens":1017}}
 ```
 
 One response's own counters, not the run's cumulative ones, plus the directory the run works in and
@@ -98,7 +105,7 @@ means the check or the install failed, 2 is a usage error.
 
 ## Tools
 
-Six tools, all of them thin wrappers over tools you already have:
+Seven tools, all of them thin wrappers over tools you already have:
 
 | tool | what it does |
 | --- | --- |
@@ -108,9 +115,11 @@ Six tools, all of them thin wrappers over tools you already have:
 | `edit` | exact string replacement, refuses an ambiguous match unless `replace_all` |
 | `search` | `rg --line-number --no-heading`, optional glob |
 | `ast` | `ast-grep run` for structural match, or `--rewrite --update-all` to apply one |
+| `git` | read-only `status`, `diff`, `log`, `show`, `blame`, capped at 400 lines |
 
 The system prompt tells the model to search with ripgrep and rewrite structurally with `ast-grep`
-rather than reimplementing either in the harness. `bash` is there for builds, tests and git.
+rather than reimplementing either in the harness. `bash` is there for builds and tests; git state
+has its own tool, with the subcommands fixed here instead of assembled by the model.
 
 A transient failure — 429, any 5xx, a dropped connection — is retried twice with 1 s and 2 s of
 backoff before the run exits non-zero, so a provider's bad minute does not make gauntlet redo a

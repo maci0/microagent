@@ -148,6 +148,8 @@ class Microagent(BaseAgent):
                 model,
                 "--budget",
                 budget,
+                "--max-turns",
+                os.environ.get("MICROAGENT_MAX_TURNS", "150"),
                 instruction,
             )
         )

@@ -21,17 +21,20 @@ const max_tool_output = 24 * 1024;
 /// long run pays for every file it has ever read, forever: one Terminal-Bench
 /// task reached 1.7M cumulative input tokens that way.
 const conversation_soft_limit = 400 * 1024;
-const max_turns_default = 60;
+const max_turns_default = 100;
 
 const system_prompt =
-    "You are microagent, a fast coding agent working in the current repository. " ++
-    "Use the tools to inspect and change the working tree. Prefer ripgrep (`rg`) for searching, " ++
-    "`ast-grep` for structural matches and rewrites, and `bash` for builds, tests and git. " ++
-    "Read a file before you edit it. Make the smallest correct change; never invent APIs. " ++
-    "Budget your steps: a handful of tool calls should be enough to locate the problem, then edit. " ++
-    "Do not audit unrelated code, and do not read library or standard-library sources to answer a " ++
-    "question about this repository. Do not ask questions. When the task is done, reply with a " ++
-    "short summary of what changed and why.";
+    "You are microagent, a coding agent working on the repository in the current directory.\n" ++
+    "Work in this order: (1) find the relevant code with the `search` tool (ripgrep) and find the " ++
+    "tests that cover it; (2) reproduce the failure with `bash` before changing anything, so you " ++
+    "know what you are fixing; (3) make the smallest correct change - `edit` for a precise text " ++
+    "change, `ast` (ast-grep) when the change is structural; (4) re-run the failing test and any " ++
+    "test you touched; (5) check `git diff` and stop with a short summary.\n" ++
+    "Prefer these deterministic tools over shelling out: `search` for text, `ast` for syntax, " ++
+    "`read` for files, `git` for status/diff/log/show/blame. Use `bash` for running tests, builds " ++
+    "and anything the other tools do not cover. Never invent APIs: read the definition first. " ++
+    "Do not audit unrelated code and do not read library or standard-library sources to answer a " ++
+    "question about this repository. Do not ask questions.";
 
 const tools_json =
     \\[
@@ -40,7 +43,8 @@ const tools_json =
     \\{"type":"function","function":{"name":"write","description":"Create or overwrite a file. Parent directories are created.","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}},
     \\{"type":"function","function":{"name":"edit","description":"Replace an exact string in a file. old_string must occur exactly once unless replace_all is true.","parameters":{"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean"}},"required":["path","old_string","new_string"]}}},
     \\{"type":"function","function":{"name":"search","description":"Search file contents with ripgrep. Returns file:line:text matches.","parameters":{"type":"object","properties":{"pattern":{"type":"string","description":"Regular expression"},"path":{"type":"string","description":"Directory or file, default ."},"glob":{"type":"string","description":"Glob filter, e.g. *.zig"}},"required":["pattern"]}}},
-    \\{"type":"function","function":{"name":"ast","description":"Structural search or rewrite with ast-grep, matched on syntax rather than text. Set rewrite to apply the change to every match.","parameters":{"type":"object","properties":{"pattern":{"type":"string","description":"ast-grep pattern with metavariables, e.g. $A == $A"},"lang":{"type":"string","description":"Language, e.g. python, javascript, go, rust"},"path":{"type":"string","description":"Directory or file, default ."},"rewrite":{"type":"string","description":"Replacement pattern; when set the matches are rewritten in place"}},"required":["pattern","lang"]}}}
+    \\{"type":"function","function":{"name":"ast","description":"Structural search or rewrite with ast-grep, matched on syntax rather than text. Set rewrite to apply the change to every match.","parameters":{"type":"object","properties":{"pattern":{"type":"string","description":"ast-grep pattern with metavariables, e.g. $A == $A"},"lang":{"type":"string","description":"Language, e.g. python, javascript, go, rust"},"path":{"type":"string","description":"Directory or file, default ."},"rewrite":{"type":"string","description":"Replacement pattern; when set the matches are rewritten in place"}},"required":["pattern","lang"]}}},
+    \\{"type":"function","function":{"name":"git","description":"Read repository state with git: status, diff, log, show, blame. Use this instead of running git through bash.","parameters":{"type":"object","properties":{"cmd":{"type":"string","enum":["status","diff","log","show","blame"],"description":"What to read"},"path":{"type":"string","description":"File or directory to scope to"},"rev":{"type":"string","description":"Revision for show/blame, e.g. HEAD~3"},"limit":{"type":"integer","description":"Max output lines, default 400"}},"required":["cmd"]}}}
     \\]
 ;
 
@@ -82,6 +86,11 @@ const Usage = struct {
     completion: u64 = 0,
     reasoning: u64 = 0,
     total: u64 = 0,
+    /// Of `prompt`, the part the provider served from its prompt cache. Every
+    /// turn re-sends the whole conversation, so this is the counter that says
+    /// whether the prefix is still being reused: a prompt-sized `prompt_tokens`
+    /// with `cached_tokens` near it is a hit, and near-zero is a full re-read.
+    cached: u64 = 0,
 };
 
 const ChatResult = struct {
@@ -91,6 +100,7 @@ const ChatResult = struct {
     completion_tokens: u64 = 0,
     reasoning_tokens: u64 = 0,
     total_tokens: u64 = 0,
+    cached_tokens: u64 = 0,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -222,7 +232,7 @@ const help_text =
     \\  -m, --model <model>    model id (env MICROAGENT_MODEL)
     \\  -b, --base-url <url>   OpenAI-compatible base url (env MICROAGENT_BASE_URL)
     \\  -k, --api-key <key>    api key (env MICROAGENT_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY)
-    \\      --max-turns <n>    tool-loop turn ceiling (default 60)
+    \\      --max-turns <n>    tool-loop turn ceiling (default 100)
     \\      --ca-bundle <file>
     \\                         PEM file to trust instead of the system store
     \\                         (env MICROAGENT_CA_BUNDLE, SSL_CERT_FILE). Needed in
@@ -420,8 +430,8 @@ fn sessionRecord(
     try writeJsonString(w, cwd);
     try w.writeAll(",\"model\":");
     try writeJsonString(w, model);
-    try w.print(",\"elapsed_ms\":{d},\"usage\":{{\"prompt_tokens\":{d},\"completion_tokens\":{d},\"reasoning_tokens\":{d},\"total_tokens\":{d}", .{
-        elapsed_ms, result.prompt_tokens, result.completion_tokens, result.reasoning_tokens, result.total_tokens,
+    try w.print(",\"elapsed_ms\":{d},\"usage\":{{\"prompt_tokens\":{d},\"cached_tokens\":{d},\"completion_tokens\":{d},\"reasoning_tokens\":{d},\"total_tokens\":{d}", .{
+        elapsed_ms, result.prompt_tokens, result.cached_tokens, result.completion_tokens, result.reasoning_tokens, result.total_tokens,
     });
     try w.writeAll("}}\n");
     return jb.items();
@@ -603,6 +613,13 @@ fn applyFrame(
         if (u.object.get("completion_tokens_details")) |d| {
             if (d == .object) result.reasoning_tokens = num(d.object.get("reasoning_tokens"));
         }
+        // Cached prompt tokens, in the three spellings providers actually send:
+        // the OpenAI/OpenRouter one, DeepSeek's native one, and Anthropic's.
+        if (u.object.get("prompt_tokens_details")) |d| {
+            if (d == .object) result.cached_tokens = num(d.object.get("cached_tokens"));
+        }
+        if (result.cached_tokens == 0) result.cached_tokens = num(u.object.get("prompt_cache_hit_tokens"));
+        if (result.cached_tokens == 0) result.cached_tokens = num(u.object.get("cache_read_input_tokens"));
     };
     const choices = root.object.get("choices") orelse return;
     if (choices != .array or choices.array.items.len == 0) return;
@@ -634,6 +651,63 @@ fn applyFrame(
             calls.items[idx].args = args_buf.items;
         }
     };
+}
+
+/// Read-only git, with the subcommands fixed here rather than assembled by the
+/// model. Deterministic, no shell quoting, and the output is capped: a raw
+/// `git log` in a big repository is thousands of lines of context nobody reads.
+fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
+    const cmd = str(args.get("cmd")) orelse return std.fmt.allocPrint(arena, "error: missing cmd", .{});
+    const path = str(args.get("path"));
+    const rev = str(args.get("rev"));
+    const limit: usize = if (args.get("limit")) |v| @intCast(num(v)) else 400;
+
+    var argv: std.ArrayList([]const u8) = .empty;
+    try argv.appendSlice(arena, &.{ "git", "--no-pager" });
+    if (std.mem.eql(u8, cmd, "status")) {
+        try argv.appendSlice(arena, &.{ "status", "--short", "--branch" });
+    } else if (std.mem.eql(u8, cmd, "diff")) {
+        try argv.appendSlice(arena, &.{ "diff", "--no-color" });
+        if (rev) |r| try argv.appendSlice(arena, &.{ r, "--" });
+    } else if (std.mem.eql(u8, cmd, "log")) {
+        try argv.appendSlice(arena, &.{ "log", "--oneline", "--no-color", "-n", "30" });
+    } else if (std.mem.eql(u8, cmd, "show")) {
+        try argv.appendSlice(arena, &.{ "show", "--no-color", "--stat", "--patch" });
+        try argv.append(arena, rev orelse "HEAD");
+    } else if (std.mem.eql(u8, cmd, "blame")) {
+        try argv.append(arena, "blame");
+        if (rev) |r| try argv.append(arena, r);
+    } else {
+        return std.fmt.allocPrint(arena, "error: unknown git cmd '{s}'", .{cmd});
+    }
+    if (path) |p| try argv.append(arena, p);
+
+    const res = std.process.run(arena, io, .{
+        .argv = argv.items,
+        .stdout_limit = .limited(max_tool_output * 4),
+        .stderr_limit = .limited(4096),
+        .timeout = durationMs(60_000),
+    }) catch |err| return std.fmt.allocPrint(arena, "error: git {s} failed: {s}", .{ cmd, @errorName(err) });
+    const text = if (res.stdout.len > 0) res.stdout else res.stderr;
+    if (text.len == 0) return std.fmt.allocPrint(arena, "(git {s}: no output)", .{cmd});
+    return firstLines(arena, text, limit);
+}
+
+/// The first `limit` lines, with a note when lines were dropped.
+fn firstLines(arena: std.mem.Allocator, text: []const u8, limit: usize) ![]u8 {
+    var lines: usize = 0;
+    var end: usize = text.len;
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        if (text[i] != '\n') continue;
+        lines += 1;
+        if (lines == limit) {
+            end = i + 1;
+            break;
+        }
+    }
+    if (end == text.len) return arena.dupe(u8, text);
+    return std.fmt.allocPrint(arena, "{s}... [output truncated at {d} lines]", .{ text[0..end], limit });
 }
 
 /// Replaces the content of the oldest large tool results with a marker once the
@@ -745,14 +819,15 @@ fn finishTurn(
     // One machine-readable line per response: gauntlet reads these for live
     // token rates, and they are the only stdout that is not model output.
     usage.prompt += result.prompt_tokens;
+    usage.cached += result.cached_tokens;
     usage.completion += result.completion_tokens;
     usage.reasoning += result.reasoning_tokens;
     usage.total += result.total_tokens;
     var usage_line = JsonBuf.init(arena);
     const w = usage_line.writer();
     try w.writeAll("{\"type\":\"usage\",\"usage\":{");
-    try w.print("\"prompt_tokens\":{d},\"completion_tokens\":{d},\"reasoning_tokens\":{d},\"total_tokens\":{d}", .{
-        usage.prompt, usage.completion, usage.reasoning, usage.total,
+    try w.print("\"prompt_tokens\":{d},\"cached_tokens\":{d},\"completion_tokens\":{d},\"reasoning_tokens\":{d},\"total_tokens\":{d}", .{
+        usage.prompt, usage.cached, usage.completion, usage.reasoning, usage.total,
     });
     try w.writeAll("}}\n");
     std.Io.File.stdout().writeStreamingAll(io, usage_line.items()) catch {};
@@ -773,6 +848,7 @@ fn runTool(io: Io, arena: std.mem.Allocator, call: ToolCall) ![]u8 {
     if (std.mem.eql(u8, call.name, "edit")) return toolEdit(io, arena, args);
     if (std.mem.eql(u8, call.name, "search")) return toolSearch(io, arena, args);
     if (std.mem.eql(u8, call.name, "ast")) return toolAst(io, arena, args);
+    if (std.mem.eql(u8, call.name, "git")) return toolGit(io, arena, args);
     return std.fmt.allocPrint(arena, "error: unknown tool '{s}'", .{call.name});
 }
 
@@ -1075,7 +1151,7 @@ test "conversation and tool schema serialize as one valid request body" {
     try std.testing.expectEqualStrings("say \"hi\"\nplease", messages.items[1].object.get("content").?.string);
 
     const tools = root.get("tools").?.array;
-    try std.testing.expectEqual(@as(usize, 6), tools.items.len);
+    try std.testing.expectEqual(@as(usize, 7), tools.items.len);
     for (tools.items) |tool| {
         const f = tool.object.get("function").?.object;
         try std.testing.expect(f.get("name").?.string.len > 0);
@@ -1157,6 +1233,28 @@ test "usage counters land on the result" {
     try std.testing.expectEqual(@as(u64, 22), result.completion_tokens);
     try std.testing.expectEqual(@as(u64, 33), result.total_tokens);
     try std.testing.expectEqual(@as(u64, 7), result.reasoning_tokens);
+    // Nothing in this frame says the prompt was cached, so it is a full miss.
+    try std.testing.expectEqual(@as(u64, 0), result.cached_tokens);
+}
+
+// The cache counter is what turns "we probably reuse the prefix" into a number
+// a benchmark can read, so all three provider spellings have to land on it.
+test "cached prompt tokens read every provider spelling" {
+    const spellings = [_][]const u8{
+        "{\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":900,\"prompt_tokens_details\":{\"cached_tokens\":768}}}",
+        "{\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":900,\"prompt_cache_hit_tokens\":768}}",
+        "{\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":900,\"cache_read_input_tokens\":768}}",
+    };
+    for (spellings) |payload| {
+        var run_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer run_state.deinit();
+        var result: ChatResult = .{};
+        var calls: std.ArrayList(ToolCall) = .empty;
+        var out_buf: std.ArrayList(u8) = .empty;
+        try applyFrame(run_state.allocator(), run_state.allocator(), payload, &result, &calls, &out_buf);
+        try std.testing.expectEqual(@as(u64, 900), result.prompt_tokens);
+        try std.testing.expectEqual(@as(u64, 768), result.cached_tokens);
+    }
 }
 
 // A record a monitor reads has to be one JSON object with this response's own
@@ -1169,6 +1267,7 @@ test "session record carries one response's counters, cwd and model time" {
 
     var result: ChatResult = .{};
     result.prompt_tokens = 910;
+    result.cached_tokens = 832;
     result.completion_tokens = 18;
     result.reasoning_tokens = 0;
     result.total_tokens = 928;
@@ -1176,8 +1275,8 @@ test "session record carries one response's counters, cwd and model time" {
     const line = try sessionRecord(arena, 1759000000000, "/home/me/proj", "deepseek/deepseek-v4-flash", 1234, &result);
     try std.testing.expectEqualStrings(
         "{\"ts\":1759000000000,\"cwd\":\"/home/me/proj\",\"model\":\"deepseek/deepseek-v4-flash\"," ++
-            "\"elapsed_ms\":1234,\"usage\":{\"prompt_tokens\":910,\"completion_tokens\":18," ++
-            "\"reasoning_tokens\":0,\"total_tokens\":928}}\n",
+            "\"elapsed_ms\":1234,\"usage\":{\"prompt_tokens\":910,\"cached_tokens\":832," ++
+            "\"completion_tokens\":18,\"reasoning_tokens\":0,\"total_tokens\":928}}\n",
         line,
     );
 }
@@ -1189,10 +1288,22 @@ test "session record escapes a directory that needs it" {
     const line = try sessionRecord(state.allocator(), 1, "/tmp/a\"b\\c", "m", 5, &result);
     try std.testing.expectEqualStrings(
         "{\"ts\":1,\"cwd\":\"/tmp/a\\\"b\\\\c\",\"model\":\"m\"," ++
-            "\"elapsed_ms\":5,\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":4," ++
-            "\"reasoning_tokens\":0,\"total_tokens\":0}}\n",
+            "\"elapsed_ms\":5,\"usage\":{\"prompt_tokens\":0,\"cached_tokens\":0," ++
+            "\"completion_tokens\":4,\"reasoning_tokens\":0,\"total_tokens\":0}}\n",
         line,
     );
+}
+
+test "tool output truncation keeps whole lines" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const short = try firstLines(arena, "a\nb\n", 10);
+    try std.testing.expectEqualStrings("a\nb\n", short);
+
+    const long = try firstLines(arena, "1\n2\n3\n4\n", 2);
+    try std.testing.expectEqualStrings("1\n2\n... [output truncated at 2 lines]", long);
 }
 
 test "compaction elides old tool output and keeps the recent turns" {
@@ -1237,6 +1348,50 @@ test "compaction elides old tool output and keeps the recent turns" {
     try std.testing.expectEqualStrings("call_119", last.get("tool_call_id").?.string);
     try std.testing.expectEqual(@as(usize, 8192), last.get("content").?.string.len);
     try std.testing.expect(std.mem.startsWith(u8, array.items[2].object.get("content").?.string, "[earlier tool output elided"));
+}
+
+// Prompt caching keys on the exact bytes of the request prefix. Compaction is
+// the one thing that rewrites the conversation, so everything ahead of the
+// first elided tool result has to survive it byte for byte: one re-spelled
+// escape and every later turn re-reads the whole prompt instead of its tail.
+test "compaction leaves the cached prefix byte-identical" {
+    const gpa = std.testing.allocator;
+    var scratch_state = std.heap.ArenaAllocator.init(gpa);
+    defer scratch_state.deinit();
+
+    var msgs: std.ArrayList(u8) = .empty;
+    defer msgs.deinit(gpa);
+
+    try msgs.appendSlice(gpa, "[");
+    // Characters a JSON round trip could re-spell: quote, backslash, newline,
+    // a control byte, and a non-ASCII byte.
+    try appendMessage(gpa, &msgs, "system", "you are a coding agent: \"a\\b\"\n\u{7} caf\u{00e9}");
+    try appendMessage(gpa, &msgs, "user", "fix the bug");
+    const prefix = try gpa.dupe(u8, msgs.items);
+    defer gpa.free(prefix);
+
+    const blob = "x" ** 8192;
+    var i: usize = 0;
+    while (i < 120) : (i += 1) {
+        if (msgs.items.len > 1) try msgs.append(gpa, ',');
+        var msg = JsonBuf.init(gpa);
+        try msg.writer().writeAll("{\"role\":\"tool\",\"tool_call_id\":\"call_");
+        try msg.writer().print("{d}", .{i});
+        try msg.writer().writeAll("\",\"content\":");
+        try writeJsonString(msg.writer(), blob);
+        try msg.writer().writeAll("}");
+        try msgs.appendSlice(gpa, msg.items());
+        msg.list.deinit(gpa);
+    }
+    try msgs.append(gpa, ']');
+    try std.testing.expect(msgs.items.len > conversation_soft_limit);
+
+    try compactMessages(gpa, &msgs, scratch_state.allocator());
+
+    try std.testing.expect(msgs.items.len > prefix.len);
+    try std.testing.expectEqualStrings(prefix, msgs.items[0..prefix.len]);
+    // The prefix is cached, not just unchanged: the newest turn is still whole.
+    try std.testing.expect(std.mem.endsWith(u8, msgs.items, "\"content\":\"" ++ blob ++ "\"}]"));
 }
 
 test "a CA bundle path that cannot be read falls back to the system store" {

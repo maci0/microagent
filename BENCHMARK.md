@@ -282,6 +282,27 @@ Two things the run says beyond the score:
 The numbers a reader should compare against are published full-set (500-instance) results, not this
 sample; 13 instances carry roughly +/-13% standard error at this rate.
 
+## What actually moved the SWE-bench number
+
+The first 13-instance run was not only a model result; the harness was clipping it. Two instances
+stopped at exactly 60 turns, which was the `--max-turns` default, and one stopped at 54 with the
+1200 s budget gone. Re-running those three with the ceiling raised to 150 turns and the budget to
+2700 s (still inside the task's own 3000 s agent timeout):
+
+| instance | before | after | turns used |
+| --- | --- | --- | --- |
+| matplotlib__matplotlib-25775 | 0.0 | **1.0** | 99 |
+| pylint-dev__pylint-4551 | 0.0 | 0.0 | 97 |
+| sympy__sympy-21379 | 0.0 | 0.0 | 75 |
+
+The ceiling is now 100 by default, the harbor adapter passes `MICROAGENT_MAX_TURNS` (150), and the
+system prompt was rewritten to work in the order a bug fix actually needs: find the code and its
+tests, reproduce the failure, make the smallest change, re-run the test, check `git diff`. New
+deterministic tools behind that prompt: `search` (ripgrep), `ast` (ast-grep), `git` (status, diff,
+log, show, blame - fixed subcommands, capped output) and `read`/`edit`/`write`. `patchwork` on this
+machine is graphviz's binary, not the AST rewriter, and `semcode` is a dangling symlink into a
+never-built cargo target, so neither is wired up.
+
 ## Head to head with opencode
 
 The same machine, the same 13 SWE-bench instances, the same model
@@ -315,10 +336,52 @@ What this does and does not say:
   microagent's own `--budget` prevents by stopping deliberately.
 
 Neither harness was tuned for the other's benchmark. opencode ships repo-aware tooling and a much
-larger prompt; microagent ships six tools and a 933-token prompt. That trade is the whole point of
+larger prompt; microagent ships seven tools and a 933-token prompt. That trade is the whole point of
 the harness and it is visible in the token columns.
 
-## Streaming profile## Streaming profile
+## Prompt cache reuse
+
+Every turn re-sends the whole conversation, which is the shape a prefix cache wants: the prefix is
+byte-identical from one turn to the next, and a turn adds only its own messages. Nothing has to be
+opted into — OpenAI, DeepSeek and Gemini cache automatically above their block size, and microagent
+does not put anything volatile (a timestamp, a shuffled tool list) ahead of the conversation. What
+was missing was the counter: the usage lines reported `prompt_tokens` but not how much of it came
+from cache, so reuse could only be assumed.
+
+`applyFrame` now reads the cached-prompt counter in the three spellings endpoints send —
+`prompt_tokens_details.cached_tokens`, DeepSeek's `prompt_cache_hit_tokens`, Anthropic's
+`cache_read_input_tokens` — and it rides in the stdout usage line and in every session-log record.
+
+Measured on `deepseek/deepseek-v4-flash` through OpenRouter, one run of seven turns, one `bash` call
+per turn. The usage line is cumulative, so both columns are run totals and the share is cumulative:
+
+| turn | prompt tokens | cached | cached share |
+| --- | --- | --- | --- |
+| 1 | 1,290 | 1,024 | 79% |
+| 2 | 2,638 | 2,048 | 78% |
+| 3 | 4,043 | 3,072 | 76% |
+| 4 | 5,506 | 4,352 | 79% |
+| 5 | 7,027 | 5,632 | 80% |
+| 6 | 8,606 | 6,656 | 77% |
+| 7 | 10,243 | 7,936 | 78% |
+
+The cached count climbs by roughly one turn's worth of tokens every turn: the prefix is being
+reused, not re-read. Turn 1's 1,024 cached tokens are the system prompt and the tool schema, which
+are byte-identical in every run, so even a cold run starts with most of its fixed overhead already
+cached at the provider.
+
+Conversation compaction is the one thing that rewrites the conversation, and it is written so it
+cannot cost more cache than it has to: it replaces the *content* of old large tool results, never
+drops a message, never reorders one, and leaves everything ahead of the first elided result byte for
+byte — the same bytes are the same cached blocks. It also only fires above 400 KB, so short runs
+never pay for it at all. `zig build test` pins the property with `compaction leaves the cached
+prefix byte-identical`: the test builds a conversation whose prefix contains a quote, a backslash, a
+newline, a control byte and a non-ASCII byte, compacts it, and asserts the prefix bytes survive
+unchanged (a round trip that re-spelled one escape would turn every later turn into a full
+re-read). The cached-counter spellings are pinned by `cached prompt tokens read every provider
+spelling`.
+
+## Streaming profile
 
 The harness's only real hot loop is the SSE reader: every token delta is parsed and printed. It was
 profiled against a local OpenAI-compatible endpoint emitting a fixed 5000-frame stream
