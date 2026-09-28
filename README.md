@@ -37,8 +37,8 @@ microagent -p "fix the failing test and run it"
 With no key in the environment, `~/.secrets/openrouter` is read as a last resort.
 
 Any OpenAI-compatible endpoint works: OpenRouter, DeepSeek, OpenAI, vLLM, LiteLLM, Z.AI. Both
-`deepseek/deepseek-v4-flash` and `stealth/space-bunny-alpha` are exercised in CI-less local runs;
-see [BENCHMARK.md](BENCHMARK.md).
+`deepseek/deepseek-v4-flash` and `stealth/space-bunny-alpha` (OpenRouter) were used to verify it
+end to end; see [BENCHMARK.md](BENCHMARK.md).
 
 ### Output contract
 
