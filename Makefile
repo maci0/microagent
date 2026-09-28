@@ -7,6 +7,14 @@ BIN := zig-out/bin/microagent
 # run cannot install or benchmark a truncated binary.
 .DELETE_ON_ERROR:
 
+# A compiler reads the locale and the timezone out of the environment, so two
+# builds of one commit on two machines can differ without either being wrong.
+# Nothing embeds either today, and pinning them here is what keeps it that way:
+# a release built on a laptop is then the same bytes ci.yml publishes, which is
+# the claim CONTRIBUTING.md makes about building one before the tag exists.
+export LC_ALL := C
+export TZ := UTC
+
 .PHONY: default help build small musl test test-one fmt fmt-python lint lint-versions print-lint-versions lint-shell lint-python lint-yaml check bench overhead install release-assets checksums clean
 
 # The targets `microagent update` asks for, in the names release.yml publishes.
@@ -154,16 +162,27 @@ release-assets:
 
 # The sha256 sidecar `microagent update` verifies before it replaces anything.
 # Only a tagged build names its assets after a version, so a rehearsal in dist/
-# has nothing to checksum and says so.
+# has nothing to checksum and says so. GNU coreutils has sha256sum and macOS
+# ships shasum under another name; both print the `<hex>  <name>` line
+# src/update.zig reads, and a host with neither is told so rather than left
+# without the sidecars an update cannot verify. The chosen spelling is unquoted
+# so `shasum -a 256` arrives as two words.
 checksums:
 	@test -d dist || { echo "no dist/, run 'make release-assets TAG=v0.2.0' first" >&2; exit 2; }
-	cd dist && set -e && for asset in microagent-v*; do \
+	cd dist && set -e && \
+	if command -v sha256sum >/dev/null 2>&1; then sum=sha256sum; \
+	elif command -v shasum >/dev/null 2>&1; then sum="shasum -a 256"; \
+	else \
+		echo "neither sha256sum nor shasum is on PATH, so the sidecars update verifies cannot be written" >&2; \
+		exit 2; \
+	fi; \
+	for asset in microagent-v*; do \
 		case "$$asset" in *.sha256) continue;; esac; \
 		test -e "$$asset" || { \
 			echo "no tagged assets in dist/, run 'make release-assets TAG=v0.2.0' first" >&2; \
 			exit 2; \
 		}; \
-		sha256sum "$$asset" > "$$asset.sha256"; \
+		$$sum "$$asset" > "$$asset.sha256"; \
 	done
 
 clean:
