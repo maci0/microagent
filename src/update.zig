@@ -437,8 +437,9 @@ fn fetchBody(
     return try arena.dupe(u8, capped.body.written());
 }
 
-fn replaceExecutable(io: std.Io, arena: std.mem.Allocator, asset: []const u8) ![]const u8 {
-    const exe = try std.process.executablePathAlloc(io, arena);
+/// The path is resolved by the caller so a failure to replace it can name the
+/// file that would have changed; from here down it is already known to exist.
+fn replaceExecutable(io: std.Io, exe: []const u8, asset: []const u8) !void {
     const base = std.fs.path.basename(exe);
     if (std.fs.path.dirname(exe)) |dir_path| {
         var dir = try std.Io.Dir.cwd().openDir(io, dir_path, .{});
@@ -447,7 +448,23 @@ fn replaceExecutable(io: std.Io, arena: std.mem.Allocator, asset: []const u8) ![
     } else {
         try replaceVerified(io, std.Io.Dir.cwd(), base, .replaced, asset);
     }
-    return exe;
+}
+
+/// A download that failed, reported the way the release lookup is: the code
+/// itself when GitHub sent one, plus the hint for the two codes whose cause is
+/// worth naming. The URL the response named is unbounded, so the caller passes
+/// what it already holds: the asset name, or the sidecar described through it.
+fn downloadFailure(
+    io: std.Io,
+    what: []const u8,
+    status: std.http.Status,
+    err: anyerror,
+) u8 {
+    if (err == error.HttpStatus)
+        return fail(io, "GitHub returned HTTP {d} for {s}{s}; the binary was not replaced", .{
+            @intFromEnum(status), what, statusHint(status),
+        });
+    return fail(io, "could not download {s} ({s}); the binary was not replaced", .{ what, @errorName(err) });
 }
 
 const usage_text =
@@ -635,9 +652,11 @@ pub fn run(
     // The URL the response named is unbounded, and these lines print into a
     // fixed buffer, so the asset name is what identifies the download.
     const asset = fetchBody(&client, gpa, arena, a_url, bearer, max_asset_bytes, &status) catch |err|
-        return fail(io, "could not download {s} ({s}); the binary was not replaced", .{ asset_name, @errorName(err) });
+        return downloadFailure(io, asset_name, status, err);
+    var side_what_buf: [320]u8 = undefined;
+    const side_what = std.fmt.bufPrint(&side_what_buf, "the checksum sidecar for {s}", .{asset_name}) catch asset_name;
     const sidecar = fetchBody(&client, gpa, arena, s_url, bearer, max_sidecar_bytes, &status) catch |err|
-        return fail(io, "could not download the checksum sidecar for {s} ({s}); the binary was not replaced", .{ asset_name, @errorName(err) });
+        return downloadFailure(io, side_what, status, err);
 
     const decision = decide(.{
         .running = version,
@@ -657,8 +676,10 @@ pub fn run(
         .untrusted_url => return fail(io, "refusing to install unverified binary", .{}),
     }
 
-    const exe = replaceExecutable(io, arena, asset) catch |err|
-        return fail(io, "could not replace the binary ({s})", .{@errorName(err)});
+    const exe = std.process.executablePathAlloc(io, arena) catch |err|
+        return fail(io, "could not locate the running binary ({s})", .{@errorName(err)});
+    replaceExecutable(io, exe, asset) catch |err|
+        return fail(io, "could not replace {s} ({s}); the binary was not replaced", .{ exe, @errorName(err) });
     const installed = formatInstalled(&line_buf, rel.tag, exe) catch
         return fail(io, "could not format the install line", .{});
     net.writeOut(io, installed);

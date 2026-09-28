@@ -264,7 +264,14 @@ pub fn main(init: std.process.Init) !void {
     try openConversation(gpa, &msgs, prompt, opts.prompt);
 
     run(&client, io, gpa, init.arena.allocator(), opts, &msgs) catch |err| {
-        const msg = try std.fmt.allocPrint(init.arena.allocator(), "microagent: {s}\n", .{@errorName(err)});
+        // The endpoint is the one thing every failure below shares, and it is
+        // not in the error: a DNS failure, a refused connection and a truncated
+        // stream all arrive here as a bare name.
+        const arena = init.arena.allocator();
+        const msg = try std.fmt.allocPrint(arena, "microagent: the run against {s} failed: {s}\n", .{
+            displayUrl(arena, opts.base_url),
+            @errorName(err),
+        });
         net.writeErr(io, msg);
         std.process.exit(1);
     };
@@ -760,7 +767,7 @@ fn run(
 ) !void {
     const started = Io.Timestamp.now(io, .awake).nanoseconds;
     const budget = Budget.of(started, opts.budget_s);
-    const session = openSession(io, arena, opts);
+    var session: ?Session = openSession(io, arena, opts);
     defer closeSession(io, session);
     // What one turn allocates from the wire down -- the request body (a full
     // copy of the conversation), the streamed content, the tool results --
@@ -783,7 +790,7 @@ fn run(
             // with a small diff, and the model has already done the reading.
             net.note(io, arena, "microagent: budget of {d}s reached after {d} turn(s); one final turn\n", .{ opts.budget_s.?, turn });
             try appendMessage(gpa, msgs, "user", final_push);
-            _ = try runTurn(client, io, turn_arena, gpa, opts, msgs, session, &usage, budget.withGraceNs(final_push_grace_s));
+            _ = try runTurn(client, io, turn_arena, gpa, opts, msgs, &session, &usage, budget.withGraceNs(final_push_grace_s));
             return;
         }
         // The ceiling is announced on the turn it applies to, before it is
@@ -791,9 +798,9 @@ fn run(
         // word about the ceiling that cut it.
         if (turn + 1 == opts.max_turns)
             net.note(io, arena, "microagent: last turn (--max-turns {d})\n", .{opts.max_turns});
-        try compactMessages(gpa, msgs, turn_arena, &compaction_floor);
+        try compactMessages(io, gpa, msgs, turn_arena, &compaction_floor);
         // The model stopped asking for tools, so the run is over.
-        if (!try runTurn(client, io, turn_arena, gpa, opts, msgs, session, &usage, budget)) return;
+        if (!try runTurn(client, io, turn_arena, gpa, opts, msgs, &session, &usage, budget)) return;
     }
     net.note(io, arena, "microagent: stopped at the --max-turns ceiling ({d})\n", .{opts.max_turns});
 }
@@ -809,7 +816,7 @@ fn runTurn(
     gpa: std.mem.Allocator,
     opts: Options,
     msgs: *std.ArrayList(u8),
-    session: ?Session,
+    session: *?Session,
     usage: *Usage,
     budget: Budget,
 ) !bool {
@@ -849,6 +856,9 @@ const Session = struct {
     file: Io.File,
     cwd: []const u8,
     model: []const u8,
+    /// The directory the log is in, so a record that cannot be written says
+    /// which store went quiet rather than only why.
+    dir: []const u8,
 };
 
 /// How many names `createSessionLog` tries before it gives the run no log. The
@@ -892,7 +902,7 @@ fn openSession(io: Io, arena: std.mem.Allocator, opts: Options) ?Session {
     const stamp = Io.Clock.real.now(io).nanoseconds;
     const file = createSessionLog(io, arena, opts.session_dir, stamp) orelse return null;
     pruneSessions(io, arena, opts.session_dir);
-    return .{ .file = file, .cwd = cwd, .model = opts.model };
+    return .{ .file = file, .cwd = cwd, .model = opts.model, .dir = opts.session_dir };
 }
 
 /// Session logs kept on disk. The store is a per-run directory that nothing
@@ -959,11 +969,29 @@ fn elapsedMs(io: Io, since: i96) u64 {
     return @intCast(@divTrunc(delta, std.time.ns_per_ms));
 }
 
-fn writeSessionRecord(io: Io, arena: std.mem.Allocator, session: ?Session, elapsed_ms: u64, result: *const ChatResult) void {
-    const s = session orelse return;
+/// One record per response, into the log this run opened.
+///
+/// A failure to *open* the log is a null and costs the run nothing, which is
+/// why `openSession` can stay quiet. A failure to *write* one is different: the
+/// log was there, the run is producing records, and a store that has gone quiet
+/// (a full disk, a directory removed under the run) would otherwise leave the
+/// monitor reporting a run that stopped long before it did. It is named once and
+/// the log is dropped, so the run is not left appending to a file nothing reads
+/// and saying nothing about the gap.
+fn writeSessionRecord(io: Io, arena: std.mem.Allocator, session: *?Session, elapsed_ms: u64, result: *const ChatResult) void {
+    const s = session.* orelse return;
     const ts_ms: i64 = @intCast(@divTrunc(Io.Clock.real.now(io).nanoseconds, std.time.ns_per_ms));
-    const line = sessionRecord(arena, ts_ms, s.cwd, s.model, elapsed_ms, result) catch return;
-    s.file.writeStreamingAll(io, line) catch {};
+    const line = sessionRecord(arena, ts_ms, s.cwd, s.model, elapsed_ms, result) catch |err| {
+        net.note(io, arena, "microagent: a session record for {s} could not be built ({s}); the rest of this run is not recorded\n", .{ s.dir, @errorName(err) });
+        s.file.close(io);
+        session.* = null;
+        return;
+    };
+    s.file.writeStreamingAll(io, line) catch |err| {
+        net.note(io, arena, "microagent: the session log under {s} could not be written ({s}); the rest of this run is not recorded\n", .{ s.dir, @errorName(err) });
+        s.file.close(io);
+        session.* = null;
+    };
 }
 
 /// One response's line: this response's own counters, not the run's cumulative
@@ -1081,25 +1109,28 @@ fn streamChat(
                 .{ .name = "accept", .value = "text/event-stream" },
             },
         }) catch |err| {
-            if (waitBeforeRetry(io, attempt, @errorName(err))) continue;
+            if (waitBeforeRetry(io, arena, shown_url, attempt, "opening the request to", err)) continue;
             return err;
         };
         req_slot = req;
         var open = &req_slot.?;
         open.transfer_encoding = .{ .content_length = body.len };
         open.sendBodyComplete(@constCast(body)) catch |err| {
-            if (waitBeforeRetry(io, attempt, @errorName(err))) continue;
+            if (waitBeforeRetry(io, arena, shown_url, attempt, "sending the request body to", err)) continue;
             return err;
         };
         if (debug_enabled) std.debug.print("[mdebug] request sent, body={d} bytes\n", .{body.len});
 
         var response = open.receiveHead(&redirect_buffer) catch |err| {
-            if (waitBeforeRetry(io, attempt, @errorName(err))) continue;
+            if (waitBeforeRetry(io, arena, shown_url, attempt, "reading the response head from", err)) continue;
             return err;
         };
         if (debug_enabled) std.debug.print("[mdebug] head status={d} enc={s}\n", .{ @intFromEnum(response.head.status), @tagName(response.head.content_encoding) });
         if (response.head.status != .ok) {
             if (retryableStatus(response.head.status) and attempt < max_attempts) {
+                net.note(io, arena, "microagent: {s} answered HTTP {d}, retrying (attempt {d}/{d})\n", .{
+                    shown_url, @intFromEnum(response.head.status), attempt + 1, max_attempts,
+                });
                 try waitFor(io, attempt);
                 continue;
             }
@@ -1707,7 +1738,14 @@ fn firstLines(arena: std.mem.Allocator, text: []const u8, limit: usize) ![]u8 {
 /// quadratic in the run. One more soft limit of appended conversation is far
 /// more than enough to have made something elidable again, so the run pays one
 /// wasted parse per soft limit rather than one per turn.
+///
+/// A conversation this cannot read back is left exactly as it is rather than
+/// rewritten, but it is not left quiet: compaction is what keeps a long run's
+/// prompt bounded, so a buffer that stops being compactable is a run whose
+/// cost grows turn after turn. The buffer is one this program wrote, so a parse
+/// that fails on it is said on stderr rather than swallowed.
 fn compactMessages(
+    io: Io,
     gpa: std.mem.Allocator,
     msgs: *std.ArrayList(u8),
     scratch: std.mem.Allocator,
@@ -1720,10 +1758,18 @@ fn compactMessages(
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const parsed = std.json.parseFromSlice(std.json.Value, arena, msgs.items, .{}) catch return;
+    const parsed = std.json.parseFromSlice(std.json.Value, arena, msgs.items, .{}) catch |err| {
+        net.note(io, arena, "microagent: the {d} byte conversation could not be read back for compaction ({s}); it is sent as it stands\n", .{
+            msgs.items.len, @errorName(err),
+        });
+        return;
+    };
     const array = switch (parsed.value) {
         .array => |a| a,
-        else => return,
+        else => {
+            net.note(io, arena, "microagent: the conversation is not a message array; it is sent as it stands\n", .{});
+            return;
+        },
     };
 
     const target = conversation_soft_limit / 2;
@@ -1792,7 +1838,10 @@ fn finishTurn(
             try std.fmt.allocPrint(arena, "error: not run, the run's time budget is exhausted", .{})
         else
             runTool(io, arena, call) catch |err|
-                try std.fmt.allocPrint(arena, "error: {s}", .{@errorName(err)});
+                // A tool that fails outright (rather than reporting its own
+                // failure as text) is named here, so a result reading
+                // `error: OutOfMemory` says which of the calls ran out.
+                try std.fmt.allocPrint(arena, "error: {s}: {s}", .{ call.name, @errorName(err) });
         var tool_msg = JsonBuf.init(arena);
         try tool_msg.writer().writeAll(",{\"role\":\"tool\",\"tool_call_id\":");
         try writeJsonString(tool_msg.writer(), call.id);
@@ -2196,11 +2245,16 @@ fn retryableStatus(status: std.http.Status) bool {
     };
 }
 
-/// Logs and sleeps before the next attempt. False means attempts are spent and
-/// the caller should surface the error.
-fn waitBeforeRetry(io: Io, attempt: u32, what: []const u8) bool {
+/// Names the endpoint and the step that failed, then sleeps before the next
+/// attempt. False means attempts are spent and the caller should surface the
+/// error. A retried request says so: without this line a provider that drops
+/// three connections in a row and answers the fourth is a run that merely took
+/// longer, and nothing on the operator's screen explains the gap.
+fn waitBeforeRetry(io: Io, arena: std.mem.Allocator, url: []const u8, attempt: u32, what: []const u8, err: anyerror) bool {
     if (attempt >= max_attempts) return false;
-    std.debug.print("microagent: {s} failed, retrying (attempt {d}/{d})\n", .{ what, attempt + 1, max_attempts });
+    net.note(io, arena, "microagent: {s} {s} failed ({s}), retrying (attempt {d}/{d})\n", .{
+        what, url, @errorName(err), attempt + 1, max_attempts,
+    });
     waitFor(io, attempt) catch {};
     return true;
 }
@@ -2972,6 +3026,13 @@ test "tool output truncation keeps whole lines" {
     try std.testing.expectEqualStrings("solo\n", try firstLines(arena, "solo\n", 1));
 }
 
+/// The `[` and the system message a run starts from, in the bytes the agent
+/// appends. The tests that build a conversation by hand start here.
+fn conversationHeader(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), system: []const u8) !void {
+    try msgs.appendSlice(gpa, "[");
+    try appendMessage(gpa, msgs, "system", system);
+}
+
 /// The `[` and the first two messages a run starts from, in the bytes the
 /// agent appends. `appendToolResults` follows it with the tool results that
 /// push a conversation past the compaction limit.
@@ -3012,7 +3073,7 @@ test "compaction elides old tool output and keeps the recent turns" {
     try std.testing.expect(before > conversation_soft_limit);
 
     var floor: usize = 0;
-    try compactMessages(gpa, &msgs, scratch_state.allocator(), &floor);
+    try compactMessages(std.testing.io, gpa, &msgs, scratch_state.allocator(), &floor);
     // Something was elided, so the next pass waits for the ordinary threshold
     // rather than for the conversation to grow another soft limit.
     try std.testing.expectEqual(conversation_soft_limit, floor);
@@ -3107,21 +3168,21 @@ test "a conversation with nothing to elide is not re-parsed every turn" {
     try std.testing.expect(before > conversation_soft_limit);
 
     var floor: usize = 0;
-    try compactMessages(gpa, &msgs, scratch_state.allocator(), &floor);
+    try compactMessages(std.testing.io, gpa, &msgs, scratch_state.allocator(), &floor);
     try std.testing.expectEqual(before, msgs.items.len);
     try std.testing.expectEqual(before + conversation_soft_limit, floor);
 
     // Still over the soft limit, but below the floor: the turn is skipped
     // rather than paying the parse again.
     try growConversation(gpa, &msgs, "y" ** 8192);
-    try compactMessages(gpa, &msgs, scratch_state.allocator(), &floor);
+    try compactMessages(std.testing.io, gpa, &msgs, scratch_state.allocator(), &floor);
     try std.testing.expect(msgs.items.len > before);
     try std.testing.expectEqual(before + conversation_soft_limit, floor);
 
     // Past the floor, a result big enough to elide is picked up again.
     while (msgs.items.len <= floor) try growConversation(gpa, &msgs, "z" ** 8192);
     const grown = msgs.items.len;
-    try compactMessages(gpa, &msgs, scratch_state.allocator(), &floor);
+    try compactMessages(std.testing.io, gpa, &msgs, scratch_state.allocator(), &floor);
     try std.testing.expectEqual(conversation_soft_limit, floor);
     try std.testing.expect(msgs.items.len < grown);
 }
@@ -3162,7 +3223,7 @@ test "compaction leaves the cached prefix byte-identical" {
     try std.testing.expect(msgs.items.len > conversation_soft_limit);
 
     var floor: usize = 0;
-    try compactMessages(gpa, &msgs, scratch_state.allocator(), &floor);
+    try compactMessages(std.testing.io, gpa, &msgs, scratch_state.allocator(), &floor);
 
     try std.testing.expect(msgs.items.len > prefix.len);
     try std.testing.expectEqualStrings(prefix, msgs.items[0..prefix.len]);
@@ -3720,6 +3781,58 @@ test "a repeated session log writes beside the first and never over it" {
     const survived = try tmp.dir.readFileAlloc(io, "1759000000000000000.jsonl", alloc, .limited(64));
     defer alloc.free(survived);
     try std.testing.expectEqualStrings("first\n", survived);
+}
+
+// A log that cannot be written to has stopped recording the run. Kept, it is
+// one silent gap per turn in a store a monitor is reading; dropped, the run
+// says once that the rest of it is unrecorded and stops writing to it.
+test "a session log that cannot be written is dropped, not written to again" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Opened for reading, so every write to it is refused the way a full disk
+    // or a removed directory refuses one.
+    try tmp.dir.writeFile(io, .{ .sub_path = "read-only.jsonl", .data = "" });
+    const file = try tmp.dir.openFile(io, "read-only.jsonl", .{ .mode = .read_only });
+
+    var session: ?Session = .{ .file = file, .cwd = ".", .model = "test/model", .dir = "/sessions" };
+    var result: ChatResult = .{};
+    result.prompt_tokens = 7;
+    writeSessionRecord(io, arena, &session, 1, &result);
+    try std.testing.expect(session == null);
+
+    // A second record has nowhere to go: the log was dropped, not retried.
+    writeSessionRecord(io, arena, &session, 2, &result);
+    const empty = try tmp.dir.readFileAlloc(io, "read-only.jsonl", alloc, .limited(64));
+    defer alloc.free(empty);
+    try std.testing.expectEqualStrings("", empty);
+}
+
+test "a conversation that cannot be compacted is sent as it stands" {
+    const gpa = std.testing.allocator;
+    var scratch_state = std.heap.ArenaAllocator.init(gpa);
+    defer scratch_state.deinit();
+
+    var msgs: std.ArrayList(u8) = .empty;
+    defer msgs.deinit(gpa);
+    try conversationHeader(gpa, &msgs, "you are a coding agent");
+    try appendToolResults(gpa, &msgs, 120, "x" ** 8192);
+    try std.testing.expect(msgs.items.len > conversation_soft_limit);
+    // What a truncated write would leave: a buffer past the limit that is not
+    // the message array it is supposed to be.
+    try msgs.appendSlice(gpa, "{{\"role\":\"tool\"");
+
+    const before = msgs.items.len;
+    var floor: usize = 0;
+    try compactMessages(std.testing.io, gpa, &msgs, scratch_state.allocator(), &floor);
+    try std.testing.expectEqual(before, msgs.items.len);
 }
 
 test "a tool call index past the cap is dropped, not allocated" {

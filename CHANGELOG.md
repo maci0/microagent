@@ -65,6 +65,25 @@ release, and `microagent update` moves you to it.
 - `microagent update --repo` with a value that is not `owner/name` now prints the usage text with
   its reason, as every other update usage error does. It exited 2 with one line and broke the
   promise the update help makes.
+- A session log that cannot be written to is named and dropped, instead of failing silently once
+  per turn. Opening the log was already a null the run could afford to lose; writing to it was not:
+  a full disk or a session directory removed under a running review left the monitor reading a run
+  that had stopped, with nothing on the operator's screen to say so. The run says once that the rest
+  of it is unrecorded and stops writing.
+- `microagent update` names the HTTP status when an asset or sidecar download is refused. The
+  release lookup has always reported the code and its hint, so a rate-limited download read as
+  `could not download microagent-... (HttpStatus)`; the asset and the sidecar now report what the
+  lookup reports. A failed replacement names the binary path it would have replaced.
+- Every retried provider request says which endpoint and which step failed, and a retryable status
+  says it is being retried. The lines went out through `std.debug.print` with no URL and no status,
+  so a provider that dropped three connections and answered the fourth looked like a run that merely
+  took longer.
+- The exit-1 line names the base url the run failed against, with any credentials in it redacted.
+  A DNS failure, a refused connection and a truncated stream all reached it as a bare error name.
+- A conversation that cannot be read back for compaction says so. The buffer is one the program
+  wrote, and the silent skip meant a run whose prompt kept growing turn after turn with no sign of
+  why.
+- A tool result reading `error: OutOfMemory` names the tool that ran out.
 - `elapsed_ms` in a session record is the model's time again. It was measured after the turn's tool
   calls had run, so it reported a gap that included them, and a monitor dividing a response's tokens
   by it got a rate for a generation that was never continuous. It is now taken when the completion
