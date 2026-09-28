@@ -279,7 +279,10 @@ say, and the run says so on stderr rather than reporting it as a finished answer
 is a stream that carried no reason at all. The store keeps the 200 most recent runs and prunes the
 older ones, so a machine that runs this in a loop does not accumulate a log per review forever.
 `elapsed_ms` is the model's time, so a reader computes
-tokens per second the model actually generated instead of over a gap that includes tool calls.
+tokens per second the model actually generated instead of over a gap that includes tool calls. It is
+measured on a clock that stops while the machine is suspended, so a laptop closed mid-response does
+not report the sleep as generation time. (`--budget` deliberately does count the suspend: it is a
+ceiling on wall time, not on work done.)
 [toktop](https://github.com/maci0/toktop) reads this store by default; the counters and the
 directory are the ordinary OpenAI keys and `cwd`, so any reader of agent transcripts works. Nothing
 in the log is prompt or output text.

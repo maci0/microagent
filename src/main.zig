@@ -1325,6 +1325,18 @@ fn resolveStyle(
 /// `.awake` because a child that was not running spent none of its own.
 const budget_clock: Io.Clock = .boot;
 
+/// The clock a response's `elapsed_ms` is measured on: the one that stops for a
+/// suspend. It is `.awake` for the same reason a tool's own timeout is, and it
+/// is not `budget_clock` even though both are monotonic, because the two
+/// measure different things. The budget is a promise about wall time, so the
+/// time the machine spent off counts against it. The model's time is the time
+/// it spent generating, and a machine that was asleep was not generating: the
+/// record's number is what a monitor divides a turn's tokens by, so counting a
+/// suspend in it reports a generation at four tokens an hour. Both the stamp
+/// and the reading are on this one clock, so the difference is a duration and
+/// not the gap between two unrelated origins.
+const model_clock: Io.Clock = .awake;
+
 /// The run's time budget as an instant on the clock the loop already reads.
 /// Every part of a turn asks this, not just the top of the loop: a provider
 /// that is slow rather than broken hands the loop one long turn, and a budget
@@ -1769,7 +1781,9 @@ fn runTurn(
     progress: *Progress,
 ) !TurnEnd {
     const body = try buildBody(arena, opts, msgs.items);
-    const asked = Io.Timestamp.now(io, budget_clock).nanoseconds;
+    // Stamped on `model_clock`, which `elapsedMs` below is read on: the two
+    // ends of one duration on one clock, not the difference between origins.
+    const asked = Io.Timestamp.now(io, model_clock).nanoseconds;
     // A turn the budget cut off is not a turn: half a tool call's arguments is
     // not a tool call, so nothing of it is appended and the run ends here with
     // the reason already on stderr.
@@ -1780,8 +1794,10 @@ fn runTurn(
     defer result.deinit(gpa);
     // The model time is taken here, before the tool calls `finishTurn` runs:
     // the record says how long the model generated, and a gap that spans the
-    // tools would report a rate for a generation that was never continuous.
-    const model_ms = session_mod.elapsedMs(io, budget_clock, asked);
+    // tools would report a rate for a generation that was never continuous. It
+    // is on `model_clock` and not the budget's, because a suspended machine
+    // spent no time generating: see that constant.
+    const model_ms = session_mod.elapsedMs(io, model_clock, asked);
     // The record is written before the tools run, not after them. A turn that
     // builds or tests holds the log for as long as the tools do, and a monitor
     // following a run is told it is still going while the answer to the last
@@ -6002,6 +6018,34 @@ test "the budget is measured on a clock that keeps counting through a suspend" {
     const budget = Budget.of(Io.Timestamp.now(io, budget_clock).nanoseconds, 60);
     try std.testing.expect(!budget.expired(io));
     try std.testing.expect(budget.remainingMs(io).? <= 60_000);
+}
+
+// The budget and the record want opposite answers from a suspend, so they are
+// read on different clocks and the two are not interchangeable. The budget
+// counts the time the machine spent off; the model's time does not, because a
+// machine that was asleep was not generating, and `elapsed_ms` is what a
+// monitor divides a turn's tokens by. Measured on the budget's clock, a lid
+// closed for eight hours mid-response is written as `elapsed_ms: 28800000`,
+// which reports a model that generated four tokens an hour.
+test "a response's model time is measured on the clock that stops for a suspend" {
+    const io = std.testing.io;
+    // The two clocks are distinct, which is the whole point: `.boot` counts
+    // what `.awake` does not, so picking the wrong one is visible here.
+    try std.testing.expect(model_clock != budget_clock);
+    try std.testing.expectEqual(Io.Clock.awake, model_clock);
+
+    // The shape `runTurn` uses, and it is a duration rather than the gap
+    // between two origins: both readings are on `model_clock`, and a stamp
+    // taken there answers a positive span bounded by the wall time the test
+    // itself spent.
+    const asked = Io.Timestamp.now(io, model_clock).nanoseconds;
+    io.sleep(.{ .nanoseconds = 20 * std.time.ns_per_ms }, .awake) catch |err| {
+        std.debug.print("\nno sleep on this host: {t}\n", .{err});
+        return err;
+    };
+    const took = session_mod.elapsedMs(io, model_clock, asked);
+    try std.testing.expect(took >= 20);
+    try std.testing.expect(took < 60_000);
 }
 
 // The budget is a deadline, not a turn counter. Checked only at the top of the

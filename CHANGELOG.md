@@ -151,6 +151,13 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- A session record's `elapsed_ms` no longer counts a suspend as model time. The
+  stamp and the reading were both taken on the clock `--budget` is measured on,
+  which keeps counting while the machine is off, so a laptop closed for eight
+  hours mid-response wrote `elapsed_ms: 28800000` and a monitor dividing a
+  turn's tokens by it reported a model generating four tokens an hour. The
+  budget keeps that clock, because it is a ceiling on wall time; the record does
+  not, because a machine that was asleep was not generating.
 - `bench/run.sh` counts a binary file a run added as a file rather than as zero
   lines. `git diff --numstat` spells a binary file's two columns as `-`, and the
   sum read each as a number worth zero, so a task whose answer is a new image or
