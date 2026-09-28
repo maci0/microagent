@@ -849,7 +849,7 @@ fn run(
     const started = Io.Timestamp.now(io, .awake).nanoseconds;
     const budget = Budget.of(started, opts.budget_s);
     var session: ?Session = openSession(io, arena, opts);
-    defer closeSession(io, session);
+    defer closeSession(io, &session);
     // What one turn allocates from the wire down -- the request body (a full
     // copy of the conversation), the streamed content, the tool results --
     // is dead once that turn's messages are appended. The run arena is never
@@ -1049,8 +1049,15 @@ fn pruneSessions(io: Io, arena: std.mem.Allocator, session_dir: []const u8) void
     }
 }
 
-fn closeSession(io: Io, session: ?Session) void {
-    if (session) |s| s.file.close(io);
+/// Closes the log and clears the slot, so the handle is closed exactly once.
+/// `writeSessionRecord` drops a log it cannot write to and closes it there, so
+/// a caller that closed a *copy* of the session would close a handle that is
+/// already closed: in a debug build that is a panic, and in a release one it
+/// closes whatever file descriptor the number has been reused for.
+fn closeSession(io: Io, session: *?Session) void {
+    const s = session.* orelse return;
+    session.* = null;
+    s.file.close(io);
 }
 
 /// How long the model spent on one response. It travels in the record because
@@ -3267,6 +3274,48 @@ test "a session log that cannot be written is dropped, not written to again" {
     const empty = try tmp.dir.readFileAlloc(io, "read-only.jsonl", alloc, .limited(64));
     defer alloc.free(empty);
     try std.testing.expectEqualStrings("", empty);
+}
+
+/// The shape `run` has around its log: a mutable session for the turns in
+/// between, and a close deferred until the run ends. A turn may drop the log
+/// and close it, so the deferred close has to read the slot rather than a copy
+/// taken when the defer was written.
+fn sessionScope(io: Io, arena: std.mem.Allocator, session: ?Session) void {
+    var live = session;
+    defer closeSession(io, &live);
+    var result: ChatResult = .{ .prompt_tokens = 1 };
+    writeSessionRecord(io, arena, &live, 1, &result);
+}
+
+// A deferred close that captured the session by value fires after
+// `writeSessionRecord` has already closed the handle, so the descriptor number
+// is closed twice. In a debug build that trips the runtime's close-after-close
+// check, and in a release one it closes whatever took the number next. Opening
+// a file afterwards is what makes the second close visible: the kernel hands
+// back the number the log held, and the stray close takes it away.
+test "a run that drops its session log closes the handle once" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "read-only.jsonl", .data = "" });
+    const file = try tmp.dir.openFile(io, "read-only.jsonl", .{ .mode = .read_only });
+    const session: ?Session = .{ .file = file, .cwd = ".", .model = "test/model", .dir = "/sessions" };
+
+    sessionScope(io, arena, session);
+
+    const after = try tmp.dir.createFile(io, "after.jsonl", .{ .truncate = true });
+    defer after.close(io);
+    try after.writeStreamingAll(io, "kept");
+    const kept = try tmp.dir.readFileAlloc(io, "after.jsonl", alloc, .limited(64));
+    defer alloc.free(kept);
+    try std.testing.expectEqualStrings("kept", kept);
 }
 
 test "a conversation that cannot be compacted is sent as it stands" {
