@@ -1,0 +1,1 @@
+mean([]) crashes instead of raising ValueError. Fix calc.py so test_calc.py passes. Do not change the test.

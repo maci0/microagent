@@ -1,0 +1,6 @@
+{"agent":"microagent","task":"cli-flag","wall_s":30.5,"tokens":8221,"lines":"+4/-1","result":"pass"}
+{"agent":"microagent","task":"empty-mean","wall_s":10.6,"tokens":4533,"lines":"+2/-0","result":"pass"}
+{"agent":"microagent","task":"parse-bug","wall_s":10.9,"tokens":7219,"lines":"+2/-2","result":"pass"}
+{"agent":"kimi","task":"cli-flag","wall_s":11.5,"tokens":null,"lines":"+7/-1","result":"pass"}
+{"agent":"kimi","task":"empty-mean","wall_s":8.5,"tokens":null,"lines":"+2/-0","result":"pass"}
+{"agent":"kimi","task":"parse-bug","wall_s":12.0,"tokens":null,"lines":"+2/-2","result":"pass"}

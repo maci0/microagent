@@ -1,0 +1,1 @@
+wc.py ignores its command line. Add a --unique flag that counts distinct words instead of all words, so test_wc.py passes. Do not change the test.

@@ -1,0 +1,1 @@
+parse_duration returns wrong values for hour and second units. Fix duration.py so test_duration.py passes. Do not change the test.
