@@ -207,7 +207,7 @@ pub fn main(init: std.process.Init) !void {
     if (envValue(init.environ_map, "MICROAGENT_MAX_TOKENS")) |v| opts.max_tokens = tokenCeiling(io, "MICROAGENT_MAX_TOKENS", v);
     opts.ca_bundle = net.caBundlePath(init.environ_map);
     if (envValue(init.environ_map, "MICROAGENT_BUDGET_SECONDS")) |v|
-        opts.budget_s = std.fmt.parseInt(u64, std.mem.trim(u8, v, " \t\r\n"), 10) catch
+        opts.budget_s = budgetSeconds(v) orelse
             return configError(io, "MICROAGENT_BUDGET_SECONDS must be a number of seconds, got '{s}'", .{v});
     opts.session_dir = sessionDir(init);
 
@@ -461,6 +461,14 @@ fn displayUrl(arena: std.mem.Allocator, url: []const u8) []const u8 {
     return std.fmt.allocPrint(arena, "{s}[redacted]@{s}", .{ url[0 .. scheme_end + "://".len], rest[at + 1 ..] }) catch url;
 }
 
+/// The wall-clock budget in seconds, from a flag or a variable, trimmed the way
+/// every other numeric option here is: a value quoted with a space around it is
+/// a number a shell left in, not a bad one. Null leaves the two callers free to
+/// name where the value came from.
+fn budgetSeconds(value: []const u8) ?u64 {
+    return std.fmt.parseInt(u64, std.mem.trim(u8, value, " \t\r\n"), 10) catch null;
+}
+
 fn clip(s: []const u8) []const u8 {
     return s[0..@min(s.len, 80)];
 }
@@ -531,7 +539,7 @@ fn parseArgs(io: Io, buf: []u8, argv: []const []const u8, opts: *Options) ?[]con
         } else if (std.mem.eql(u8, name, "--budget")) {
             const v = joined orelse flagValue(argv, i) orelse return "--budget needs a number of seconds";
             if (v.len == 0) return "--budget needs a number of seconds";
-            opts.budget_s = std.fmt.parseInt(u64, std.mem.trim(u8, v, " \t\r\n"), 10) catch
+            opts.budget_s = budgetSeconds(v) orelse
                 return std.fmt.bufPrint(buf, "--budget must be a number of seconds, got '{s}'", .{v}) catch "bad --budget";
             if (joined == null) i += 1;
         } else if (std.mem.eql(u8, name, "--max-turns")) {
@@ -1327,11 +1335,21 @@ fn runSearchTool(io: Io, arena: std.mem.Allocator, argv: []const []const u8, wha
 /// Read-only git, with the subcommands fixed here rather than assembled by the
 /// model. Deterministic, no shell quoting, and the output is capped: a raw
 /// `git log` in a big repository is thousands of lines of context nobody reads.
+const git_default_limit: usize = 400;
+
+/// How many lines of git output the model reads. `limit` is a ceiling, so a
+/// limit of zero is one line rather than the whole output, and a limit a 32-bit
+/// `usize` cannot hold is every line rather than a trap.
+fn gitLineLimit(args: std.json.ObjectMap) usize {
+    const v = args.get("limit") orelse return git_default_limit;
+    return @max(1, numCount(v));
+}
+
 fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     const cmd = str(args.get("cmd")) orelse return std.fmt.allocPrint(arena, "error: missing cmd", .{});
     const path = str(args.get("path"));
     const rev = str(args.get("rev"));
-    const limit: usize = if (args.get("limit")) |v| @intCast(num(v)) else 400;
+    const limit = gitLineLimit(args);
     // A rev such as `--output=FILE` would turn a read into a write.
     if (rev) |r| if (std.mem.startsWith(u8, r, "-"))
         return std.fmt.allocPrint(arena, "error: rev must not start with '-'", .{});
@@ -1647,8 +1665,8 @@ fn toolRead(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
         return std.fmt.allocPrint(arena, "error: cannot read {s}: {s}", .{ path, @errorName(err) });
     if (!args.contains("offset") and !args.contains("limit")) return raw;
 
-    const offset: usize = @intCast(@max(1, num(args.get("offset"))));
-    const limit: usize = if (args.get("limit")) |v| @intCast(num(v)) else std.math.maxInt(usize);
+    const offset: usize = @max(1, numCount(args.get("offset")));
+    const limit: usize = if (args.get("limit")) |v| numCount(v) else std.math.maxInt(usize);
     var buf: std.ArrayList(u8) = .empty;
     var lines = std.mem.splitScalar(u8, raw, '\n');
     var n: usize = 0;
@@ -1838,6 +1856,13 @@ fn num(v: ?std.json.Value) u64 {
     };
 }
 
+/// A count the model sent, as a `usize`. `num` saturates at the `u64` ceiling,
+/// which a 32-bit build cannot hold, so the cast clamps instead of trapping:
+/// a number too large to be a line count is a number that means "all of them".
+fn numCount(v: ?std.json.Value) usize {
+    return std.math.cast(usize, num(v)) orelse std.math.maxInt(usize);
+}
+
 const max_attempts: u32 = 3;
 const retry_backoff_base_ms: u64 = 1000;
 const max_backoff_ms: u64 = 60_000;
@@ -1903,6 +1928,11 @@ const Captured = struct {
 /// big file reached the model as a bare error with no output at all. Here the
 /// bytes past the cap are drained and dropped instead: the child still runs to
 /// its own end, so the exit status and the timeout keep meaning what they did.
+///
+/// The process group is this one's, as in `runToolProcess`. A `bash` call is the
+/// one the model runs a build through, so it is the one most likely to leave a
+/// compiler or a test server behind when the timeout fires: killing only the
+/// shell that was spawned leaves the tree it started running.
 fn runCapped(
     io: Io,
     arena: std.mem.Allocator,
@@ -1920,6 +1950,8 @@ fn runCapped(
         .stdout = .pipe,
         .stderr = .pipe,
     });
+    // Every exit path signals the whole group and then reaps the direct child,
+    // so a timeout leaves neither an orphan nor a zombie.
     const pgid: ?std.posix.pid_t = if (builtin.os.tag == .windows) null else @intCast(child.id.?);
     defer {
         if (pgid) |group| signalGroup(group);
@@ -2092,6 +2124,13 @@ test "the command line parses in either flag form and in any order" {
     try std.testing.expectEqualStrings("some/model", short.model);
     try std.testing.expectEqualStrings("http://localhost:1234/v1", short.base_url);
     try std.testing.expectEqualStrings("fix it", short.prompt);
+
+    // A value quoted with a space around it is a number the shell left in.
+    var padded: Options = .{};
+    const padded_argv = [_][]const u8{ "--budget", " 90 ", "--max-turns", " 7 " };
+    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(std.testing.io, &buf, &padded_argv, &padded));
+    try std.testing.expectEqual(@as(?u64, 90), padded.budget_s);
+    try std.testing.expectEqual(@as(usize, 7), padded.max_turns);
 }
 
 test "a wrong command line names the flag and the value it was given" {
@@ -2835,6 +2874,34 @@ test "git tool refuses a rev that git would read as an option" {
     try args.put(arena, "rev", .{ .string = "--output=pwned" });
     const out = try toolGit(std.testing.io, arena, args);
     try std.testing.expectEqualStrings("error: rev must not start with '-'", out);
+}
+
+test "a git line limit is a ceiling, so zero is one line and a huge one is no trap" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    try std.testing.expectEqual(git_default_limit, gitLineLimit(.empty));
+    var one: std.json.ObjectMap = .empty;
+    try one.put(arena, "limit", .{ .integer = 12 });
+    try std.testing.expectEqual(@as(usize, 12), gitLineLimit(one));
+    var zero: std.json.ObjectMap = .empty;
+    try zero.put(arena, "limit", .{ .integer = 0 });
+    try std.testing.expectEqual(@as(usize, 1), gitLineLimit(zero));
+    var negative: std.json.ObjectMap = .empty;
+    try negative.put(arena, "limit", .{ .integer = -5 });
+    try std.testing.expectEqual(@as(usize, 1), gitLineLimit(negative));
+    // A count a 32-bit `usize` cannot hold is every line, not a trap.
+    var huge: std.json.ObjectMap = .empty;
+    try huge.put(arena, "limit", .{ .number_string = "18446744073709551615" });
+    try std.testing.expectEqual(@as(usize, std.math.maxInt(usize)), gitLineLimit(huge));
+    // A count sent as a float saturates the same way rather than truncating.
+    try std.testing.expectEqual(@as(usize, std.math.maxInt(usize)), numCount(.{ .float = 1e30 }));
+
+    var lines: std.json.ObjectMap = .empty;
+    try lines.put(arena, "limit", .{ .integer = 1 });
+    const text = try firstLines(arena, "one\ntwo\nthree\n", gitLineLimit(lines));
+    try std.testing.expectEqualStrings("one\n... [output truncated at 1 lines]", text);
 }
 
 test "git tool refuses a missing or unknown subcommand" {

@@ -115,6 +115,15 @@ release, and `microagent update` moves you to it.
 - `microagent update` compares the running version and the published tag with one leading `v` ignored on
   both sides. It ignored the prefix on the tag only, so a `v`-prefixed running version never matched a
   `v`-prefixed tag.
+- A `bash` call that timed out or hit its capture cap left its process tree running. Only the shell
+  that was spawned was signalled, so the build, test server or compiler it started went on holding the
+  next turn's resources. `bash` now runs in its own process group and the whole group is signalled, as
+  `search`, `ast` and `git` already did.
+- `--budget` and `MICROAGENT_BUDGET_SECONDS` trim the value, as `--max-turns`, `--max-tokens` and the
+  reasoning level already did. A number quoted with a space around it was reported as not a number.
+- A `git` `limit` of 0 returned the whole output rather than no lines: the loop that stops at the limit
+  never reaches a limit of zero, so the cap fell open. It is one line now, and a count a 32-bit build
+  cannot hold (`read`'s `offset` and `limit` too) is clamped rather than trapping the cast.
 
 ### Security
 

@@ -396,6 +396,11 @@ fn fail(io: std.Io, comptime fmt: []const u8, args: anytype) u8 {
 /// across the three fetches a run makes so the CA store is loaded once. On an
 /// HTTP error `status_out` carries the code, which is the difference between
 /// "no release yet" and "rate limit".
+///
+/// The body is copied into `arena` and the buffer it arrived in is released on
+/// the way out. The arena copy is the one that has to outlive this call, and an
+/// arena frees its most recent allocation, so the buffer cannot be the arena's
+/// own and then released.
 fn fetchBody(
     client: *std.http.Client,
     gpa: std.mem.Allocator,
