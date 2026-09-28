@@ -39,10 +39,6 @@ pub const max_secret_bytes: usize = 4096;
 /// that reports an exit status.
 const truncation_note = "\n[output truncated at the tool's cap]";
 const bash_exit_note = "\n(exit: )";
-/// An exit number is a wait status, so it is three digits at most. Sized here
-/// rather than guessed, because it is the one part of the exit line whose
-/// width is not fixed by the constant around it.
-const exit_status_max_digits = 3;
 
 /// How long a read-only tool subprocess may run: `search`, `ast` and `git`.
 /// `bash` has its own default and ceiling below, because it is the one tool
@@ -257,42 +253,144 @@ fn runSearchTool(
 /// output. A half-read match list reads as the whole one otherwise, and the
 /// model narrows its next search against what it did not see.
 fn withCaptureNote(arena: std.mem.Allocator, text: []const u8, got: Partial) ![]const u8 {
-    if (!got.atCaptureLimit()) return text;
-    return std.fmt.allocPrint(arena, "{s}{s}", .{ text, truncation_note });
+    return captureResult(arena, .{ .stdout = text, .at_limit = got.atCaptureLimit() });
 }
 
-/// What a tool says when its subprocess failed: everything the child wrote
-/// before it did, then the failure under it.
+/// What a subprocess's two streams and the notes beside them assemble into.
+/// The parts are the caller's to know; the order, the cut and the separators are
+/// this one's.
+const CaptureParts = struct {
+    stdout: []const u8 = "",
+    stderr: []const u8 = "",
+    /// A stream was cut at the capture limit, so what is here is the beginning
+    /// of a longer output.
+    at_limit: bool = false,
+    /// The term to report, or null for a call that never learned one.
+    term: ?std.process.Child.Term = null,
+    /// The line naming why the call failed, already a whole line.
+    reason: ?[]const u8 = null,
+};
+
+/// One subprocess's result as the model reads it: the bytes it wrote, the note
+/// saying the cap cut them, the exit status when the call failed, and the
+/// reason when the call itself did.
 ///
 /// The output is the point. A `git log` that timed out after printing the last
 /// hundred commits, or a `bash` build that printed every error it had found and
 /// then hung, reached the model as the error name alone, so the next turn read
-/// that the command had produced nothing and re-ran it from scratch. The same
-/// three tools, which disagree about this, all say it here now.
+/// that the command had produced nothing and re-ran it from scratch. The three
+/// tools that report a subprocess, which disagree about this, all say it here.
 ///
-/// `reason` is already the whole line, so a caller that has a name and a number
-/// to put in it formats both before the call.
+/// The notes have to survive `toolResult`, which cuts whatever a tool returned
+/// to `max_tool_output` while each stream was captured at four times that, and a
+/// note written after the output is the first thing the cut takes. A `bash`
+/// call that printed a 100 KB build log and exited 1 reached the model as
+/// 24 KB of log under the generic "truncated at the tool's cap" marker, with
+/// `(exit: 1)` gone, and the same call that timed out lost the timeout with it.
+/// What the model read about a failing command then depended on how much the
+/// command had printed, which is the guessing the status and the reason exist
+/// to stop.
+///
+/// So the output is cut first, and on a codepoint boundary, and the notes are
+/// written into what is left. Every tool that reports a subprocess goes through
+/// this one, which is what keeps the invariant: a tool's result never exceeds
+/// `max_tool_output`, no note is ever the thing the cap takes, and `toolResult`
+/// finds nothing left to cut.
+fn captureResult(arena: std.mem.Allocator, parts: CaptureParts) ![]const u8 {
+    // Only a term the child chose is worth a line: an exit of 0 is what a
+    // clean call already says by not reporting one.
+    const report_term = if (parts.term) |t| t != .exited or t.exited != 0 else false;
+
+    // The notes are formatted before the cut, because the exit status is a
+    // number whose width nothing here knows until it is written, and because
+    // the cut has to know how much room they take.
+    var exit_line: std.ArrayList(u8) = .empty;
+    if (report_term) {
+        try exit_line.appendSlice(arena, bash_exit_note[1 .. bash_exit_note.len - 1]);
+        try appendExitStatus(arena, &exit_line, parts.term.?);
+        try exit_line.append(arena, ')');
+    }
+
+    const sep: usize = if (parts.stdout.len != 0 and parts.stderr.len != 0) 1 else 0;
+    const body = parts.stdout.len +| parts.stderr.len +| sep;
+
+    // Every note is a line of its own under whatever output is left, so it
+    // costs the newline that separates it as well as its own bytes. A call that
+    // printed nothing says the status in place of the output rather than under
+    // it, so a term beside no output costs the output no room.
+    const exit_cost = if (body != 0 and report_term) noteCost.of(exit_line.items) else 0;
+    const reason_cost = if (parts.reason) |r| noteCost.of(r) else 0;
+    // The truncation note is written when the capture limit said so or when the
+    // output does not fit beside the other notes, and it is a fixed length
+    // either way, so its room is held back before the cut rather than measured
+    // after it.
+    const cut_cost = noteCost.of(truncation_note[1..]);
+    const will_cut = parts.at_limit or body > max_tool_output -| exit_cost -| reason_cost -| cut_cost;
+    const room = max_tool_output -| exit_cost -| reason_cost -| (if (will_cut) cut_cost else 0);
+
+    var stdout = parts.stdout;
+    var stderr = parts.stderr;
+    if (body > room) {
+        // The two streams are cut as the one run of bytes they were captured
+        // as, so a short stdout still leaves its stderr room and a stdout that
+        // fills the budget still drops the stream behind it, which is what
+        // cutting the concatenation whole did.
+        const keep = room -| sep;
+        stdout = chat.clamp(stdout, keep);
+        stderr = chat.clamp(stderr, keep -| stdout.len);
+    }
+
+    var buf: std.ArrayList(u8) = .empty;
+    try buf.ensureTotalCapacity(arena, stdout.len + sep + stderr.len + exit_cost + reason_cost + cut_cost);
+    try buf.appendSlice(arena, stdout);
+    if (sep != 0) try buf.append(arena, '\n');
+    try buf.appendSlice(arena, stderr);
+    if (will_cut) try appendLine(arena, &buf, truncation_note[1..]);
+    if (body != 0) try appendLine(arena, &buf, exit_line.items);
+    if (parts.reason) |r| try appendLine(arena, &buf, r);
+    // A call that printed nothing has the status as the whole of what it has
+    // to say, and a status on its own reads as a fragment of one. A failing one
+    // is already a line of its own, so this is the exit that has nothing else.
+    if (buf.items.len == 0 and parts.term != null) {
+        try buf.appendSlice(arena, "(no output, exit ");
+        try appendExitStatus(arena, &buf, parts.term.?);
+        try buf.append(arena, ')');
+    }
+    return buf.items;
+}
+
+/// What one note costs the result it is written into: the line, and the newline
+/// that separates it from what is above it.
+const noteCost = struct {
+    fn of(text: []const u8) usize {
+        return if (text.len == 0) 0 else text.len + 1;
+    }
+};
+
+/// One line under whatever is already written, and nothing at all when there is
+/// nothing to put it under. A note under an empty result is a line of its own
+/// rather than a leading blank one.
+fn appendLine(arena: std.mem.Allocator, buf: *std.ArrayList(u8), text: []const u8) !void {
+    if (text.len == 0) return;
+    if (buf.items.len != 0) try buf.append(arena, '\n');
+    try buf.appendSlice(arena, text);
+}
+
+/// What a tool says when its subprocess failed: everything the child wrote
+/// before it did, then the failure under it. `reason` is already the whole
+/// line, so a caller that has a name and a number to put in it formats both
+/// before the call.
 fn failedOutput(
     arena: std.mem.Allocator,
     got: Partial,
     reason: []const u8,
 ) ![]const u8 {
-    if (got.stdout.len == 0 and got.stderr.len == 0) return reason;
-    var buf: std.ArrayList(u8) = .empty;
-    try buf.ensureTotalCapacity(arena, got.stdout.len + got.stderr.len +
-        truncation_note.len + reason.len + 2);
-    if (got.stdout.len > 0) try buf.appendSlice(arena, got.stdout);
-    if (got.stderr.len > 0) {
-        if (buf.items.len > 0) try buf.appendSlice(arena, "\n");
-        try buf.appendSlice(arena, got.stderr);
-    }
-    if (got.atCaptureLimit()) {
-        if (buf.items.len > 0) try buf.appendSlice(arena, "\n");
-        try buf.appendSlice(arena, truncation_note[1..]);
-    }
-    try buf.appendSlice(arena, "\n");
-    try buf.appendSlice(arena, reason);
-    return buf.items;
+    return captureResult(arena, .{
+        .stdout = got.stdout,
+        .stderr = got.stderr,
+        .at_limit = got.atCaptureLimit(),
+        .reason = reason,
+    });
 }
 
 /// Lines of git output a call keeps when the model asks for no limit: a raw
@@ -707,38 +805,12 @@ fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_
     const clean = !atCaptureLimit(res) and res.term == .exited and res.term.exited == 0;
     if (clean and res.stderr.len == 0 and res.stdout.len > 0) return res.stdout;
     if (clean and res.stdout.len == 0 and res.stderr.len > 0) return res.stderr;
-    // The captured size is known before the first append, so the buffer is
-    // sized once rather than doubling its way up to `capture_limit` on each
-    // stream, copying everything written so far at every step. The two
-    // trailing notes are the only other bytes written to it; they are spelled
-    // as constants so the reservation and the writes cannot drift apart.
-    var buf: std.ArrayList(u8) = .empty;
-    try buf.ensureTotalCapacity(arena, res.stdout.len + res.stderr.len +
-        truncation_note.len + bash_exit_note.len + exit_status_max_digits);
-    if (res.stdout.len > 0) try buf.appendSlice(arena, res.stdout);
-    if (res.stderr.len > 0) {
-        if (buf.items.len > 0) try buf.appendSlice(arena, "\n");
-        try buf.appendSlice(arena, res.stderr);
-    }
-    // Output the model acts on is cut at the cap, so say so rather than letting
-    // a half-read build log or diff read as the whole one.
-    if (res.partial().atCaptureLimit()) {
-        if (buf.items.len > 0) try buf.appendSlice(arena, "\n");
-        try buf.appendSlice(arena, truncation_note[1..]);
-    }
-    if (buf.items.len == 0) {
-        var line: std.ArrayList(u8) = .empty;
-        try line.appendSlice(arena, "(no output, exit ");
-        try appendExitStatus(arena, &line, res.term);
-        try line.appendSlice(arena, ")");
-        return line.items;
-    }
-    if (res.term != .exited or res.term.exited != 0) {
-        try buf.appendSlice(arena, bash_exit_note[0 .. bash_exit_note.len - 1]);
-        try appendExitStatus(arena, &buf, res.term);
-        try buf.appendSlice(arena, ")");
-    }
-    return buf.items;
+    return captureResult(arena, .{
+        .stdout = res.stdout,
+        .stderr = res.stderr,
+        .at_limit = res.partial().atCaptureLimit(),
+        .term = res.term,
+    });
 }
 
 /// The tag and, for a normal exit, the number: the tag alone says `exited`
@@ -3917,6 +3989,60 @@ test "a bash result is the capture itself when nothing is said after it" {
         "out\n\nerr\n",
         try dispatch(arena, "bash", "{\"command\":\"printf 'out\\\\n'; printf 'err\\\\n' 1>&2\"}"),
     );
+}
+
+// Each stream is captured at four times the cap a tool result is cut at, so a
+// command that printed more than that had its trailing notes written past the
+// cut: the exit status and the failure reason were the first bytes the cap
+// took, and the model read a long build log that said nothing about the failure
+// the log was the evidence for. The notes are now written into what the output
+// leaves, which is what these pin: the note is there, the result is within the
+// cap, and the cut the model finally sees is the one that says bytes were
+// dropped rather than a note about the command that produced them.
+test "a bash result over the cap still says how the command ended" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const chatty = try std.fmt.allocPrint(
+        arena,
+        "{{\"command\":\"head -c {} /dev/zero | tr '\\\\0' 'x'; exit 3\"}}",
+        .{max_tool_output * 4},
+    );
+    const failed = try dispatch(arena, "bash", chatty);
+    try std.testing.expect(failed.len <= max_tool_output);
+    try std.testing.expect(std.mem.indexOf(u8, failed, "(exit: exited 3)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, failed, "[output truncated at the tool's cap]") != null);
+    // Nothing is left for `toolResult` to cut, so what the model reads is
+    // exactly what the tool returned, notes and marker included.
+    try std.testing.expectEqualStrings(failed, try toolResult(arena, failed));
+
+    // The same for a call the deadline took: the timeout is the reason the log
+    // matters, so a command that printed a screen of it before hanging has to
+    // say so.
+    const hung = try std.fmt.allocPrint(
+        arena,
+        "{{\"command\":\"head -c {} /dev/zero | tr '\\\\0' 'x'; sleep 5\",\"timeout_ms\":600}}",
+        .{max_tool_output * 4},
+    );
+    const timed_out = try dispatch(arena, "bash", hung);
+    try std.testing.expect(timed_out.len <= max_tool_output);
+    try std.testing.expect(std.mem.indexOf(u8, timed_out, "command timed out after 600ms") != null);
+    try std.testing.expectEqualStrings(timed_out, try toolResult(arena, timed_out));
+
+    // The cut is on a codepoint boundary, so a command whose output is all
+    // three-byte characters is still whole characters after it. The bytes go
+    // into the next request body verbatim, so a cut inside one is invalid
+    // UTF-8 on the wire and a 400 the model is blamed for.
+    const wide = try std.fmt.allocPrint(
+        arena,
+        "{{\"command\":\"yes \\\\u65e5 | head -n 20000\"}}",
+        .{},
+    );
+    const cjk = try dispatch(arena, "bash", wide);
+    try std.testing.expect(cjk.len <= max_tool_output);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(cjk));
+    try std.testing.expect(std.mem.indexOf(u8, cjk, "[output truncated at the tool's cap]") != null);
 }
 
 test "bash refuses a command naming a credentials file" {

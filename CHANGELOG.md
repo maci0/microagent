@@ -178,6 +178,18 @@ release, and `microagent update` moves you to it.
   prompt string: `ponytail` said "Ask first whether the change needs to exist"
   in the same request as a system prompt that says "Do not ask questions", so it
   now says "Settle first".
+- A tool that printed more than a result's cap kept its exit status and its
+  failure reason out of what the model read. Each of a child's streams is
+  captured at four times `max_tool_output`, and the notes are written after the
+  output, so the cut that brought the result back to the cap took them first: a
+  `bash` call that printed a 100 KB build log and exited 1 reached the model as
+  24 KB of log under the generic truncation marker, with `(exit: 1)` gone, and
+  the same call that timed out lost the timeout with it. What the model read
+  about a failing command depended on how much the command had printed, which
+  is the guessing the status and the reason exist to stop. The output is now
+  cut first, on a codepoint boundary, and the notes are written into what is
+  left, so a tool's result never exceeds the cap and no note is the thing the
+  cap takes.
 - The bidi controls and zero-width characters are written out in every value
   quoted for the operator. They are well-formed UTF-8 carrying no C0 or C1
   control, so the escaping every diagnostic already went through passed them,
