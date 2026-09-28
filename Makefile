@@ -15,7 +15,7 @@ BIN := zig-out/bin/microagent
 export LC_ALL := C
 export TZ := UTC
 
-.PHONY: default help build small musl test test-one fmt fmt-python lint lint-versions zig-version lint-shell lint-python lint-yaml check bench overhead install release-assets checksums clean
+.PHONY: default help version build small musl test test-one fmt fmt-python lint lint-versions zig-version lint-shell lint-python lint-yaml check bench overhead install release-assets checksums clean
 
 # The targets `microagent update` asks for, in the names release.yml publishes.
 # ci.yml rehearses the same list on every push and release.yml publishes it, so
@@ -46,6 +46,7 @@ help:
 	  'build                 zig build -Doptimize=$(OPT) -> $(BIN)' \
 	  'small                 ReleaseSmall binary' \
 	  'musl                  static musl binary for integrations/harbor' \
+	  'version               the version build.zig.zon declares' \
 	  'test                  the whole unit test suite' \
 	  'test-one FILTER=...   only tests whose name contains FILTER' \
 	  'fmt                   rewrite src, build.zig and the Harbor adapter in format style' \
@@ -60,6 +61,12 @@ help:
 	  'release-assets TAG=vX.Y.Z  the same, named as release.yml publishes them' \
 	  'checksums             sha256 sidecars for dist/ (after a tagged build)' \
 	  'clean                 remove zig-out and .zig-cache'
+
+# The version build.zig.zon declares. ci.yml and release.yml both refuse a
+# release whose tag and whose binary disagree, and both read it through here so
+# there is one `sed` for it rather than one per workflow.
+version:
+	@sed -n 's/^[[:space:]]*\.version = "\([^"]*\)".*/\1/p' build.zig.zon
 
 build:
 	$(ZIG) build -Doptimize=$(OPT)

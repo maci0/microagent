@@ -38,7 +38,7 @@ jobs:
       - name: tag names the build.zig.zon version
         run: |
           set -euo pipefail
-          version="$(sed -n 's/^[[:space:]]*\.version = "\([^"]*\)".*/\1/p' build.zig.zon)"
+          version="$(make version)"
           if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
             echo "tag ${GITHUB_REF_NAME} does not name build.zig.zon version v${version}" >&2
             exit 1

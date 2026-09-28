@@ -91,10 +91,18 @@ jobs:
         # becoming the linter that decides the gate passes. The pins are
         # ruff and yamllint themselves, plus the two packages yamllint imports,
         # so nothing in the resolution is chosen at install time.
+        #
+        # The install goes into a venv. The runner's python3 is marked
+        # externally managed (PEP 668), so pip refuses to install into it
+        # without --break-system-packages, which is the flag the runner image
+        # exists to not need. Its bin directory goes on PATH for the rest of
+        # the job, so the Makefile's bare `ruff` and `yamllint` are these.
         run: |
           set -euo pipefail
-          python3 -m pip install --disable-pip-version-check --require-hashes \
-            -r lint-requirements.txt
+          python3 -m venv "$RUNNER_TEMP/lintenv"
+          echo "$RUNNER_TEMP/lintenv/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/lintenv/bin/pip" install --disable-pip-version-check \
+            --require-hashes -r lint-requirements.txt
 
       # `make check` runs this before the linters, and it is the check that
       # keeps the version in lint-requirements.txt and the one in the Makefile
@@ -139,7 +147,7 @@ jobs:
       - name: the host binary reports the version in build.zig.zon
         run: |
           set -euo pipefail
-          version="$(sed -n 's/^[[:space:]]*\.version = "\([^"]*\)".*/\1/p' build.zig.zon)"
+          version="$(make version)"
           got="$(./dist/microagent-x86_64-linux-musl --version)"
           test "$got" = "microagent $version"
 

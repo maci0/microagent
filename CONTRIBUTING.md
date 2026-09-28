@@ -26,8 +26,9 @@ uv tool install yamllint==1.38.0
 
 CI installs those two from [lint-requirements.txt](lint-requirements.txt),
 which pins them and the packages `yamllint` imports, one sha256 per published
-artifact, and installs it with `--require-hashes`. `make lint-versions` fails
-when a version there and one in the Makefile drift apart.
+artifact, and installs it with `--require-hashes` into a venv on `PATH`, so the
+job never writes into the runner image's externally managed python. `make
+lint-versions` fails when a version there and one in the Makefile drift apart.
 
 `zig fmt` covers the Zig and needs nothing else.
 
