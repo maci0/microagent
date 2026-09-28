@@ -1289,6 +1289,10 @@ const StreamFrame = struct {
     choices: []const Choice = &.{},
 
     const Choice = struct {
+        // Read as a Value so a reason that is not a string leaves the last one
+        // standing here, exactly as `str` leaves it on the generic path,
+        // rather than failing the parse and taking the slow one.
+        finish_reason: std.json.Value = .null,
         delta: ?Delta = null,
     };
     const Delta = struct {
@@ -1348,7 +1352,18 @@ fn applyDeclared(
             result.total_tokens = result.prompt_tokens +| result.completion_tokens;
     }
     if (frame.choices.len == 0) return true;
-    const delta = frame.choices[0].delta orelse return true;
+    const choice = frame.choices[0];
+    // Why the provider stopped, on the last frame that carries it. `length`
+    // means the response was cut at `max_tokens`; the caller says so rather
+    // than appending a prefix of an answer as if it were the whole one. This
+    // has to land before the delta, because the generic path lands it there
+    // and a frame may carry the reason with no delta beside it.
+    if (str(choice.finish_reason)) |reason| {
+        const owned = try gpa.dupe(u8, reason);
+        result.deinitFinish(gpa);
+        result.finish_reason = owned;
+    }
+    const delta = choice.delta orelse return true;
 
     if (delta.content) |text| {
         if (result.content.items.len < max_response_bytes) {
