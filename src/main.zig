@@ -1376,7 +1376,7 @@ fn streamChat(
         }
 
         var start: usize = 0;
-        while (nextLineEnd(pending.items, &scanned)) |pos| {
+        while (net.nextLineEnd(pending.items, &scanned)) |pos| {
             const raw = pending.items[start..pos];
             start = pos + 1;
             const line = std.mem.trimEnd(u8, raw, "\r");
@@ -1425,21 +1425,6 @@ fn streamChat(
     result.calls = calls;
     dropNamelessCalls(gpa, &result.calls);
     return result;
-}
-
-/// The index of the next newline in `pending`, or null while the line it would
-/// end is still arriving. `scanned` is how much of `pending` has already been
-/// searched, so a frame longer than one read is not searched for again from the
-/// front each time the next piece of it lands: that made splitting a long frame
-/// quadratic in its length. The caller drops the bytes it consumed and lowers
-/// `scanned` by the same amount.
-fn nextLineEnd(pending: []const u8, scanned: *usize) ?usize {
-    const at = std.mem.indexOfScalarPos(u8, pending, scanned.*, '\n') orelse {
-        scanned.* = pending.len;
-        return null;
-    };
-    scanned.* = at + 1;
-    return at;
 }
 
 /// Why a stream that ended without `[DONE]` is not a finished turn, in the
@@ -3071,7 +3056,7 @@ test "a frame split across reads yields the same lines, and is searched once" {
             // Each call looks at exactly the bytes between the old cursor and
             // the new one, whether it found a newline or ran off the end.
             const was = scanned;
-            const found = nextLineEnd(pending.items, &scanned);
+            const found = net.nextLineEnd(pending.items, &scanned);
             searched += scanned - was;
             const pos = found orelse break;
             try seen.append(gpa, gpa.dupe(u8, pending.items[start..pos]) catch return error.OutOfMemory);

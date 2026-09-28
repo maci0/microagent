@@ -574,7 +574,7 @@ fn readLines(io: Io, arena: std.mem.Allocator, path: []const u8, offset: usize, 
     // bundle, a JSON blob, a lockfile or a base64 row is an ordinary thing for
     // the model to ask for, and a ranged read cannot stop at the first line it
     // wants because it has to find where that line ends.
-    var searched: usize = 0;
+    var scanned: usize = 0;
     var consumed: usize = 0;
     while (consumed < max_read_bytes) {
         const want = @min(read_chunk, max_read_bytes - consumed);
@@ -586,13 +586,12 @@ fn readLines(io: Io, arena: std.mem.Allocator, path: []const u8, offset: usize, 
         };
         if (n == 0) break;
         consumed += n;
-        // Resume where the search left off, not where the buffer starts. The
-        // bytes between `start` and there were searched on an earlier read and
-        // held no newline, so the line in hand still runs from `start`.
-        const search_from = @max(start, searched);
         try rest.appendSlice(arena, chunk[0..n]);
-        var at = search_from;
-        while (std.mem.indexOfScalarPos(u8, rest.items, at, '\n')) |pos| {
+        // The scan resumes where the last one stopped, not where the buffer
+        // starts: the bytes between `start` and there were searched on an
+        // earlier read and held no newline, so the line in hand still runs from
+        // `start`.
+        while (net.nextLineEnd(rest.items, &scanned)) |pos| {
             line += 1;
             if (line >= offset) {
                 if (taken >= limit) return buf.items;
@@ -600,21 +599,22 @@ fn readLines(io: Io, arena: std.mem.Allocator, path: []const u8, offset: usize, 
                 try buf.append(arena, '\n');
                 taken += 1;
             }
-            at = pos + 1;
             // Only a found newline ends a line, so this is the only thing that
             // moves the start. Anything else would drop bytes the line is made
             // of, and truncate it.
-            start = at;
+            start = pos + 1;
         }
-        // Nothing consumed means nothing to move: copying the whole buffer onto
-        // itself once per read is the other half of the same quadratic.
+        // Nothing was consumed on a read that completed no line, and the
+        // move below is a memmove of the whole pending line onto itself when
+        // `start` is zero, which on a file of long lines is the other half of
+        // that gigabyte.
         if (start > 0) {
             const left = rest.items.len - start;
             std.mem.copyForwards(u8, rest.items[0..left], rest.items[start..]);
             rest.shrinkRetainingCapacity(left);
+            scanned -= start;
             start = 0;
         }
-        searched = rest.items.len;
     }
     // Out of cap rather than out of file, which is what a whole-file read of
     // the same file reports, so one file over the cap reads the same whichever
@@ -1043,6 +1043,52 @@ test "a ranged read of a file over the cap is refused like a whole-file read" {
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "under.txt", .data = under.items });
     const under_path = try std.fs.path.join(arena, &.{ dir_buf[0..try tmp.dir.realPath(std.testing.io, &dir_buf)], "under.txt" });
     try std.testing.expectEqual(max_read_bytes - 1, (try readLines(std.testing.io, arena, under_path, 1, 5)).len);
+}
+
+// The scan cursor is what keeps a ranged read of a minified bundle or a base64
+// blob from re-searching the whole pending line on every read, but a cursor
+// that is lowered wrongly drops or repeats a line. The bytes are the property
+// worth asserting: lines that straddle a read boundary, several reads long, at
+// an offset, come back exactly as `expectedLines` spells them.
+test "lines longer than a read come back whole, whatever they straddle" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fs.path.join(arena, &.{ dir_buf[0..try tmp.dir.realPath(std.testing.io, &dir_buf)], "long.txt" });
+
+    // One line per read-chunk boundary, one that straddles three of them, and
+    // a last line with no newline: the three shapes a cursor can lose.
+    const short = "a" ** 16;
+    const straddling = "b" ** (read_chunk * 3 + 7);
+    const unterminated = "c" ** (read_chunk + 1);
+    var raw: std.ArrayList(u8) = .empty;
+    try raw.appendSlice(arena, short);
+    try raw.append(arena, '\n');
+    try raw.appendSlice(arena, straddling);
+    try raw.append(arena, '\n');
+    try raw.appendSlice(arena, unterminated);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "long.txt", .data = raw.items });
+
+    const want = try expectedLines(arena, raw.items, 1, std.math.maxInt(usize));
+    // Past the first line, so the cursor is exercised after a line was already
+    // consumed, and the whole file below, so it is exercised past the
+    // straddling line and at the unterminated tail.
+    const offset: usize = 2;
+    const got = try readLines(std.testing.io, arena, path, offset, 2);
+    const want_offset = try expectedLines(arena, raw.items, offset, 2);
+    try std.testing.expectEqualStrings(want_offset, got);
+    // Lines two and three are the ones the range covers: the whole of the
+    // straddling line and the unterminated tail, byte for byte, not a read's
+    // worth of either.
+    try std.testing.expectEqualStrings(
+        try std.fmt.allocPrint(arena, "{s}\n{s}\n", .{ straddling, unterminated }),
+        got,
+    );
+    try std.testing.expectEqual(want.len, (try readLines(std.testing.io, arena, path, 1, std.math.maxInt(usize))).len);
 }
 
 test "the tool gutter stays one line whatever the model sent" {

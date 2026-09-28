@@ -106,6 +106,22 @@ pub fn resolveSymlinkTarget(
     return std.fmt.bufPrint(join_buf, "{s}{c}{s}", .{ dir_end, std.fs.path.sep, link }) catch link;
 }
 
+/// The index of the next newline in `pending`, or null while the line it would
+/// end is still arriving. `scanned` is how much of `pending` has already been
+/// searched, so a record longer than one read is not searched for again from the
+/// front each time the next piece of it lands: that made splitting a long
+/// record quadratic in its length, once for a completion frame and once for a
+/// file line. The caller drops the bytes it consumed and lowers `scanned` by the
+/// same amount.
+pub fn nextLineEnd(pending: []const u8, scanned: *usize) ?usize {
+    const at = std.mem.indexOfScalarPos(u8, pending, scanned.*, '\n') orelse {
+        scanned.* = pending.len;
+        return null;
+    };
+    scanned.* = at + 1;
+    return at;
+}
+
 /// A monotonic duration for `Io.Timeout`, from milliseconds. A tool deadline
 /// and a provider read both name one, so the conversion is spelled once here
 /// rather than at each call site.
