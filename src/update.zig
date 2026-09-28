@@ -1161,13 +1161,17 @@ test "update: this target is the name the release matrix publishes" {
     try std.testing.expectEqualStrings("aarch64-linux-musl", try assetTriple(&gnu_buf, "aarch64", "linux", "gnu"));
     try std.testing.expectEqualStrings("x86_64-macos", try assetTriple(&gnu_buf, "x86_64", "macos", "none"));
 
+    // The name the running binary asks for is pinned to the table above by the
+    // target it builds for, not by asking the same function twice: a
+    // comparison between two calls of the wrapper under test is true whatever
+    // the wrapper returns.
     var live_buf: [64]u8 = undefined;
-    var via_buf: [64]u8 = undefined;
-    const want = try assetTriple(&via_buf, @tagName(builtin.cpu.arch), @tagName(builtin.os.tag), @tagName(builtin.abi));
     const got = try thisAssetTriple(&live_buf);
-    try std.testing.expectEqualStrings(want, got);
     try std.testing.expect(!std.mem.endsWith(u8, got, "-none"));
-    if (builtin.os.tag == .linux) try std.testing.expect(std.mem.endsWith(u8, got, "-linux-musl"));
+    if (builtin.os.tag == .linux) {
+        try std.testing.expect(std.mem.endsWith(u8, got, "-linux-musl"));
+        try std.testing.expect(std.mem.startsWith(u8, got, @tagName(builtin.cpu.arch)));
+    }
 }
 
 test "update: a repo that is not owner/name is refused before a release url exists" {
@@ -1837,11 +1841,25 @@ test "update: a body over the cap is refused while it arrives" {
     try std.testing.expect(!capped.over);
     try std.testing.expectEqualStrings("short", capped.body.written());
 
-    // Over it: the write fails on the chunk that crosses the line, so the cost
-    // is the cap plus that chunk rather than the whole body.
+    // Over it: the chunk is written whole and the cap is checked against what
+    // arrived, so the body holds the crossing chunk rather than a prefix of it
+    // and the caller is told with an error it cannot mistake for a short read.
+    // The cost of the overshoot is one chunk, which is why the chunk a fetch
+    // reads at a time bounds it, and `reset` is what takes the body back to
+    // empty before a second attempt.
     try std.testing.expectError(error.WriteFailed, capped.writer.writeAll("y" ** 1024));
     try std.testing.expect(capped.over);
-    try std.testing.expect(capped.body.written().len <= 64 + 1024);
+    try std.testing.expectEqual(@as(usize, 5 + 1024), capped.body.written().len);
+    // What the body holds is the bytes that crossed it, nothing dropped and
+    // nothing invented, because the checksum is computed over exactly these.
+    try std.testing.expectEqualStrings("short" ++ "y" ** 1024, capped.body.written());
+    capped.reset();
+    try std.testing.expect(!capped.over);
+    try std.testing.expectEqualStrings("", capped.body.written());
+    // And the reader answers the next fetch from an empty body, so two
+    // attempts never concatenate into a body no release published.
+    try capped.writer.writeAll("second");
+    try std.testing.expectEqualStrings("second", capped.body.written());
 }
 
 test "update: replaceVerified follows a symlinked destination" {

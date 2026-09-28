@@ -542,6 +542,61 @@ test "a CA bundle that names no certificate leaves the client scanning the syste
     try std.testing.expectEqual(@as(usize, 0), client.ca_bundle.map.count());
 }
 
+test "a CA bundle that holds a certificate is the store the client stops rescanning" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // A self-signed root no network ever vouched for, generated once and
+    // written into the test rather than read from the machine's trust store:
+    // a fixture that is the host's certificates changes with the host, and a
+    // test that reads one does not say what it is checking.
+    const certificate =
+        \\-----BEGIN CERTIFICATE-----
+        \\MIIBlTCCATugAwIBAgIUNG7GKLlqcw1fZt2YvLoGAojuugAwCgYIKoZIzj0EAwIw
+        \\HzEdMBsGA1UEAwwUbWljcm9hZ2VudCB0ZXN0IHJvb3QwIBcNMjYwOTI4MjIzMDI1
+        \\WhgPMjEyNjA5MDQyMjMwMjVaMB8xHTAbBgNVBAMMFG1pY3JvYWdlbnQgdGVzdCBy
+        \\b290MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAErNLrBW9YMnlOVZ2hKtLbXURc
+        \\ztMorJURg3SgsyPQHOUApmmSF47ignAD3rwbWrIxZYxSCmAwjhfsvI9pR9RLsqNT
+        \\MFEwHQYDVR0OBBYEFKuOW97bpN34Tbatk8IbY8ATFW7kMB8GA1UdIwQYMBaAFKuO
+        \\W97bpN34Tbatk8IbY8ATFW7kMA8GA1UdEwEB/wQFMAMBAf8wCgYIKoZIzj0EAwID
+        \\SAAwRQIgK9AoYB8EF4qzeAH9v3UuKgfGT0gDXk9KPV4REvVrmCkCIQDBQ4oityRN
+        \\oVNsATZtOW1jph7igNwlFELmJLHKtwVySQ==
+        \\-----END CERTIFICATE-----
+        \\
+    ;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "bundle.pem", .data = certificate });
+
+    var client: std.http.Client = .{ .allocator = gpa, .io = io };
+    defer client.deinit();
+    try std.testing.expect(client.now == null);
+
+    var file_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const absolute = file_buf[0..try tmp.dir.realPathFile(io, "bundle.pem", &file_buf)];
+    loadCaBundle(&client, io, gpa, absolute, arena);
+    // The two things a bundle that loaded is for: the trust store holds what
+    // the file named, and `now` is set so the client does not rescan the system
+    // store over the top of it.
+    try std.testing.expectEqual(@as(usize, 1), client.ca_bundle.map.count());
+    try std.testing.expect(client.now != null);
+
+    // The relative form reaches the same store, so a wrapper exporting a path
+    // relative to the working directory is not left with an empty one.
+    var relative_client: std.http.Client = .{ .allocator = gpa, .io = io };
+    defer relative_client.deinit();
+    const relative = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}/bundle.pem", .{tmp.sub_path});
+    loadCaBundle(&relative_client, io, gpa, relative, arena);
+    try std.testing.expectEqual(@as(usize, 1), relative_client.ca_bundle.map.count());
+    try std.testing.expect(relative_client.now != null);
+}
+
 test "the home directory is trimmed, and an empty one is no home" {
     var env: std.process.Environ.Map = .init(std.testing.allocator);
     defer env.deinit();
@@ -592,14 +647,13 @@ test "a write target follows a symlink, relative or absolute" {
         try resolveForTest(tmp.dir, "sub/link", &name_buf, &cur_buf, &next_buf),
     );
 
-    // An absolute link needs no join and must not be rewritten as one. The
-    // temporary directory is reached through the working directory, so the
-    // target is written as the absolute path that resolves to `real`.
-    const abs = try std.fs.path.resolve(
-        std.testing.allocator,
-        &.{ ".zig-cache", "tmp", &tmp.sub_path, "real" },
-    );
-    defer std.testing.allocator.free(abs);
+    // An absolute link needs no join and must not be rewritten as one: the
+    // directory holding the link is not part of its target, so joining the
+    // link's own path onto it would name a file that does not exist. The
+    // target need not exist for the walk, which reads the link and does path
+    // arithmetic rather than looking the file up, so a path no filesystem
+    // carries is the one that says this.
+    const abs = "/nonexistent/absolute/target";
     try tmp.dir.symLink(std.testing.io, abs, "abs_link", .{});
     try std.testing.expectEqualStrings(
         abs,

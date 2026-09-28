@@ -523,7 +523,11 @@ test "the shipped config template applies, and names levels the reader has" {
     const text = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "config.example.toml", gpa, .limited(max_template_bytes));
     defer gpa.free(text);
 
-    var style: Style = .{};
+    // Both keys start off, so a level the template names is one the file
+    // actually sets. Starting from the built-in defaults would make the
+    // template's own values indistinguishable from no template at all, and a
+    // template that lost a key line would apply cleanly and set nothing.
+    var style: Style = .{ .caveman = .off, .ponytail = .off };
     // No unknown key and no bad value: every line the template ships is one
     // this reader takes. A level added to an enum is not required to appear
     // here, so this only refuses a template that has drifted from the reader.

@@ -559,6 +559,31 @@ test "session record escapes a directory that needs it" {
     );
 }
 
+// The model time a record carries is the gap between the stamp the caller took
+// and the one this reads, on the same clock. Two things make it wrong without
+// any test noticing: a stamp from another clock, which the caller passing one
+// in rules out, and a clock that went backwards underneath it, which the clamp
+// at zero answers rather than writing a negative number into a record a rate is
+// taken from.
+test "model time is the gap on the clock it was stamped from, and never negative" {
+    const io = std.testing.io;
+    const now = Io.Clock.real.now(io).nanoseconds;
+
+    // A stamp an hour in the future is a clock that moved backwards, or a
+    // caller that stamped a different one. The record says the run took no
+    // time rather than a length no reader can divide by.
+    try std.testing.expectEqual(@as(u64, 0), elapsedMs(io, .real, now + 3600 * std.time.ns_per_s));
+    try std.testing.expectEqual(@as(u64, 0), elapsedMs(io, .real, now));
+
+    // A stamp from the past is the ordinary case. The band is wide on purpose:
+    // the lower bound is what proves the difference was taken, and an upper
+    // bound tight enough to fail would be a timing dependency.
+    const since = now - 1500 * std.time.ns_per_ms;
+    const took = elapsedMs(io, .real, since);
+    try std.testing.expect(took >= 1500);
+    try std.testing.expect(took < 60_000);
+}
+
 // A run that starts twice, or two runs that start together, can read the same
 // wall-clock stamp. The second one must write beside the first: truncating it
 // would leave the store holding one run's records labelled as another's.
@@ -637,7 +662,39 @@ test "a session directory that cannot be used is named, and keeps no log" {
     const usable = try std.fs.path.join(arena, &.{ store, "sessions" });
     var session: ?Session = open(io, arena, usable, "test/model") orelse return error.TestUnexpectedResult;
     defer close(io, &session);
-    writeRecord(io, arena, &session, 12, &.{});
+
+    // And the store that opened is one a monitor can read: the record is on
+    // disk, it is the one line the record is built from, and it carries the
+    // model and the model time the run measured. `writeRecord` is the only
+    // thing that puts a line in a log, so a writer that dropped it, wrote it
+    // to the wrong file or carried the wrong counters passes every other test
+    // in this file.
+    var result: chat.ChatResult = .{ .completion_tokens = 3 };
+    writeRecord(io, arena, &session, 12, &result);
+    close(io, &session);
+    session = null;
+
+    var logs = try tmp.dir.openDir(io, "sessions", .{ .iterate = true });
+    defer logs.close(io);
+    var it = logs.iterate();
+    var lines: std.ArrayList([]const u8) = .empty;
+    while (try it.next(io)) |entry| {
+        const text = try logs.readFileAlloc(io, entry.name, arena, .unlimited);
+        try lines.append(arena, text);
+    }
+    try std.testing.expectEqual(@as(usize, 1), lines.items.len);
+    const line = lines.items[0];
+    try std.testing.expect(std.mem.endsWith(u8, line, "\n"));
+    // One line, not a record concatenated onto a previous one.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, line, "\n"));
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, line, .{});
+    defer parsed.deinit();
+    const record = parsed.value.object;
+    try std.testing.expectEqualStrings("test/model", record.get("model").?.string);
+    try std.testing.expectEqual(@as(i64, 12), record.get("elapsed_ms").?.integer);
+    try std.testing.expectEqual(@as(i64, 3), record.get("usage").?.object.get("completion_tokens").?.integer);
+    try std.testing.expect(record.get("ts").?.integer >= 0);
+    try std.testing.expect(record.get("cwd") != null);
 }
 
 // A log that cannot be written to has stopped recording the run. Kept, it is

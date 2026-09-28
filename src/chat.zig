@@ -578,6 +578,55 @@ pub fn safeTextAll(arena: std.mem.Allocator, s: []const u8) []const u8 {
 // nothing a terminal acts on survives. The budget is what makes completeness
 // possible, so the two are asserted against the same input rather than
 // separately.
+
+// What `safeTextAll` quoted, read back: a `\xNN` escape is the byte it names
+// and every other byte is the byte it was. The escaper never writes a bare
+// backslash, because `\` is printable ASCII and is copied rather than escaped,
+// so the two forms do not collide.
+fn unescapeSafeText(gpa: std.mem.Allocator, quoted: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var i: usize = 0;
+    while (i < quoted.len) {
+        if (quoted[i] == '\\' and i + 3 < quoted.len and quoted[i + 1] == 'x') {
+            const hi = std.fmt.charToDigit(quoted[i + 2], 16) catch return error.MalformedEscape;
+            const lo = std.fmt.charToDigit(quoted[i + 3], 16) catch return error.MalformedEscape;
+            try out.append(gpa, hi * 16 + lo);
+            i += 4;
+            continue;
+        }
+        try out.append(gpa, quoted[i]);
+        i += 1;
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+// The value the escaper was given, written out the way its own documentation
+// says it reads: whole characters keep their bytes and a byte that begins none
+// is U+FFFD. A quoted value that decodes to this is one that dropped nothing
+// and invented nothing.
+fn safeTextInputAsQuoted(gpa: std.mem.Allocator, raw: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var i: usize = 0;
+    while (i < raw.len) {
+        const len = std.unicode.utf8ByteSequenceLength(raw[i]) catch {
+            try out.appendSlice(gpa, "\u{fffd}");
+            i += 1;
+            continue;
+        };
+        const end = i + len;
+        if (end > raw.len or !std.unicode.utf8ValidateSlice(raw[i..end])) {
+            try out.appendSlice(gpa, "\u{fffd}");
+            i += 1;
+            continue;
+        }
+        try out.appendSlice(gpa, raw[i..end]);
+        i = end;
+    }
+    return out.toOwnedSlice(gpa);
+}
+
 test "a value quoted whole is escaped whole, and nothing in it is a control" {
     const gpa = std.testing.allocator;
     var arena_state = std.heap.ArenaAllocator.init(gpa);
@@ -592,18 +641,34 @@ test "a value quoted whole is escaped whole, and nothing in it is a control" {
         "/home/me/\u{00e5}\u{4e2d}\u{6587}/sessions",
         "model-with-a-\u{1f600}-in-it",
         "\x00\x01\x02\x7f",
+        "a back\\slash and an \x01 escape",
     };
     inline for (cases) |raw| {
         const quoted = safeTextAll(arena, raw);
-        // Every byte that reaches a terminal through this value is printable
-        // ASCII or a whole character: the C0 controls, DEL and the C1 range
-        // are all written as escapes, and a byte that is not text is U+FFFD.
-        for (quoted) |c| try std.testing.expect(c >= 0x20 and c != 0x7f);
-        try std.testing.expect(std.unicode.utf8ValidateSlice(quoted));
-        // Whole: the escaped value is never cut short by its own budget, which
-        // is what a directory a reader has to be able to copy needs. A budget
-        // no escaping can reach is the same value written out in full.
-        try std.testing.expectEqualStrings(safeText(arena, raw, std.math.maxInt(usize)), quoted);
+        // Every character that reaches a terminal through this value is
+        // printable ASCII, a whole non-control character, or U+FFFD: the C0
+        // controls, DEL and the C1 range are all written as escapes, and a
+        // byte that is not text is U+FFFD. The C1 range is checked as
+        // characters rather than bytes, because UTF-8 spells it `C2 80..9F`
+        // and every one of those bytes passes a per-byte test.
+        var i: usize = 0;
+        while (i < quoted.len) {
+            const len = std.unicode.utf8ByteSequenceLength(quoted[i]) catch unreachable;
+            const cp = std.unicode.utf8Decode(quoted[i..][0..len]) catch unreachable;
+            const control = cp < 0x20 or cp == 0x7f or (cp >= 0x80 and cp <= 0x9f);
+            try std.testing.expect(!control);
+            i += len;
+        }
+        // Whole: the budget is four bytes per input byte and no escape is
+        // longer than that, so nothing was cut, and unquoting what came out
+        // gives back the value that went in, with every byte that is not text
+        // as the U+FFFD it was quoted for.
+        try std.testing.expect(quoted.len <= raw.len *| safe_text_widening);
+        const back = try unescapeSafeText(gpa, quoted);
+        defer gpa.free(back);
+        const want = try safeTextInputAsQuoted(gpa, raw);
+        defer gpa.free(want);
+        try std.testing.expectEqualStrings(want, back);
     }
     // The two forms differ exactly where the escaping does, so a test that
     // pins one does not silently pass on the other.
@@ -667,16 +732,20 @@ test "a string that is not UTF-8 still serializes as valid JSON" {
         "ok\xff\xe6\x97\xa5ok",
     };
     for (cases) |raw| {
-        var buf = JsonBuf.init(std.testing.allocator);
-        defer buf.list.deinit(std.testing.allocator);
+        const gpa = std.testing.allocator;
+        var buf = JsonBuf.init(gpa);
+        defer buf.list.deinit(gpa);
         try writeJsonString(buf.writer(), raw);
 
-        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, buf.items(), .{});
+        var parsed = try std.json.parseFromSlice(std.json.Value, gpa, buf.items(), .{});
         defer parsed.deinit();
         try std.testing.expect(std.unicode.utf8ValidateSlice(parsed.value.string));
-        // The valid text either side of a bad byte survives unchanged.
-        if (std.mem.indexOf(u8, raw, "ok") != null)
-            try std.testing.expect(std.mem.startsWith(u8, parsed.value.string, "ok"));
+        // The valid text either side of a bad byte survives unchanged, and a
+        // bad byte becomes the one replacement character it is written as, so
+        // the value parses to the input with each undecodable byte named.
+        const want = try safeTextInputAsQuoted(gpa, raw);
+        defer gpa.free(want);
+        try std.testing.expectEqualStrings(want, parsed.value.string);
     }
 }
 
@@ -903,7 +972,12 @@ test "a body split at any byte still joins into the text it was" {
         // four-byte character.
         const joined = try std.mem.concat(std.testing.allocator, u8, &.{ head[head.len - held ..], text[at..] });
         defer std.testing.allocator.free(joined);
-        try std.testing.expectEqualStrings(text[head.len - held ..], joined);
+        // What the writer put on the wire before it held the tail back, plus
+        // the tail and the next chunk, is the text it was: holding bytes back
+        // costs no output.
+        const whole = try std.mem.concat(std.testing.allocator, u8, &.{ head[0 .. head.len - held], joined });
+        defer std.testing.allocator.free(whole);
+        try std.testing.expectEqualStrings(text, whole);
     }
 }
 
