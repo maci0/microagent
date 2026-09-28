@@ -141,6 +141,7 @@ jobs:
       - name: build every published target
         run: |
           set -euo pipefail
+          make check-targets
           make release-assets
           ls -l dist
 
@@ -164,7 +165,7 @@ jobs:
       - name: the release build is reproducible
         run: |
           set -euo pipefail
-          targets="$(sed -n 's/^RELEASE_TARGETS := //p' Makefile)"
+          targets="$(make --no-print-directory release-targets)"
           test -n "$targets" || { echo "Makefile names no RELEASE_TARGETS to check" >&2; exit 1; }
           build_once() {
             SOURCE_DATE_EPOCH="$1" LC_ALL="$2" TZ="$3" zig build \

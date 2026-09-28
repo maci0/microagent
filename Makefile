@@ -15,7 +15,7 @@ BIN := zig-out/bin/microagent
 export LC_ALL := C
 export TZ := UTC
 
-.PHONY: default help preflight version build small musl test test-one fmt fmt-python lint lint-versions zig-version lint-shell lint-python lint-yaml check bench overhead install release-assets checksums clean
+.PHONY: default help preflight version build small musl test test-one fmt fmt-python lint lint-versions zig-version required-zig-version release-targets check-targets lint-shell lint-python lint-yaml check bench overhead install release-assets checksums clean
 
 # The targets `microagent update` asks for, in the names release.yml publishes.
 # ci.yml rehearses the same list on every push and release.yml publishes it, so
@@ -88,7 +88,10 @@ help:
 	  'install               install the binary into ~/.local/bin' \
 	  'release-assets        cross-build every published target into dist/' \
 	  'release-assets TAG=vX.Y.Z  the same, named as release.yml publishes them' \
+	  'release-targets       the published target triples, one per line' \
+	  'check-targets         every published target is one `update` asks for' \
 	  'checksums             sha256 sidecars for dist/ (after a tagged build)' \
+	  'required-zig-version  the zig version build.zig.zon declares' \
 	  'clean                 remove zig-out and .zig-cache'
 
 # The version build.zig.zon declares. ci.yml and release.yml both refuse a
@@ -97,6 +100,20 @@ help:
 version:
 	@sed -n 's/^[[:space:]]*\.version = "\([^"]*\)".*/\1/p' build.zig.zon
 
+# The zig version the release assets are built with. setup-zig installs it on
+# every runner, and it is read through here for the same reason `version` is:
+# a second `sed` over build.zig.zon is a second place to update when the pin
+# moves, and the one left behind installs a compiler no release ever used.
+required-zig-version:
+	@sed -n 's/^[[:space:]]*\.minimum_zig_version = "\([^"]*\)".*/\1/p' build.zig.zon
+
+# The published targets, one per line. ci.yml's reproducibility step builds
+# every one of them and a `sed` over this file is a second spelling of the list
+# that can disagree with the one `release-assets` builds, which is exactly the
+# drift the step is there to catch.
+release-targets:
+	@for target in $(RELEASE_TARGETS); do echo "$$target"; done
+
 build:
 	$(ZIG) build -Doptimize=$(OPT)
 
@@ -104,10 +121,15 @@ build:
 small:
 	$(ZIG) build -Doptimize=ReleaseSmall
 
-# Static musl binary for running inside containers (Harbor benchmarks).
+# Static musl binary for running inside containers (Harbor benchmarks). The
+# adapter uploads whatever sits at that name, so the copy is made beside it and
+# renamed: a copy interrupted halfway leaves a truncated binary that the next
+# Harbor run uploads into every container and fails in, which reads as a broken
+# agent rather than a broken build.
 musl:
 	$(ZIG) build -Dtarget=x86_64-linux-musl -Doptimize=ReleaseFast
-	cp $(BIN) integrations/harbor/microagent-x86_64-linux-musl
+	cp $(BIN) integrations/harbor/microagent-x86_64-linux-musl.tmp
+	mv integrations/harbor/microagent-x86_64-linux-musl.tmp integrations/harbor/microagent-x86_64-linux-musl
 
 test:
 	$(ZIG) build test --summary all
@@ -163,7 +185,7 @@ lint-versions:
 # work), so the gate asks for the release version by name and says which it is.
 zig-version:
 	@set -eu; \
-	want="$$(sed -n 's/^[[:space:]]*\.minimum_zig_version = "\([^"]*\)".*/\1/p' build.zig.zon)"; \
+	want="$$($(MAKE) --no-print-directory required-zig-version)"; \
 	test -n "$$want" || { echo "build.zig.zon has no .minimum_zig_version to check against" >&2; exit 1; }; \
 	have="$$($(ZIG) version)"; \
 	[ "$$have" = "$$want" ] || { \
@@ -187,6 +209,7 @@ lint-yaml:
 check:
 	$(MAKE) preflight
 	$(MAKE) zig-version
+	$(MAKE) check-targets
 	$(ZIG) fmt --check src build.zig
 	$(MAKE) lint
 	$(ZIG) build test --summary all
@@ -212,6 +235,23 @@ overhead: build
 install: build
 	mkdir -p $(HOME)/.local/bin
 	install -m755 $(BIN) $(HOME)/.local/bin/microagent
+
+# Every target here is a target `microagent update` asks for, and every target
+# it asks for is published here. The two are separate files that a rename in
+# either one would break in the same way: an asset published under a name no
+# update asks for is dead weight, and a target update asks for that nothing
+# publishes is an update that fails on a user's machine at the moment it runs.
+# `zig build test` pins the naming in src/update.zig against literals; this
+# pins it against this list, so a target cannot be added to one and not the
+# other. Building every target proves the triples still compile; it says
+# nothing about the names, so it is not the check for this.
+check-targets:
+	@set -eu; \
+	for target in $(RELEASE_TARGETS); do \
+		grep -q -- "$$target" src/update.zig || { \
+		  echo "$$target is published here but src/update.zig never asks for it, so no update can install it" >&2; \
+		  exit 1; }; \
+	done
 
 # Every published target, cross-built, under the name release.yml publishes and
 # update.zig asks for. Running it without TAG is the rehearsal ci.yml does on

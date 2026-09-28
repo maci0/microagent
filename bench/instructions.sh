@@ -42,14 +42,20 @@ command -v perf >/dev/null 2>&1 || {
 # Row name, test filter, units the row's work is done in. Per-unit numbers stay
 # comparable when a test grows.
 # The baseline is measured once, before this loop, so it is not a row.
-cat >"${TMPDIR:-/tmp}/.instructions-rows.$$" <<'ROWS'
+work=$(mktemp -d) || exit 2
+trap 'rm -rf "$work"' EXIT
+bin="$work/instructions-test"
+
+# The rows live in $work rather than a fixed name under /tmp: a predictable path
+# in a world-writable directory is another account's file to write through, and
+# TMPDIR is where bench/run.sh puts its scratch anyway.
+cat >"$work/rows" <<'ROWS'
 stream content frame|main.test.a long stream costs|20000
 stream tool-arg frame|main.test.streamed argument fragments|2000
 compaction of a 1 MB conversation|main.test.compaction elides|1
 build the request body 40 times|main.test.one request body|40
 ROWS
-rows=${TMPDIR:-/tmp}/.instructions-rows.$$
-trap 'rm -f "$rows"' EXIT
+rows="$work/rows"
 
 export ZIG_GLOBAL_CACHE_DIR="${ZIG_GLOBAL_CACHE_DIR:-$root/.zig-cache/global}"
 opts=$(find "$root/.zig-cache/c" -maxdepth 2 -name options.zig -type f 2>/dev/null | head -n 1)
@@ -63,35 +69,50 @@ zigenv=$("$zig" env)
 lib=$(printf '%s' "$zigenv" | sed -n 's/.*\.lib_dir = "\([^"]*\)".*/\1/p' | head -n 1)
 [ -n "$lib" ] && [ -d "$lib" ] || lib=$(dirname "$(printf '%s' "$zigenv" | sed -n 's/.*\.std_dir = "\([^"]*\)".*/\1/p' | head -n 1)")
 
-work=$(mktemp -d) || exit 2
-trap 'rm -f "$rows"; rm -rf "$work"' EXIT
-bin="$work/instructions-test"
-
 # Median of $runs samples of one binary. The median, not the mean, because the
 # first run pays for the page faults on a binary that was just written and the
 # rest do not.
+#
+# A build that fails, a test that no longer exists and a perf that measures
+# nothing all used to leave no output, which the row printed as "not built" and
+# `--check` counted as a pass: a renamed test or a compile error turned the
+# gate green. Each is a broken measurement now, named and non-zero.
 measure() {
 	filter=$1
 	# One build, then the same binary sampled $runs times. Rebuilding per
 	# sample does not work: zig sees the inputs are unchanged, skips emitting,
 	# and leaves no binary to run.
 	rm -f "$bin"
-	"$zig" test -fno-strip -OReleaseFast \
+	if ! "$zig" test -fno-strip -OReleaseFast \
 		--dep build_options -Mroot=src/main.zig -Mbuild_options="$opts" \
 		--cache-dir "$root/.zig-cache" --global-cache-dir "$ZIG_GLOBAL_CACHE_DIR" \
 		--name test --test-filter "$filter" \
-		--zig-lib-dir "$lib" -femit-bin="$bin" >/dev/null 2>&1
-	[ -x "$bin" ] || return 0
+		--zig-lib-dir "$lib" -femit-bin="$bin" >"$work/build.log" 2>&1; then
+		printf 'bench/instructions.sh: the test build failed for filter %s\n' "$filter" >&2
+		sed -n '1,20p' "$work/build.log" >&2
+		return 3
+	fi
+	[ -x "$bin" ] || {
+		printf 'bench/instructions.sh: no test binary was emitted for filter %s\n' "$filter" >&2
+		return 3
+	}
 	i=0
+	samples="$work/samples"
+	: >"$samples"
 	while [ "$i" -lt "$runs" ]; do
-		perf stat -e instructions "$bin" 2>&1 |
+		perf stat -e instructions "$bin" </dev/null 2>&1 |
 			grep -oE '[0-9,]+[[:space:]]+instructions' |
-			grep -oE '^[0-9,]+' | tr -d ','
+			grep -oE '^[0-9,]+' | tr -d ',' >>"$samples"
 		i=$((i + 1))
-	done | sort -n | awk '{ v[NR] = $1 } END { print v[int((NR + 1) / 2)] }'
+	done
+	[ -s "$samples" ] || {
+		printf 'bench/instructions.sh: perf counted no instructions for filter %s, so the row has no number to compare\n' "$filter" >&2
+		return 3
+	}
+	sort -n "$samples" | awk '{ v[NR] = $1 } END { print v[int((NR + 1) / 2)] }'
 }
 
-baseline=$(measure zzzz_no_such_test)
+baseline=$(measure zzzz_no_such_test) || exit 2
 printf '%-32s %14s %14s\n' path instructions instr_per_unit
 printf '%s\n' "--------------------------------------------------------------------------"
 printf '%-32s %14s %14s\n' baseline "$baseline" -
@@ -99,11 +120,7 @@ printf '%-32s %14s %14s\n' baseline "$baseline" -
 worst=0
 while IFS='|' read -r name filter units; do
 	[ -n "$name" ] || continue
-	value=$(measure "$filter")
-	if [ -z "$value" ]; then
-		printf '%-32s %14s\n' "$name" "not built"
-		continue
-	fi
+	value=$(measure "$filter") || exit 2
 	per=$(((value - baseline) / units))
 	printf '%-32s %14s %14s\n' "$name" "$value" "$per"
 

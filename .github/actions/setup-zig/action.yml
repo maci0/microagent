@@ -13,7 +13,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        version="$(sed -n 's/^[[:space:]]*\.minimum_zig_version = "\([^"]*\)".*/\1/p' build.zig.zon)"
+        version="$(make --no-print-directory required-zig-version)"
         if [ -z "$version" ]; then
           echo "build.zig.zon has no .minimum_zig_version to install" >&2
           exit 1

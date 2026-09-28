@@ -11,9 +11,14 @@ uploads it, then runs one non-interactive turn with the task instruction.
 ## Build the binary
 
 ```sh
-zig build -Dtarget=x86_64-linux-musl -Doptimize=ReleaseFast
-cp zig-out/bin/microagent integrations/harbor/microagent-x86_64-linux-musl
+make musl
 ```
+
+That is the same two commands spelled in the
+[Makefile](../../Makefile): `zig build -Dtarget=x86_64-linux-musl
+-Doptimize=ReleaseFast`, then the binary copied to
+`microagent-x86_64-linux-musl` next to the adapter, which is the name
+`binary_path()` below looks for. Neither file is committed.
 
 Statically linked, ~1.31 MB, no runtime dependencies — it runs in `python:slim`,
 bare `ubuntu`, and distroless images alike.

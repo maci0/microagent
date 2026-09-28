@@ -33,6 +33,16 @@ release, and `microagent update` moves you to it.
   `lint-requirements.txt` and the one named in the Makefile from drifting. It was in
   `make check` but not in CI, so a bump that forgot one of the two files only failed for
   whoever ran the gate locally.
+- `make check-targets`: the check that every published target is one `microagent update` asks
+  for. `ci.yml` claimed its release rehearsal caught an asset name drifting from the ones
+  `update.zig` asks for, and it did not: the job built the list and ran `ls`. The unit tests pin
+  the naming in `src/update.zig` against literals, and this pins it against the Makefile's
+  `RELEASE_TARGETS`, so a target cannot be added to one and not the other. It runs in `make check`
+  and in that CI job.
+- `make required-zig-version` and `make release-targets`. `setup-zig` and ci.yml's reproducibility
+  step each `sed`-parsed the Makefile and `build.zig.zon` themselves, so the toolchain pin and the
+  published target list were each spelled twice, and a rename had to land in both to be a rename.
+  Both read the Makefile now.
 - `THREAT_MODEL.md`: the attack surface as a whole, entry points, trust boundaries, assets,
   the threats on each boundary, the controls the code implements and the gaps it does not
   cover, each with a file reference.
@@ -144,10 +154,20 @@ release, and `microagent update` moves you to it.
   tests. `zig build test -Dtest-filter=...` reports `1/1 tests passed` for a filter that matches
   nothing, so a mistyped filter was a green run of no tests; the recipe now names the filter
   that matched nothing and prints the command that lists the names.
-- `bench/instructions.sh` keeps its scratch file under `${TMPDIR:-/tmp}` like the other bench
-  scripts, instead of a hardcoded `/tmp`. It is the one script that cannot run on macOS at all,
-  since `perf stat` is what reports the counter, and its refusal to run now says that rather
+- `bench/instructions.sh` is the one bench script that cannot run on macOS at all, since
+  `perf stat` is what reports the counter, and its refusal to run now says that rather
   than reporting a missing tool on a platform that will never ship one.
+- `bench/instructions.sh` fails when a row cannot be measured instead of printing `not built` and
+  passing. A test build that failed, a test renamed away and a `perf` that counted nothing all left
+  no output, the row printed `not built`, and `--check` exited 0: the retired-instruction gate was
+  green on a tree that did not compile. Each names itself and exits 2. Its rows also moved out of
+  `/tmp/.instructions-rows.$$`, a predictable name in a world-writable directory, into the
+  `mktemp -d` work directory the script already makes, so `TMPDIR` is honoured and two runs cannot
+  collide.
+- `make musl` copies the Harbor binary to a `.tmp` beside it and renames, so an interrupted copy
+  cannot leave a truncated binary for the adapter to upload into every container. The `.tmp` is
+  ignored with the binary it becomes, and `integrations/harbor/README.md` now says `make musl`
+  instead of spelling the same two commands a second time.
 - `bench/run.sh` and `bench/gauntlet.sh` skip a harness that is not on `PATH`, naming it on
   stderr, as `bench/overhead.sh` already did. They invoked each harness by bare name, so a first
   run on a machine without the binary built every task against an empty tree and appended a

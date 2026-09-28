@@ -80,11 +80,14 @@ an `environ_map`, it does not call `getenv`), and use `std.testing.tmpDir` for
 files. Nothing in the suite reaches the network, the clock's timezone, or
 `$HOME`, so a test that needs any of those must say how it neutralizes them.
 
-There is no generated code and no lockfile to regenerate. The only build output
-is `zig-out/`, and `make clean` removes it along with `.zig-cache/`. A bench run
-appends its own line to the committed `bench/results.jsonl`; that file is
-results, not code, so leave the appended line out of a change that did not run a
-benchmark.
+There is no generated code and no lockfile to regenerate. A build writes
+`zig-out/`, and `make clean` removes it along with `.zig-cache/`. `make musl`
+also copies the static binary to `integrations/harbor/microagent-x86_64-linux-musl`
+for the Harbor adapter; that one and the `.tmp` it is renamed from are ignored,
+so nothing under `integrations/` is ever a build output a commit picks up. A
+bench run appends its own line to the committed `bench/results.jsonl`; that file
+is results, not code, so leave the appended line out of a change that did not run
+a benchmark.
 
 ### Fuzz targets
 
