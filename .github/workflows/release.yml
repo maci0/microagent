@@ -52,25 +52,20 @@ jobs:
       - name: unit tests pass
         run: zig build test --summary all
 
+      # The target list and the asset names come from the Makefile, so a
+      # rehearsal with `make release-assets TAG=v0.2.0` builds the same files
+      # this step publishes.
       - name: build and checksum the release assets
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          mkdir -p dist
-          for target in x86_64-linux-musl aarch64-linux-musl x86_64-macos aarch64-macos; do
-            zig build -Dtarget="$target" -Doptimize=ReleaseSmall
-            install -m755 zig-out/bin/microagent "dist/microagent-${GITHUB_REF_NAME}-${target}"
-          done
-          cd dist
-          # sha256sum's "<hex>  <basename>" line is the sidecar `microagent
-          # update` verifies before it replaces anything.
-          for asset in microagent-v*; do
-            case "$asset" in *.sha256) continue;; esac
-            sha256sum "$asset" > "$asset.sha256"
-          done
+          make release-assets
+          make checksums
           # The host-arch asset must be the binary this tag names.
-          got="$("./microagent-${GITHUB_REF_NAME}-x86_64-linux-musl" --version)"
+          got="$("./dist/microagent-${GITHUB_REF_NAME}-x86_64-linux-musl" --version)"
           test "$got" = "microagent ${GITHUB_REF_NAME#v}"
-          ls -l
+          ls -l dist
 
       - name: the changelog has an entry for this tag
         run: |

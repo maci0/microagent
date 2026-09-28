@@ -7,7 +7,14 @@ BIN := zig-out/bin/microagent
 # run cannot install or benchmark a truncated binary.
 .DELETE_ON_ERROR:
 
-.PHONY: help build small musl test test-one fmt fmt-python lint lint-shell lint-python lint-yaml check bench overhead install clean
+.PHONY: help build small musl test test-one fmt fmt-python lint lint-shell lint-python lint-yaml check bench overhead install release-assets checksums clean
+
+# The targets `microagent update` asks for, in the names release.yml publishes.
+# ci.yml rehearses the same list on every push and release.yml publishes it, so
+# the list and the asset names are spelled once, here.
+RELEASE_TARGETS := x86_64-linux-musl aarch64-linux-musl x86_64-macos aarch64-macos
+# A rehearsal leaves TAG empty; a release passes TAG=v0.2.0.
+ASSET_PREFIX = microagent-$(if $(TAG),$(TAG)-)
 
 # `make check` is what CI runs; run it before pushing.
 help:
@@ -23,6 +30,9 @@ help:
 	  'bench AGENTS=...      three coding tasks through each harness' \
 	  'overhead              startup and first-request cost per harness' \
 	  'install               install the binary into ~/.local/bin' \
+	  'release-assets        cross-build every published target into dist/' \
+	  'release-assets TAG=vX.Y.Z  the same, named as release.yml publishes them' \
+	  'checksums             sha256 sidecars for dist/ (after a tagged build)' \
 	  'clean                 remove zig-out and .zig-cache'
 
 build:
@@ -65,7 +75,7 @@ lint-python:
 	ruff format --check --config ruff.toml integrations/harbor
 
 lint-yaml:
-	yamllint -c .yamllint .github/
+	yamllint -c .yamllint .github/workflows/ .github/actions/
 
 # The CI gate, so a formatting, lint or test failure shows up here rather than
 # after a push. Keep these in step with .github/workflows/ci.yml.
@@ -92,6 +102,31 @@ overhead: build
 install: build
 	mkdir -p $(HOME)/.local/bin
 	install -m755 $(BIN) $(HOME)/.local/bin/microagent
+
+# Every published target, cross-built, under the name release.yml publishes and
+# update.zig asks for. Running it without TAG is the rehearsal ci.yml does on
+# every push; `make release-assets TAG=v0.2.0` produces the released names, so
+# a release can be built on a laptop exactly as the tag builds it.
+release-assets:
+	mkdir -p dist
+	@set -e; for target in $(RELEASE_TARGETS); do \
+		$(ZIG) build -Dtarget="$$target" -Doptimize=ReleaseSmall; \
+		install -m755 $(BIN) "dist/$(ASSET_PREFIX)$$target"; \
+	done
+
+# The sha256 sidecar `microagent update` verifies before it replaces anything.
+# Only a tagged build names its assets after a version, so a rehearsal in dist/
+# has nothing to checksum and says so.
+checksums:
+	@test -d dist || { echo "no dist/, run 'make release-assets TAG=v0.2.0' first" >&2; exit 2; }
+	cd dist && set -e && for asset in microagent-v*; do \
+		case "$$asset" in *.sha256) continue;; esac; \
+		test -e "$$asset" || { \
+			echo "no tagged assets in dist/, run 'make release-assets TAG=v0.2.0' first" >&2; \
+			exit 2; \
+		}; \
+		sha256sum "$$asset" > "$$asset.sha256"; \
+	done
 
 clean:
 	rm -rf zig-out .zig-cache

@@ -97,7 +97,7 @@ jobs:
       - name: the Harbor adapter is ruff-clean and ruff-formatted
         run: make lint-python
 
-      - name: the workflows and actions are yamllint-clean
+      - name: the workflows and the shared toolchain action are yamllint-clean
         run: make lint-yaml
 
   release-assets:
@@ -113,14 +113,12 @@ jobs:
 
       - uses: ./.github/actions/setup-zig
 
+      # The target list and the asset names come from the Makefile, the same
+      # ones release.yml builds, so a rename lands in one place.
       - name: build every published target
         run: |
           set -euo pipefail
-          mkdir -p dist
-          for target in x86_64-linux-musl aarch64-linux-musl x86_64-macos aarch64-macos; do
-            zig build -Dtarget="$target" -Doptimize=ReleaseSmall
-            install -m755 zig-out/bin/microagent "dist/microagent-$target"
-          done
+          make release-assets
           ls -l dist
 
       - name: the host binary reports the version in build.zig.zon

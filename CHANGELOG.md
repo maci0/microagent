@@ -33,6 +33,16 @@ release, and `microagent update` moves you to it.
   turn could generate, so a model that failed to stop was billed until something else stopped it;
   `--max-turns` counts turns, not tokens.
 
+### Changed
+
+- CI restores the Zig build caches between runs, from the shared toolchain action, so a push no
+  longer pays for compiling the compiler cache and `std` from scratch on a cold runner. The
+  global cache is moved under `RUNNER_TEMP`, whose default path differs per runner OS.
+- The published targets and their asset names are spelled once, in the Makefile, as
+  `make release-assets TAG=v0.2.0`. `ci.yml` rehearses the release with that target and
+  `release.yml` publishes what it builds, so a release can be built on a laptop the way the tag
+  builds it, and a renamed target no longer has to be renamed in two workflows.
+
 ### Fixed
 
 - A `bash` call can no longer run without a deadline. `timeout_ms` is model output and was taken as

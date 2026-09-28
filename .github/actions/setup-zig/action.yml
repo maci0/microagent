@@ -23,3 +23,27 @@ runs:
     - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
       with:
         zig-version: ${{ steps.zig.outputs.version }}
+
+    # A cold runner compiles the toolchain's own cache and std from scratch,
+    # which is most of a job's wall clock, and the cross build of every
+    # published target in ci.yml is the slowest job in the gate. Both caches
+    # are restored here so every job that installs the toolchain gets them and
+    # no workflow repeats the step. The global cache is moved under
+    # RUNNER_TEMP because its default path differs per runner OS and
+    # platform. The key carries the Zig version and a hash of the sources, so
+    # either changing starts a new cache; the restore prefix falls back to the
+    # most recent cache with the same toolchain, which still holds the
+    # compiler's compiled artifacts.
+    - name: point the global cache at a known path
+      shell: bash
+      run: echo "ZIG_GLOBAL_CACHE_DIR=$RUNNER_TEMP/zig-global" >> "$GITHUB_ENV"
+
+    - name: restore the zig build caches
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          .zig-cache
+          ${{ runner.temp }}/zig-global
+        key: zig-${{ runner.os }}-${{ steps.zig.outputs.version }}-${{ hashFiles('build.zig', 'build.zig.zon', 'src/**') }}
+        restore-keys: |
+          zig-${{ runner.os }}-${{ steps.zig.outputs.version }}-

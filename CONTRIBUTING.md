@@ -27,8 +27,8 @@ version. `make help` lists every target. Source is formatted with `zig fmt`;
 `make fmt` applies it, and `ruff format` does the same for the Harbor adapter.
 The three linters cover what `zig fmt` cannot: the bench
 shell, the Harbor adapter under `integrations/harbor` (rules in
-[ruff.toml](ruff.toml)) and the workflows and actions under `.github` (rules in
-[.yamllint](.yamllint)).
+[ruff.toml](ruff.toml)) and the workflows and the composite toolchain action
+(rules in [.yamllint](.yamllint)).
 
 ## Tests
 
@@ -66,8 +66,17 @@ flags, the environment variables, or the stdout and session-log JSON names the
 before and the after in its entry.
 
 Releases are tags: the release workflow publishes only when the tag names the
-`build.zig.zon` version and that version has a `CHANGELOG.md` entry. Contributors
-do not tag or publish.
+`build.zig.zon` version and that version has a `CHANGELOG.md` entry. The four
+published binaries and their asset names are spelled once, in the
+[Makefile](Makefile), so a release can be built and checksummed on a laptop
+before the tag exists:
+
+```sh
+make release-assets TAG=v0.2.0   # the four cross-built assets, in dist/
+make checksums                   # the sha256 sidecars `update` verifies
+```
+
+Contributors do not tag or publish.
 
 ## Commit messages
 
