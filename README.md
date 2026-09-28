@@ -307,7 +307,8 @@ The version is `build.zig.zon` and nothing else, and [CHANGELOG.md](CHANGELOG.md
 what changed in it. The project is under `0.y`, so the minor takes features, any change to what a
 run does by default, and anything taken away, and the patch takes fixes: upgrading a patch must not
 change an existing invocation. The release workflow refuses a patch tag whose changelog section
-carries an `Added`, a `Changed` or a `Removed` entry, and refuses any tag while `## [Unreleased]`
+carries an `Added`, a `Changed` or a `Removed` entry, refuses a tag whose section is not the five
+Keep a Changelog headings once each in order, and refuses any tag while `## [Unreleased]`
 still holds entries. Breaking changes to the flags, the environment variables or the stdout and
 session-log JSON come with a changelog entry naming the before and the after, before the tag. Only
 the latest release is supported, with no backport window: a fix ships in the next release.

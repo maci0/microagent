@@ -15,7 +15,7 @@ BIN := zig-out/bin/microagent
 export LC_ALL := C
 export TZ := UTC
 
-.PHONY: default help preflight version build small musl test test-sanitize test-one watch fmt fmt-check fmt-python lint lint-versions lint-lock zig-version required-zig-version release-targets check-targets check-assets check-changelog check-unreleased check-release check-reproducible lint-shell lint-python lint-yaml check bench gauntlet instructions overhead install release-assets checksums clean
+.PHONY: default help preflight version build small musl test test-sanitize test-one watch fmt fmt-check fmt-python lint lint-versions lint-lock zig-version required-zig-version release-targets check-targets check-assets check-changelog check-changelog-sections check-unreleased check-release check-reproducible lint-shell lint-python lint-yaml check bench gauntlet instructions overhead install release-assets checksums clean
 
 # The targets `microagent update` asks for, in the names release.yml publishes.
 # ci.yml rehearses the same list on every push and release.yml publishes it, so
@@ -115,7 +115,7 @@ help:
 	  'release-targets       the published target triples, one per line' \
 	  'check-targets         every published target is one `update` asks for' \
 	  'check-assets TAG=...  the assets in dist/ are the ones the tag will publish' \
-	  'check-changelog [VERSION=...]  the changelog entry a tag would publish, and the 0.y policy on it' \
+	  'check-changelog [VERSION=...]  the changelog entry a tag would publish, its shape, and the 0.y policy on it' \
 	  'check-unreleased      the [Unreleased] entry has the five sections, once each, in order' \
 	  'check-release TAG=vX.Y.Z  the tag names build.zig.zon, nothing is stranded unreleased' \
 	  'check-reproducible    every published target rebuilds byte-identical' \
@@ -472,39 +472,37 @@ check-targets:
 	  exit 1; \
 	}
 
-# The shape of the entry a change carries, asked while it is still under
-# [Unreleased]. CONTRIBUTING.md requires the Keep a Changelog sections the file
-# already uses, one of each at most, in their order, and nothing asked it: the
-# check that reads a section is `check-changelog`, and that reads the section a
-# tag names, which by then is a version heading the author no longer sees. A
-# misspelled heading, a second `### Fixed`, or a `### Security` above a
-# `### Fixed` publishes as a release note that renders wrong, and the first
-# person to read it as rendered is whoever pulls the release.
+# The shape of one changelog entry: the Keep a Changelog sections
+# CONTRIBUTING.md requires, one of each at most, in their order. SECTION names
+# the entry, so the same awk asks the one a change is drafted under and the one
+# a tag publishes. A misspelled heading, a second `### Fixed`, or a `### Security`
+# above a `### Fixed` renders as a release note that reads wrong, and the person
+# who reads it rendered is whoever pulls the release.
 #
 # Only the structure is asked, never the presence of an entry. Whether a change
 # is worth an entry is a judgement the person writing it makes, and a gate that
 # refused an empty section would be a gate that fails a commit for a policy
 # rather than for a mistake in the entry that is there.
-check-unreleased:
-	@awk ' \
+check-changelog-sections:
+	@awk -v want="$(SECTION)" ' \
 	  BEGIN { \
 	    split("Added Changed Removed Fixed Security", order, " "); \
 	    for (i = 1; i <= 5; i++) rank[order[i]] = i; \
 	  } \
-	  index($$0, "## [Unreleased]") == 1 { inside = 1; next } \
+	  index($$0, "## [" want "]") == 1 { inside = 1; next } \
 	  /^## / { inside = 0 } \
 	  inside && /^### / { \
 	    name = $$0; sub(/^### /, "", name); sub(/[ \t]+$$/, "", name); \
 	    if (!(name in rank)) { \
-	      printf("CHANGELOG.md [Unreleased] has a \"### %s\" section; the five are Added, Changed, Removed, Fixed, Security\n", name) > "/dev/stderr"; \
+	      printf("CHANGELOG.md [" want "] has a \"### %s\" section; the five are Added, Changed, Removed, Fixed, Security\n", name) > "/dev/stderr"; \
 	      bad = 1; next; \
 	    } \
 	    if (++seen[name] > 1) { \
-	      printf("CHANGELOG.md [Unreleased] has a second \"### %s\" section, and each of the five is used at most once\n", name) > "/dev/stderr"; \
+	      printf("CHANGELOG.md [" want "] has a second \"### %s\" section, and each of the five is used at most once\n", name) > "/dev/stderr"; \
 	      bad = 1; \
 	    } \
 	    if (name != previous && rank[name] <= last) { \
-	      printf("CHANGELOG.md [Unreleased] has \"### %s\" after \"### %s\"; the order is Added, Changed, Removed, Fixed, Security\n", name, previous) > "/dev/stderr"; \
+	      printf("CHANGELOG.md [" want "] has \"### %s\" after \"### %s\"; the order is Added, Changed, Removed, Fixed, Security\n", name, previous) > "/dev/stderr"; \
 	      bad = 1; \
 	    } \
 	    last = rank[name]; previous = name; \
@@ -512,12 +510,21 @@ check-unreleased:
 	  END { exit bad } \
 	' CHANGELOG.md
 
+# The shape of the entry a change carries, asked while it is still under
+# [Unreleased]. `check-changelog` asks the same rules over the section a tag
+# names, which by then is a version heading the author no longer sees.
+check-unreleased:
+	@$(MAKE) --no-print-directory check-changelog-sections SECTION=Unreleased
+
 # The changelog rules release.yml enforces on the tag, and the 0.y policy
 # CONTRIBUTING.md states, runnable before the tag exists. They were shell inside
 # release.yml, so the policy a contributor writes an entry against could only be
 # checked by pushing a tag: a patch carrying an `Added`, a section left under
 # [Unreleased] that the tag would drop, and a version with no notes at all were
-# all first found by a failed release job rather than by a command. VERSION is
+# all first found by a failed release job rather than by a command. The section
+# this target publishes is asked for the same shape `check-unreleased` asks of
+# the entry being drafted, since by the time a tag names a version heading the
+# author who wrote it no longer sees it. VERSION is
 # the version under test and defaults to the one build.zig.zon declares, so the
 # check a contributor runs while drafting an entry asks the same question the
 # tag will.
@@ -538,6 +545,7 @@ check-changelog:
 	  echo "add it with the Keep a Changelog sections the file already uses" >&2; \
 	  exit 1; \
 	}; \
+	$(MAKE) --no-print-directory check-changelog-sections SECTION="$$want"; \
 	printf '%s\n' "$$notes"; \
 	prev="$$(awk -v want="$$want" ' \
 	  /^## \[/ { \

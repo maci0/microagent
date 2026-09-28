@@ -206,8 +206,10 @@ before and the after in its entry. `make check-unreleased` is in `make check`
 and in the push workflow, and asks that shape of the entry while it is still
 under `[Unreleased]`: the five sections, each at most once, in that order. It
 does not ask whether the change is worth an entry, which is the writer's call.
-The 0.y policy and the rules a tag is refused for are `make check-changelog`
-and `make check-release`, below.
+`make check-changelog` asks the same five sections of the entry a tag names, so
+the release note a consumer reads is checked for its shape after the heading has
+become a version and the author no longer sees it. The 0.y policy and the rules
+a tag is refused for are `make check-changelog` and `make check-release`, below.
 
 Releases are tags: the release workflow publishes only when the tag names the
 `build.zig.zon` version, that version has a `CHANGELOG.md` entry, and the bump
@@ -244,13 +246,15 @@ The three rules a tag is refused for are commands here rather than shell inside
 `release.yml`, so a release note is written against something runnable:
 
 ```sh
-make check-changelog              # the section for the version build.zig.zon declares, and the 0.y policy on it
+make check-changelog              # the section for the version build.zig.zon declares, its shape, and the 0.y policy on it
 make check-changelog VERSION=0.2.1
 make check-release TAG=v0.2.1     # what a tag has to satisfy: the version, and nothing left under [Unreleased]
 ```
 
 `make check-changelog` prints the section it checked, which is what a release
-publishes as the notes. `check-release` is the gate as a whole, and it refuses
+publishes as the notes, and refuses that section on the same five headings
+`check-unreleased` asks of a draft. `check-release` is the gate as a whole, and
+it refuses
 an entry still parked under `[Unreleased]`, since the tag would drop it from
 the published notes and land it in the next release under a version nobody ran.
 Run it after the version bump and the entry is written, before the tag is cut.
