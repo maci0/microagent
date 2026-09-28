@@ -933,11 +933,24 @@ test "a count that is absent, null or not a number is left to the caller" {
 // is missing the argument it needs, not a call whose argument is the number.
 test "a string argument is read only from a string" {
     try std.testing.expectEqualStrings("x", str(.{ .string = "x" }).?);
+    // An empty string is still the string the model sent, so a length check
+    // that reads it as missing turns `""` into a refusal no path asked for.
+    try std.testing.expectEqualStrings("", str(.{ .string = "" }).?);
+    // Every other shape the wire can carry, including the two the string arm
+    // is not the only candidate for: a number is what a bare `timeout` parses
+    // to, and a container is what a nested argument arrives as.
+    for ([_]std.json.Value{
+        std.json.Value{ .integer = 3 },
+        std.json.Value{ .float = 1.5 },
+        std.json.Value{ .number_string = "3" },
+        std.json.Value{ .bool = false },
+        std.json.Value{ .null = {} },
+        std.json.Value{ .array = std.json.Array.init(std.testing.allocator) },
+        std.json.Value{ .object = .empty },
+    }) |value| {
+        try std.testing.expect(str(value) == null);
+    }
     try std.testing.expect(str(null) == null);
-    try std.testing.expect(str(null) == null);
-    try std.testing.expect(str(std.json.Value{ .integer = 3 }) == null);
-    try std.testing.expect(str(std.json.Value{ .bool = false }) == null);
-    try std.testing.expect(str(std.json.Value{ .null = {} }) == null);
 }
 
 // The escaper asks `utf8SequenceLen` what to copy, and 0 is the answer that

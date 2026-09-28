@@ -503,3 +503,40 @@ test "a Retry-After date is read as the instant it names" {
     // it is redundant, and a server a second off writes the wrong one.
     try std.testing.expectEqual(@as(?i64, 1_792_567_680), httpDateEpochSeconds("Mon, 21 Oct 2026 07:28:00 GMT"));
 }
+
+// The dates above name three months of the twelve, so a table reordered, a
+// month dropped or the case-insensitive match narrowed to a byte comparison
+// would pass them all and misread the rest. Every name is pinned to the number
+// `daysFromCivil` counts it by: the twelfth day of each month, whose epoch is
+// the number of days from the epoch to it, so an off-by-one in either the table
+// or the arithmetic moves the answer rather than being asserted twice.
+test "every month name reads as the month the epoch counts" {
+    for (calendar_months, 1..) |name, number| {
+        const month: u32 = @intCast(number);
+        // A year with no 29 February, so February's own length does not enter.
+        const header = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "Thu, 12 {s} 2021 00:00:00 GMT",
+            .{name},
+        );
+        defer std.testing.allocator.free(header);
+        const want = daysFromCivil(2021, month, 12) * @as(i64, std.time.s_per_day);
+        try std.testing.expectEqual(@as(?i64, want), httpDateEpochSeconds(header));
+        // The name a sender is allowed to spell any other way is still this
+        // month, which a byte comparison against the table would refuse.
+        for ([_]*const fn (u8) u8{ std.ascii.toLower, std.ascii.toUpper }) |casing| {
+            var recased: [3]u8 = undefined;
+            for (name, 0..) |c, i| recased[i] = casing(c);
+            const recased_header = try std.fmt.allocPrint(
+                std.testing.allocator,
+                "Thu, 12 {s} 2021 00:00:00 GMT",
+                .{recased},
+            );
+            defer std.testing.allocator.free(recased_header);
+            try std.testing.expectEqual(@as(?i64, want), httpDateEpochSeconds(recased_header));
+        }
+    }
+    // A name the table does not carry is not a month, whatever it looks like.
+    for ([_][]const u8{ "", "Ju", "Junx", "Jun1", "Sept", "0" }) |name|
+        try std.testing.expectEqual(@as(?u32, null), monthFromName(name));
+}

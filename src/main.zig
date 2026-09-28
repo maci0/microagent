@@ -4812,10 +4812,46 @@ test "a conversation that cannot be compacted is sent as it stands" {
 }
 
 test "a tool call index past the cap is dropped, not allocated" {
+    // The cap is 64 calls, so index 63 is the last one the run keeps and 64 is
+    // the first it drops. A far index would pass under a cap placed anywhere in
+    // four orders of magnitude; the pair either side of the number is what pins
+    // it, and a cap one too high or one too low keeps the wrong one of them.
+    // Every call carries an id and an object argument, so the run's own
+    // unusable-call sweep cannot empty the list and hide which side of the cap
+    // the call fell.
+    for ([_]struct { index: u32, slots: usize }{
+        .{ .index = 0, .slots = 1 },
+        .{ .index = 63, .slots = 64 },
+        .{ .index = 64, .slots = 0 },
+        .{ .index = 1000, .slots = 0 },
+        .{ .index = 4000000000, .slots = 0 },
+    }) |case| {
+        var sink = FrameSink.init(std.testing.allocator);
+        defer sink.deinit();
+        const frame = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "{{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":{d},\"id\":\"call_1\",\"function\":{{\"name\":\"bash\",\"arguments\":\"{{}}\"}}}}]}}}}]}}",
+            .{case.index},
+        );
+        defer std.testing.allocator.free(frame);
+        try sink.feed(frame);
+        // An index sizes the list, so the last call kept sits at its own index
+        // and the slots below it are the placeholders the sweep drops.
+        try std.testing.expectEqual(case.slots, sink.calls.items.len);
+        dropUnusableCalls(sink.run.allocator(), &sink.calls);
+        try std.testing.expectEqual(@as(usize, if (case.index >= max_tool_calls) 0 else 1), sink.calls.items.len);
+        if (case.slots != 0) try std.testing.expectEqualStrings("call_1", sink.calls.items[0].id);
+    }
+
+    // An index past the cap is dropped before the slots below it are filled, so
+    // it allocates nothing: the list a four-billion index would otherwise size
+    // is never built. The run arena is the counter, because a list that grew
+    // would grow it.
     var sink = FrameSink.init(std.testing.allocator);
     defer sink.deinit();
     try sink.feed("{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":4000000000,\"function\":{\"name\":\"bash\"}}]}}]}");
     try std.testing.expectEqual(@as(usize, 0), sink.calls.items.len);
+    try std.testing.expectEqual(@as(usize, 0), sink.run.queryCapacity());
 }
 
 // The provider stream is the largest untrusted input the binary parses: every

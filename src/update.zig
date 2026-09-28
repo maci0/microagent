@@ -1196,6 +1196,78 @@ test "update: a release page that is not https on a GitHub host is not printed" 
     try std.testing.expect(!trustedGithubUrl("https://objects.githubusercontent.com.evil.com/x"));
 }
 
+// The allowlist is the one gate between a name this run built and a host the
+// bytes come from, so each of its refusals is pinned here rather than left to
+// the release page that happens to exercise it. The three ways a url names a
+// host besides the host itself are a userinfo, a port and a case, and the two
+// suffix rules differ over whether the bare domain counts.
+test "update: only a github host is fetched from, however the url spells it" {
+    // The scheme is compared case-insensitively, and a host is a DNS name
+    // where case is not significant, so both spellings name the same host.
+    try std.testing.expect(trustedGithubUrl("HTTPS://GITHUB.COM/maci0/microagent"));
+    try std.testing.expect(trustedGithubUrl("https://Release-Assets.GitHubUserContent.com/x"));
+
+    // A subdomain of a trusted domain is trusted; the bare second-level domain
+    // is not, because `githubusercontent.com` itself serves nothing this run
+    // should fetch from, and the rule is a suffix with the dot in it.
+    try std.testing.expect(trustedGithubUrl("https://codeload.github.com/x"));
+    try std.testing.expect(!trustedGithubUrl("https://githubusercontent.com/x"));
+    try std.testing.expect(!trustedGithubUrl("https://evil.githubusercontent.com.evil.com/x"));
+    try std.testing.expect(!trustedGithubUrl("https://notgithub.com/x"));
+    try std.testing.expect(!trustedGithubUrl("https://github.co/x"));
+
+    // A port is part of the host field and a non-empty one of digits leaves
+    // the host it names; an empty or non-numeric one is a url no parser reads
+    // the way this one would have to.
+    try std.testing.expect(trustedGithubUrl("https://github.com:443/maci0/microagent"));
+    try std.testing.expect(trustedGithubUrl("https://api.github.com:8443/x"));
+    try std.testing.expect(!trustedGithubUrl("https://github.com:/x"));
+    try std.testing.expect(!trustedGithubUrl("https://github.com:443abc/x"));
+    try std.testing.expect(!trustedGithubUrl("https://github.com:443@evil.com/x"));
+
+    // Userinfo is refused outright, and so is a host carrying the byte that
+    // separates a path from a query, which is where a parser that disagreed
+    // with this one would read the trusted name from.
+    for ([_][]const u8{
+        "https://user@github.com/x",
+        "https://user:pass@github.com/x",
+        "https://github.com\\@evil.com/x",
+        "https://github.com x",
+        "https://github.com\tx",
+        "https://github.com\n/x",
+        // A line ending past the host is the one a host comparison cannot see:
+        // the host field still reads `github.com`, and the header the request
+        // is built from carries whatever followed it.
+        "https://github.com/x\r\nHost: evil.example",
+        "https://github.com/x\nHost: evil.example",
+    }) |url| {
+        if (trustedGithubUrl(url)) {
+            std.debug.print("trusted a url carrying userinfo or a separator: {s}\n", .{url});
+            return error.TestUnexpectedResult;
+        }
+    }
+
+    // A url with no scheme, an empty one, and one that is only the scheme.
+    try std.testing.expect(!trustedGithubUrl(""));
+    try std.testing.expect(!trustedGithubUrl("https://"));
+    try std.testing.expect(!trustedGithubUrl("https:///maci0/microagent"));
+    try std.testing.expect(!trustedGithubUrl("http://github.com/x"));
+    try std.testing.expect(!trustedGithubUrl("//github.com/x"));
+    try std.testing.expect(!trustedGithubUrl("github.com/x"));
+
+    // A host past the DNS name's own 253-byte ceiling is refused rather than
+    // compared out of bounds, and one exactly at it is still read.
+    var long_host: [max_host_len + 1]u8 = undefined;
+    const suffix = ".github.com";
+    @memset(long_host[0 .. max_host_len - suffix.len], 'a');
+    @memcpy(long_host[max_host_len - suffix.len .. max_host_len], suffix);
+    var long_url: [max_host_len + 16]u8 = undefined;
+    const at_max = try std.fmt.bufPrint(&long_url, "https://{s}/x", .{long_host[0..max_host_len]});
+    try std.testing.expect(trustedGithubUrl(at_max));
+    const over_max = try std.fmt.bufPrint(&long_url, "https://{s}/x", .{long_host[0 .. max_host_len + 1]});
+    try std.testing.expect(!trustedGithubUrl(over_max));
+}
+
 // The subcommand's command line is the one thing about `run` that can be read
 // without a socket, and it decides whether the run fetches an asset at all.
 test "update: the command line reads in either flag form, and help and version win" {
