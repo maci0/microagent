@@ -1574,7 +1574,7 @@ fn runTurn(
     // A turn the budget cut off is not a turn: half a tool call's arguments is
     // not a tool call, so nothing of it is appended and the run ends here with
     // the reason already on stderr.
-    var result = streamChat(client, io, gpa, arena, opts, body, budget) catch |err| switch (err) {
+    var result = streamChat(client, io, gpa, arena, opts, body, budget, msgs.items) catch |err| switch (err) {
         error.BudgetExhausted => return .cut_off,
         else => return err,
     };
@@ -1705,6 +1705,7 @@ fn streamChat(
     opts: Options,
     body: []const u8,
     budget: Budget,
+    msgs: []const u8,
 ) !chat_mod.ChatResult {
     const url = try std.fmt.allocPrint(arena, "{s}/chat/completions", .{std.mem.trimEnd(u8, opts.base_url, "/")});
     const uri = std.Uri.parse(url) catch return error.InvalidUrl;
@@ -1727,6 +1728,14 @@ fn streamChat(
     var decompress: std.http.Decompress = undefined;
     var decompress_buffer: [std.compress.flate.max_window_len]u8 = undefined;
 
+    // The optional request fields are the ones a provider may refuse without
+    // the request being wrong: `reasoning` is ours, not theirs, and NVIDIA's
+    // NIM answers a request carrying it with
+    // `400 Validation: Unsupported parameter(s): reasoning`. One retry without
+    // them, on a 400, is the difference between "this provider cannot run the
+    // harness" and a run.
+    var body_now = body;
+    var dropped_optional = false;
     var attempt: u32 = 0;
     // A rate limit, or a connection that died before the request was on the
     // wire, is the provider's weather rather than the review's verdict: retry
@@ -1753,8 +1762,8 @@ fn streamChat(
         };
         req_slot = req;
         var open = &req_slot.?;
-        open.transfer_encoding = .{ .content_length = body.len };
-        open.sendBodyComplete(@constCast(body)) catch |err| {
+        open.transfer_encoding = .{ .content_length = body_now.len };
+        open.sendBodyComplete(@constCast(body_now)) catch |err| {
             if (worthAnotherAttempt(.sending, err) and waitBeforeRetry(io, arena, shown_url, attempt, "sending the request body to", err, budget)) continue;
             return err;
         };
@@ -1772,6 +1781,17 @@ fn streamChat(
         };
         if (debug_enabled) std.debug.print("[mdebug] head status={d} enc={s}\n", .{ @intFromEnum(response.head.status), @tagName(response.head.content_encoding) });
         if (response.head.status != .ok) {
+            // A provider that refuses one of our optional fields gets one more
+            // request without them, rather than a failed run: the field is a
+            // preference, not a requirement.
+            if (response.head.status == .bad_request and !dropped_optional and opts.reasoning_effort != null) {
+                dropped_optional = true;
+                var plain = opts;
+                plain.reasoning_effort = null;
+                body_now = try buildBody(arena, plain, msgs);
+                net.note(io, arena, "microagent: {s} refused the optional request fields (HTTP 400); retrying once without them\n", .{shown_url});
+                continue;
+            }
             if (net.retryableStatus(response.head.status) and attempt < max_attempts) {
                 // A rate limit carries the wait the provider wants, and its own
                 // backoff is the wrong one to spend: this run's schedule is 1 s,
