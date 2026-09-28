@@ -508,13 +508,14 @@ fn budgetSeconds(value: []const u8) ?u64 {
     return std.fmt.parseInt(u64, std.mem.trim(u8, value, " \t\r\n"), 10) catch null;
 }
 
-/// How much of a value an error message quotes back. Cut on bytes, not on a
-/// codepoint boundary: the text lands on stderr, where a partial codepoint is
-/// a replaced byte rather than invalid UTF-8 on the wire.
+/// How much of a value an error message quotes back, cut on a codepoint
+/// boundary like every other truncation here: a partial codepoint is a
+/// replacement character in the middle of a diagnostic, and the value being
+/// quoted is whatever the user typed.
 const quoted_value_bytes = 80;
 
 fn clip(s: []const u8) []const u8 {
-    return s[0..@min(s.len, quoted_value_bytes)];
+    return clamp(s, quoted_value_bytes);
 }
 
 /// The option a flag that takes a value sets.
@@ -1546,10 +1547,9 @@ fn applyDeclared(
     const delta = choice.delta orelse return true;
 
     if (delta.content) |text| {
-        if (result.content.items.len < max_response_bytes) {
-            try result.content.appendSlice(gpa, text);
-            try out_buf.appendSlice(gpa, text);
-        }
+        const kept = clamp(text, max_response_bytes -| result.content.items.len);
+        try result.content.appendSlice(gpa, kept);
+        try out_buf.appendSlice(gpa, kept);
     }
     if (delta.tool_calls) |tcs| {
         for (tcs) |tc| {
@@ -1576,7 +1576,7 @@ fn applyDeclared(
                     call.name = owned;
                 }
                 if (f.arguments) |v| {
-                    if (call.args.items.len < max_response_bytes) try call.args.appendSlice(gpa, v);
+                    try call.args.appendSlice(gpa, clamp(v, max_response_bytes -| call.args.items.len));
                 }
             }
         }
@@ -1643,10 +1643,9 @@ fn applyFrame(
     if (delta != .object) return;
 
     if (str(delta.object.get("content"))) |text| {
-        if (result.content.items.len < max_response_bytes) {
-            try result.content.appendSlice(gpa, text);
-            try out_buf.appendSlice(gpa, text);
-        }
+        const kept = clamp(text, max_response_bytes -| result.content.items.len);
+        try result.content.appendSlice(gpa, kept);
+        try out_buf.appendSlice(gpa, kept);
     }
     if (delta.object.get("tool_calls")) |tcs| if (tcs == .array) {
         for (tcs.array.items) |tc| {
@@ -1674,7 +1673,7 @@ fn applyFrame(
                     call.name = owned;
                 }
                 if (str(f.object.get("arguments"))) |v| {
-                    if (call.args.items.len < max_response_bytes) try call.args.appendSlice(gpa, v);
+                    try call.args.appendSlice(gpa, clamp(v, max_response_bytes -| call.args.items.len));
                 }
             };
         }
@@ -2921,6 +2920,21 @@ test "clamp keeps short strings intact" {
     try std.testing.expectEqualStrings("", clamp("abc", 0));
 }
 
+// A value quoted back in an error is whatever the user typed, and the quote is
+// cut at a fixed length, so the cut has to be on a character boundary like
+// every other one here.
+test "a quoted value keeps whole characters" {
+    try std.testing.expectEqualStrings("plain", clip("plain"));
+    const long = "日本語のテキスト" ** 10;
+    const quoted = clip(long);
+    try std.testing.expect(quoted.len <= quoted_value_bytes);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(quoted));
+    try std.testing.expect(std.mem.startsWith(u8, long, quoted));
+    // Three-byte characters throughout: the cut is on one of them, so the
+    // quote holds whole ones and no more than the byte budget allows.
+    try std.testing.expectEqualStrings("日" ** 26, clip("日" ** 40));
+}
+
 test "a cut never leaves half a code point in the request body" {
     // The bytes go into the JSON body verbatim, so anything clamp keeps has to
     // be a whole character: source files are full of multi-byte text and a
@@ -3291,6 +3305,72 @@ test "a response that never stops sending cannot grow the run without bound" {
     try std.testing.expectEqual(@as(usize, 0), out_buf.items.len);
     try std.testing.expectEqualStrings("bash", calls.items[0].name);
     try std.testing.expectEqualStrings("{}", calls.items[0].args.items);
+}
+
+// The ceiling is a limit on what a turn holds, so the last delta that crosses
+// it is cut at the boundary rather than appended whole. Appended whole it
+// overshoots the number the constant states, and the cut it needs happens
+// wherever the frame happens to end: mid-character, in the text the model
+// reads and in the arguments it dispatches.
+test "the response ceiling is exact, and lands on a code point boundary" {
+    const gpa = std.testing.allocator;
+    // Three characters, nine bytes: the room left for them is what decides
+    // where the cut lands.
+    const cjk = "\\u65e5\\u672c\\u8a9e";
+
+    var sink = FrameSink.init(gpa);
+    defer sink.deinit();
+    const arena = sink.run.allocator();
+    // A first delta that leaves one byte of room, then one that does not fit.
+    try sink.feed(try contentFrame(arena, "x" ** (max_response_bytes - 1)));
+    try std.testing.expectEqual(max_response_bytes - 1, sink.result.content.items.len);
+
+    try sink.feed(try contentFrame(arena, cjk));
+    // "日" is three bytes, so one byte of room takes none of it.
+    try std.testing.expectEqual(max_response_bytes - 1, sink.result.content.items.len);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(sink.result.content.items));
+    // What the terminal got is the same bytes the turn carries.
+    try std.testing.expectEqualSlices(u8, sink.result.content.items, sink.out_buf.items);
+
+    // Enough room for two of the three: the cut is at the boundary, not short
+    // of it, and never inside a character.
+    var roomy = FrameSink.init(gpa);
+    defer roomy.deinit();
+    const roomy_arena = roomy.run.allocator();
+    try roomy.feed(try contentFrame(roomy_arena, "x" ** (max_response_bytes - 6)));
+    try roomy.feed(try contentFrame(roomy_arena, cjk));
+    try std.testing.expectEqual(max_response_bytes, roomy.result.content.items.len);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(roomy.result.content.items));
+    // The two that fit, and not the head of the third the cut gave back.
+    try std.testing.expectEqualStrings("\u{65e5}\u{672c}", roomy.result.content.items[max_response_bytes - 6 ..]);
+}
+
+// The same boundary on the other side of a frame: arguments are JSON the next
+// turn dispatches, and half a character in them is a parse error the model is
+// told about as its own mistake.
+test "streamed arguments stop at the ceiling on a code point boundary" {
+    const gpa = std.testing.allocator;
+    var sink = FrameSink.init(gpa);
+    defer sink.deinit();
+    const arena = sink.run.allocator();
+
+    // A run one byte short of a three-byte character, so the ceiling falls
+    // where a plain byte count would take half of one.
+    const text = try std.mem.concat(arena, u8, &.{ "x" ** (max_response_bytes - 1), "\\u672c" });
+
+    try sink.feed(try argsFrame(arena, text));
+    try std.testing.expectEqual(max_response_bytes - 1, sink.calls.items[0].args.items.len);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(sink.calls.items[0].args.items));
+}
+
+/// A frame whose delta carries `text`, which the tests above build out of ASCII
+/// and `\uXXXX` escapes so it needs no escaping of its own.
+fn contentFrame(gpa: std.mem.Allocator, text: []const u8) ![]u8 {
+    return std.fmt.allocPrint(gpa, "{{\"choices\":[{{\"delta\":{{\"content\":\"{s}\"}}}}]}}", .{text});
+}
+
+fn argsFrame(gpa: std.mem.Allocator, text: []const u8) ![]u8 {
+    return std.fmt.allocPrint(gpa, "{{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":0,\"function\":{{\"arguments\":\"{s}\"}}}}]}}}}]}}", .{text});
 }
 
 test "usage counters land on the result" {

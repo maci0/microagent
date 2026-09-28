@@ -23,6 +23,16 @@ const max_asset_bytes: usize = 256 * 1024 * 1024;
 /// How much of a `--repo` argument an error message quotes back.
 const repo_in_error_bytes: usize = 80;
 
+/// A `--repo` short of the quote, cut on a codepoint boundary: the value is
+/// whatever the user typed, and a partial codepoint in a diagnostic reads as a
+/// replacement character in the middle of the flag they got wrong.
+fn quoteRepo(repo: []const u8) []const u8 {
+    if (repo.len <= repo_in_error_bytes) return repo;
+    var end = repo_in_error_bytes;
+    while (end > 0 and repo[end] & 0xc0 == 0x80) end -= 1;
+    return repo[0..end];
+}
+
 pub const Verdict = enum {
     current,
     missing_asset,
@@ -644,7 +654,7 @@ fn runChecked(
     // A value the flag cannot carry is a usage error, so it prints the reason
     // and the usage text together like every other one.
     const api = releaseApiUrl(&api_buf, repo) catch
-        return updateUsageError(io, "want owner/repo, not a URL (got '{s}')", .{repo[0..@min(repo.len, repo_in_error_bytes)]});
+        return updateUsageError(io, "want owner/repo, not a URL (got '{s}')", .{quoteRepo(repo)});
 
     var client: std.http.Client = .{ .allocator = gpa, .io = io };
     defer client.deinit();
@@ -972,6 +982,21 @@ test "update: a malformed body and a failed allocation are not the same error" {
         error.OutOfMemory,
         parseRelease(failing.allocator(), "{\"tag_name\":\"v1\"}"),
     );
+}
+
+test "update: a repo quoted back in an error keeps whole characters" {
+    // A `--repo` is whatever the user typed, and the quote is cut at a fixed
+    // length, so a cut that lands inside a multi-byte character would put a
+    // replacement character in the middle of the flag they got wrong.
+    try std.testing.expectEqualStrings("maci0/microagent", quoteRepo("maci0/microagent"));
+    const long = "日本語/" ++ "x" ** 200;
+    const quoted = quoteRepo(long);
+    try std.testing.expect(quoted.len <= repo_in_error_bytes);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(quoted));
+    try std.testing.expect(std.mem.startsWith(u8, long, quoted));
+    // Three-byte characters throughout: the cut is on one of them, so the
+    // quote holds whole ones and no more than the byte budget allows.
+    try std.testing.expectEqualStrings("日" ** 26, quoteRepo("日" ** 40));
 }
 
 test "update: comparison and install lines use the release wording" {
