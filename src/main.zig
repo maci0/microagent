@@ -57,6 +57,11 @@ const Options = struct {
     /// PEM file to trust instead of scanning the system store. Set by
     /// --ca-bundle, MICROAGENT_CA_BUNDLE or SSL_CERT_FILE.
     ca_bundle: []const u8 = "",
+    /// Directory the session log is written to, one JSONL record per model
+    /// response, so a monitor (toktop) can read this run's tokens per second
+    /// while it is still going. Set by MICROAGENT_SESSION_DIR, else
+    /// $HOME/.microagent/sessions; an empty value writes nothing.
+    session_dir: []const u8 = "",
 };
 
 const ToolCall = struct {
@@ -103,6 +108,7 @@ pub fn main(init: std.process.Init) !void {
     }
     if (init.environ_map.get("MICROAGENT_BUDGET_SECONDS")) |v|
         opts.budget_s = std.fmt.parseInt(u64, v, 10) catch return usageError(io, "MICROAGENT_BUDGET_SECONDS must be a number");
+    opts.session_dir = sessionDir(init);
 
     var i: usize = 1;
     while (i < args.items.len) : (i += 1) {
@@ -278,6 +284,8 @@ fn run(
     msgs: *std.ArrayList(u8),
 ) !usize {
     const started = Io.Timestamp.now(io, .awake).nanoseconds;
+    const session = openSession(io, gpa, arena, opts);
+    defer closeSession(io, session);
     var turn: usize = 0;
     var usage: Usage = .{};
     while (turn < opts.max_turns) : (turn += 1) {
@@ -291,15 +299,19 @@ fn run(
                 announce(io, arena, "microagent: budget of {d}s reached after {d} turn(s); one final turn\n", .{ budget, turn });
                 try appendMessage(gpa, msgs, "user", final_push);
                 const body = try buildBody(arena, opts, msgs.items);
+                const asked = Io.Timestamp.now(io, .awake).nanoseconds;
                 var result = try streamChat(client, io, arena, opts, body);
                 try finishTurn(io, arena, gpa, msgs, &result, &usage);
+                writeSessionRecord(io, arena, session, elapsedMs(io, asked), &result);
                 return turn + 1;
             }
         }
         try compactMessages(gpa, msgs, arena);
         const body = try buildBody(arena, opts, msgs.items);
+        const asked = Io.Timestamp.now(io, .awake).nanoseconds;
         var result = try streamChat(client, io, arena, opts, body);
         try finishTurn(io, arena, gpa, msgs, &result, &usage);
+        writeSessionRecord(io, arena, session, elapsedMs(io, asked), &result);
         if (result.calls.items.len == 0) return turn + 1;
 
         // One turn left: say so, rather than ending on a truncated answer that
@@ -316,6 +328,83 @@ fn run(
 fn announce(io: Io, arena: std.mem.Allocator, comptime fmt: []const u8, args: anytype) void {
     const msg = std.fmt.allocPrint(arena, fmt, args) catch return;
     Io.File.stderr().writeStreamingAll(io, msg) catch {};
+}
+
+/// Where the session log goes: MICROAGENT_SESSION_DIR, else a directory beside
+/// the other per-run state under $HOME. An empty value turns the log off, and
+/// so does a home that is not there.
+fn sessionDir(init: std.process.Init) []const u8 {
+    if (init.environ_map.get("MICROAGENT_SESSION_DIR")) |v| return v;
+    const home = init.environ_map.get("HOME") orelse return "";
+    return std.fmt.allocPrint(init.arena.allocator(), "{s}/.microagent/sessions", .{home}) catch "";
+}
+
+/// One session log per run, one JSONL record per model response, which is what
+/// a monitor (toktop) reads to report this run's tokens per second while it is
+/// still going. Nothing depends on it, so every failure here is a null rather
+/// than an error: a read-only home costs a run nothing.
+const Session = struct {
+    file: Io.File,
+    cwd: []const u8,
+    model: []const u8,
+};
+
+fn openSession(io: Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, opts: Options) ?Session {
+    if (opts.session_dir.len == 0) return null;
+    // Every record names the directory it ran in. That is what attributes the
+    // record to one review: the store is machine-wide, and a monitor skips a
+    // record that names no directory rather than billing it to whichever
+    // watcher happens to read the store.
+    const cwd = std.Io.Dir.cwd().realPathFileAlloc(io, ".", gpa) catch return null;
+    std.Io.Dir.cwd().createDirPath(io, opts.session_dir) catch return null;
+    const stamp = Io.Clock.real.now(io).nanoseconds;
+    const path = std.fmt.allocPrint(arena, "{s}/{d}.jsonl", .{ opts.session_dir, stamp }) catch return null;
+    const file = std.Io.Dir.createFileAbsolute(io, path, .{}) catch return null;
+    return .{ .file = file, .cwd = cwd, .model = opts.model };
+}
+
+fn closeSession(io: Io, session: ?Session) void {
+    if (session) |s| s.file.close(io);
+}
+
+/// How long the model spent on one response. It travels in the record because
+/// a monitor's polling gap covers the tools as well: dividing a turn's tokens
+/// by that gap reports a rate for a generation that was never continuous.
+fn elapsedMs(io: Io, since: i96) u64 {
+    const delta = Io.Timestamp.now(io, .awake).nanoseconds - since;
+    if (delta <= 0) return 0;
+    return @intCast(@divTrunc(delta, std.time.ns_per_ms));
+}
+
+fn writeSessionRecord(io: Io, arena: std.mem.Allocator, session: ?Session, elapsed_ms: u64, result: *const ChatResult) void {
+    const s = session orelse return;
+    const ts_ms: i64 = @intCast(@divTrunc(Io.Clock.real.now(io).nanoseconds, std.time.ns_per_ms));
+    const line = sessionRecord(arena, ts_ms, s.cwd, s.model, elapsed_ms, result) catch return;
+    s.file.writeStreamingAll(io, line) catch {};
+}
+
+/// One response's line: this response's own counters, not the run's cumulative
+/// ones, so a reader sums them; the directory it ran in; and the model time it
+/// took. The keys are the OpenAI-shaped ones toktop already reads by name.
+fn sessionRecord(
+    allocator: std.mem.Allocator,
+    ts_ms: i64,
+    cwd: []const u8,
+    model: []const u8,
+    elapsed_ms: u64,
+    result: *const ChatResult,
+) ![]u8 {
+    var jb = JsonBuf.init(allocator);
+    const w = jb.writer();
+    try w.print("{{\"ts\":{d},\"cwd\":", .{ts_ms});
+    try writeJsonString(w, cwd);
+    try w.writeAll(",\"model\":");
+    try writeJsonString(w, model);
+    try w.print(",\"elapsed_ms\":{d},\"usage\":{{\"prompt_tokens\":{d},\"completion_tokens\":{d},\"reasoning_tokens\":{d},\"total_tokens\":{d}", .{
+        elapsed_ms, result.prompt_tokens, result.completion_tokens, result.reasoning_tokens, result.total_tokens,
+    });
+    try w.writeAll("}}\n");
+    return jb.items();
 }
 
 fn buildBody(arena: std.mem.Allocator, opts: Options, messages: []const u8) ![]u8 {
@@ -1042,6 +1131,42 @@ test "usage counters land on the result" {
     try std.testing.expectEqual(@as(u64, 22), result.completion_tokens);
     try std.testing.expectEqual(@as(u64, 33), result.total_tokens);
     try std.testing.expectEqual(@as(u64, 7), result.reasoning_tokens);
+}
+
+// A record a monitor reads has to be one JSON object with this response's own
+// counters, the directory that attributes it, and the model time a rate is
+// taken over.
+test "session record carries one response's counters, cwd and model time" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    var result: ChatResult = .{};
+    result.prompt_tokens = 910;
+    result.completion_tokens = 18;
+    result.reasoning_tokens = 0;
+    result.total_tokens = 928;
+
+    const line = try sessionRecord(arena, 1759000000000, "/home/me/proj", "deepseek/deepseek-v4-flash", 1234, &result);
+    try std.testing.expectEqualStrings(
+        "{\"ts\":1759000000000,\"cwd\":\"/home/me/proj\",\"model\":\"deepseek/deepseek-v4-flash\"," ++
+            "\"elapsed_ms\":1234,\"usage\":{\"prompt_tokens\":910,\"completion_tokens\":18," ++
+            "\"reasoning_tokens\":0,\"total_tokens\":928}}\n",
+        line,
+    );
+}
+
+test "session record escapes a directory that needs it" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    var result: ChatResult = .{ .completion_tokens = 4 };
+    const line = try sessionRecord(state.allocator(), 1, "/tmp/a\"b\\c", "m", 5, &result);
+    try std.testing.expectEqualStrings(
+        "{\"ts\":1,\"cwd\":\"/tmp/a\\\"b\\\\c\",\"model\":\"m\"," ++
+            "\"elapsed_ms\":5,\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":4," ++
+            "\"reasoning_tokens\":0,\"total_tokens\":0}}\n",
+        line,
+    );
 }
 
 test "compaction elides old tool output and keeps the recent turns" {

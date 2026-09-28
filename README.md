@@ -62,6 +62,23 @@ Token counters are cumulative for the run, which is the shape gauntlet's usage r
 maximum from. Tool activity goes to stderr as a one-line gutter (`⏺ read src/main.zig`) so it never
 pollutes the agent's answer.
 
+### Session log
+
+Each run appends one JSONL record per model response to `~/.microagent/sessions/<unix-ns>.jsonl`
+(`MICROAGENT_SESSION_DIR` moves it, an empty value turns it off), so a monitor can follow the run
+while it is still going:
+
+```json
+{"ts":1790608347342,"cwd":"/home/maci/Desktop/Projects/microagent","model":"deepseek/deepseek-v4-flash","elapsed_ms":1448,"usage":{"prompt_tokens":998,"completion_tokens":19,"reasoning_tokens":16,"total_tokens":1017}}
+```
+
+One response's own counters, not the run's cumulative ones, plus the directory the run works in and
+how long the model spent on that response. `elapsed_ms` is the model's time, so a reader computes
+tokens per second the model actually generated instead of over a gap that includes tool calls.
+[toktop](https://github.com/maci0/toktop) reads this store by default; the counters and the
+directory are the ordinary OpenAI keys and `cwd`, so any reader of agent transcripts works. Nothing
+in the log is prompt or output text.
+
 ## Tools
 
 Six tools, all of them thin wrappers over tools you already have:
