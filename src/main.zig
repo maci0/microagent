@@ -854,14 +854,21 @@ fn sessionRecord(
     return jb.items();
 }
 
+/// The request body, with `messages` last.
+///
+/// Prompt caching keys on the exact byte prefix of a request, so a turn's body
+/// has to be the previous turn's body plus the new messages. That only holds
+/// while nothing constant sits *behind* the growing array: the tool schema is
+/// 2.8 KB, and written after `messages` it fell outside the cacheable prefix
+/// on every turn of every run, so the provider re-read it each time. Member
+/// order is not significant in JSON, so the constant fields go first and the
+/// conversation ends the body.
 fn buildBody(arena: std.mem.Allocator, opts: Options, messages: []const u8) ![]u8 {
     var jb = JsonBuf.init(arena);
     const w = jb.writer();
     try w.print("{{\"model\":", .{});
     try writeJsonString(w, opts.model);
-    try w.writeAll(",\"messages\":");
-    try w.writeAll(messages);
-    try w.writeAll("],\"tools\":");
+    try w.writeAll(",\"tools\":");
     try w.writeAll(tools_json);
     try w.writeAll(",\"stream\":true,\"stream_options\":{\"include_usage\":true}");
     try w.print(",\"max_tokens\":{d}", .{opts.max_tokens});
@@ -874,7 +881,9 @@ fn buildBody(arena: std.mem.Allocator, opts: Options, messages: []const u8) ![]u
             try w.writeAll("}");
         }
     }
-    try w.writeAll("}");
+    try w.writeAll(",\"messages\":");
+    try w.writeAll(messages);
+    try w.writeAll("]}");
     return jb.items();
 }
 
@@ -2190,6 +2199,65 @@ test "conversation and tool schema serialize as one valid request body" {
         // itself and never reaches "unknown tool".
         try std.testing.expect(!std.mem.startsWith(u8, err, "error: unknown tool"));
     }
+}
+
+// The cacheable part of a request is its leading bytes, so the only thing a
+// turn may add is the tail. Asserted as a byte count, because that is the whole
+// point: a field moved back behind `messages` costs the provider a re-read of
+// its bytes on every turn of every run, and nothing else here would notice.
+test "one request body is the previous one plus its new messages" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const gpa = arena_state.allocator();
+
+    var msgs: std.ArrayList(u8) = .empty;
+    try msgs.appendSlice(gpa, "[");
+    try appendMessage(gpa, &msgs, "system", system_prompt);
+    try appendMessage(gpa, &msgs, "user", "fix the bug");
+
+    const opts: Options = .{ .model = "test/model" };
+    // A body is the constant header, the message array, then `]}`, so the
+    // header is whatever is left once those two are taken off the end.
+    var previous = try gpa.dupe(u8, try buildBody(gpa, opts, msgs.items));
+    const header = previous.len - msgs.items.len - 2;
+    try std.testing.expect(header > tools_json.len);
+
+    var turn: usize = 0;
+    while (turn < 40) : (turn += 1) {
+        try msgs.appendSlice(gpa, ",{\"role\":\"assistant\",\"content\":\"working\"}");
+        try msgs.appendSlice(gpa, ",{\"role\":\"tool\",\"tool_call_id\":\"c\",\"content\":\"ok\"}");
+        const added = msgs.items.len;
+
+        const body = try buildBody(gpa, opts, msgs.items);
+        // Header and every message so far are still there byte for byte, so the
+        // un-cacheable tail is the two closing bytes and the schema is inside
+        // the cache from the second turn on.
+        const shared = header + (previous.len - header - 2);
+        try std.testing.expectEqualSlices(u8, previous[0..shared], body[0..shared]);
+        try std.testing.expectEqual(added - (shared - header), body.len - previous.len);
+        try std.testing.expectEqualSlices(u8, "]", body[body.len - 2 .. body.len - 1]);
+
+        gpa.free(previous);
+        previous = try gpa.dupe(u8, body);
+    }
+}
+
+// The tool schema is the largest constant in a body, so where it sits decides
+// whether the provider can cache it at all. This says so out loud instead of
+// leaving it to a field order nobody reads twice.
+test "the tool schema sits inside the cacheable prefix, not behind the conversation" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const gpa = arena_state.allocator();
+    const body = try buildBody(gpa, .{ .model = "m" }, "[{\"role\":\"user\",\"content\":\"hi\"}]");
+
+    const tools_at = std.mem.indexOf(u8, body, "\"tools\":").?;
+    const messages_at = std.mem.indexOf(u8, body, "\"messages\":").?;
+    try std.testing.expect(tools_at < messages_at);
+    // Worth ordering only because the schema is worth caching: 2.8 KB is
+    // several hundred tokens of prefill the provider would otherwise repeat.
+    try std.testing.expect(tools_json.len > 1024);
+    try std.testing.expectEqualStrings(tools_json, body[tools_at + 8 ..][0..tools_json.len]);
 }
 
 /// The three sinks `applyFrame` fills, on the two allocators it parses with:
