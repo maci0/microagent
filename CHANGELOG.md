@@ -128,6 +128,20 @@ release, and `microagent update` moves you to it.
   run on a machine without the binary built every task against an empty tree and appended a
   `fail(rc=127)` row per task to the committed `results.jsonl` and `gauntlet-results.jsonl`. A
   harness named with a model (`microagent:model`) is matched on the harness alone.
+- `microagent update --repo` says what the flag wants. A value that is not `owner/name` was reported
+  as `want owner/repo, not a URL`, which described one guess at the mistake: an empty value, a second
+  slash and a pasted URL are three typos with one answer, and only the last is a URL. The message is
+  `--repo must be owner/name, got '<value>'`, the way every other flag here names itself and the
+  value it was given. An empty value (`--repo=` or `--repo ""`) is now refused where it is parsed, the
+  same as a `--repo` that ends the command line, instead of being sent to the API first.
+- An empty word on the command line (`microagent ""`) is reported as an empty prompt rather than as
+  `unknown or incomplete argument ''`, which described a flag nobody wrote. Still exit 2, still with
+  the reason and the help on stderr.
+- `microagent --help` states the output contract: stdout carries the model's text and one
+  `{"type":"usage",...}` line per response and nothing else, stderr carries the tool gutter, the notes
+  and every error. The README said it; the help a script author reads first did not.
+- The session-close test helper named `ChatResult` without the module it lives in, so no build
+  compiled: `zig build` and `make build` failed on the whole program, not only on a test.
 - `write` refuses a call with no `content` instead of writing an empty file. The tool schema names
   `content` as required, but the argument was read as an empty string when it was missing, so a call
   that arrived naming only a path (a model that forgot it, or arguments cut short in the stream)

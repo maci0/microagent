@@ -89,6 +89,11 @@ subcommand:
                          (--check only reports; GITHUB_TOKEN lifts the
                          API rate limit)
 
+output: stdout carries the model's text and one JSON line per response,
+{"type":"usage","usage":{...}}, and nothing else. stderr carries the tool
+gutter, the notes and every error, so a script reading stdout gets the
+answer and the token counters.
+
 MDEBUG=1                trace a stuck stream on stderr, and print the
                         configuration this run resolved (never the key). 0,
                         off, no, false and an empty value all leave it off.

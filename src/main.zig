@@ -304,6 +304,11 @@ const help_text =
     \\exit status: 0 the run finished, 1 the run failed, 2 the command line was
     \\wrong.
     \\
+    \\output: stdout carries the model's text and one JSON line per response,
+    \\{"type":"usage","usage":{...}}, and nothing else. stderr carries the tool
+    \\gutter, the notes and every error, so a script reading stdout gets the
+    \\answer and the token counters.
+    \\
     \\MDEBUG=1                 trace a stuck stream on stderr, and print the
     \\                         configuration this run resolved: model, base
     \\                         url, ceilings, style levels, and the name of
@@ -597,6 +602,11 @@ fn parseArgs(buf: []u8, argv: []const []const u8, opts: *Options) ?[]const u8 {
             // "microagent -p {prompt}" would hand the model flag to -p;
             // taking the prompt positionally makes the order irrelevant.
             if (setPrompt(buf, opts, arg)) |m| return m;
+        } else if (arg.len == 0) {
+            // An empty word is a prompt with nothing in it, which is the same
+            // mistake as `--print=`, and saying it is an unknown argument
+            // describes a flag nobody wrote.
+            return "the prompt is empty: pass the task as an argument or with --print";
         } else {
             return std.fmt.bufPrint(buf, "unknown or incomplete argument '{s}'", .{arg}) catch "bad arguments";
         }
@@ -2045,6 +2055,8 @@ test "a wrong command line names the flag and the value it was given" {
     try std.testing.expectEqualStrings("prompt given twice: 'one' and 'two'", parseArgs(&buf, &.{ "one", "two" }, &opts).?);
     var joined: Options = .{};
     try std.testing.expectEqualStrings("prompt given twice: 'one' and 'two'", parseArgs(&buf, &.{ "-p", "one", "--print=two" }, &joined).?);
+    // An empty word is an empty prompt, not an argument nobody knows.
+    try std.testing.expectEqualStrings("the prompt is empty: pass the task as an argument or with --print", parseArgs(&buf, &.{""}, &opts).?);
 }
 
 test "help and version win wherever they appear" {

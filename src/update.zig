@@ -575,6 +575,10 @@ fn decideFromBody(arena: std.mem.Allocator, body: []const u8) !Decision {
     return .{ .rel = rel, .in = in, .verdict = decide(in) };
 }
 
+/// One sentence for the two ways `--repo` can arrive without a value, so the
+/// flag at the end of the command line and `--repo=` say the same thing.
+const repo_needs_value = "--repo needs an owner/name value";
+
 /// What the subcommand's command line asked for. `--help` and `--version`
 /// stop the parse where they appear, the way the agent's own parse does, and a
 /// bad argument is a result of its own rather than an error the caller has to
@@ -603,10 +607,14 @@ fn parseArgs(args: []const []const u8) Parsed {
             parsed.run.check_only = true;
         } else if (std.mem.eql(u8, arg, "--repo")) {
             i += 1;
-            if (i >= args.len) return .{ .bad_flag = "--repo needs an owner/name value" };
-            parsed.run.repo = args[i];
+            if (i >= args.len) return .{ .bad_flag = repo_needs_value };
+            const v = args[i];
+            if (v.len == 0) return .{ .bad_flag = repo_needs_value };
+            parsed.run.repo = v;
         } else if (std.mem.startsWith(u8, arg, "--repo=")) {
-            parsed.run.repo = arg["--repo=".len..];
+            const v = arg["--repo=".len..];
+            if (v.len == 0) return .{ .bad_flag = repo_needs_value };
+            parsed.run.repo = v;
         } else {
             return .{ .unknown = arg };
         }
@@ -654,9 +662,11 @@ fn runChecked(
 ) u8 {
     var api_buf: [240]u8 = undefined;
     // A value the flag cannot carry is a usage error, so it prints the reason
-    // and the usage text together like every other one.
+    // and the usage text together like every other one. The message names the
+    // flag and the rule rather than guessing at the mistake: a URL, a second
+    // slash and an empty value are three different typos with one answer.
     const api = releaseApiUrl(&api_buf, repo) catch
-        return updateUsageError(io, "want owner/repo, not a URL (got '{s}')", .{quoteRepo(repo)});
+        return updateUsageError(io, "--repo must be owner/name, got '{s}'", .{quoteRepo(repo)});
 
     var client: std.http.Client = .{ .allocator = gpa, .io = io };
     defer client.deinit();
@@ -875,6 +885,17 @@ test "update: the command line reads in either flag form, and help and version w
         else => return error.TestUnexpectedResult,
     }
     switch (parseArgs(&.{"--repo"})) {
+        .bad_flag => |msg| try std.testing.expectEqualStrings("--repo needs an owner/name value", msg),
+        else => return error.TestUnexpectedResult,
+    }
+    // An empty value is the same mistake as a missing one, in either spelling,
+    // so both are caught here rather than sent on to be told a name is not a
+    // name.
+    switch (parseArgs(&.{"--repo="})) {
+        .bad_flag => |msg| try std.testing.expectEqualStrings("--repo needs an owner/name value", msg),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (parseArgs(&.{ "--repo", "" })) {
         .bad_flag => |msg| try std.testing.expectEqualStrings("--repo needs an owner/name value", msg),
         else => return error.TestUnexpectedResult,
     }
