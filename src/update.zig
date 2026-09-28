@@ -904,13 +904,13 @@ fn runChecked(
     // The agent run's CA-bundle escape hatch: an image that ships no
     // ca-certificates can still reach GitHub by naming a PEM file.
     const ca_path = net.caBundlePath(env);
-    if (ca_path.len != 0) net.loadCaBundle(&client, io, gpa, ca_path, arena);
+    net.loadCaBundle(&client, io, gpa, ca_path, arena);
 
     const bearer = githubBearer(arena, env);
     var status: std.http.Status = .ok;
     const body = fetchBody(io, &client, gpa, arena, api, bearerFor(api, bearer), max_api_bytes, &status) catch |err| {
         if (err == error.HttpStatus) return fail(io, "GitHub returned HTTP {d} for {s}{s}", .{
-            @intFromEnum(status), repo, statusHint(status),
+            @intFromEnum(status), quoteUntrusted(arena, repo), statusHint(status),
         });
         return fail(io, "could not reach {s} ({s})", .{ api, @errorName(err) });
     };
@@ -1917,7 +1917,7 @@ fn fuzzRelease(_: void, smith: *std.testing.Smith) !void {
     // Whatever the tag said, the running build is the same release as itself
     // with or without the `v` on either side, and as nothing else.
     const tag = d.in.tag;
-    const bare = if (std.mem.startsWith(u8, tag, "v")) tag[1..] else tag;
+    const bare = bareVersion(tag);
     try std.testing.expect(sameRelease(tag, tag));
     try std.testing.expect(sameRelease(bare, tag));
     try std.testing.expect(sameRelease(tag, bare));

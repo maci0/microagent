@@ -55,7 +55,7 @@ pub fn loadCaBundle(
         // The path is a variable the operator set, and both notes below name
         // it: a value that is not text, or one carrying an escape sequence,
         // has to be written as the characters it is rather than acted on.
-        note(io, arena, "microagent: cannot read CA bundle {s}: {s}; scanning the system store instead\n", .{ chat.safeTextAll(arena, path), @errorName(err) });
+        note(io, arena, "microagent: cannot read CA bundle {s} ({s}); scanning the system store instead\n", .{ chat.safeTextAll(arena, path), @errorName(err) });
         return;
     };
     // A file that is readable but holds no PEM parses as zero certificates

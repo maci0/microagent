@@ -1790,7 +1790,7 @@ fn truncatedNotice(
 
 /// What the filter below took out of one response, so the caller can say which
 /// of the two reasons applied rather than reporting one number for both.
-pub const DroppedCalls = struct {
+const DroppedCalls = struct {
     /// A call the run cannot carry: no id, no name, or arguments that are not a
     /// JSON object. The caller names this count, because a call that vanished is
     /// a call the operator watching the run cannot otherwise account for.
@@ -2004,6 +2004,74 @@ const UsageFields = struct {
     cache_read: ?std.json.Value = null,
 };
 
+// The seven counters above are spelled out once per parse: `applyDeclared`
+// reads them off `StreamFrame.UsageFrame`, `applyFrame` off the generic parse.
+// A spelling added to one and not the other is a counter a provider's own
+// field is counted under on the fast path and not on the slow one, and a frame
+// only takes the slow path when the fast one refused it wholesale, so no
+// existing test sees both spellings of the same frame.
+test "the declared and generic parses count usage the same way" {
+    const gpa = std.testing.allocator;
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    const Counters = struct {
+        prompt: u64,
+        completion: u64,
+        total: u64,
+        reasoning: u64,
+        cached: u64,
+    };
+    const counters = struct {
+        fn of(result: *const chat_mod.ChatResult) Counters {
+            return .{
+                .prompt = result.prompt_tokens,
+                .completion = result.completion_tokens,
+                .total = result.total_tokens,
+                .reasoning = result.reasoning_tokens,
+                .cached = result.cached_tokens,
+            };
+        }
+    }.of;
+
+    // Every spelling of a cached count the three providers send, so the one
+    // field with three names is the one under test.
+    const usages = [_][]const u8{
+        \\{"prompt_tokens":11,"completion_tokens":22,"total_tokens":33,"completion_tokens_details":{"reasoning_tokens":44},"prompt_tokens_details":{"cached_tokens":55}}
+        ,
+        \\{"prompt_tokens":11,"completion_tokens":22,"prompt_cache_hit_tokens":66}
+        ,
+        \\{"prompt_tokens":11,"completion_tokens":22,"cache_read_input_tokens":77}
+        ,
+        // A total of 0 is not a total the provider stands behind, so the sum
+        // of the parts stands in for it on both paths.
+        \\{"prompt_tokens":11,"completion_tokens":22,"total_tokens":0}
+        ,
+    };
+
+    for (usages) |usage| {
+        var results: [2]chat_mod.ChatResult = .{ .{}, .{} };
+        // `choices` spelled as something the declared shapes refuse is what
+        // sends the second frame down the generic parse; the usage block
+        // beside it is the same object both paths read.
+        var declared_buf: [512]u8 = undefined;
+        var generic_buf: [512]u8 = undefined;
+        const declared = try std.fmt.bufPrint(&declared_buf, "{{\"usage\":{s},\"choices\":[]}}", .{usage});
+        const generic = try std.fmt.bufPrint(&generic_buf, "{{\"usage\":{s},\"choices\":\"none\"}}", .{usage});
+        for ([_][]const u8{ declared, generic }, 0..) |payload, which| {
+            var calls: std.ArrayList(chat_mod.ToolCall) = .empty;
+            defer chat_mod.deinitCalls(gpa, &calls);
+            var out_buf: std.ArrayList(u8) = .empty;
+            defer out_buf.deinit(gpa);
+            var unparsable: usize = 0;
+            try applyFrame(arena, arena, payload, &results[which], &calls, &out_buf, &unparsable);
+            try std.testing.expectEqual(@as(usize, 0), unparsable);
+        }
+        try std.testing.expectEqual(counters(&results[0]), counters(&results[1]));
+    }
+}
+
 /// Folds one frame's usage block into the run's counters. Cached prompt tokens
 /// arrive in the three spellings providers actually send: the OpenAI and
 /// OpenRouter one, DeepSeek's native one, and Anthropic's.
@@ -2091,7 +2159,15 @@ fn applyCallDelta(
     // the count is what says what happened to them.
     const idx = chat_mod.numCount(index);
     if (idx >= max_tool_calls) {
-        result.over_cap += 1;
+        // Counted per call rather than per fragment: a provider streams one
+        // call as an id and a name, then as many argument fragments as the
+        // arguments need, every one of them repeating this index. Counting each
+        // of those as a call is what made a single long-argument call past the
+        // ceiling read as a response asking for dozens of parallel calls.
+        if (result.over_cap_index == null or result.over_cap_index.? != idx) {
+            result.over_cap += 1;
+            result.over_cap_index = idx;
+        }
         return;
     }
     while (calls.items.len <= idx) try calls.append(gpa, .{ .id = "", .name = "" });
@@ -2252,13 +2328,13 @@ fn elideToolResults(
 /// re-sent every turn. Messages are never dropped, so `tool_call_id` pairing
 /// stays valid.
 ///
-/// A run whose tool output is all under `min_elided_bytes` has nothing the
-/// first pass may replace, and a prompt that grows a turn at a time is a run
-/// that eventually asks for a context the provider refuses. So a pass that
-/// elided nothing is followed by one that takes any result longer than its own
-/// marker, however small, which is the smallest replacement that still takes
-/// bytes out. Both passes share the one target, so the conversation still lands
-/// where the first pass alone would have put it.
+/// A run whose first pass stops short of the target has nothing large left to
+/// replace, and a prompt that grows a turn at a time is a run that eventually
+/// asks for a context the provider refuses. So such a pass is followed by one
+/// that takes any result longer than its own marker, however small, which is
+/// the smallest replacement that still takes bytes out. Both passes share the
+/// one target, so the conversation still lands where the first pass alone would
+/// have put it.
 ///
 /// `floor` is the length the conversation has to grow past before another pass
 /// is worth its parse. Finding out what is elidable means parsing the whole
@@ -2307,13 +2383,16 @@ fn compactMessages(
     const wanted = msgs.items.len - target;
     size -= try elideToolResults(arena, array, min_elided_bytes, wanted);
     if (size > conversation_soft_limit) {
-        // Every result this run has is a small one, so the pass above found
-        // nothing worth its marker and the conversation would grow a turn at a
-        // time with no ceiling, until the provider refuses a context this run
-        // built. Anything longer than the marker it becomes is worth
-        // replacing, and the model is told the results are gone rather than
-        // finding an elision it never saw.
-        net.note(io, arena, "microagent: no tool result reached {d} bytes, so the oldest ones are being replaced with a marker to keep the prompt under {d} bytes; the detail they held is not in the next turn\n", .{ min_elided_bytes, conversation_soft_limit });
+        // The pass above stopped short of the target, which it only does when
+        // it ran out of eligible results: stopping at the target elides at
+        // least `wanted` bytes, which lands the conversation under half the
+        // soft limit and never reaches here. So every result over
+        // `min_elided_bytes` is already a marker, and a prompt that grows a
+        // turn at a time with no ceiling is a run that eventually asks for a
+        // context the provider refuses. Anything longer than the marker it
+        // becomes is worth replacing, and the model is told the results are
+        // gone rather than finding an elision it never saw.
+        net.note(io, arena, "microagent: the conversation is still {d} bytes with every tool result over {d} bytes already a marker, so the rest are being replaced down to their own markers to keep the prompt under {d} bytes; the detail they held is not in the next turn\n", .{ size, min_elided_bytes, conversation_soft_limit });
         size -= try elideToolResults(arena, array, min_marker_bytes, wanted -| (msgs.items.len - size));
     }
     if (size == msgs.items.len) {
@@ -3964,13 +4043,6 @@ test "a token count that is not a number is counted, not folded in as zero" {
     try std.testing.expectEqual(@as(u64, 900), sink.result.prompt_tokens);
 }
 
-/// The `[` and the system message a run starts from, in the bytes the agent
-/// appends. The tests that build a conversation by hand start here.
-fn conversationHeader(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), system: []const u8) !void {
-    try msgs.appendSlice(gpa, "[");
-    try appendMessage(gpa, msgs, "system", system);
-}
-
 /// The `[` and the first two messages a run starts from, in the bytes the
 /// agent appends. `appendToolResults` follows it with the tool results that
 /// push a conversation past the compaction limit.
@@ -4147,9 +4219,9 @@ test "a conversation with nothing to elide is not re-parsed every turn" {
     var msgs: std.ArrayList(u8) = .empty;
     defer msgs.deinit(gpa);
 
-    // Every message is the model's own, so neither pass of compaction has
+    // No message here carries tool output, so neither pass of compaction has
     // anything to replace and the conversation is well past the soft limit.
-    try conversationHeader(gpa, &msgs, "you are a coding agent");
+    try openConversation(gpa, &msgs, "you are a coding agent", "fix the bug");
     try msgs.append(gpa, ']');
     var i: usize = 0;
     while (i < 100) : (i += 1) try growConversation(gpa, &msgs, "assistant", "x" ** 8192);
@@ -4692,6 +4764,18 @@ test "a tool call past the parallel-call ceiling is counted and reported" {
     try std.testing.expect(std.mem.indexOf(u8, notice, "1 tool call(s)") != null);
     try std.testing.expect(std.mem.indexOf(u8, notice, "not dispatched") != null);
 
+    // The same call streamed as the fragments a long argument arrives in is
+    // one call past the ceiling, not one per fragment.
+    result.over_cap = 0;
+    result.over_cap_index = null;
+    for (0..4) |_| {
+        const part = std.fmt.bufPrint(&buf, "{{\"choices\":[{{\"delta\":{{\"tool_calls\":[" ++
+            "{{\"index\":{d},\"function\":{{\"arguments\":\"[1, 2\"}}}}" ++
+            "]}}}}]}}", .{max_tool_calls}) catch unreachable;
+        try applyFrame(arena, arena, part, &result, &calls, &out_buf, &unparsable);
+    }
+    try std.testing.expectEqual(@as(usize, 1), result.over_cap);
+
     // Both reasons at once is one line naming both, and the counts add.
     const joined = droppedCallNotice(arena, "http://x", .{ .unusable = 3 }, 2).?;
     try std.testing.expect(std.mem.indexOf(u8, joined, "5 tool call(s)") != null);
@@ -4977,7 +5061,7 @@ test "a conversation that cannot be compacted is sent as it stands" {
 
     var msgs: std.ArrayList(u8) = .empty;
     defer msgs.deinit(gpa);
-    try conversationHeader(gpa, &msgs, "you are a coding agent");
+    try openConversation(gpa, &msgs, "you are a coding agent", "fix the bug");
     try appendToolResults(gpa, &msgs, 120, "x" ** 8192);
     try std.testing.expect(msgs.items.len > conversation_soft_limit);
     // What a truncated write would leave: a buffer past the limit that is not
@@ -5118,8 +5202,8 @@ fn fuzzStream(_: void, smith: *std.testing.Smith) !void {
         try tool_msg.writer().writeAll("}");
         try msgs.appendSlice(gpa, tool_msg.items());
     }
-    // `buildBody` opens and closes the `messages` array, so what it is given
-    // is the objects between the brackets.
+    // `buildBody` closes the `messages` array, and the run opens it through
+    // `openConversation`, so what it is given is the array, brackets and all.
     const body = try buildBody(arena, .{}, msgs.items);
     try std.testing.expect(try std.json.validate(gpa, body));
 }

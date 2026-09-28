@@ -93,6 +93,12 @@ pub const ChatResult = struct {
     /// ran fewer calls than the model asked for with nothing said about it is a
     /// turn whose work is smaller than the work it asked for.
     over_cap: usize = 0,
+    /// The index `over_cap` last counted, so a call streamed as one frame per
+    /// argument fragment is counted once rather than once per fragment. The
+    /// fragments of a call arrive together, and a provider that interleaved two
+    /// calls' fragments would break the `tool_call_id` pairing whatever the run
+    /// counted, so the last index is the whole of what has to be remembered.
+    over_cap_index: ?usize = null,
 
     pub fn deinitFinish(self: *ChatResult, gpa: std.mem.Allocator) void {
         if (!std.mem.eql(u8, self.finish_reason, &.{})) gpa.free(self.finish_reason);

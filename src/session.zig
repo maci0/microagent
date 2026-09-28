@@ -121,7 +121,7 @@ const log_dir_mode: Io.File.Permissions = @enumFromInt(@as(std.posix.mode_t, 0o7
 /// `session_name_attempts` times, which the operator can do something about and
 /// a silent log cannot show, so it is named here like any other failure to open
 /// a log.
-fn createSessionLog(io: Io, arena: std.mem.Allocator, session_dir: []const u8, stamp: i128) ?Io.File {
+fn createSessionLog(io: Io, arena: std.mem.Allocator, session_dir: []const u8, stamp: u128) ?Io.File {
     // The directory the notes below name is `MICROAGENT_SESSION_DIR` or a
     // path under `$HOME`: whatever the shell, a wrapper script or a container
     // image put there. It is escaped once here rather than at every call site,
@@ -188,7 +188,12 @@ pub fn open(io: Io, arena: std.mem.Allocator, session_dir: []const u8, model: []
         net.note(io, arena, "microagent: the session directory {s} could not be created ({s}); the rest of this run is not recorded\n", .{ shown, @errorName(err) });
         return null;
     };
-    const stamp = Io.Clock.real.now(io).nanoseconds;
+    const now_ns = Io.Clock.real.now(io).nanoseconds;
+    // A clock set before 1970 reads a negative stamp, and a name that begins
+    // with `-` is one `logName` refuses to parse, so the log would be written
+    // and never pruned. Zero sorts as the oldest name, which is the order a
+    // stamp saying nothing about the time should have.
+    const stamp: u128 = if (now_ns < 0) 0 else @intCast(now_ns);
     const file = createSessionLog(io, arena, session_dir, stamp) orelse {
         net.note(io, arena, "microagent: no session log could be opened under {s}; the rest of this run is not recorded\n", .{shown});
         return null;
@@ -287,9 +292,10 @@ fn pruneSessions(io: Io, arena: std.mem.Allocator, session_dir: []const u8) void
 /// the oldest in the store. The note carries the count so an operator reading
 /// it can tell an empty store from one this run walked for a while, and it is
 /// one function so the three cannot drift into three different sentences.
-fn partialList(io: Io, arena: std.mem.Allocator, session_dir: []const u8, seen: usize, err: anyerror) void {
+/// `shown` is the escaped directory, which every note in the pruner shares.
+fn partialList(io: Io, arena: std.mem.Allocator, shown: []const u8, seen: usize, err: anyerror) void {
     net.note(io, arena, "microagent: the session store under {s} could not be listed past {d} of its logs ({s}); nothing is pruned, because pruning from a partial list would delete whichever logs it saw rather than the oldest ones\n", .{
-        chat.safeTextAll(arena, session_dir), seen, @errorName(err),
+        shown, seen, @errorName(err),
     });
 }
 
@@ -322,7 +328,7 @@ fn pruneSessionsTo(io: Io, arena: std.mem.Allocator, session_dir: []const u8, ke
         defer walker.deinit();
         while (true) {
             const entry = walker.next(io) catch |err| {
-                partialList(io, arena, session_dir, found.items.len, err);
+                partialList(io, arena, shown, found.items.len, err);
                 return;
             } orelse break;
             if (entry.kind != .file) continue;
@@ -333,12 +339,12 @@ fn pruneSessionsTo(io: Io, arena: std.mem.Allocator, session_dir: []const u8, ke
             // different file with the same name, while still counting toward
             // the limit: the store then looks pruned and is not.
             const path_copy = arena.dupe(u8, entry.path) catch |err| {
-                partialList(io, arena, session_dir, found.items.len, err);
+                partialList(io, arena, shown, found.items.len, err);
                 return;
             };
             found.append(arena, .{ .path = path_copy, .key = key }) catch |err| {
                 arena.free(path_copy);
-                partialList(io, arena, session_dir, found.items.len, err);
+                partialList(io, arena, shown, found.items.len, err);
                 return;
             };
         }

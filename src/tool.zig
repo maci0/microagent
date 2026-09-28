@@ -144,7 +144,7 @@ pub fn readSecret(io: Io, arena: std.mem.Allocator, path: []const u8) SecretRead
     // The BOM first, then the whitespace: `trim` cuts the ASCII set, and U+FEFF
     // is not in it, so a key file an editor saved with a BOM would otherwise
     // send the BOM to the provider as the first byte of the key.
-    return .{ .found = std.mem.trim(u8, chat.stripBom(raw), " \t\r\n") };
+    return .{ .found = std.mem.trim(u8, chat.stripBom(raw), net.env_surrounding) };
 }
 
 /// SIGKILL to a whole process group. A group that is already gone is the normal
@@ -209,7 +209,7 @@ fn runSearchTool(io: Io, arena: std.mem.Allocator, argv: []const []const u8, wha
 /// model narrows its next search against what it did not see.
 fn withCaptureNote(arena: std.mem.Allocator, text: []const u8, res: Captured) ![]const u8 {
     if (!atCaptureLimit(res)) return text;
-    return std.fmt.allocPrint(arena, "{s}\n[output truncated at the tool's cap]", .{text});
+    return std.fmt.allocPrint(arena, "{s}{s}", .{ text, bash_truncation_note });
 }
 
 /// Lines of git output a call keeps when the model asks for no limit: a raw
@@ -451,8 +451,10 @@ fn toolCallLine(arena: std.mem.Allocator, buf: []u8, name: []const u8, args: std
 /// a repository can put an escape sequence on the operator's screen through
 /// the gutter line. A diagnostic note shows them as `.`; the model's own output
 /// on stdout is left alone, because that is the answer the run was asked for.
+/// An allocation that fails yields no text rather than the text unescaped,
+/// which is the input this exists to remove.
 pub fn terminalSafe(arena: std.mem.Allocator, s: []const u8) []const u8 {
-    const out = arena.alloc(u8, s.len) catch return s;
+    const out = arena.alloc(u8, s.len) catch return s[0..0];
     var i: usize = 0;
     while (i < s.len) {
         const c = s[i];
