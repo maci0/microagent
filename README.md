@@ -27,6 +27,8 @@ make                                   # ReleaseFast build, the default target
 make help                              # every target
 make test                              # the whole suite
 make test-one FILTER="usage counters"  # one test, by name substring
+make watch                             # rerun the suite on every source change, Ctrl-C to stop
+make watch FILTER="usage counters"     # the same, narrowed to one test
 make check                             # the CI gate: fmt --check, linters, tests, ReleaseSmall build
 make preflight                         # name any tool the gate needs that is not on PATH
 ```
@@ -365,9 +367,22 @@ See [integrations/harbor/README.md](integrations/harbor/README.md) and
 ## Benchmarks
 
 ```sh
-bench/run.sh microagent kimi opencode   # three coding tasks, pass/fail + wall time + tokens
-bench/gauntlet.sh microagent kimi       # the same gauntlet reviews per agent, scored on pass + diff + verify
-bench/overhead.sh                       # startup latency and no-op request cost per harness
+make bench AGENTS="microagent kimi"     # three coding tasks, pass/fail + wall time + tokens
+make overhead                           # startup latency and no-op request cost per harness
 ```
+
+Each builds `zig-out/bin/microagent` first and puts it on `PATH` for the run, so
+the harness under measurement is the tree you just edited rather than whichever
+copy happens to be installed. The scripts take the same arguments and work
+against any harness already on `PATH`:
+
+```sh
+sh bench/run.sh microagent kimi opencode
+sh bench/gauntlet.sh microagent kimi    # gauntlet reviews, scored on pass + diff + verify
+sh bench/overhead.sh
+```
+
+Run against a fresh clone without a `make bench` first, every harness is skipped
+by name, so the run reports nothing and appends nothing.
 
 Results from this machine are in [BENCHMARK.md](BENCHMARK.md).

@@ -49,9 +49,17 @@ lint-versions` fails when a version there and one in the Makefile drift apart.
 ```sh
 make check                  # the gate: zig fmt --check, the linters, the tests, an optimized build
 make test-one FILTER="..."  # one test, while you are mid-edit
+make watch                  # the suite again on every source change, until Ctrl-C
 make preflight              # name any tool check and lint need that is not on PATH
 make lint                   # the pin checks, shellcheck, ruff and yamllint on their own
 ```
+
+`make watch` is `zig build test --watch`, the build system's own mode, so the
+edit loop is one command rather than an editor task and a `make test` after it.
+`FILTER` narrows it the way `test-one` narrows one run, and is checked against
+the declared test names before the watch starts, because a filter that matches
+nothing reports success while running no test. Neither mode is what `check`
+runs, so a green watch is not a push: `make check` is still the gate.
 
 `make check` is the whole gate: it is the same `zig fmt --check`, the same
 `ruff check`, `ruff format --check` and `yamllint`, the same `zig build test`,

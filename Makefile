@@ -15,7 +15,7 @@ BIN := zig-out/bin/microagent
 export LC_ALL := C
 export TZ := UTC
 
-.PHONY: default help preflight version build small musl test test-one fmt fmt-python lint lint-versions lint-lock zig-version required-zig-version release-targets check-targets check-reproducible lint-shell lint-python lint-yaml check bench overhead install release-assets checksums clean
+.PHONY: default help preflight version build small musl test test-one watch fmt fmt-python lint lint-versions lint-lock zig-version required-zig-version release-targets check-targets check-reproducible lint-shell lint-python lint-yaml check bench overhead install release-assets checksums clean
 
 # The targets `microagent update` asks for, in the names release.yml publishes.
 # ci.yml rehearses the same list on every push and release.yml publishes it, so
@@ -89,10 +89,11 @@ help:
 	  'version               the version build.zig.zon declares' \
 	  'test                  the whole unit test suite' \
 	  'test-one FILTER=...   only tests whose name contains FILTER' \
+	  'watch [FILTER=...]    rerun the suite on every source change, until Ctrl-C' \
 	  'preflight             name every tool check and lint need that is not on PATH' \
 	  'fmt                   rewrite src, build.zig and the Harbor adapter in format style' \
 	  'check                 preflight, zig-version, fmt --check, the linters, the tests, an optimized build' \
-	  'lint                  shellcheck, ruff, and yamllint over the non-Zig sources' \
+	  'lint                  the pin checks, then shellcheck, ruff and yamllint' \
 	  'lint-versions         check ruff and yamllint against the versions the gate runs' \
 	  'lint-lock             check the Harbor requirements.txt pins are the ones requirements.lock has' \
 	  'zig-version           check the local zig against the version the release is built with' \
@@ -173,6 +174,24 @@ test-one:
 	  printf "  grep -h -o -E '^test \"[^\"]+\"' $(ZIG_SOURCES)\n" >&2; \
 	  exit 2; }
 	$(ZIG) build test -Dtest-filter="$(FILTER)" --summary all
+
+# The edit loop. `zig build test --watch` is the build system's own mode and
+# needs nothing here that `test` does not already do, so this wraps the same
+# command rather than introducing a second way to run the suite. FILTER narrows
+# it the way `test-one` narrows one run, and is checked against the declared
+# test names for the same reason: a filter matching nothing reports success
+# while running no test, which is worse than a slow loop.
+watch:
+	@if [ -n "$(FILTER)" ]; then \
+	  grep -h -o -E '^test "[^"]+"' $(ZIG_SOURCES) | grep -F -q -- "$(FILTER)" || { \
+	    printf 'no test declared in src/ is named like "%s"\n' "$(FILTER)" >&2; \
+	    printf 'the watch below would report success without running a test; list the names with:\n' >&2; \
+	    printf "  grep -h -o -E '^test \"[^\"]+\"' $(ZIG_SOURCES)\n" >&2; \
+	    exit 2; }; \
+	  $(ZIG) build test -Dtest-filter="$(FILTER)" --watch --summary all; \
+	else \
+	  $(ZIG) build test --watch --summary all; \
+	fi
 
 fmt:
 	$(ZIG) fmt src build.zig

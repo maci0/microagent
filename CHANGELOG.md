@@ -14,6 +14,13 @@ release, and `microagent update` moves you to it.
 
 ### Added
 
+- `make watch` reruns the unit test suite on every source change, and
+  `make watch FILTER=...` narrows it to the tests whose name contains the
+  substring, the way `make test-one` narrows one run. It wraps
+  `zig build test --watch`, the build system's own mode, so the edit loop is a
+  declared command rather than something a contributor has to know. A `FILTER`
+  that matches no declared test name is refused before the watch starts,
+  because the build system reports success for a filter that ran nothing.
 - The bench shell, the Harbor adapter and the workflows are linted. `make check` now runs
   `shellcheck` over `bench/*.sh` and `bench/tasks/*/*.sh`, `ruff check` over
   `integrations/harbor` (rules in `ruff.toml`) and `yamllint` over `.github`
@@ -153,6 +160,12 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- The README's benchmark commands lead with `make bench` and `make overhead`, the
+  two targets that build `zig-out/bin/microagent` and put it on `PATH` for the run.
+  The bare `bench/*.sh` form it documented first is the one that skips every
+  harness by name on a fresh clone, so the documented command measured nothing.
+  `make help` also described `lint` as the three linters, dropping the version and
+  lock pin checks the target runs.
 - A base url that is not a url is refused as one. `--base-url api.openai.com/v1` and
   `MICROAGENT_BASE_URL` set the same way were reported as "the API key would go to ... in the
   clear", a security warning about a value that never reaches the network; the plaintext check
