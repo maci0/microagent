@@ -968,6 +968,23 @@ const Budget = struct {
         return @max(left, tool_timeout_floor_ms);
     }
 
+    /// Whether this run can afford to wait `want_ms` before its next attempt,
+    /// and how long it may wait. Null means it cannot, and the caller must not
+    /// make the attempt: a retry taken after a refusal the provider is still
+    /// refusing is a second billable refusal, and one taken by sitting out the
+    /// wait is a turn that never arrives.
+    ///
+    /// A provider asking for two minutes is weather and sitting it out is the
+    /// right answer to it. Sitting it out inside a caller's per-review timeout
+    /// is not: the run is killed mid-sleep with nothing to show for it, which
+    /// is the one thing the budget exists to prevent. So the wait is taken only
+    /// when the budget covers it.
+    fn affordableWaitMs(self: Budget, io: Io, want_ms: u64) ?u64 {
+        const left = self.remainingMs(io) orelse return want_ms;
+        if (want_ms >= left) return null;
+        return want_ms;
+    }
+
     /// The same budget with `seconds` more to run. The final push is the one
     /// turn that is allowed past the budget, and the grace is what keeps that
     /// turn bounded too: it lands or it is cut off with a reason, never left
@@ -1162,14 +1179,14 @@ fn streamChat(
                 .{ .name = "accept", .value = "text/event-stream" },
             },
         }) catch |err| {
-            if (worthAnotherAttempt(.opened) and waitBeforeRetry(io, arena, shown_url, attempt, "opening the request to", err)) continue;
+            if (worthAnotherAttempt(.opened) and waitBeforeRetry(io, arena, shown_url, attempt, "opening the request to", err, budget)) continue;
             return err;
         };
         req_slot = req;
         var open = &req_slot.?;
         open.transfer_encoding = .{ .content_length = body.len };
         open.sendBodyComplete(@constCast(body)) catch |err| {
-            if (worthAnotherAttempt(.sending) and waitBeforeRetry(io, arena, shown_url, attempt, "sending the request body to", err)) continue;
+            if (worthAnotherAttempt(.sending) and waitBeforeRetry(io, arena, shown_url, attempt, "sending the request body to", err, budget)) continue;
             return err;
         };
         if (debug_enabled) std.debug.print("[mdebug] request sent, body={d} bytes\n", .{body.len});
@@ -1195,11 +1212,21 @@ fn streamChat(
                 // willing to wait, and the schedule stands where it is not.
                 const asked = retryAfterMs(response.head.bytes);
                 const wait = asked orelse backoffMs(attempt);
-                net.note(io, arena, "microagent: {s} answered HTTP {d}, retrying in {d}ms (attempt {d}/{d})\n", .{
-                    shown_url, @intFromEnum(response.head.status), wait, attempt + 1, max_attempts,
+                if (budget.affordableWaitMs(io, wait)) |affordable| {
+                    net.note(io, arena, "microagent: {s} answered HTTP {d}, retrying in {d}ms (attempt {d}/{d})\n", .{
+                        shown_url, @intFromEnum(response.head.status), affordable, attempt + 1, max_attempts,
+                    });
+                    waitMs(io, affordable) catch {};
+                    continue;
+                }
+                // The provider asked for longer than this run has left. Waiting
+                // the full ask would put the run to sleep inside the caller's
+                // timeout, and retrying early is the second billable refusal the
+                // header was meant to prevent, so the turn is given up here with
+                // the reason below.
+                net.note(io, arena, "microagent: {s} answered HTTP {d} asking for {d}ms, which is past what is left of this run's budget; the turn is given up\n", .{
+                    shown_url, @intFromEnum(response.head.status), wait,
                 });
-                try waitMs(io, wait);
-                continue;
             }
             var err_transfer: [8 * 1024]u8 = undefined;
             const err_reader = response.reader(&err_transfer);
@@ -1970,12 +1997,18 @@ fn worthAnotherAttempt(stage: request_stage) bool {
 /// steps that fail before the request is on the wire come through here; one
 /// that fails after is not retried at all, for the reason the head branch in
 /// `streamChat` gives.
-fn waitBeforeRetry(io: Io, arena: std.mem.Allocator, url: []const u8, attempt: u32, what: []const u8, err: anyerror) bool {
+fn waitBeforeRetry(io: Io, arena: std.mem.Allocator, url: []const u8, attempt: u32, what: []const u8, err: anyerror, budget: Budget) bool {
     if (attempt >= max_attempts) return false;
+    const wait = budget.affordableWaitMs(io, backoffMs(attempt)) orelse {
+        net.note(io, arena, "microagent: {s} {s} failed ({s}), and the {d}ms before another attempt would pass the run's budget; this one is the last\n", .{
+            what, url, @errorName(err), backoffMs(attempt),
+        });
+        return false;
+    };
     net.note(io, arena, "microagent: {s} {s} failed ({s}), retrying (attempt {d}/{d})\n", .{
         what, url, @errorName(err), attempt + 1, max_attempts,
     });
-    waitFor(io, attempt) catch {};
+    waitMs(io, wait) catch {};
     return true;
 }
 
@@ -3530,6 +3563,30 @@ test "backoff doubles, caps, and never overflows an attempt counter" {
 // A rate limit names the wait it wants. Retrying on this run's own 1 s/2 s/4 s
 // schedule instead is a second, third and fourth refusal from a provider that
 // asked for thirty seconds, and every one of them is billed as a request.
+// A provider that asks for longer than the run has left is weather the run
+// cannot wait out: sleeping the full ask puts it to bed inside the caller's
+// timeout, which is what --budget exists to stop, and retrying early is the
+// second billable refusal the header was there to prevent. So the decision is
+// the budget's.
+//
+// The two ends only, because std.testing.io's clock does not advance and a
+// deadline between them is arithmetic that needs a real one.
+test "a wait the budget cannot cover is not taken" {
+    // No budget: every wait is affordable, which is the behaviour for a run
+    // nobody put a ceiling on. This is the two-minute ask and the run's own
+    // schedule, and both are taken exactly as before.
+    const unbounded: Budget = .{};
+    try std.testing.expectEqual(@as(?u64, max_retry_after_ms), unbounded.affordableWaitMs(std.testing.io, max_retry_after_ms));
+    try std.testing.expectEqual(@as(?u64, backoffMs(2)), unbounded.affordableWaitMs(std.testing.io, backoffMs(2)));
+
+    // Spent: nothing is affordable, not even a millisecond, so no attempt is
+    // made and the run ends with the reason already on stderr.
+    const spent: Budget = .{ .deadline_ns = 0 };
+    try std.testing.expectEqual(@as(?u64, null), spent.affordableWaitMs(std.testing.io, 1));
+    try std.testing.expectEqual(@as(?u64, null), spent.affordableWaitMs(std.testing.io, backoffMs(0)));
+    try std.testing.expectEqual(@as(?u64, null), spent.affordableWaitMs(std.testing.io, max_retry_after_ms));
+}
+
 test "a Retry-After header sets the wait, and only a wait worth taking" {
     const head =
         "HTTP/1.1 429 Too Many Requests\r\n" ++
