@@ -21,7 +21,8 @@ bare `ubuntu`, and distroless images alike.
 ## Run
 
 ```sh
-uv venv ~/harbor-venv && uv pip install --python ~/harbor-venv/bin/python harbor
+uv venv ~/harbor-venv && uv pip install --python ~/harbor-venv/bin/python \
+  -r integrations/harbor/requirements.txt
 
 export MICROAGENT_API_KEY=...            # or OPENROUTER_API_KEY
 export MICROAGENT_REASONING_EFFORT=none  # see "Reasoning" below
@@ -36,6 +37,10 @@ PYTHONPATH=$PWD/integrations/harbor ~/harbor-venv/bin/harbor run \
 
 `swebench-verified@1.0`, `swebenchpro@1.0`, `aider-polyglot@1.0` and the rest of
 Harbor's registry work the same way; only the dataset name changes.
+
+Harbor itself is pinned in [requirements.txt](requirements.txt), because the
+adapter subclasses its agent API and a score is only the same score against the
+Harbor release that produced it.
 
 ## Environment
 

@@ -1,0 +1,15 @@
+# What microagent_agent.py imports: the Harbor framework it plugs into. The
+# adapter subclasses harbor.agents.base.BaseAgent and reads
+# harbor.models.agent.context.AgentContext, so a Harbor release that moves or
+# renames either breaks the adapter, and `harbor run` is what the numbers in
+# BENCHMARK.md come from. Pinned exactly, so a benchmark and the adapter that
+# produced it are the same pair on any machine.
+#
+# Install into the venv the README names:
+#
+#     uv pip install --python ~/harbor-venv/bin/python \
+#       -r integrations/harbor/requirements.txt
+#
+# Harbor's own dependencies are not pinned here. They are resolved by uv, and
+# an unpinned transitive tree is Harbor's to lock, not this adapter's.
+harbor==0.23.0

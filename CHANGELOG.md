@@ -43,6 +43,14 @@ release, and `microagent update` moves you to it.
 
 ### Changed
 
+- The linters CI installs come from `lint-requirements.txt`, which pins `ruff`, `yamllint` and
+  the two packages `yamllint` imports to one sha256 per published artifact, and the lint job
+  installs it with `--require-hashes`. A version range was a resolved-at-install-time choice of
+  whatever the index served that day; a hash is the file a person looked at. `make lint-versions`
+  fails when a version there and the one in the Makefile drift apart.
+- The Harbor adapter's own dependency is declared. `integrations/harbor/requirements.txt` pins
+  `harbor` exactly, because the adapter subclasses its agent API and a benchmark score is only
+  the same score against the Harbor release that produced it.
 - CI restores the Zig build caches between runs, from the shared toolchain action, so a push no
   longer pays for compiling the compiler cache and `std` from scratch on a cold runner. The
   global cache is moved under `RUNNER_TEMP`, whose default path differs per runner OS.
@@ -55,6 +63,10 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- A stream frame's `finish_reason` is no longer dropped. The declared-shape parse, the fast
+  path every OpenAI-style frame takes, did not carry the field, so a response the provider cut
+  at `max_tokens` arrived with no reason at all and the turn ended looking like a finished
+  answer. The generic parse still reads it; the fast path reads it now too.
 - Ctrl+C and `kill` now take the tool subprocess with them. A tool child leads its own process
   group so its tree can be reaped, which is also where the terminal's interrupt does not reach: the
   agent died and the build it had launched kept running and writing files. The run now forwards

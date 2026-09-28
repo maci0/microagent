@@ -16,6 +16,7 @@ export LC_ALL := C
 export TZ := UTC
 
 .PHONY: default help build small musl test test-one fmt fmt-python lint lint-versions print-lint-versions lint-shell lint-python lint-yaml check bench overhead install release-assets checksums clean
+.PHONY: default help build small musl test test-one fmt fmt-python lint lint-versions print-lint-versions lint-shell lint-python lint-yaml check bench overhead install release-assets checksums clean
 
 # The targets `microagent update` asks for, in the names release.yml publishes.
 # ci.yml rehearses the same list on every push and release.yml publishes it, so
@@ -27,9 +28,10 @@ ASSET_PREFIX = microagent-$(if $(TAG),$(TAG)-)
 # The linter versions the gate runs. `ruff format` rewrites files and
 # `yamllint` changes rules between releases, so a local run on a different
 # version is a green run CI disagrees with. Spelled once, here:
-# `lint-versions` checks a local install against them, and the ci.yml lint job
-# installs them from `print-lint-versions`. shellcheck rides on the runner
-# image, so it has no version to pin here.
+# `lint-versions` checks a local install against them, and checks that the
+# hashes in lint-requirements.txt still pin them, because the ci.yml lint job
+# installs that file. shellcheck rides on the runner image, so it has no
+# version to pin here.
 RUFF_VERSION := 0.16.4
 YAMLLINT_VERSION := 1.38.0
 
@@ -102,11 +104,11 @@ lint-versions:
 	  echo "ruff $$have_ruff, the gate runs $(RUFF_VERSION): install it with 'uv tool install ruff@$(RUFF_VERSION)'" >&2; bad=1; }; \
 	[ "$$have_yamllint" = "$(YAMLLINT_VERSION)" ] || { \
 	  echo "yamllint $$have_yamllint, the gate runs $(YAMLLINT_VERSION): install it with 'uv tool install yamllint==$(YAMLLINT_VERSION)'" >&2; bad=1; }; \
+	ruff_pin="$$(sed -n 's/^ruff==\([^ ]*\).*/\1/p' lint-requirements.txt)"; \
+	yamllint_pin="$$(sed -n 's/^yamllint==\([^ ]*\).*/\1/p' lint-requirements.txt)"; \
+	{ [ "$$ruff_pin" = "$(RUFF_VERSION)" ] && [ "$$yamllint_pin" = "$(YAMLLINT_VERSION)" ]; } || { \
+	  echo "lint-requirements.txt pins ruff==$$ruff_pin and yamllint==$$yamllint_pin, not $(RUFF_VERSION) and $(YAMLLINT_VERSION): CI installs that file, so a bump here has to bump the Makefile too" >&2; bad=1; }; \
 	test "$$bad" -eq 0
-
-# What the ci.yml lint job installs, on one line for pip.
-print-lint-versions:
-	@echo "ruff==$(RUFF_VERSION) yamllint==$(YAMLLINT_VERSION)"
 
 lint-shell:
 	shellcheck -x bench/*.sh bench/tasks/*/*.sh

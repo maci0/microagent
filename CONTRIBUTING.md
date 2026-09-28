@@ -22,6 +22,11 @@ uv tool install ruff@0.16.4
 uv tool install yamllint==1.38.0
 ```
 
+CI installs those two from [lint-requirements.txt](lint-requirements.txt),
+which pins them and the packages `yamllint` imports, one sha256 per published
+artifact, and installs it with `--require-hashes`. `make lint-versions` fails
+when a version there and one in the Makefile drift apart.
+
 `zig fmt` covers the Zig and needs nothing else.
 
 ## Before you push

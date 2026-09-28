@@ -86,13 +86,15 @@ jobs:
           persist-credentials: false
 
       - name: install the linters
-        # The versions live in the Makefile, the same place `make
-        # lint-versions` checks a local install against, so the gate and a
-        # contributor's own run cannot lint with different tools.
+        # The file is installed with --require-hashes, so an artifact whose
+        # sha256 is not the one written down there fails the job instead of
+        # becoming the linter that decides the gate passes. The pins are
+        # ruff and yamllint themselves, plus the two packages yamllint imports,
+        # so nothing in the resolution is chosen at install time.
         run: |
           set -euo pipefail
-          python3 -m pip install --disable-pip-version-check \
-            $(make -s print-lint-versions)
+          python3 -m pip install --disable-pip-version-check --require-hashes \
+            -r lint-requirements.txt
 
       - name: the shell scripts parse and are shellcheck-clean
         run: make lint-shell
