@@ -15,7 +15,7 @@ BIN := zig-out/bin/microagent
 export LC_ALL := C
 export TZ := UTC
 
-.PHONY: default help preflight version build small musl test test-one watch fmt fmt-python lint lint-versions lint-lock zig-version required-zig-version release-targets check-targets check-reproducible lint-shell lint-python lint-yaml check bench instructions overhead install release-assets checksums clean
+.PHONY: default help preflight version build small musl test test-one watch fmt fmt-python lint lint-versions lint-lock zig-version required-zig-version release-targets check-targets check-reproducible lint-shell lint-python lint-yaml check bench instructions overhead install release-assets checksums clean20260928T162500Z-40d9c-l6-lane2-00/prompt-review
 
 # The targets `microagent update` asks for, in the names release.yml publishes.
 # ci.yml rehearses the same list on every push and release.yml publishes it, so
@@ -100,6 +100,7 @@ help:
 	  'bench AGENTS=...      three coding tasks through each harness' \
 	  'instructions [CHECK=--check]  retired instructions per unit of work, per path' \
 	  'overhead              startup and first-request cost per harness' \
+	  'instructions          retired instructions per unit, against bench/instructions.baseline' \
 	  'install               install the binary into ~/.local/bin' \
 	  'release-assets        cross-build every published target into dist/' \
 	  'release-assets TAG=vX.Y.Z  the same, named as release.yml publishes them' \
@@ -330,6 +331,14 @@ instructions: build
 # Startup latency and first-request cost per installed harness.
 overhead: build
 	PATH="$(BIN_DIR):$$PATH" sh bench/overhead.sh
+
+# Retired instructions per unit of work, checked against the committed
+# baseline. The script builds its own test binary, but it needs the options.zig
+# a full `zig build test` leaves in the cache, so the suite runs first: without
+# it the script exits 2 on a measurement it could not take, which reads as a
+# broken gate on a tree where nothing is wrong.
+instructions: test
+	sh bench/instructions.sh --check
 
 # `install -D` is GNU coreutils; macOS ships BSD install, so the parent
 # directory is created here instead.

@@ -76,11 +76,13 @@ a fragment with no invocation surface to hold a contract.
    `--repo=OWNER/NAME` form, and on which paths fetch an asset.
 
 8. **Emitted JSON that no document matches.** `usage_fields` in `src/chat.zig` fixes
-   the order of the five token counters in both the usage line and the per-response usage
-   object, and the session log has its own key set. Compare those writers against the
-   README and CHANGELOG claims about the log, and against `src/style.zig` for the fields
-   the log borrows from it. A key renamed in the writer but not in the prose, or a counter
-   emitted in a different order than promised, is a defect: a consumer parses this.
+   the order of the five token counters, and it is one string in all three writers: the
+   usage line, the per-response usage object, and the session log, where `sessionRecord`
+   in `src/session.zig` writes it inside a record whose own keys are `ts`, `cwd`,
+   `model`, `finish_reason` and `elapsed_ms`. Compare those writers against the README
+   and CHANGELOG claims about the log. A key renamed in the writer but not in the prose,
+   or a counter emitted in a different order than promised, is a defect: a consumer
+   parses this.
 
 9. **Tools the model is offered.** The help and the README call the tool set seven tools.
    Read the schemas in the `tools` array the request body is built from in
@@ -146,7 +148,9 @@ count of fixes applied and the gate result.
 
 - This review owns the invocation and output contract. The threat model's accuracy
   belongs to `threat-model-review.md`, the published measurements to
-  `benchmark-accuracy-review.md`, prompt files, skills, agent rule files, PRDs, ADRs,
+  `benchmark-accuracy-review.md`, the prose claims that are not the contract (the
+  commands a contributor runs, the paths and links they follow) to
+  `doc-review.md`, prompt files, skills, agent rule files, PRDs, ADRs,
   and general prose review belong to their own reviews, and code quality belongs to the
   standard gate; none of them are in scope here.
 - Judge the contract as a caller meets it: what a script, a CI job, or the model harness

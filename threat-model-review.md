@@ -127,7 +127,8 @@ applied and the gate result.
 - This review owns the threat model's accuracy, not the binary's security, and it edits
   `THREAT_MODEL.md` alone: the invocation contract belongs to
   `cli-contract-review.md`, the published measurements to
-  `benchmark-accuracy-review.md`, and code quality to the standard gate. A model that
+  `benchmark-accuracy-review.md`, the prose claims outside the contract to
+  `doc-review.md`, and code quality to the standard gate. A model that
   records every weakness faithfully is a correct deliverable even when the weaknesses
   are severe; do not pad it, and do not remove a threat to make the document look better.
 - Judge each claim as the next reader meets it: the row has to name code that exists, or
