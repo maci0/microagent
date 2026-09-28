@@ -21,10 +21,6 @@ const exec_mode: std.Io.File.Permissions = @enumFromInt(@as(std.posix.mode_t, 0o
 const max_api_bytes: usize = 10 * 1024 * 1024;
 const max_sidecar_bytes: usize = 64 * 1024;
 const max_asset_bytes: usize = 256 * 1024 * 1024;
-/// How much of a value this program does not spell an error message quotes
-/// back. Bounded on the bytes that come out rather than the bytes that went in,
-/// so a value of control characters cannot cost a line four times its length.
-const quoted_value_bytes: usize = 80;
 
 /// A value this program does not spell, as the operator can be shown it: cut on
 /// a codepoint boundary (a partial codepoint in a diagnostic reads as a
@@ -40,12 +36,7 @@ const quoted_value_bytes: usize = 80;
 /// which version line is printed, and the asset name reaches four messages
 /// about a download that failed.
 fn quoteUntrusted(arena: std.mem.Allocator, text: []const u8) []const u8 {
-    return chat.safeText(arena, text, quoted_value_bytes);
-}
-
-/// A `--repo` short of the quote, under the one name both kinds of value share.
-fn quoteRepo(arena: std.mem.Allocator, repo: []const u8) []const u8 {
-    return quoteUntrusted(arena, repo);
+    return chat.safeText(arena, text, net.quoted_value_bytes);
 }
 
 pub const Verdict = enum {
@@ -844,7 +835,7 @@ pub fn run(
             return 0;
         },
         .bad_flag => |msg| return updateUsageError(io, "{s}", .{msg}),
-        .unknown => |arg| return updateUsageError(io, "unknown or incomplete argument '{s}'", .{quoteRepo(arena, arg)}),
+        .unknown => |arg| return updateUsageError(io, "unknown or incomplete argument '{s}'", .{quoteUntrusted(arena, arg)}),
         .run => |opts| {
             return runChecked(io, gpa, arena, env, opts.check_only, opts.repo orelse default_repo);
         },
@@ -871,7 +862,7 @@ fn runChecked(
     // flag and the rule rather than guessing at the mistake: a URL, a second
     // slash and an empty value are three different typos with one answer.
     const api = releaseApiUrl(&api_buf, repo) catch
-        return updateUsageError(io, "--repo must be owner/name, got '{s}'", .{quoteRepo(arena, repo)});
+        return updateUsageError(io, "--repo must be owner/name, got '{s}'", .{quoteUntrusted(arena, repo)});
 
     var client: std.http.Client = .{ .allocator = gpa, .io = io };
     defer client.deinit();
@@ -1287,24 +1278,16 @@ fn fuzzUpdateArgs(_: void, smith: *std.testing.Smith) !void {
     var raw: [8 * 1024]u8 = undefined;
     const text = if (smith.in) |seed| seed else raw[0..smith.slice(&raw)];
 
-    // One word per space-separated run, so the fuzzer's bytes reach the parser
-    // as arguments rather than as a single opaque one.
     var argv: [64][]const u8 = undefined;
-    var n: usize = 0;
-    var words = std.mem.tokenizeAny(u8, text, " \t\n");
-    while (words.next()) |word| {
-        if (n == argv.len) break;
-        argv[n] = word;
-        n += 1;
-    }
+    const words = net.fuzzArgv(text, &argv);
 
-    const parsed = parseArgs(argv[0..n]);
+    const parsed = parseArgs(words);
     const repo = switch (parsed) {
         .run => |r| r.repo orelse return,
         // Every other outcome refuses the line, so no repo is set. A parser
         // that set one anyway would send it on to a URL nobody named.
         else => {
-            for (argv[0..n]) |arg| try std.testing.expect(!std.mem.eql(u8, arg, default_repo));
+            for (words) |arg| try std.testing.expect(!std.mem.eql(u8, arg, default_repo));
             return;
         },
     };
@@ -1314,7 +1297,7 @@ fn fuzzUpdateArgs(_: void, smith: *std.testing.Smith) !void {
     // is the one spelling where the repo is a slice of a word rather than a
     // word of its own, which is why the test is containment.
     var named = false;
-    for (argv[0..n]) |arg| {
+    for (words) |arg| {
         if (std.mem.indexOf(u8, arg, repo) != null) named = true;
     }
     if (!named) {
@@ -1354,8 +1337,8 @@ fn fuzzUpdateArgs(_: void, smith: *std.testing.Smith) !void {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const quoted = quoteRepo(arena, repo);
-    try std.testing.expect(quoted.len <= quoted_value_bytes);
+    const quoted = quoteUntrusted(arena, repo);
+    try std.testing.expect(quoted.len <= net.quoted_value_bytes);
     try std.testing.expect(std.unicode.utf8ValidateSlice(quoted));
     for (quoted) |c| try std.testing.expect(c >= 0x20 and c != 0x7f);
     // The budget cuts the escaped text, never the repo, so what is quoted is
@@ -1364,7 +1347,7 @@ fn fuzzUpdateArgs(_: void, smith: *std.testing.Smith) !void {
     const whole = chat.safeText(arena, repo, std.math.maxInt(usize));
     try std.testing.expect(std.mem.startsWith(u8, whole, quoted));
     // And a short repo is quoted whole, escapes and all.
-    if (repo.len <= quoted_value_bytes) try std.testing.expectEqualStrings(whole, quoted);
+    if (repo.len <= net.quoted_value_bytes) try std.testing.expectEqualStrings(whole, quoted);
 }
 
 test "update: --check and an equal version do not fetch an asset" {
@@ -1531,18 +1514,18 @@ test "update: a repo quoted back in an error keeps whole characters" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const gpa = arena_state.allocator();
-    try std.testing.expectEqualStrings("maci0/microagent", quoteRepo(gpa, "maci0/microagent"));
+    try std.testing.expectEqualStrings("maci0/microagent", quoteUntrusted(gpa, "maci0/microagent"));
     const long = "日本語/" ++ "x" ** 200;
-    const quoted = quoteRepo(gpa, long);
-    try std.testing.expect(quoted.len <= quoted_value_bytes);
+    const quoted = quoteUntrusted(gpa, long);
+    try std.testing.expect(quoted.len <= net.quoted_value_bytes);
     try std.testing.expect(std.unicode.utf8ValidateSlice(quoted));
     try std.testing.expect(std.mem.startsWith(u8, long, quoted));
     // Three-byte characters throughout: the cut is on one of them, so the
     // quote holds whole ones and no more than the byte budget allows.
-    try std.testing.expectEqualStrings("日" ** 26, quoteRepo(gpa, "日" ** 40));
+    try std.testing.expectEqualStrings("日" ** 26, quoteUntrusted(gpa, "日" ** 40));
     // A byte that is not text, and a control character, reach the line as
     // text rather than as mojibake or as a cursor the operator did not ask for.
-    try std.testing.expectEqualStrings("bad\\x1b[31m\u{fffd}", quoteRepo(gpa, "bad\x1b[31m\xff"));
+    try std.testing.expectEqualStrings("bad\\x1b[31m\u{fffd}", quoteUntrusted(gpa, "bad\x1b[31m\xff"));
 }
 
 // The release body's tag and asset name reach every line this run prints
@@ -1794,7 +1777,7 @@ fn fuzzRelease(_: void, smith: *std.testing.Smith) !void {
     // bytes, and every line this run prints about a version, a missing asset or
     // a failed download names one of them.
     for ([_][]const u8{ d.shown_tag, d.shown_asset }) |shown| {
-        try std.testing.expect(shown.len <= quoted_value_bytes);
+        try std.testing.expect(shown.len <= net.quoted_value_bytes);
         try std.testing.expect(std.unicode.utf8ValidateSlice(shown));
         for (shown) |c| try std.testing.expect(c >= 0x20 and c != 0x7f);
     }

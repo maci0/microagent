@@ -602,10 +602,10 @@ fn budgetSeconds(buf: []u8, from: []const u8, value: []const u8, out: *?u64) ?[]
     return null;
 }
 
-/// How much of a value an error message quotes back, bounded on the bytes that
-/// come out rather than the bytes that went in, so a value of control
-/// characters cannot be several times the length it was given.
-const quoted_value_bytes = 80;
+/// How much of a value an error message quotes back. The budget itself is
+/// `net.quoted_value_bytes`, which `update` quotes release-supplied names under
+/// too, so the two cannot drift apart.
+const quoted_value_bytes = net.quoted_value_bytes;
 
 /// A value quoted back into a message about itself.
 ///
@@ -2641,26 +2641,18 @@ fn fuzzArgs(_: void, smith: *std.testing.Smith) !void {
     var raw: [8 * 1024]u8 = undefined;
     const text: []const u8 = if (smith.in) |seed| seed else raw[0..smith.slice(&raw)];
 
-    // One word per space-separated run, so the fuzzer's bytes reach the parser
-    // as arguments rather than as a single opaque one.
     var argv: [64][]const u8 = undefined;
-    var n: usize = 0;
-    var words = std.mem.tokenizeAny(u8, text, " \t\n");
-    while (words.next()) |word| {
-        if (n == argv.len) break;
-        argv[n] = word;
-        n += 1;
-    }
+    const words = net.fuzzArgv(text, &argv);
 
     var buf: [512]u8 = undefined;
     var opts: Options = .{};
-    const msg = parseArgs(&buf, argv[0..n], &opts);
+    const msg = parseArgs(&buf, words, &opts);
     if (msg) |m| try std.testing.expect(m.len > 0);
 
     // `--help` and `--version` stop the parse where they are, so an argument
     // after one of them sets nothing, whatever it says.
     const stops = blk: {
-        for (argv[0..n]) |arg| {
+        for (words) |arg| {
             if (isFlag(arg, "-h", "--help")) break :blk Action.help;
             if (isFlag(arg, "-V", "--version")) break :blk Action.version;
         }
@@ -2678,9 +2670,9 @@ fn fuzzArgs(_: void, smith: *std.testing.Smith) !void {
     // refusing it, hands a run a model id or a key nobody typed.
     for ([_][]const u8{ opts.model, opts.base_url, opts.api_key, opts.ca_bundle, opts.config, opts.prompt }) |value| {
         if (isDefault(value)) continue;
-        try std.testing.expect(inArgv(argv[0..n], value));
+        try std.testing.expect(inArgv(words, value));
     }
-    if (opts.reasoning_effort) |level| try std.testing.expect(inArgv(argv[0..n], level));
+    if (opts.reasoning_effort) |level| try std.testing.expect(inArgv(words, level));
     try std.testing.expect(opts.max_turns >= 1);
     try std.testing.expect(opts.max_tokens >= 1);
     if (opts.reasoning_effort) |level| {
@@ -2695,7 +2687,7 @@ fn fuzzArgs(_: void, smith: *std.testing.Smith) !void {
     // invented from one.
     if (opts.budget_s) |seconds| {
         var on_the_line = false;
-        for (argv[0..n]) |arg| {
+        for (words) |arg| {
             const n_ = std.fmt.parseInt(u64, std.mem.trim(u8, arg, " \t\r\n"), 10) catch continue;
             if (n_ == seconds) on_the_line = true;
         }
@@ -2706,7 +2698,7 @@ fn fuzzArgs(_: void, smith: *std.testing.Smith) !void {
     // reruns the failing invocation sees the failure again.
     var again: Options = .{};
     var again_buf: [512]u8 = undefined;
-    const again_msg = parseArgs(&again_buf, argv[0..n], &again);
+    const again_msg = parseArgs(&again_buf, words, &again);
     try std.testing.expectEqualStrings(opts.prompt, again.prompt);
     try std.testing.expectEqual(opts.max_turns, again.max_turns);
     try std.testing.expectEqual(opts.max_tokens, again.max_tokens);

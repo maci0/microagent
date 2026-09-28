@@ -1,7 +1,8 @@
 //! What the three modules that touch the machine share: the CA-bundle escape
 //! hatch, a deadline, the two output sinks (stderr for notes and stdout for the
-//! answers a caller parses), and the path a write through a symlink really lands
-//! on.
+//! answers a caller parses), the path a write through a symlink really lands on,
+//! and the two budgets a value read out of the environment or off the wire is
+//! held to.
 //!
 //! A leaf module. It imports nothing from the rest of the program, so the
 //! agent run and `update` can both use it without either of them importing
@@ -15,6 +16,13 @@ const Io = std.Io;
 /// so trimming an environment value has one set behind it rather than one per
 /// reader.
 pub const env_surrounding = " \t\r\n";
+
+/// How much of a value a message quotes back, bounded on the bytes that come
+/// out rather than the bytes that went in, so a value of control characters
+/// cannot cost a line several times its length. The agent run and `update` both
+/// quote untrusted values into a diagnostic, and one budget is what keeps the
+/// two from drifting apart.
+pub const quoted_value_bytes: usize = 80;
 
 /// Points the TLS client at a PEM file when one was named. Many container
 /// images (bare ubuntu, distroless) ship no ca-certificates at all, and the
@@ -158,6 +166,22 @@ pub fn nextLineEnd(pending: []const u8, scanned: *usize) ?usize {
 /// rather than at each call site.
 pub fn durationMs(ms: u64) Io.Timeout {
     return .{ .duration = .{ .raw = .{ .nanoseconds = ms *| std.time.ns_per_ms }, .clock = .awake } };
+}
+
+/// The fuzzer's bytes as an `argv`, one word per space-separated run, so they
+/// reach a command-line parser as arguments rather than as a single opaque
+/// word. The agent's flags and `update`'s are parsed by two different parsers
+/// that both need the same shape. The words borrow `text`, so the caller's
+/// buffer (or the corpus seed) must outlive the returned slice.
+pub fn fuzzArgv(text: []const u8, argv: *[64][]const u8) []const []const u8 {
+    var n: usize = 0;
+    var words = std.mem.tokenizeAny(u8, text, " \t\n");
+    while (words.next()) |word| {
+        if (n == argv.len) break;
+        argv[n] = word;
+        n += 1;
+    }
+    return argv[0..n];
 }
 
 test "the CA bundle comes from the project's variable first, then the system one" {

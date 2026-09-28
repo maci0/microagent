@@ -239,6 +239,11 @@ release, and `microagent update` moves you to it.
   those refusals was a billable one. The date is now turned into the wait it
   names, measured against the clock, clamped to the two minutes the run will sit
   out, and a date already past is a wait of zero rather than the backoff.
+- The binary builds. `isTestRun` was handed a tool call's `args` where it reads
+  a `[]const u8`, and `args` is the `ArrayList` the streamed fragments are
+  appended to, so every optimized build failed to compile. The unit tests did
+  not catch it because they pass string literals; `make check` and the release
+  workflow both build the executable.
 - A command-line argument quoted back in a usage error is quoted as text. The
   message used to cut it on a codepoint boundary and nothing else, so
   `microagent $'\e[2J'` cleared the terminal and `microagent update $'\e]0;x\a'`
