@@ -6502,6 +6502,47 @@ test "an atomic write follows a symlink to the file it names" {
     try std.testing.expectEqualStrings("real", link_buf[0..n]);
 }
 
+// A `write` is the one tool call a duplicate is naturally safe on, because it
+// sets a file to a fixed value rather than changing it by an amount, and that is
+// a property of the call rather than of the caller, so it is worth holding in
+// place: a turn cut before its result reached the model, a re-read to check
+// the change landed, a frame a reconnecting relay replayed, and a wrapper that
+// re-runs the task all hand the same tool the same arguments a second time.
+// `toolEdit` has its own test for this, and this is the other half: the same
+// run twice leaves the file, the link and the mode the first run left, rather
+// than a second pass over a file the first pass already rewrote.
+test "a write issued twice leaves the file the first run left" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "real", .data = "old" });
+    try tmp.dir.setFilePermissions(io, "real", Io.File.Permissions.fromMode(0o600), .{});
+    try tmp.dir.symLink(io, "real", "link", .{});
+
+    try tool_mod.writeFileAtomic(io, tmp.dir, "link", "new");
+    try tool_mod.writeFileAtomic(io, tmp.dir, "link", "new");
+
+    try std.testing.expectEqualStrings("new", try tmp.dir.readFileAlloc(io, "real", arena, .limited(64)));
+    // The link survives the duplicate: a second run that replaced the name
+    // rather than the file it names leaves a regular file where the link was,
+    // so a repository holding links grows one copy per run.
+    var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.readLink(io, "link", &link_buf);
+    try std.testing.expectEqualStrings("real", link_buf[0..n]);
+    // The mode is read after the second run, because the rename brings the
+    // temporary file's mode with it and the duplicate is the run that would
+    // hand a 0o600 file back as whatever the second one created.
+    const stat = try tmp.dir.statFile(io, "real", .{});
+    try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), stat.permissions.toMode() & tool_mod.permission_bits);
+}
+
 // Where the key comes from is decided before the first turn, and the order
 // decides it: a `--api-key` beats every variable, the variables are tried in
 // the order the help text names them, and only when none of them carries one

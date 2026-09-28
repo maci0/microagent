@@ -2023,6 +2023,40 @@ test "update: replaceVerified follows a chain of symlinked destinations" {
     try std.testing.expectEqualStrings("new-content", got);
 }
 
+// The install is the one write in this tree with the largest blast radius, and
+// the one a duplicate is hardest to see: the same bytes over the same path is
+// what a second `update` does by design, so nothing in the output says it ran
+// twice. The contract is that a second execution reaches the state the first
+// one left, and it is checked over a symlinked destination because that is the
+// shape a packaged install actually has: the link must still be a link, and the
+// file it names must still hold the asset, or the second run resolved the path
+// differently and left the user's link pointing at a copy it never wrote.
+test "update: replacing the binary twice leaves the one install" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "real_bin", .data = "old-content" });
+    try tmp.dir.symLink(io, "real_bin", "microagent", .{});
+
+    try replaceVerified(io, tmp.dir, "microagent", .replaced, "new-content");
+    // The second execution carries the same asset, which is what a re-run after
+    // a completed install, a retry of a command whose output was lost, and a
+    // wrapper that runs it twice a day all hand it.
+    try replaceVerified(io, tmp.dir, "microagent", .replaced, "new-content");
+
+    var link_buf: [256]u8 = undefined;
+    const n = try tmp.dir.readLink(io, "microagent", &link_buf);
+    try std.testing.expectEqualStrings("real_bin", link_buf[0..n]);
+
+    const got = try tmp.dir.readFileAlloc(io, "real_bin", alloc, .limited(64));
+    defer alloc.free(got);
+    try std.testing.expectEqualStrings("new-content", got);
+}
+
 // The release body is attacker-shaped input too: it is whatever the API served
 // for the repo, and every field in it becomes a tag, a name or a URL the
 // updater acts on. `std.testing.fuzz` runs this corpus through the harness on
