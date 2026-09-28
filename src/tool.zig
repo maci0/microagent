@@ -1130,12 +1130,117 @@ pub fn runCapped(
         }
     }
 
-    // Both pipes are at end of stream but the child may still be running, and
-    // the wait below takes no timeout of its own.
-    if (deadline.toDurationFromNow(io)) |left| if (left.raw.nanoseconds <= 0) return error.Timeout;
-    const term = try child.wait(io);
+    const term = try waitBounded(io, child, spawned.pgid, deadline);
     if (read_err) |err| return err;
     return .{ .stdout = out[0].items, .stderr = out[1].items, .term = term, .dropped = dropped };
+}
+
+/// How often the waiter re-reads the clock while it waits for a child. The
+/// deadline is checked this often rather than slept through, because the two
+/// things racing here are the child's exit and the deadline, and only the
+/// second one is a sleep: a child that exits on its own must not have to wait
+/// out the rest of its timeout before the turn carries on.
+const wait_poll_interval: Io.Clock.Duration = .{
+    .raw = .{ .nanoseconds = 5 * std.time.ns_per_ms },
+    .clock = .awake,
+};
+
+/// The child's exit status, or `error.Timeout` once `deadline` passes.
+///
+/// Both pipes are at end of stream by the time this runs, and that says
+/// nothing about the child: `sh -c 'exec 1>&- 2>&-; sleep 600'` closes them
+/// immediately and keeps running, so the drain above finishes in milliseconds
+/// and a bare `child.wait` then blocks for however long the command decides,
+/// with the tool timeout this call was given never consulted again. The whole
+/// run hangs behind one tool call, and the group reap on the way out of
+/// `runCapped` never fires because the call has not returned.
+///
+/// So the wait is raced against the deadline. The wait itself has no timeout
+/// in this API, so it runs as a task and a second task signals the group when
+/// the deadline passes; the signal is what unblocks the wait, and the caller
+/// reports the timeout the same way a timeout during the drain does. A child
+/// that exits first sets `exited` and the signalling task stops, so an ordinary
+/// command is not held to the poll interval or to its own timeout.
+fn waitBounded(
+    io: Io,
+    child: *std.process.Child,
+    pgid: std.posix.pid_t,
+    deadline: Io.Timeout,
+) !std.process.Child.Term {
+    // No deadline means an unbounded wait is what was asked for, and there is
+    // nothing to race it against.
+    const opening = deadline.toDurationFromNow(io) orelse return child.wait(io);
+    // A deadline already spent is answered before anything is spawned: the
+    // drain uses the whole of the timeout, so reaching here with none left is
+    // the drain's own timeout, and the child is about to be reaped either way.
+    if (opening.raw.nanoseconds <= 0) return error.Timeout;
+
+    const Waiting = struct {
+        child: *std.process.Child,
+        io: Io,
+        pgid: std.posix.pid_t,
+        deadline: Io.Timeout,
+        term: std.process.Child.Term = .{ .exited = 0 },
+        wait_err: ?anyerror = null,
+        exited: std.atomic.Value(bool) = .init(false),
+        /// Set by the signalling task, and only when it actually signals. The
+        /// wait returns either way, and the two answers are different: a child
+        /// that exited on its own has a status worth reporting, and a child the
+        /// deadline killed has the signal this program sent it.
+        timed_out: std.atomic.Value(bool) = .init(false),
+
+        fn waitForExit(self: *@This()) void {
+            if (self.child.wait(self.io)) |t| {
+                self.term = t;
+            } else |err| {
+                self.wait_err = err;
+            }
+            self.exited.store(true, .release);
+        }
+
+        fn signalAtDeadline(self: *@This()) void {
+            while (!self.exited.load(.acquire)) {
+                const left = self.deadline.toDurationFromNow(self.io) orelse return;
+                if (left.raw.nanoseconds <= 0) break;
+                const slice: Io.Clock.Duration = .{
+                    .raw = .{ .nanoseconds = @min(left.raw.nanoseconds, wait_poll_interval.raw.nanoseconds) },
+                    .clock = .awake,
+                };
+                slice.sleep(self.io) catch return;
+            }
+            // A child that already exited needs no signal, and one that has
+            // not is what this task exists to bound. The group goes rather than
+            // the single process: a command that closed its pipes may have
+            // backgrounded the work it was asked to do, and that work is what
+            // the timeout was for.
+            if (self.exited.load(.acquire)) return;
+            self.timed_out.store(true, .release);
+            signalGroup(self.pgid);
+        }
+    };
+
+    var waiting: Waiting = .{ .child = child, .io = io, .pgid = pgid, .deadline = deadline };
+    var group: Io.Group = .init;
+    // Both tasks are joined before this returns, so the child is reaped and
+    // nothing is left holding its process group.
+    defer group.cancel(io);
+    group.concurrent(io, Waiting.waitForExit, .{&waiting}) catch |err| switch (err) {
+        // Without concurrency there is no way to race the two, and a bare wait
+        // is the hang this exists to remove, so the call fails loudly rather
+        // than blocking on a child the timeout was meant to bound.
+        error.ConcurrencyUnavailable => return error.NoConcurrency,
+        else => |e| return e,
+    };
+    group.concurrent(io, Waiting.signalAtDeadline, .{&waiting}) catch |err| switch (err) {
+        error.ConcurrencyUnavailable => return error.NoConcurrency,
+        else => |e| return e,
+    };
+    group.await(io) catch {};
+    if (waiting.wait_err) |err| return err;
+    // The kill is this program's own, so it is reported as the timeout it is
+    // rather than as a signal the command did not choose for itself.
+    if (waiting.timed_out.load(.acquire)) return error.Timeout;
+    return waiting.term;
 }
 
 /// True when a stream filled the cap with bytes still arriving, so the captured
@@ -2938,4 +3043,37 @@ test "a tool subprocess cannot see the provider key" {
         &env,
     );
     try std.testing.expect(std.mem.indexOf(u8, inherited.stdout, "sk-live-not-a-real-key") != null);
+}
+
+// A child that closes its own output streams and keeps running used to hang the
+// whole run: the drain finished on the closed pipes and the bare `child.wait`
+// that followed took no timeout, so the tool call blocked for as long as the
+// command decided and the group reap on the way out never fired. The timeout
+// the call was given has to bound the wait as well as the drain.
+test "a command that closes its pipes and keeps running is bounded by the tool timeout" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const io = std.testing.io;
+
+    const start = Io.Timestamp.now(io, .awake).nanoseconds;
+    // The timeout really is waited out here, so the ceiling below has to cover
+    // a second of it plus whatever a loaded runner adds. It is still three
+    // orders of magnitude under the ten minutes the command would otherwise
+    // hold the suite for.
+    try std.testing.expectError(error.Timeout, runCapped(
+        io,
+        arena,
+        &.{ "/bin/sh", "-c", "exec 1>&- 2>&-; sleep 600" },
+        4096,
+        net.durationMs(1000),
+        null,
+    ));
+    const elapsed_ms = @divTrunc(Io.Timestamp.now(io, .awake).nanoseconds - start, std.time.ns_per_ms);
+    try std.testing.expect(elapsed_ms < 30_000);
+
+    // The child the deadline killed is not left holding its process group: the
+    // reap is what keeps a timed-out command's background work from outliving
+    // the turn, and it only runs because the wait returned.
+    try std.testing.expectEqual(@as(std.posix.pid_t, 0), tool_group.load(.monotonic));
 }

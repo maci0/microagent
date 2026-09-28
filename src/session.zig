@@ -108,9 +108,22 @@ fn createSessionLog(io: Io, arena: std.mem.Allocator, session_dir: []const u8, s
     var attempt: usize = 0;
     while (attempt < session_name_attempts) : (attempt += 1) {
         var suffix_buf: [4]u8 = undefined;
-        const suffix = if (attempt == 0) "" else std.fmt.bufPrint(&suffix_buf, "-{d}", .{attempt}) catch return null;
-        const name = std.fmt.allocPrint(arena, "{d}{s}.jsonl", .{ stamp, suffix }) catch return null;
-        const path = std.fs.path.join(arena, &.{ session_dir, name }) catch return null;
+        // A name this program cannot spell or cannot join is a failure like any
+        // other one to open the log, and the doc above promises it is named.
+        // The three silent nulls this replaces left a monitor reading a store
+        // that stayed empty with nothing on stderr to say why.
+        const suffix = if (attempt == 0) "" else std.fmt.bufPrint(&suffix_buf, "-{d}", .{attempt}) catch |err| {
+            net.note(io, arena, "microagent: a session log name under {s} could not be built ({s}); this run records no usage\n", .{ session_dir, @errorName(err) });
+            return null;
+        };
+        const name = std.fmt.allocPrint(arena, "{d}{s}.jsonl", .{ stamp, suffix }) catch |err| {
+            net.note(io, arena, "microagent: a session log name under {s} could not be built ({s}); this run records no usage\n", .{ session_dir, @errorName(err) });
+            return null;
+        };
+        const path = std.fs.path.join(arena, &.{ session_dir, name }) catch |err| {
+            net.note(io, arena, "microagent: a session log path under {s} could not be built ({s}); this run records no usage\n", .{ session_dir, @errorName(err) });
+            return null;
+        };
         return std.Io.Dir.createFileAbsolute(io, path, .{ .exclusive = true }) catch |err| switch (err) {
             error.PathAlreadyExists => continue,
             else => |e| {
@@ -238,6 +251,21 @@ fn pruneSessions(io: Io, arena: std.mem.Allocator, session_dir: []const u8) void
     pruneSessionsTo(io, arena, session_dir, max_session_logs);
 }
 
+/// The note for a list the walk could not finish, however far it got: a read
+/// that failed, a name that would not copy, an entry that would not fit. All
+/// three leave the same thing behind, a partial list, and all three are
+/// abandoned the same way, because pruning from a partial list is not a smaller
+/// prune: the entries still standing are the ones the walk never saw, so the
+/// files deleted would be whichever of the seen ones sort lowest rather than
+/// the oldest in the store. The note carries the count so an operator reading
+/// it can tell an empty store from one this run walked for a while, and it is
+/// one function so the three cannot drift into three different sentences.
+fn partialList(io: Io, arena: std.mem.Allocator, session_dir: []const u8, seen: usize, err: anyerror) void {
+    net.note(io, arena, "microagent: the session store under {s} could not be listed past {d} of its logs ({s}); nothing is pruned, because pruning from a partial list would delete whichever logs it saw rather than the oldest ones\n", .{
+        session_dir, seen, @errorName(err),
+    });
+}
+
 /// The pruner, with the window it keeps as an argument rather than a constant,
 /// so the fuzz harness can put a handful of names over a window of two and
 /// check what the delete loop does with them.
@@ -264,9 +292,7 @@ fn pruneSessionsTo(io: Io, arena: std.mem.Allocator, session_dir: []const u8, ke
         defer walker.deinit();
         while (true) {
             const entry = walker.next(io) catch |err| {
-                net.note(io, arena, "microagent: the session store under {s} could not be read past {d} of its logs ({s}); nothing is pruned, because pruning from a partial list would delete whichever logs it saw rather than the oldest ones\n", .{
-                    session_dir, found.items.len, @errorName(err),
-                });
+                partialList(io, arena, session_dir, found.items.len, err);
                 return;
             } orelse break;
             if (entry.kind != .file) continue;
@@ -276,7 +302,15 @@ fn pruneSessionsTo(io: Io, arena: std.mem.Allocator, session_dir: []const u8, ke
             // deleted through the root either removes nothing or removes a
             // different file with the same name, while still counting toward
             // the limit: the store then looks pruned and is not.
-            found.append(arena, .{ .path = arena.dupe(u8, entry.path) catch return, .key = key }) catch return;
+            const path_copy = arena.dupe(u8, entry.path) catch |err| {
+                partialList(io, arena, session_dir, found.items.len, err);
+                return;
+            };
+            found.append(arena, .{ .path = path_copy, .key = key }) catch |err| {
+                arena.free(path_copy);
+                partialList(io, arena, session_dir, found.items.len, err);
+                return;
+            };
         }
     }
     if (found.items.len <= keep) return;

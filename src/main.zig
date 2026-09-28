@@ -856,21 +856,31 @@ fn resolveKey(io: Io, init: std.process.Init, given: []const u8) Key {
     for (key_vars) |n| {
         if (envValue(init.environ_map, n)) |v| return .{ .value = v, .source = n };
     }
-    const fallback = std.fs.path.join(init.arena.allocator(), &.{
+    const arena = init.arena.allocator();
+    const fallback = std.fs.path.join(arena, &.{
         net.homeDir(init.environ_map) orelse return .{ .value = "", .source = "none" },
         ".secrets",
         "openrouter",
-    }) catch return .{ .value = "", .source = "none" };
-    switch (tool_mod.readSecret(io, init.arena.allocator(), fallback)) {
+    }) catch |err| {
+        // Every other way this file can go unreadable is named, and this one
+        // read as "there is no key file here" instead: the caller then says
+        // the run has no API key, when the key is in a file whose path this
+        // could not build.
+        net.note(io, arena, "microagent: the path to {s}/.secrets/openrouter could not be built ({s}); no key was taken from a file there\n", .{
+            net.homeDir(init.environ_map) orelse "$HOME", @errorName(err),
+        });
+        return .{ .value = "", .source = "none" };
+    };
+    switch (tool_mod.readSecret(io, arena, fallback)) {
         .found => |v| {
             if (v.len != 0) return .{ .value = v, .source = fallback };
-            net.note(io, init.arena.allocator(), "microagent: {s} is empty; no key in it\n", .{fallback});
+            net.note(io, arena, "microagent: {s} is empty; no key in it\n", .{fallback});
         },
         // A key that is set in a file this process cannot read is not the same
         // as no key, and the difference is the whole of what the caller does
         // next: the first is a permissions problem on a file that holds a
         // working key, the second is a key to go and find.
-        .unreadable => |u| net.note(io, init.arena.allocator(), "microagent: {s} could not be read ({s}); it may hold a key this process cannot reach, and no key was taken from it\n", .{ fallback, @errorName(u.reason) }),
+        .unreadable => |u| net.note(io, arena, "microagent: {s} could not be read ({s}); it may hold a key this process cannot reach, and no key was taken from it\n", .{ fallback, @errorName(u.reason) }),
         .absent => {},
     }
     return .{ .value = "", .source = "none" };
