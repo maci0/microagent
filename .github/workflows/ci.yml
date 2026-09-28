@@ -1,0 +1,47 @@
+# Contributor gate: the same two checks `make check` runs, on the Zig version
+# build.zig.zon declares as its minimum, so a push that would fail here never
+# gets that far. Release assets are built by release.yml on a version tag.
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The toolchain version is declared once, in build.zig.zon.
+      - name: read the minimum zig version
+        id: zig
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^[[:space:]]*\.minimum_zig_version = "\([^"]*\)".*/\1/p' build.zig.zon)"
+          if [ -z "$version" ]; then
+            echo "build.zig.zon has no .minimum_zig_version to install" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          zig-version: ${{ steps.zig.outputs.version }}
+
+      - name: format is clean
+        run: zig fmt --check src build.zig
+
+      - name: unit tests pass
+        run: zig build test --summary all

@@ -10,11 +10,26 @@ loops. One binary, one loop, OpenAI-compatible APIs only.
 
 ## Build
 
+Zig 0.16.0 or newer, the minimum declared in `build.zig.zon`. Nothing else: no
+dependencies, no services, no runtime.
+
 ```sh
 zig build -Doptimize=ReleaseFast      # zig-out/bin/microagent
 zig build -Doptimize=ReleaseSmall     # smallest binary, ~690 KB
 zig build test                        # unit tests
 ```
+
+Every target is also a make target, and `make help` lists them:
+
+```sh
+make                                   # ReleaseFast build
+make test                              # the whole suite
+make test-one FILTER="usage counters"  # one test, by name substring
+make check                             # fmt --check plus the tests, the CI gate
+```
+
+`make check` is exactly what [CI](.github/workflows/ci.yml) runs on a push, on
+the Zig version `build.zig.zon` names, so run it before pushing.
 
 ## Use
 

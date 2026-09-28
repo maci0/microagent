@@ -27,7 +27,13 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run.addArgs(args);
     b.step("run", "Run microagent").dependOn(&run.step);
 
-    const tests = b.addTest(.{ .root_module = exe.root_module });
+    // -Dtest-filter runs one test by name, so editing a function does not mean
+    // re-running the whole suite to see its own test.
+    const test_filter = b.option([]const u8, "test-filter", "run only tests whose name contains this text");
+    const tests = b.addTest(.{
+        .root_module = exe.root_module,
+        .filters = if (test_filter) |f| &[_][]const u8{f} else &.{},
+    });
     const run_tests = b.addRunArtifact(tests);
     b.step("test", "Run unit tests").dependOn(&run_tests.step);
 }
