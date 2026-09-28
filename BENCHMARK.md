@@ -13,11 +13,11 @@ below was produced by those scripts, not by hand.
 | build | binary |
 | --- | --- |
 | `-Doptimize=ReleaseSmall` (stripped) | 605 KB |
-| `-Doptimize=ReleaseFast` (stripped) | 1.05 MB |
+| `-Doptimize=ReleaseFast` (stripped) | 1.08 MB |
 | `-Doptimize=ReleaseSafe` (stripped) | 1.34 MB |
 | `Debug` (unstripped) | 31 MB |
 
-No runtime, no package manager, no node_modules, no python. One file, ~700 lines.
+No runtime, no package manager, no node_modules, no python. One file, 713 lines.
 
 ## Startup
 
@@ -25,7 +25,7 @@ No runtime, no package manager, no node_modules, no python. One file, ~700 lines
 
 | harness | mean |
 | --- | --- |
-| **microagent** | **2.3 ms** |
+| **microagent** | **2.5 ms** |
 | claude | 22.1 ms |
 | grok | 38.1 ms |
 | codex | 49.6 ms |
