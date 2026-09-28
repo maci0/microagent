@@ -37,6 +37,7 @@ lint.select = [
     "DTZ",  # naive datetime calls
     "EXE",  # shebang and executable rules
     "FBT",  # a boolean argument reads at the call site as a plain flag
+    "FLY",  # string formatting: an f-string with nothing in it, a join of literals
     "G",    # logging format
     "ISC",  # implicit string concatenation
     "ICN",  # import conventions
