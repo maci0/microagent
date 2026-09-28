@@ -159,9 +159,6 @@ const Options = struct {
     /// Reply-style config to read. Set by --config or MICROAGENT_CONFIG, else
     /// $HOME/.microagent/config.toml. A missing file is not an error.
     config: []const u8 = "",
-    /// What the command line asked for. `--help` and `--version` stop the
-    /// parse where they appear, before any option value is needed.
-    action: Action = .run,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -190,6 +187,9 @@ pub fn main(init: std.process.Init) !void {
     // documentation. `microagent update`, dispatched above, already behaved
     // this way; the two commands now agree.
     if (earlyAction(args.items[1..])) |action| {
+        // The text a caller may have piped at something that read a few lines
+        // and left: nothing is waiting on the rest, so a closed stream costs
+        // the caller nothing.
         switch (action) {
             .help => net.writeOut(io, help_text) catch {},
             .version => net.writeOut(io, "microagent " ++ version ++ "\n") catch {},
@@ -222,20 +222,6 @@ pub fn main(init: std.process.Init) !void {
 
     var err_buf: [512]u8 = undefined;
     if (parseArgs(&err_buf, args.items[1..], &opts)) |msg| return usageError(io, "{s}", .{msg});
-    switch (opts.action) {
-        .help => {
-            // The text a caller may have piped at something that read a few
-            // lines and left: nothing is waiting on the rest, so a closed
-            // stream costs the caller nothing.
-            net.writeOut(io, help_text) catch {};
-            return;
-        },
-        .version => {
-            net.writeOut(io, "microagent " ++ version ++ "\n") catch {};
-            return;
-        },
-        .run => {},
-    }
 
     if (opts.prompt.len == 0) return usageError(io, "no prompt: pass it as an argument or with --print", .{});
     tool_mod.forwardInterruptsToToolGroup();
@@ -736,11 +722,9 @@ fn parseArgs(buf: []u8, argv: []const []const u8, opts: *Options) ?[]const u8 {
         const split = splitArg(arg);
         const name = split.name;
         const joined = split.joined;
-        if (isFlag(name, "-V", "--version")) {
-            opts.action = .version;
-            return null;
-        } else if (isFlag(name, "-h", "--help")) {
-            opts.action = .help;
+        if (isFlag(name, "-V", "--version") or isFlag(name, "-h", "--help")) {
+            // `earlyAction` has already answered both before the environment is
+            // read, so the parse stops here and sets nothing.
             return null;
         } else if (valuedFlag(name)) |flag| {
             // A flag that ends the command line and one handed an empty value
@@ -2534,24 +2518,23 @@ test "a budget of zero is refused like every other zero ceiling" {
     try std.testing.expectEqual(@as(?u64, 90), opts.budget_s);
 }
 
-test "help and version win wherever they appear" {
+test "help and version stop the parse where they appear" {
     var opts: Options = .{};
     var buf: [512]u8 = undefined;
     try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &.{ "a prompt", "--help" }, &opts));
-    try std.testing.expectEqual(Action.help, opts.action);
+    try std.testing.expectEqualStrings("a prompt", opts.prompt);
 
     var v: Options = .{};
     try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &.{ "-V", "--model" }, &v));
-    try std.testing.expectEqual(Action.version, v.action);
+    try std.testing.expectEqualStrings(default_model, v.model);
 }
 
-// The walk that runs before the environment is read has to reach the same
-// answer as the walk that runs after it, on the arguments both of them are
-// given, and it has to leave a command line that asks for no help and no
-// version alone. `earlyAction` is what keeps `microagent --help` working on
-// a machine whose `MICROAGENT_MAX_TURNS` is not a number, which is the only
-// way that walk is reachable at all.
-test "the walk that answers help before reading the environment agrees with the parser" {
+// The walk that runs before the environment is read is the only way `--help`
+// and `--version` are answered, and the parse has to stop where the walk
+// stopped, so what follows the flag is never read as an option. `earlyAction`
+// is what keeps `microagent --help` working on a machine whose
+// `MICROAGENT_MAX_TURNS` is not a number.
+test "the walk that answers help before reading the environment stops the parse there" {
     const cases = [_]struct { argv: []const []const u8, want: ?Action }{
         .{ .argv = &.{ "a prompt", "--help" }, .want = .help },
         .{ .argv = &.{ "-V", "--model" }, .want = .version },
@@ -2567,10 +2550,12 @@ test "the walk that answers help before reading the environment agrees with the 
     };
     for (cases) |c| {
         try std.testing.expectEqual(c.want, earlyAction(c.argv));
-        var opts: Options = .{};
-        var buf: [512]u8 = undefined;
-        _ = parseArgs(&buf, c.argv, &opts);
-        if (c.want) |want| try std.testing.expectEqual(want, opts.action) else try std.testing.expectEqual(Action.run, opts.action);
+        // Where the walk answered, the parse stops and says nothing is wrong.
+        if (c.want != null) {
+            var opts: Options = .{};
+            var buf: [512]u8 = undefined;
+            try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, c.argv, &opts));
+        }
     }
 }
 
@@ -2652,19 +2637,10 @@ fn fuzzArgs(_: void, smith: *std.testing.Smith) !void {
     const msg = parseArgs(&buf, argv[0..n], &opts);
     if (msg) |m| try std.testing.expect(m.len > 0);
 
-    // `--help` and `--version` stop the parse where they are, so an argument
-    // after one of them sets nothing, whatever it says.
-    const stops = blk: {
-        for (argv[0..n]) |arg| {
-            if (isFlag(arg, "-h", "--help")) break :blk Action.help;
-            if (isFlag(arg, "-V", "--version")) break :blk Action.version;
-        }
-        break :blk Action.run;
-    };
-    if (stops != .run) {
-        try std.testing.expectEqual(stops, opts.action);
-        try std.testing.expectEqualStrings(default_model, opts.model);
-        try std.testing.expectEqual(max_turns_default, opts.max_turns);
+    // `--help` and `--version` are answered by the walk that runs before the
+    // environment is read, so a line carrying one never reaches the options.
+    if (earlyAction(argv[0..n]) != null) {
+        try std.testing.expectEqual(@as(?[]const u8, null), msg);
         return;
     }
 

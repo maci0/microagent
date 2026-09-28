@@ -256,27 +256,8 @@ const git_default_limit: usize = 400;
 /// `usize` cannot hold is every line rather than a trap.
 fn gitLineLimit(args: std.json.ObjectMap) usize {
     const v = args.get("limit") orelse return git_default_limit;
-    const n = countArg(v) orelse return git_default_limit;
+    const n = chat.maybeNum(v, null) orelse return git_default_limit;
     return @max(1, std.math.cast(usize, n) orelse std.math.maxInt(usize));
-}
-
-/// A count the model sent, or null when it sent something that is not one.
-///
-/// `chat.num` answers 0 for every value it cannot read as a number, which is
-/// the right answer for a token counter that starts at zero and the wrong one
-/// for a line count: a `limit` of `"3"` became a limit of zero, so the call
-/// returned an empty result and the model read it as a file with nothing in
-/// it. A number spelled as a string is a number a model meant, so it is read
-/// as one; a value that is neither is the model's mistake to be told about by
-/// the default rather than answered with the wrong lines.
-fn countArg(v: ?std.json.Value) ?u64 {
-    const value = v orelse return null;
-    return switch (value) {
-        .integer => |n| if (n > 0) @intCast(n) else 0,
-        .float => |f| std.math.lossyCast(u64, f),
-        .number_string, .string => |s| std.fmt.parseInt(u64, s, 10) catch null,
-        else => null,
-    };
 }
 
 /// The largest count handed to `git log -n`. Its own argument parser refuses a
@@ -459,14 +440,14 @@ fn bashTimeoutMs(requested: ?u64, ceiling_ms: ?u64) u64 {
 
 /// The timeout the model asked for, or null when it asked for none.
 ///
-/// `countArg` reads a number the model wrote, and null for one it did not, but
-/// a timeout it did write can still be a value no command can run under: a
+/// `chat.maybeNum` reads a number the model wrote, and null for one it did not,
+/// but a timeout it did write can still be a value no command can run under: a
 /// zero or a negative one is not "no time", it is a deadline already spent, and
 /// the call came back `command timed out after 0ms` without the command ever
 /// starting. The documented default is what a request that names no usable
 /// timeout gets.
 fn requestedTimeoutMs(v: ?std.json.Value) ?u64 {
-    const n = countArg(v) orelse return null;
+    const n = chat.maybeNum(v, null) orelse return null;
     return if (n > 0) n else null;
 }
 
@@ -679,8 +660,8 @@ fn toolRead(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
         return std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_read_bytes)) catch |err|
             return readFailed(arena, path, err);
 
-    const offset: usize = @max(1, std.math.cast(usize, countArg(args.get("offset")) orelse 1) orelse std.math.maxInt(usize));
-    const limit: usize = std.math.cast(usize, countArg(args.get("limit")) orelse std.math.maxInt(u64)) orelse std.math.maxInt(usize);
+    const offset: usize = @max(1, std.math.cast(usize, chat.maybeNum(args.get("offset"), null) orelse 1) orelse std.math.maxInt(usize));
+    const limit: usize = std.math.cast(usize, chat.maybeNum(args.get("limit"), null) orelse std.math.maxInt(u64)) orelse std.math.maxInt(usize);
     return readLines(io, arena, path, offset, limit);
 }
 
