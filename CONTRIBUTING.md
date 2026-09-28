@@ -4,28 +4,43 @@
 
 Zig 0.16.0 or newer, the minimum declared as `.minimum_zig_version` in
 [build.zig.zon](build.zig.zon). There is no dependency to install, no service to
-start, and no configuration to copy. A clone plus a Zig toolchain is a working
-checkout.
+start, and no configuration to copy. A clone plus a Zig toolchain builds and
+tests.
 
 ```sh
 make            # zig-out/bin/microagent
 make small      # the ReleaseSmall binary
 ```
 
+`make check`, the gate, also needs `shellcheck`, `ruff` and `yamllint` on
+`PATH`. `ruff` and `yamllint` are format- and rule-sensitive, so they are
+pinned in the [Makefile](Makefile) and `make lint-versions` says so by name
+when a local install differs from the one CI runs:
+
+```sh
+uv tool install ruff@0.16.4
+uv tool install yamllint==1.38.0
+```
+
+`zig fmt` covers the Zig and needs nothing else.
+
 ## Before you push
 
 ```sh
-make check                  # zig fmt --check, the linters, and the whole test suite
+make check                  # the gate: zig fmt --check, the linters, the tests, an optimized build
 make test-one FILTER="..."  # one test, while you are mid-edit
 make lint                   # shellcheck, ruff and yamllint on their own
 ```
 
 `make check` is the whole gate: it is the same `zig fmt --check`, the same
-`ruff check`, `ruff format --check` and `yamllint`, and the same `zig build test` that
+`ruff check`, `ruff format --check` and `yamllint`, the same `zig build test`,
+and the same `ReleaseSmall` build whose binary it then runs, that
 [.github/workflows/ci.yml](.github/workflows/ci.yml) runs, on the same Zig
-version. `make help` lists every target. Source is formatted with `zig fmt`;
-`make fmt` applies it, and `ruff format` does the same for the Harbor adapter.
-The three linters cover what `zig fmt` cannot: the bench
+version. The one CI job it does not stand in for is the release-assets
+cross-build; `make release-assets` runs that. `make help` lists every target.
+Source is formatted with `zig fmt`; `make fmt` applies it, and `ruff format`
+does the same for the Harbor adapter. The three linters cover what `zig fmt`
+cannot: the bench
 shell, the Harbor adapter under `integrations/harbor` (rules in
 [ruff.toml](ruff.toml)) and the workflows and the composite toolchain action
 (rules in [.yamllint](.yamllint)).

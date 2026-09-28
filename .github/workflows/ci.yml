@@ -86,10 +86,13 @@ jobs:
           persist-credentials: false
 
       - name: install the linters
+        # The versions live in the Makefile, the same place `make
+        # lint-versions` checks a local install against, so the gate and a
+        # contributor's own run cannot lint with different tools.
         run: |
           set -euo pipefail
           python3 -m pip install --disable-pip-version-check \
-            ruff==0.16.4 yamllint==1.38.0
+            $(make -s print-lint-versions)
 
       - name: the shell scripts parse and are shellcheck-clean
         run: make lint-shell
