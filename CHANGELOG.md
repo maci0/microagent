@@ -43,6 +43,19 @@ release, and `microagent update` moves you to it.
 - The harbor adapter treats an empty `MICROAGENT_BASE_URL`, `MICROAGENT_BUDGET_SECONDS` or
   `MICROAGENT_MAX_TURNS` as unset, and a non-numeric one names the variable instead of raising a
   `ValueError` out of `int()`.
+- `bash`, `search`, `ast` and `git` kept their output only while it stayed under the capture cap.
+  Past it, the run aborted with `StreamTooLong` and handed the model a bare error instead of the text, so
+  a chatty build, a `rg` over a large tree and a `git show` of a big file all came back as nothing found.
+  The output past the cap is now drained and dropped, the child still runs to its own end so its exit
+  status and timeout mean what they did, and `bash` says when its output was cut.
+- The `--max-turns` ceiling note said "last turn" on the second-to-last turn, one turn before the turn
+  it describes.
+- A reply-style level the parser does not recognize no longer costs the run the levels it did
+  understand: a bad `MICROAGENT_CAVEMAN` left `MICROAGENT_PONYTAIL` unapplied, and a bad key in the
+  config file hid every key after it.
+- A streamed tool call whose `index` skipped a slot left a nameless call in the list, which was sent
+  back as an assistant tool call with no function name and rejected by the next request. The gap is
+  dropped.
 
 ### Added
 

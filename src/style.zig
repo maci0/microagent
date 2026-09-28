@@ -111,16 +111,19 @@ pub const Style = struct {
 
     /// Read the levels out of a TOML document. A missing key keeps the
     /// default, and an unrecognized level keeps the default too: the first
-    /// offending line is returned so the caller can say so on stderr rather
+    /// offending key is returned so the caller can say so on stderr rather
     /// than silently running a level the user did not ask for. A key the file
     /// does not define is returned the same way, because a misspelled
     /// `caveman` would otherwise leave the default in force with nothing said.
+    /// One bad value does not hide the keys after it, so the scan runs to the
+    /// end of the document and every key it does understand still applies.
     ///
     /// Only `key = "value"` is understood, at the top level or under `[style]`.
     /// That is the whole config, so it does not need a TOML parser: the rest of
     /// the format (numbers, arrays, dates, nested tables) has nowhere to go.
     pub fn applyToml(self: *Style, text: []const u8) ?Problem {
         var ours = true;
+        var unknown: ?Problem = null;
         var lines = std.mem.splitScalar(u8, text, '\n');
         while (lines.next()) |raw| {
             const line = std.mem.trim(u8, raw, " \t\r");
@@ -138,20 +141,20 @@ pub const Style = struct {
             if (std.mem.eql(u8, key, "caveman")) {
                 if (parseCaveman(value)) |level| {
                     self.caveman = level;
-                } else {
-                    return .{ .key = key, .bad_value = true };
+                } else if (unknown == null) {
+                    unknown = .{ .key = key, .bad_value = true };
                 }
             } else if (std.mem.eql(u8, key, "ponytail")) {
                 if (parsePonytail(value)) |level| {
                     self.ponytail = level;
-                } else {
-                    return .{ .key = key, .bad_value = true };
+                } else if (unknown == null) {
+                    unknown = .{ .key = key, .bad_value = true };
                 }
-            } else {
-                return .{ .key = key, .bad_value = false };
+            } else if (unknown == null) {
+                unknown = .{ .key = key, .bad_value = false };
             }
         }
-        return null;
+        return unknown;
     }
 };
 

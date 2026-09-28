@@ -533,25 +533,29 @@ const UnknownLevel = struct {
 };
 
 /// The levels, in the order the doc comment names: the config file, then the
-/// environment overrides, over the built-in defaults. The first value that is
-/// not a level is returned and the levels understood so far stand.
+/// environment overrides, over the built-in defaults. One value that is not a
+/// level does not cost the run the others, so every source is read to the end
+/// and the first offending value is the one named on stderr.
 fn resolveStyle(
     style: *style_mod.Style,
     config: ?[]const u8,
     caveman_env: ?[]const u8,
     ponytail_env: ?[]const u8,
 ) ?UnknownLevel {
+    var unknown: ?UnknownLevel = null;
     if (config) |text| {
-        if (style.applyToml(text)) |problem|
-            return .{ .key = problem.key, .from_config = true, .bad_value = problem.bad_value };
+        if (style.applyToml(text)) |problem| {
+            if (unknown == null)
+                unknown = .{ .key = problem.key, .from_config = true, .bad_value = problem.bad_value };
+        }
     }
     if (caveman_env) |v| {
-        if (style_mod.parseCaveman(v)) |level| style.caveman = level else return .{ .key = "MICROAGENT_CAVEMAN", .from_config = false, .bad_value = true };
+        if (style_mod.parseCaveman(v)) |level| style.caveman = level else if (unknown == null) unknown = .{ .key = "MICROAGENT_CAVEMAN", .from_config = false, .bad_value = true };
     }
     if (ponytail_env) |v| {
-        if (style_mod.parsePonytail(v)) |level| style.ponytail = level else return .{ .key = "MICROAGENT_PONYTAIL", .from_config = false, .bad_value = true };
+        if (style_mod.parsePonytail(v)) |level| style.ponytail = level else if (unknown == null) unknown = .{ .key = "MICROAGENT_PONYTAIL", .from_config = false, .bad_value = true };
     }
-    return null;
+    return unknown;
 }
 
 /// The agent loop: keep asking until the model stops calling tools.
@@ -596,6 +600,11 @@ fn run(
                 return;
             }
         }
+        // The ceiling is announced on the turn it applies to, before it is
+        // spent, so a truncated answer is never the last thing on stdout with no
+        // word about the ceiling that cut it.
+        if (turn + 1 == opts.max_turns)
+            net.note(io, arena, "microagent: last turn (--max-turns {d})\n", .{opts.max_turns});
         try compactMessages(gpa, msgs, turn_arena);
         const body = try buildBody(turn_arena, opts, msgs.items);
         const asked = Io.Timestamp.now(io, .awake).nanoseconds;
@@ -603,11 +612,6 @@ fn run(
         try finishTurn(io, turn_arena, gpa, msgs, &result, &usage);
         writeSessionRecord(io, turn_arena, session, elapsedMs(io, asked), &result);
         if (result.calls.items.len == 0) return;
-
-        // One turn left: say so, rather than ending on a truncated answer that
-        // reads like a finished one.
-        if (turn + 1 == opts.max_turns - 1)
-            net.note(io, arena, "microagent: last turn (--max-turns {d})\n", .{opts.max_turns});
     }
     net.note(io, arena, "microagent: stopped at the --max-turns ceiling ({d})\n", .{opts.max_turns});
 }
@@ -885,6 +889,7 @@ fn streamChat(
     if (result.content.items.len > 0) try out_buf.append(arena, '\n');
     flushOut(io, &out_buf);
     result.calls = calls;
+    dropNamelessCalls(&result.calls);
     return result;
 }
 
@@ -906,6 +911,21 @@ fn truncatedNotice(
             "content and {d} tool call(s); the turn is not complete",
         .{ url, content_len, calls_len },
     ) catch "microagent: the completion stream ended without [DONE]; the turn is not complete";
+}
+
+/// A provider that skips a tool-call index leaves an empty slot where `applyFrame`
+/// sized the list by index. A nameless call is not a call: it dispatches as
+/// `unknown tool ''` and it goes back to the provider as an assistant message
+/// carrying a function with no name, which the next request rejects. The gap is
+/// dropped here rather than sent on.
+fn dropNamelessCalls(calls: *std.ArrayList(ToolCall)) void {
+    var kept: usize = 0;
+    for (calls.items) |*call| {
+        if (call.name.len == 0) continue;
+        calls.items[kept] = call.*;
+        kept += 1;
+    }
+    calls.shrinkRetainingCapacity(kept);
 }
 
 /// Folds one SSE payload into the response being built.
@@ -999,13 +1019,13 @@ fn runToolProcess(
     arena: std.mem.Allocator,
     argv: []const []const u8,
     stderr_limit: usize,
-) !std.process.RunResult {
-    return std.process.run(arena, io, .{
-        .argv = argv,
-        .stdout_limit = .limited(max_tool_output * 4),
-        .stderr_limit = .limited(stderr_limit),
-        .timeout = durationMs(tool_timeout_ms),
-    });
+) !Captured {
+    const res = try runCapped(io, arena, argv, max_tool_output * 4, durationMs(tool_timeout_ms));
+    return .{
+        .stdout = res.stdout,
+        .stderr = @constCast(clamp(res.stderr, stderr_limit)),
+        .term = res.term,
+    };
 }
 
 /// A tool that delegates to a binary already on PATH: the caller builds the
@@ -1267,12 +1287,8 @@ fn writeGutterText(gpa: std.mem.Allocator, buf: *std.ArrayList(u8), s: []const u
 fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     const command = str(args.get("command")) orelse return std.fmt.allocPrint(arena, "error: missing command", .{});
     const timeout_ms: u64 = if (args.get("timeout_ms")) |v| num(v) else 120_000;
-    const res = std.process.run(arena, io, .{
-        .argv = &.{ "/bin/sh", "-c", command },
-        .stdout_limit = .limited(max_tool_output * 4),
-        .stderr_limit = .limited(max_tool_output * 4),
-        .timeout = durationMs(timeout_ms),
-    }) catch |err| switch (err) {
+    const capture_limit = max_tool_output * 4;
+    const res = runCapped(io, arena, &.{ "/bin/sh", "-c", command }, capture_limit, durationMs(timeout_ms)) catch |err| switch (err) {
         error.Timeout => return std.fmt.allocPrint(arena, "error: command timed out after {d}ms", .{timeout_ms}),
         else => return std.fmt.allocPrint(arena, "error: {s}", .{@errorName(err)}),
     };
@@ -1281,6 +1297,12 @@ fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]u8 {
     if (res.stderr.len > 0) {
         if (buf.items.len > 0) try buf.appendSlice(arena, "\n");
         try buf.appendSlice(arena, res.stderr);
+    }
+    // Output the model acts on is cut at the cap, so say so rather than letting
+    // a half-read build log or diff read as the whole one.
+    if (atCaptureLimit(res, capture_limit)) {
+        if (buf.items.len > 0) try buf.appendSlice(arena, "\n");
+        try buf.appendSlice(arena, "[output truncated at the tool's cap]");
     }
     if (buf.items.len == 0) return std.fmt.allocPrint(arena, "(no output, exit {s})", .{@tagName(res.term)});
     if (res.term != .exited or res.term.exited != 0) {
@@ -1535,6 +1557,91 @@ fn waitFor(io: Io, attempt: u32) !void {
 /// A monotonic duration for `Io.Timeout`, from milliseconds.
 fn durationMs(ms: u64) Io.Timeout {
     return .{ .duration = .{ .raw = .{ .nanoseconds = ms *| std.time.ns_per_ms }, .clock = .awake } };
+}
+
+/// Bytes read from a child pipe per operation. Both pipes are drained in one
+/// batch, so neither can fill up and wedge the child while the other is read.
+const capture_chunk = 8 * 1024;
+
+/// What a capped child produced: the first `limit` bytes of each stream, and the
+/// status it exited with.
+const Captured = struct {
+    stdout: []u8,
+    stderr: []u8,
+    term: std.process.Child.Term,
+};
+
+/// Runs `argv` and keeps the first `limit` bytes of each stream.
+///
+/// `std.process.run` answers `error.StreamTooLong` and throws away everything it
+/// had read, so a chatty build, a ripgrep over a large tree or a `git show` of a
+/// big file reached the model as a bare error with no output at all. Here the
+/// bytes past the cap are drained and dropped instead: the child still runs to
+/// its own end, so the exit status and the timeout keep meaning what they did.
+fn runCapped(
+    io: Io,
+    arena: std.mem.Allocator,
+    argv: []const []const u8,
+    limit: usize,
+    timeout: Io.Timeout,
+) !Captured {
+    var child = try std.process.spawn(io, .{
+        .argv = argv,
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .pipe,
+    });
+    defer child.kill(io);
+
+    const files = [2]Io.File{ child.stdout.?, child.stderr.? };
+    var chunks: [2][capture_chunk]u8 = undefined;
+    var vecs: [2][1][]u8 = .{ .{&chunks[0]}, .{&chunks[1]} };
+    var out: [2]std.ArrayList(u8) = .{ .empty, .empty };
+
+    var storage: [2]Io.Operation.Storage = undefined;
+    var batch: Io.Batch = .init(&storage);
+    defer batch.cancel(io);
+    for (0..2) |i| batch.addAt(@intCast(i), .{ .file_read_streaming = .{
+        .file = files[i],
+        .data = &vecs[i],
+    } });
+
+    var draining: usize = files.len;
+    var read_err: ?anyerror = null;
+    while (draining > 0) {
+        try batch.awaitConcurrent(io, timeout);
+        while (batch.next()) |completion| {
+            const i = completion.index;
+            const n = completion.result.file_read_streaming catch |err| {
+                // EndOfStream and Canceled are how a pipe finishes, not a fault.
+                if (read_err == null and err != error.EndOfStream and err != error.Canceled)
+                    read_err = err;
+                draining -= 1;
+                continue;
+            };
+            if (n > 0) {
+                const taken = @min(n, limit -| out[i].items.len);
+                if (taken > 0) try out[i].appendSlice(arena, chunks[i][0..taken]);
+            }
+            // A read may legitimately return zero bytes without ending the
+            // stream, so re-arm either way.
+            vecs[i] = .{&chunks[i]};
+            batch.addAt(i, .{ .file_read_streaming = .{
+                .file = files[i],
+                .data = &vecs[i],
+            } });
+        }
+    }
+
+    const term = try child.wait(io);
+    if (read_err) |err| return err;
+    return .{ .stdout = out[0].items, .stderr = out[1].items, .term = term };
+}
+
+/// True when a stream filled the cap, so the captured bytes are the beginning of
+/// the output and not all of it.
+fn atCaptureLimit(captured: Captured, limit: usize) bool {
+    return captured.stdout.len == limit or captured.stderr.len == limit;
 }
 
 /// The first `max` bytes, cut on a UTF-8 codepoint boundary. Both callers feed
@@ -2186,6 +2293,25 @@ test "a tool argument is a string or it is refused" {
     try std.testing.expect(str(.{ .bool = true }) == null);
 }
 
+// A level the parser does not have is reported, not fatal: the other knob and
+// the rest of the file still apply, because a typo in one variable is not a
+// reason to silently run the run the user did not ask for.
+test "one bad style value does not cost the run the levels it did understand" {
+    var style: style_mod.Style = .{};
+
+    const bad_env = resolveStyle(&style, null, "brief", "off").?;
+    try std.testing.expectEqualStrings("MICROAGENT_CAVEMAN", bad_env.key);
+    try std.testing.expectEqual(style_mod.CavemanLevel.ultra, style.caveman);
+    try std.testing.expectEqual(style_mod.PonytailLevel.off, style.ponytail);
+
+    var from_file: style_mod.Style = .{};
+    const bad_file = resolveStyle(&from_file, "ponytail = \"lazy\"\ncaveman = \"lite\"\n", null, null).?;
+    try std.testing.expectEqualStrings("ponytail", bad_file.key);
+    try std.testing.expectEqual(style_mod.PonytailLevel.full, from_file.ponytail);
+    // The key after the bad one is still read.
+    try std.testing.expectEqual(style_mod.CavemanLevel.lite, from_file.caveman);
+}
+
 var debug_enabled: bool = false;
 
 /// Cheap env-gated trace, for debugging a stuck stream.
@@ -2300,6 +2426,75 @@ fn dispatch(arena: std.mem.Allocator, name: []const u8, args: []const u8) ![]u8 
     };
     try call.args.appendSlice(arena, args);
     return runTool(std.testing.io, arena, call);
+}
+
+test "a child that outruns the capture cap keeps its first bytes instead of failing" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const cap: usize = 4096;
+    // `std.process.run` answers this with `error.StreamTooLong` and no output at
+    // all, which is what a chatty build or a broad ripgrep used to hand back.
+    const noisy = try runCapped(std.testing.io, arena, &.{
+        "/bin/sh", "-c", "head -c 200000 /dev/zero | tr '\\0' 'a'",
+    }, cap, durationMs(30_000));
+    try std.testing.expectEqual(cap, noisy.stdout.len);
+    try std.testing.expect(atCaptureLimit(noisy, cap));
+    try std.testing.expectEqualStrings("a" ** 8, noisy.stdout[0..8]);
+    // The child still ran to its own end, so the status is the command's.
+    switch (noisy.term) {
+        .exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        else => return error.TestUnexpectedResult,
+    }
+
+    const quiet = try runCapped(std.testing.io, arena, &.{
+        "/bin/sh", "-c", "echo hi; echo bye >&2",
+    }, cap, durationMs(30_000));
+    try std.testing.expectEqualStrings("hi\n", quiet.stdout);
+    try std.testing.expectEqualStrings("bye\n", quiet.stderr);
+    try std.testing.expect(!atCaptureLimit(quiet, cap));
+}
+
+test "both pipes past the cap drain together, so the child never wedges" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const cap: usize = 4096;
+
+    const noisy = try runCapped(std.testing.io, arena_state.allocator(), &.{
+        "/bin/sh",
+        "-c",
+        "head -c 200000 /dev/zero | tr '\\0' 'a'; head -c 200000 /dev/zero | tr '\\0' 'b' >&2",
+    }, cap, durationMs(30_000));
+    try std.testing.expectEqual(cap, noisy.stdout.len);
+    try std.testing.expectEqual(cap, noisy.stderr.len);
+    try std.testing.expectEqualStrings("a" ** 8, noisy.stdout[0..8]);
+    try std.testing.expectEqualStrings("b" ** 8, noisy.stderr[0..8]);
+}
+
+test "a gap in the tool-call indexes leaves no nameless call behind" {
+    const gpa = std.testing.allocator;
+    var run_state = std.heap.ArenaAllocator.init(gpa);
+    defer run_state.deinit();
+    const arena = run_state.allocator();
+
+    var result: ChatResult = .{};
+    var calls: std.ArrayList(ToolCall) = .empty;
+    var out_buf: std.ArrayList(u8) = .empty;
+    var unparsable: usize = 0;
+    // Index 2 arrives with no 0 and no 1, so the frame parser has to size the
+    // list to index 2 and leave two slots behind it.
+    const payload = "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":2,\"id\":\"call_1\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}]}}]}";
+    try applyFrame(arena, arena, payload, &result, &calls, &out_buf, &unparsable);
+    try std.testing.expectEqual(@as(usize, 3), calls.items.len);
+
+    dropNamelessCalls(&calls);
+    try std.testing.expectEqual(@as(usize, 1), calls.items.len);
+    try std.testing.expectEqualStrings("read", calls.items[0].name);
+
+    // A response whose calls are all named is untouched.
+    dropNamelessCalls(&calls);
+    try std.testing.expectEqual(@as(usize, 1), calls.items.len);
 }
 
 test "out-of-range numbers from the model saturate instead of trapping" {
