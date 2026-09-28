@@ -26,6 +26,7 @@ argv_for() {
 	kimi) printf '%s' "kimi -p \"\$PROMPT\"" ;;
 	codex) printf '%s' "codex exec --skip-git-repo-check \"\$PROMPT\"" ;;
 	crush) printf '%s' "crush run \"\$PROMPT\"" ;;
+	opencode) printf '%s' "opencode run \"\$PROMPT\"" ;;
 	*) printf '%s' "$1 -p \"\$PROMPT\"" ;;
 	esac
 }
