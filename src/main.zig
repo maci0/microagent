@@ -48,6 +48,12 @@ const elision_marker = "[earlier tool output elided: {d} bytes]";
 /// elides nothing at all.
 const min_marker_bytes = "[earlier tool output elided: 0 bytes]".len;
 const max_turns_default = 100;
+/// The exit status for a run that stopped at a ceiling rather than finishing:
+/// `--max-turns`, or a budget that ended the last turn. Distinct from 0 (the
+/// model answered) and from 1 (the run failed), because neither of those
+/// describes it, and a script that reads stdout has no other way to tell a
+/// prefix of an answer from an answer.
+const exit_incomplete: u8 = 3;
 /// Ceiling on what one response may generate, sent as `max_tokens`. Without it
 /// the provider's own limit is the only bound: a model that fails to stop
 /// streams until something else stops it, and the run pays for every token of
@@ -268,7 +274,7 @@ pub fn main(init: std.process.Init) !void {
     var tool_env = try childEnviron(gpa, init.environ_map);
     defer tool_env.deinit();
 
-    run(&client, io, gpa, init.arena.allocator(), opts, &msgs, &tool_env) catch |err| {
+    const ended = run(&client, io, gpa, init.arena.allocator(), opts, &msgs, &tool_env) catch |err| {
         // The endpoint is the one thing every failure below shares, and it is
         // not in the error: a DNS failure, a refused connection and a truncated
         // stream all arrive here as a bare name.
@@ -280,6 +286,11 @@ pub fn main(init: std.process.Init) !void {
         net.writeErr(io, msg);
         std.process.exit(1);
     };
+    // A run that stopped at a ceiling still has the model's words on stdout,
+    // and they are a prefix of the work rather than an answer to it. Reporting
+    // 0 would tell a script reading them that the task finished, which is the
+    // one claim a ceiling-truncated answer cannot support.
+    if (ended != .answered) std.process.exit(exit_incomplete);
 }
 
 /// Injected when the wall-clock budget runs out: the model has done its
@@ -362,7 +373,9 @@ const help_text =
     \\  microagent --print "$(cat task.txt)"
     \\
     \\exit status: 0 the run finished, 1 the run failed, 2 the command line was
-    \\wrong, 130 interrupted (Ctrl+C or kill), which takes the tool subprocess
+    \\wrong, 3 the run stopped at a ceiling (--max-turns, or a budget that ran
+    \\out) so the answer on stdout is a prefix of the work rather than an
+    \\answer, 130 interrupted (Ctrl+C or kill), which takes the tool subprocess
     \\with it.
     \\
     \\output: stdout carries the model's text and one JSON line per response,
@@ -409,6 +422,39 @@ fn die(io: Io, comptime fallback: []const u8, comptime fmt: []const u8, args: an
     net.writeErr(io, msg);
     net.writeErr(io, help_text);
     std.process.exit(2);
+}
+
+test "a run that stopped at a ceiling reports a status of its own" {
+    // The four statuses a finished, a failed, a malformed and an interrupted
+    // run already occupy. 3 is the one a ceiling-stopped run uses, so it must
+    // not be a value one of them answers to: a run that reports 0 claims the
+    // model finished, and its stdout is a prefix of the work rather than an
+    // answer to it.
+    for ([_]u8{ 0, 1, 2, 130 }) |taken| {
+        try std.testing.expect(exit_incomplete != taken);
+    }
+
+    // The code is only a contract if the help text states it. A script reads
+    // the help, not the source, so a status added to the exit path and not to
+    // the table is a status nobody can discover. The paragraph wraps, so the
+    // block is gathered across its lines rather than read off the first one.
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(std.testing.allocator);
+    var lines = std.mem.splitScalar(u8, help_text, '\n');
+    var started = false;
+    while (lines.next()) |line| {
+        if (!started) {
+            if (std.mem.indexOf(u8, line, "exit status:") == null) continue;
+            started = true;
+        }
+        // The paragraph ends at the blank line, so a status spelled in a
+        // wrapped continuation is inside the block rather than beside it.
+        if (line.len == 0) break;
+        try block.appendSlice(std.testing.allocator, line);
+        try block.append(std.testing.allocator, ' ');
+    }
+    try std.testing.expect(started);
+    try std.testing.expect(std.mem.indexOf(u8, block.items, "3 the run stopped at a ceiling") != null);
 }
 
 /// The value of an environment variable, or null when it is not set or is set
@@ -1029,7 +1075,21 @@ const final_push_grace_s: u64 = 300;
 /// zero timeout would fail before the tool could even start.
 const tool_timeout_floor_ms: u64 = 5_000;
 
+/// How a turn ended, which is what tells a finished run from a stopped one.
+///
+/// A turn is finished when the model stopped asking for tools on its own. The
+/// other two end the run without that: `wants_tools` is a turn whose answer was
+/// a request for more work, and `cut_off` is a turn the budget ended before
+/// there was a turn to append. Both leave a prefix of an answer on stdout, so
+/// neither may report itself as a finished run.
+const TurnEnd = enum { answered, wants_tools, cut_off };
+
 /// The agent loop: keep asking until the model stops calling tools.
+///
+/// What it returns is the last turn's end, and only `.answered` is a run that
+/// reached an answer on its own. A loop that leaves through `--max-turns` is
+/// `.cut_off`: the model was still working when the ceiling took the turn away,
+/// so what is on stdout is a prefix.
 fn run(
     client: *std.http.Client,
     io: Io,
@@ -1038,7 +1098,7 @@ fn run(
     opts: Options,
     msgs: *std.ArrayList(u8),
     tool_env: *const std.process.Environ.Map,
-) !void {
+) !TurnEnd {
     const started = Io.Timestamp.now(io, .awake).nanoseconds;
     const budget = Budget.of(started, opts.budget_s);
     var session: ?session_mod.Session = session_mod.open(io, arena, opts.session_dir, opts.model);
@@ -1065,8 +1125,11 @@ fn run(
             // with a small diff, and the model has already done the reading.
             net.note(io, arena, "microagent: budget of {d}s reached after {d} turn(s); one final turn\n", .{ opts.budget_s.?, turn });
             try appendMessage(gpa, msgs, "user", final_push);
-            _ = try runTurn(client, io, turn_arena, gpa, opts, msgs, &session, &usage, budget.withGraceNs(final_push_grace_s), tool_env);
-            return;
+            // The final push is a turn like any other, so it ends the run the
+            // way any other does. A model that answers it finished, and one
+            // that asks for more tools was cut off mid-work, which is a
+            // different exit status from a finished run.
+            return try runTurn(client, io, turn_arena, gpa, opts, msgs, &session, &usage, budget.withGraceNs(final_push_grace_s), tool_env);
         }
         // The ceiling is announced on the turn it applies to, before it is
         // spent, so a truncated answer is never the last thing on stdout with no
@@ -1074,21 +1137,28 @@ fn run(
         if (turn + 1 == opts.max_turns)
             net.note(io, arena, "microagent: last turn (--max-turns {d})\n", .{opts.max_turns});
         try compactMessages(io, gpa, msgs, turn_arena, &compaction_floor);
-        // The model stopped asking for tools. If it changed the tree without
-        // ever running a test, ask for that once rather than accepting the
-        // answer: a fix nobody ran is the failure mode this loop exists to
-        // catch, and one extra turn is a cheap way to catch it.
-        if (!try runTurn(client, io, turn_arena, gpa, opts, msgs, &session, &usage, budget, tool_env)) {
-            if (!verify_asked and madeEdit(msgs.items) and !ranTests(msgs.items)) {
-                verify_asked = true;
-                net.note(io, arena, "microagent: no test runner was used; asking for one verification turn\n", .{});
-                try appendMessage(gpa, msgs, "user", verify_push);
-                continue;
-            }
-            return;
+        // `.wants_tools` keeps the loop going, and `.cut_off` is the budget
+        // ending the run mid-turn, so neither is a finished run.
+        switch (try runTurn(client, io, turn_arena, gpa, opts, msgs, &session, &usage, budget, tool_env)) {
+            .wants_tools, .cut_off => |end| return end,
+            // The model stopped asking for tools. If it changed the tree
+            // without ever running a test, ask for that once rather than
+            // accepting the answer: a fix nobody ran is the failure mode this
+            // loop exists to catch, and one extra turn is a cheap way to catch
+            // it.
+            .answered => {
+                if (!verify_asked and madeEdit(msgs.items) and !ranTests(msgs.items)) {
+                    verify_asked = true;
+                    net.note(io, arena, "microagent: no test runner was used; asking for one verification turn\n", .{});
+                    try appendMessage(gpa, msgs, "user", verify_push);
+                    continue;
+                }
+                return .answered;
+            },
         }
     }
-    net.note(io, arena, "microagent: stopped at the --max-turns ceiling ({d})\n", .{opts.max_turns});
+    net.note(io, arena, "microagent: stopped at the --max-turns ceiling ({d}); the answer is a prefix of the work\n", .{opts.max_turns});
+    return .cut_off;
 }
 
 /// Test runners worth recognising, so a run that never touched one can be
@@ -1122,8 +1192,9 @@ fn madeEdit(msgs: []const u8) bool {
 
 /// One request and everything its answer causes: the completion, the assistant
 /// message and tool results it appends, the usage line, and the session record.
-/// False when the response asked for no tools, which ends the loop, and when
-/// the budget cut the turn off before there was a turn to append.
+/// `.answered` when the response asked for no tools, which ends the loop;
+/// `.wants_tools` when it did, and `.cut_off` when the budget ended the turn
+/// before there was a turn to append.
 fn runTurn(
     client: *std.http.Client,
     io: Io,
@@ -1135,14 +1206,14 @@ fn runTurn(
     usage: *chat_mod.Usage,
     budget: Budget,
     tool_env: *const std.process.Environ.Map,
-) !bool {
+) !TurnEnd {
     const body = try buildBody(arena, opts, msgs.items);
     const asked = Io.Timestamp.now(io, .awake).nanoseconds;
     // A turn the budget cut off is not a turn: half a tool call's arguments is
     // not a tool call, so nothing of it is appended and the run ends here with
     // the reason already on stderr.
     var result = streamChat(client, io, gpa, arena, opts, body, budget) catch |err| switch (err) {
-        error.BudgetExhausted => return false,
+        error.BudgetExhausted => return .cut_off,
         else => return err,
     };
     defer result.deinit(gpa);
@@ -1152,7 +1223,7 @@ fn runTurn(
     const model_ms = session_mod.elapsedMs(io, asked);
     try finishTurn(io, arena, gpa, msgs, &result, usage, budget, tool_env);
     session_mod.writeRecord(io, arena, session, model_ms, &result);
-    return result.calls.items.len != 0;
+    return if (result.calls.items.len != 0) .wants_tools else .answered;
 }
 
 /// The request body, with `messages` last.

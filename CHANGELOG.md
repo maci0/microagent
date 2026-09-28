@@ -114,6 +114,14 @@ release, and `microagent update` moves you to it.
 
 ### Changed
 
+- A run that stops at a ceiling exits 3 instead of 0. `--max-turns`, and a budget
+  that ended the last turn, both leave a prefix of an answer on stdout while
+  reporting success, so a script reading the text read a truncated review as a
+  finished one. 0 is now only a run the model finished: 1 is a failure, 2 a bad
+  command line, 3 a run stopped at a ceiling. A script that wants the prefix
+  regardless of the status reads stdout as it did; one that acts on the status
+  now has the fact it needed. `microagent --help` and the README carry the code.
+
 - A `read` with `offset` or `limit` streams the file instead of reading all of it and
   copying the lines out. Reading fifty lines of a 3.9 MB file took 0.90 ms and left the
   whole file in the turn's memory beside the response it shared that memory with; it takes
