@@ -755,6 +755,8 @@ const help_text =
     \\microagent - tiny OpenAI-compatible coding agent
     \\
     \\usage: microagent [options] "<prompt>"
+    \\       microagent update [-c | --check]
+    \\       microagent help
     \\
     \\  -p, --print <prompt>   task to run (also accepted as a bare argument)
     \\  -m, --model <model>    model id (env MICROAGENT_MODEL, config key
@@ -1016,6 +1018,38 @@ test "the help text says the one bare word that is a subcommand, not a task" {
     // no longer reserves.
     const argv = [_][]const u8{ "update", "--check" };
     try std.testing.expect(subcommandArg(argv[0]));
+}
+
+test "the help text spells every invocation in the usage block" {
+    // Three command lines reach three different paths: a run, the `update`
+    // subcommand dispatched ahead of the flags, and the bare `help` word. The
+    // usage block is the first thing a reader sees, and a form missing from it
+    // is a form they have to find in a section further down. The forms are
+    // gathered from the dispatch itself, so a subcommand or a bare word added
+    // to one and not the other fails here.
+    const gpa = std.testing.allocator;
+    const doc = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, usage_doc_path, gpa, .limited(max_usage_doc_bytes));
+    defer gpa.free(doc);
+    const lines = [_][]const u8{
+        "usage: microagent [options] \"<prompt>\"",
+        "       microagent update [-c | --check]",
+        "       microagent help",
+    };
+    for (lines) |line| {
+        if (std.mem.indexOf(u8, help_text, line) == null) {
+            std.debug.print("\n--help does not spell the invocation \"{s}\"\n", .{line});
+            return error.TestUnexpectedResult;
+        }
+        if (std.mem.indexOf(u8, doc, line) == null) {
+            std.debug.print("\n" ++ usage_doc_path ++ ": does not spell the invocation \"{s}\"\n", .{line});
+            return error.TestUnexpectedResult;
+        }
+    }
+    // The word the usage block names as a request has to be the one the parser
+    // reserves, and `update` has to be the one the dispatch takes.
+    try std.testing.expectEqualStrings("help", help_word);
+    try std.testing.expect(subcommandArg("update"));
+    try std.testing.expect(!subcommandArg(help_word));
 }
 
 test "the help text names the spend alarm the run prints" {

@@ -14,7 +14,7 @@ microagent \- tiny OpenAI-compatible coding agent
 .B "microagent help"
 .SH DESCRIPTION
 .B microagent
-runs one non-interactive turn of an OpenAI-compatible coding agent: it sends a
+runs one non-interactive task of an OpenAI-compatible coding agent: it sends a
 task to a provider, calls the tools the model asks for until it stops, and
 writes the model's text to stdout. It is a single static binary that links no C
 library on Linux; the
@@ -204,8 +204,14 @@ says.
 .BR MICROAGENT_MAX_TURNS ", " MICROAGENT_MAX_TOKENS ", " MICROAGENT_STALL_TIMEOUT ", " MICROAGENT_BUDGET_SECONDS ", " MICROAGENT_MAX_SPEND_TOKENS
 The ceilings and timeouts above.
 .TP
-.BR MICROAGENT_REASONING_EFFORT ", " MICROAGENT_TEMPERATURE ", " GITHUB_TOKEN
+.BR MICROAGENT_REASONING_EFFORT ", " MICROAGENT_TEMPERATURE
 As above.
+.TP
+.B GITHUB_TOKEN
+A bearer for api.github.com, for
+.B microagent update
+only, past the anonymous rate limit. The public asset hosts never see it, and a
+run only scrubs it: it is withheld from every tool subprocess a run starts.
 .TP
 .BR MICROAGENT_CONFIG ", " MICROAGENT_SESSION_DIR ", " MICROAGENT_SKILLS
 These three take an empty value as off: no config file, no session log, no
@@ -219,6 +225,12 @@ the name of the source the api key came from, never the key.
 .BR NO_COLOR ", " TERM=dumb
 The tool gutter draws the tool name in bold on a terminal and in plain text
 everywhere else.
+.B NO_COLOR
+set to anything but an empty string, or
+.B TERM=dumb
+, leaves the bold out even at a terminal. The value of
+.B NO_COLOR
+is not read, only the name, and an empty value is not a setting.
 .TP
 .B TMPDIR
 Added to the sandbox writable roots whenever
@@ -226,12 +238,6 @@ Added to the sandbox writable roots whenever
 is true under
 .BR [sandbox] ,
 on macOS only, where the system keeps per-user scratch space there.
-.B NO_COLOR
-set to anything but an empty string, or
-.B TERM=dumb
-, leaves the bold out even at a terminal. The value of
-.B NO_COLOR
-is not read, only the name, and an empty value is not a setting.
 .SH FILES
 .TP
 .I ~/.microagent/config.toml
@@ -304,6 +310,14 @@ Pass a task that begins with a dash:
 .RS
 .EX
 microagent -- "explain why \-Werror is failing in src/net.zig"
+.EE
+.RE
+.PP
+Report the latest release without installing it:
+.PP
+.RS
+.EX
+microagent update --check
 .EE
 .RE
 .SH SEE ALSO

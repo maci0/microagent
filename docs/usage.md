@@ -34,6 +34,8 @@ The prompt may also be the last bare argument, so `microagent "fix the failing t
 microagent - tiny OpenAI-compatible coding agent
 
 usage: microagent [options] "<prompt>"
+       microagent update [-c | --check]
+       microagent help
 
   -p, --print <prompt>   task to run (also accepted as a bare argument)
   -m, --model <model>    model id (env MICROAGENT_MODEL, config key

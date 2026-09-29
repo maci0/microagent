@@ -142,6 +142,23 @@ release, and `microagent update` moves you to it.
   object a monitor already parses, with an `error` beside counters that are zero
   because nothing was billed.
 
+- The `usage:` block of `microagent --help` names the three command lines that
+  reach three different paths, `microagent update [-c | --check]` and
+  `microagent help` beside the run, so neither is only in a section further
+  down. The man page synopsis has listed all three since it was written.
+
+- `microagent update --help` gained the two examples that section had none of,
+  and the man page gained the `--check` one beside the run's.
+
+- The man page's `NO_COLOR`, `TERM=dumb` paragraph was the last text of the
+  `TMPDIR` entry, so `man microagent` read the color rules as something
+  `TMPDIR` does, a second paragraph away from the entry that names them.
+  `GITHUB_TOKEN` was listed among the run's variables as "as above" next to
+  `--temperature`, which is not what it is: it is read by `update` alone, and a
+  run only withholds it from the tool subprocesses it starts. The description
+  said a run "runs one non-interactive turn" and then said it calls tools until
+  the model stops; a run is a task, not a turn.
+
 - `microagent --help` names `-c` beside `--check` in the `update` subcommand
   synopsis, so it reads the way `microagent update --help`, the man page
   synopsis and the update's own usage line already did. The top-level help is

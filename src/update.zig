@@ -469,6 +469,11 @@ const usage_text =
     \\reason and this text on stderr. A misspelled flag is answered with the one
     \\it is closest to, so --chek says did you mean --check?
     \\
+    \\examples:
+    \\  microagent update --check       report the latest release, install nothing
+    \\  GITHUB_TOKEN=... microagent update
+    \\                                 install it, past the anonymous rate limit
+    \\
 ;
 
 const Parsed = union(enum) {
