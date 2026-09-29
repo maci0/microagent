@@ -80,10 +80,10 @@ reduced to a fragment with no instructions for anyone to follow.
    lines out of `lint-requirements.txt`, and read the versions the document
    prints: three spellings of one pin is a defect the moment any two of them
    move apart, and `make lint-versions` compares the Makefile pins against the
-   requirements file, checks the two tools actually on `PATH`, and audits that
-   every pin in that file carries a `--hash=sha256` so CI's `--require-hashes`
-   install resolves; none of that reads the document, so the printed version is
-   the only place the third spelling is checked.
+   requirements file, `make preflight` checks that the two linters are actually
+   on `PATH`, and `make lint-lock` audits that every entry in the Harbor lock
+   carries a `--hash=sha256`; none of that reads the document, so the printed
+   version is the only place the third spelling is checked.
 
 7. **What the release documentation promises against what the release does.**
    `CONTRIBUTING.md`'s "Version and changelog" counts the published binaries

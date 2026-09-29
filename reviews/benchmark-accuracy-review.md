@@ -65,8 +65,8 @@ reduced to a fragment with nothing measured left to check.
    `bench/results.jsonl` and `bench/gauntlet-results.jsonl` are appended to by
    the scripts and committed, so they are data the next reader parses. Every
    field name in those objects must still be written by the script that writes
-   it: `run.sh` emits `agent`, `task`, `wall_s`, `tokens`, `lines` and
-   `result`, and `gauntlet.sh` emits `agent`, `passed`, `failed`,
+   it: `run.sh` emits `run`, `agent`, `task`, `wall_s`, `tokens`, `lines` and
+   `result`, and `gauntlet.sh` emits `run`, `agent`, `passed`, `failed`,
    `changed_files`, `wall_s`, `tokens`, `verify` and `rc`. A field the writer
    stopped emitting leaves a column the data can no longer fill, and a row whose
    fields no writer produces is a row nobody can reproduce.
@@ -95,12 +95,13 @@ reduced to a fragment with nothing measured left to check.
    setup no longer writes, all report a pass no agent earned, and a `pass` in
    `results.jsonl` produced that way is a wrong number in a committed file.
 
-8. **Command lines the harness mapping has got wrong.** `bench/harness.sh`
-   maps an agent name to the words that precede the prompt, and the default
-   branch spells the rest as `NAME -p`, which a CLI with a subcommand refuses. A
-   name the mapping sends to a command line that CLI does not accept measures a
-   run that never happened, and so does an agent the document spells differently
-   from the name the scripts match on, since the match is the bare name.
+8. **Command lines the harness mapping has got wrong.** `harness_argv` in
+   `bench/portable.sh` maps an agent name to the words that precede the prompt,
+   and the default branch spells the rest as `NAME -p`, which a CLI with a
+   subcommand refuses. A name the mapping sends to a command line that CLI does
+   not accept measures a run that never happened, and so does an agent the
+   document spells differently from the name the scripts match on, since the
+   match is the bare name.
 
 9. **Stated methodology the scripts no longer use.** The header records the
    machine, the Zig version, the run counts and the wall-clock method. A
@@ -142,10 +143,11 @@ reduced to a fragment with nothing measured left to check.
   reaches the network through it, so a pass that measures instead of reading
   produces numbers from a different machine, a different model and a different
   clock, which is the defect this review exists to catch. Recompute what a
-  local command answers on its own: `wc -l`, `ls -l`, `rg`. The one gate you may
-  run is `sh bench/instructions.sh --check`, which reaches neither the network nor a
-  harness CLI; it exits 2 on a machine with no `perf`, and its verdict settles a row
-  only on the machine and toolchain the baseline header names.
+  local command answers on its own: `wc -l`, `ls -l`, `rg`. The one bench check
+  you may run is `sh bench/instructions.sh --check`, which reaches neither the
+  network nor a harness CLI; it exits 2 on a machine with no `perf`, and its
+  verdict settles a row only on the machine and toolchain the baseline header
+  names.
 - Do not delete a row from `results.jsonl` or `gauntlet-results.jsonl`, and do
   not edit a recorded measurement. A row is a record of a run that happened; a
   run that must not count is a finding about the writer, not a deleted line.

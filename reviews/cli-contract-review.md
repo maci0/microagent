@@ -55,12 +55,13 @@ a fragment with no invocation surface to hold a contract.
 
 4. **Empty-string semantics drift.** `help_text` names a specific set of variables that
    keep their default when set to the empty string, and a second set that falls through to
-   the next source. Check each named variable against `envValue` and, for the style keys,
-   against `resolveStyle`. A new variable that reads the environment but is missing from
+   the next source. `empty_is_unset_vars` in `src/main.zig` is the code's own list of the
+   first set, so check each variable the help names against that list and against
+   `envValue`. A new variable that reads the environment but is missing from
    the empty-string paragraph in the help is the common form of this defect.
 
 5. **Defaults quoted in the help with no single source in the code.** `--max-turns` says
-   `default 100`; the style defaults, the session directory, the config path, and the
+   `default 100`; the session directory, the config path, and the
    update repository each carry a literal in the help text. Find the value the code
    actually falls back to and flag any literal that has drifted. A default that appears
    only in the help and only in the code is a defect even when the two agree today: it is
@@ -69,9 +70,12 @@ a fragment with no invocation surface to hold a contract.
 6. **Exit codes that the error paths do not return.** The help's "exit status" paragraph
    promises five: 0 for a finished run, 1 for a failed run, 2 for a wrong command line,
    3 for a run stopped at a ceiling, and 130 for an interrupted one. Check all five.
-   `usageError`, `configError`, `updateUsageError`, and every other `noreturn` error
+   `usageError`, `configError`, and every other `noreturn` error
    printer in the two files must exit with the code its class of failure implies, and a
    code the help names with no path that returns it is a finding the other direction.
+   The update subcommand returns codes rather than printing them, so its `run` function
+   is where a wrong one shows: `.unknown` carries 2 today, and the parse arms and the
+   install path are where a code the update help names with no return is a finding.
 
 7. **Update subcommand contract.** The help advertises `microagent update [--check]
    [--repo owner/name]`, with `-c` as the short of `--check` on the flag's own line
@@ -85,7 +89,8 @@ a fragment with no invocation surface to hold a contract.
    the order of the five token counters, and it is one string in the two writers that
    print them: `logUsage` in `src/main.zig`, which writes the per-response usage line,
    and `sessionRecord` in `src/session.zig`, which writes it inside a record whose own
-   keys are `ts`, `cwd`, `model`, `finish_reason` and `elapsed_ms`. Compare both writers
+   keys are `ts`, `cwd`, `model`, `finish_reason`, `served_model`, `fingerprint` and
+   `elapsed_ms`, beside the nested `usage` object. Compare both writers
    against docs/usage.md and the CHANGELOG claims about the log. A key renamed in a writer but
    not in the prose, or a counter emitted in a different order than promised, is a
    defect: a consumer parses this.
