@@ -69,12 +69,16 @@ reduced to a fragment with no instructions for anyone to follow.
    heading that has been renamed is a dead end in the middle of a sentence that
    promises an answer.
 
-5. **The gate the prose says `make check` is.** `CONTRIBUTING.md` claims that
-   `make check` runs the same steps as `.github/workflows/ci.yml`, in the same
-   order, and that it is the whole gate. Compare the `check` recipe's steps with
-   the `run:` lines of ci.yml's steps: a step in one and not the other, or a
-   step CI runs that `make check` does not, breaks the claim in whichever
-   direction the difference runs. The same applies to what `make clean` removes
+5. **The gate the prose says `make check` is.** `CONTRIBUTING.md`'s "The gate"
+   section lists the steps `make check` runs, in order, and claims they are the
+   steps ci.yml's `test` and `lint` jobs run on the same Zig version, less
+   `preflight` and `zig-version` and more the one `check-asset-run`. Compare the
+   `check` recipe and those two jobs' `run:` lines against the claim as written,
+   exceptions included: a step the document lists that neither the recipe nor the
+   job runs, a step a job runs that the document does not name, and a step the two
+   order differently are findings. The `release-assets` job is the third one, and
+   the document says the first two are the gate, so its absence from `make check`
+   is not a finding. The same applies to what `make clean` removes
    and where `make musl` copies the binary.
 
 6. **Pins the setup section quotes in two places.** `CONTRIBUTING.md` names the

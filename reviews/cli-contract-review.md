@@ -79,13 +79,17 @@ a fragment with no invocation surface to hold a contract.
    is where a wrong one shows: `.unknown` carries 2 today, and the parse arms and the
    install path are where a code the update help names with no return is a finding.
 
-7. **Update subcommand contract.** The help advertises `microagent update [--check]
-   [--repo owner/name]`, with `-c` as the short of `--check` on the flag's own line
-   and `--repo=OWNER/NAME` named beside it; that `--check` writes the release page URL
-   to stdout and installs nothing, and that `GITHUB_TOKEN` lifts the rate limit. Check
-   the update help text, the argument loop in `src/update.zig` (search `"--repo"`), the
-   token lookup, and the `docs/usage.md` mention of the subcommand for agreement on the flag
-   spellings, including the `--repo=OWNER/NAME` form, and on which paths fetch an asset.
+7. **Update subcommand contract.** The help's subcommand line reads `update [--check]`
+   and sends the reader to `microagent update --help`, whose usage line is
+   `microagent update [-c | --check]` and which lists `-c, --check`, `-h, --help` and
+   `-V, --version` and nothing else; `docs/usage.md` says the repository is the one the
+   binary was built for and that no flag selects it. Check the four surfaces against each
+   other: `usage_text` in `src/update.zig`, the argument loop there (search `"--check"`),
+   the token lookup, and the `docs/usage.md` "Update" section. A flag one of them names
+   that the loop does not read, and a flag the loop reads that no surface offers, are
+   findings in either direction, beside the claims that `--check` writes the release page
+   URL to stdout and installs nothing, that `GITHUB_TOKEN` lifts the rate limit, and
+   which paths fetch an asset.
 
 8. **Emitted JSON that no document matches.** `usage_fields` in `src/chat.zig` fixes
    the order of the five token counters, and it is one string in the two writers that
