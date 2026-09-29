@@ -3376,7 +3376,7 @@ fn finishTurn(
         // the next request rejects, so the loop below would spend a turn on a
         // 400 instead of on the answer.
         const output = if (budget.expired(io))
-            try std.fmt.allocPrint(arena, "error: not run, the run's time budget is exhausted", .{})
+            "error: not run, the run's time budget is exhausted"
         else blk: {
             // The ceiling is read here rather than once for the turn, because a
             // turn's calls run in sequence: a reading taken before the first of

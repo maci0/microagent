@@ -271,7 +271,7 @@ fn runSearchTool(
         .at_limit = res.partial().atCaptureLimit(),
         .term = res.term,
     });
-    return std.fmt.allocPrint(arena, "(no matches)", .{});
+    return "(no matches)";
 }
 
 /// The captured stream with a line saying that it is the beginning of a longer
@@ -470,13 +470,13 @@ const git_log_line_ceiling: usize = 1 << 20;
 /// Read-only git, with the subcommands fixed here rather than assembled by the
 /// model. Deterministic, no shell quoting, and the output is capped.
 fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map) ![]const u8 {
-    const cmd = chat.str(args.get("cmd")) orelse return std.fmt.allocPrint(arena, "error: missing cmd", .{});
+    const cmd = chat.str(args.get("cmd")) orelse return "error: missing cmd";
     const path = chat.str(args.get("path"));
     const rev = chat.str(args.get("rev"));
     const limit = gitLineLimit(args);
     // A rev such as `--output=FILE` would turn a read into a write.
     if (rev) |r| if (std.mem.startsWith(u8, r, "-"))
-        return std.fmt.allocPrint(arena, "error: rev must not start with '-'", .{});
+        return "error: rev must not start with '-'";
     // A rev that carries a path after a colon (`HEAD:.env`, `main:keys/id`)
     // is a tree-ish plus a file, and git shows that file whatever the
     // `:(exclude)` pathspecs below say: they filter a revision's diff, not an
@@ -647,10 +647,10 @@ fn firstLines(arena: std.mem.Allocator, text: []const u8, limit: usize) ![]const
 /// answers with an error string and no tool runs.
 pub fn runTool(io: Io, arena: std.mem.Allocator, call: chat.ToolCall, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map) ![]const u8 {
     const parsed = std.json.parseFromSlice(std.json.Value, arena, call.args.items, .{}) catch
-        return std.fmt.allocPrint(arena, "error: tool arguments are not valid JSON", .{});
+        return "error: tool arguments are not valid JSON";
     const args = switch (parsed.value) {
         .object => |o| o,
-        else => return std.fmt.allocPrint(arena, "error: tool arguments must be an object", .{}),
+        else => return "error: tool arguments must be an object",
     };
 
     // The one place a tool name is a string. Past it the call is a variant, so
@@ -879,7 +879,7 @@ fn credentialInCommand(command: []const u8) ?[]const u8 {
 }
 
 fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map) ![]const u8 {
-    const command = chat.str(args.get("command")) orelse return std.fmt.allocPrint(arena, "error: missing command", .{});
+    const command = chat.str(args.get("command")) orelse return "error: missing command";
     // `bash` is the one tool with no path argument to check, and it can read
     // every file the three guarded tools refuse: `cat .env` and
     // `git show HEAD -- .env` both come back whole, and a tool result is
@@ -1154,7 +1154,7 @@ fn credentialRefusal(arena: std.mem.Allocator, tool: chat.Tool, path: []const u8
 }
 
 fn toolRead(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]const u8 {
-    const path = chat.str(args.get("path")) orelse return std.fmt.allocPrint(arena, "error: missing path", .{});
+    const path = chat.str(args.get("path")) orelse return "error: missing path";
     if (credentialPath(io, arena, path)) |refused| return try credentialRefusal(arena, .read, refused, false);
     if (!args.contains("offset") and !args.contains("limit"))
         return std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_read_bytes)) catch |err|
@@ -1278,7 +1278,7 @@ fn readLines(io: Io, arena: std.mem.Allocator, path: []const u8, offset: usize, 
 }
 
 fn toolWrite(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]const u8 {
-    const path = chat.str(args.get("path")) orelse return std.fmt.allocPrint(arena, "error: missing path", .{});
+    const path = chat.str(args.get("path")) orelse return "error: missing path";
     // The same refusal `read` makes. A run that cannot read a key file has no
     // business rewriting one either: `write` replaces the file whole, so a
     // model that gets the path from a file in the tree and the content from a
@@ -1291,7 +1291,7 @@ fn toolWrite(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]cons
     // reporting the missing argument. A model that means an empty file says
     // so, as `"content": ""`.
     const content = chat.str(args.get("content")) orelse
-        return std.fmt.allocPrint(arena, "error: missing content", .{});
+        return "error: missing content";
     writeFileAtomic(io, std.Io.Dir.cwd(), path, content) catch |err|
         return writeFailed(arena, path, err);
     return std.fmt.allocPrint(arena, "wrote {d} bytes to {s}", .{ content.len, path });
@@ -1353,19 +1353,19 @@ pub fn writeFileAtomic(io: Io, dir: std.Io.Dir, path: []const u8, bytes: []const
 }
 
 fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]const u8 {
-    const path = chat.str(args.get("path")) orelse return std.fmt.allocPrint(arena, "error: missing path", .{});
+    const path = chat.str(args.get("path")) orelse return "error: missing path";
     // The same refusal `read` makes. An edit reads the whole file to find its
     // match, and the operator's key is the one file in a tree where a match the
     // model guessed at and a rewrite of the value beside it is damage nobody
     // asked for.
     if (credentialPath(io, arena, path)) |refused| return try credentialRefusal(arena, .edit, refused, true);
-    const old = chat.str(args.get("old_string")) orelse return std.fmt.allocPrint(arena, "error: missing old_string", .{});
-    const new = chat.str(args.get("new_string")) orelse return std.fmt.allocPrint(arena, "error: missing new_string", .{});
+    const old = chat.str(args.get("old_string")) orelse return "error: missing old_string";
+    const new = chat.str(args.get("new_string")) orelse return "error: missing new_string";
     const all = if (args.get("replace_all")) |v| v == .bool and v.bool else false;
 
     const raw = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_edit_bytes)) catch |err|
         return readFailed(arena, path, err);
-    if (old.len == 0) return std.fmt.allocPrint(arena, "error: old_string is empty", .{});
+    if (old.len == 0) return "error: old_string is empty";
     // An edit is a tool call the model can issue twice: a turn that was cut
     // before the result reached it, a re-read to check the change landed, a
     // retry after a transport fault. Every other shape is already safe, because
@@ -1388,7 +1388,7 @@ fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]const
     // the file again before asking for the edit with more context in
     // `old_string`, which is also what makes it unambiguous.
     if (std.mem.indexOf(u8, new, old) != null) {
-        return std.fmt.allocPrint(arena, "error: new_string contains old_string, so a second run of this edit would match inside the first one's output and apply again; include more context in old_string", .{});
+        return "error: new_string contains old_string, so a second run of this edit would match inside the first one's output and apply again; include more context in old_string";
     }
 
     const count = std.mem.count(u8, raw, old);
@@ -1438,7 +1438,7 @@ fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]const
 /// cap, so this is a bound that makes an unbounded answer unlikely rather than
 /// one the run announces.
 fn toolSearch(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map) ![]const u8 {
-    const pattern = chat.str(args.get("pattern")) orelse return std.fmt.allocPrint(arena, "error: missing pattern", .{});
+    const pattern = chat.str(args.get("pattern")) orelse return "error: missing pattern";
     const path = chat.str(args.get("path")) orelse ".";
     // The globs below are traversal rules: ripgrep applies them while it walks,
     // and a file named as the search path is read whatever they say, so
@@ -1472,8 +1472,8 @@ fn toolSearch(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceilin
 /// is applied to every match (`--update-all`), so the next turn reads the
 /// result back rather than trusting the tool's summary.
 fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map) ![]const u8 {
-    const pattern = chat.str(args.get("pattern")) orelse return std.fmt.allocPrint(arena, "error: missing pattern", .{});
-    const lang = chat.str(args.get("lang")) orelse return std.fmt.allocPrint(arena, "error: missing lang", .{});
+    const pattern = chat.str(args.get("pattern")) orelse return "error: missing pattern";
+    const lang = chat.str(args.get("lang")) orelse return "error: missing lang";
     const path = chat.str(args.get("path")) orelse ".";
     // The same hole `search` has: `--globs` filters the walk, and a file named
     // as the path is rewritten whatever they say, which is a key's line in a

@@ -319,12 +319,12 @@ fn load(io: Io, arena: std.mem.Allocator, skill: *const Skill) ![]const u8 {
 /// sees.
 pub fn call(io: Io, arena: std.mem.Allocator, args_text: []const u8, set: Skills) ![]const u8 {
     const parsed = std.json.parseFromSlice(std.json.Value, arena, args_text, .{}) catch
-        return std.fmt.allocPrint(arena, "error: tool arguments are not valid JSON", .{});
+        return "error: tool arguments are not valid JSON";
     const args = switch (parsed.value) {
         .object => |o| o,
-        else => return std.fmt.allocPrint(arena, "error: tool arguments must be an object", .{}),
+        else => return "error: tool arguments must be an object",
     };
-    const name = chat.str(args.get("name")) orelse return std.fmt.allocPrint(arena, "error: missing name", .{});
+    const name = chat.str(args.get("name")) orelse return "error: missing name";
     const shown = chat.safeText(arena, name, 120);
     net.writeErr(io, try std.fmt.allocPrint(arena, "\u{23fa} {s} {s}\n", .{ tool_name, shown }));
     const skill = set.get(name) orelse return std.fmt.allocPrint(

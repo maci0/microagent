@@ -251,7 +251,7 @@ pub const Servers = struct {
         const args = std.mem.trim(u8, args_text, " \t\r\n");
         if (args.len != 0) {
             _ = std.json.parseFromSliceLeaky(std.json.Value, arena, args, .{}) catch
-                return std.fmt.allocPrint(arena, "error: tool arguments are not valid JSON", .{});
+                return "error: tool arguments are not valid JSON";
         }
         var pb = chat.JsonBuf.init(arena);
         try pb.writer().writeAll("{\"name\":");
@@ -338,7 +338,7 @@ fn resultText(arena: std.mem.Allocator, server_name: []const u8, result: std.jso
 fn describeError(arena: std.mem.Allocator, value: std.json.Value) ![]const u8 {
     const object = switch (value) {
         .object => |o| o,
-        else => return std.fmt.allocPrint(arena, "{s}", .{chat.safeTextAll(arena, try std.json.Stringify.valueAlloc(arena, value, .{}))}),
+        else => return chat.safeTextAll(arena, try std.json.Stringify.valueAlloc(arena, value, .{})),
     };
     const message = chat.str(object.get("message")) orelse "no message";
     if (object.get("code")) |code| switch (code) {
