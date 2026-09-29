@@ -83,6 +83,7 @@ make test-sanitize          # the same suite under the undefined-behavior saniti
 make watch                  # the suite again on every source change, until Ctrl-C
 make preflight              # name any tool check and lint need that is not on PATH
 make lint                   # the pin checks, shellcheck, ruff and yamllint on their own
+make check-asset-run        # the published asset for this host, cross-built and started
 make instructions CHECK=--check   # retired instructions per unit, and a band it must stay inside
 make check-unreleased       # the [Unreleased] entry has the five sections, once each, in order
 ```
@@ -94,11 +95,14 @@ make check-unreleased       # the [Unreleased] entry has the five sections, once
 `make check` runs, in order: `preflight`, `zig-version`, `check-targets`,
 `check-unreleased`, `fmt-check`, `lint` (`lint-versions`, `lint-lock`,
 shellcheck, `ruff check`, `ruff format --check`, yamllint), `zig build test`,
-`zig build test-sanitize`, and a `ReleaseSmall` build whose binary it then runs.
-These are the checks [.github/workflows/ci.yml](.github/workflows/ci.yml) runs,
-on the same Zig version: the shared setup-zig action installs the version `make
+`zig build test-sanitize`, and `check-binary` (a `ReleaseSmall` build whose
+binary it then starts). These are the checks
+[.github/workflows/ci.yml](.github/workflows/ci.yml) runs, on the same Zig
+version: the shared setup-zig action installs the version `make
 required-zig-version` prints, and `make zig-version` tells a laptop on a
-different compiler so rather than assuming.
+different compiler so rather than assuming. The workflow calls the same targets
+rather than repeating their commands, so a step added to `check` is a step CI
+runs.
 
 The second test run compiles the same tests with the undefined-behavior
 sanitizer. The plain run says the assertions hold; only the instrumented one
@@ -120,11 +124,17 @@ or YAML file added anywhere is linted too. Both workflows call `make lint`
 rather than repeating its targets, so a linter added to the Makefile gates a
 push and a tag as well as a laptop.
 
-`check` does not cover two things. One is the release cross-build: `make
+`check` does not cover three things. One is the release cross-build: `make
 release-assets` runs it, and `make check-reproducible` rebuilds it byte for
 byte (see
-[Version and changelog](#version-and-changelog)). The other is the macOS
-runners, where CI runs the same tests again.
+[Version and changelog](#version-and-changelog)). The second is the asset
+check, which `make check-asset-run` runs on its own: it cross-builds the
+published target for this host and starts it, so a change that only breaks the
+shipped binary (a Mach-O that links but does not start, a Linux asset that needs
+a libc the host build never saw) is caught on a laptop rather than on a runner
+or a user's machine. `make check-asset-run TARGET=...` is the form CI uses, and
+it refuses a target that is not the one this host publishes. The third is the
+macOS runners, where CI runs the same tests again.
 
 ### What CI requires
 

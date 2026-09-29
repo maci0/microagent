@@ -98,23 +98,16 @@ jobs:
       - name: unit tests pass under the undefined-behavior sanitizer
         run: zig build test-sanitize --summary all
 
-      - name: optimized build
-        run: zig build -Doptimize=ReleaseSmall
-
       # `update` is the one subcommand that names the running executable, so
-      # both paths in it are worth exercising on a real filesystem.
-      - name: the built binary runs on this platform
-        run: |
-          set -euo pipefail
-          ./zig-out/bin/microagent --version
-          ./zig-out/bin/microagent update --help >/dev/null
+      # both paths in it are worth exercising on a real filesystem. The build
+      # and the two commands are `make check-binary`, the same target `make
+      # check` runs and a contributor can run on its own, so this step is not a
+      # second spelling of the gate.
+      - name: the optimized build runs on this platform
+        run: make check-binary OPT=ReleaseSmall
 
       - name: the release asset for this platform runs
-        run: |
-          set -euo pipefail
-          zig build -Dtarget=${{ matrix.release_target }} -Doptimize=ReleaseSmall
-          ./zig-out/bin/microagent --version
-          ./zig-out/bin/microagent update --help >/dev/null
+        run: make check-asset-run TARGET=${{ matrix.release_target }}
 
   # The Zig sources are covered by zig fmt in the test job above. The shell,
   # Python and YAML around them are not, and a defect in bench/run.sh or the

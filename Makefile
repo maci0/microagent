@@ -15,7 +15,7 @@ BIN := zig-out/bin/microagent
 export LC_ALL := C
 export TZ := UTC
 
-.PHONY: default help preflight version build small musl test test-sanitize test-one watch fmt fmt-check fmt-python lint lint-versions lint-lock zig-version required-zig-version release-targets check-targets check-assets check-changelog check-changelog-sections check-unreleased check-readme check-release check-reproducible lint-shell lint-python lint-yaml check bench gauntlet instructions overhead install release-assets checksums clean
+.PHONY: default help preflight version build small musl test test-sanitize test-one watch fmt fmt-check fmt-python lint lint-versions lint-lock zig-version required-zig-version release-targets check-targets check-assets check-asset-run check-binary check-changelog check-changelog-sections check-unreleased check-readme check-release check-reproducible lint-shell lint-python lint-yaml check bench gauntlet instructions overhead install release-assets checksums clean
 
 # The targets `microagent update` asks for, in the names release.yml publishes.
 # ci.yml rehearses the same list on every push and release.yml publishes it, so
@@ -114,7 +114,7 @@ help:
 	  'fmt                   rewrite every tracked .zig and .py file in format style' \
 	  'fmt-python            rewrite the tracked .py files, which zig fmt does not reach' \
 	  'fmt-check             what check runs over the same files, without rewriting' \
-	  'check                 preflight, zig-version, fmt-check, the linters, the tests, an optimized build' \
+	  'check                 preflight, zig-version, check-targets, check-unreleased, check-readme, fmt-check, the linters, the tests, an optimized build' \
 	  'lint                  the pin checks, then shellcheck, ruff and yamllint' \
 	  'lint-shell            shellcheck over every tracked .sh file' \
 	  'lint-python           ruff check and ruff format --check over every tracked .py file' \
@@ -132,6 +132,8 @@ help:
 	  'release-targets       the published target triples, one per line' \
 	  'check-targets         every published target is one `update` asks for' \
 	  'check-assets TAG=...  the assets in dist/ are the ones the tag will publish' \
+	  'check-asset-run [TARGET=...]  the published asset for this host, cross-built and started' \
+	  'check-binary [OPT=...]  the binary this tree builds, started (what check runs)' \
 	  'check-changelog [VERSION=...]  the changelog entry a tag would publish, its shape, and the 0.y policy on it' \
 	  'check-changelog-sections  the five Keep a Changelog headings, once each, in order' \
 	  'check-unreleased      the [Unreleased] entry has the five sections, once each, in order' \
@@ -183,6 +185,21 @@ MUSL_ARCH_aarch64 := aarch64
 MUSL_ARCH_arm64 := aarch64
 MUSL_ARCH ?= $(or $(MUSL_ARCH_$(shell uname -m)),$(shell uname -m))
 MUSL_BINARY := integrations/harbor/microagent-$(MUSL_ARCH)-linux-musl
+
+# The published target that starts on this host, read from uname rather than
+# named. The four published targets cover two architectures on two systems, so
+# a name written out here is one a third of the hosts cannot run: an Apple
+# silicon laptop handed the Linux asset gets an exec format error and reads the
+# assets as broken when they are the ones a tag publishes. It is empty on a host
+# the release publishes no asset for, which `check-assets` reports as a version
+# read that was not taken and `check-asset-run` refuses rather than
+# cross-building a binary this machine cannot start.
+HOST_OS := $(shell uname -s)
+ifeq ($(HOST_OS),Darwin)
+HOST_TARGET := $(MUSL_ARCH)-macos
+else ifeq ($(HOST_OS),Linux)
+HOST_TARGET := $(MUSL_ARCH)-linux-musl
+endif
 
 # Static musl binary for running inside containers (Harbor benchmarks), named
 # for the host's architecture, which is the name the adapter looks for. The copy
@@ -404,9 +421,7 @@ check:
 	$(MAKE) lint
 	$(ZIG) build test --summary all
 	$(ZIG) build test-sanitize --summary all
-	$(ZIG) build -Doptimize=ReleaseSmall
-	./$(BIN) --version >/dev/null
-	./$(BIN) update --help >/dev/null
+	$(MAKE) check-binary OPT=ReleaseSmall
 
 # The bench scripts invoke each harness by bare name and skip the ones that are
 # not on PATH, so the binary this build just produced has to be findable.
@@ -632,7 +647,7 @@ check-release:
 # one the tag names, or the one build.zig.zon declares when there is no tag.
 #
 # The version is read by running one asset, and the one it runs is the one this
-# host can execute, decided from uname rather than named. The four published
+# host can execute, named by HOST_TARGET. The four published
 # targets cover two architectures on two systems, so a hardcoded name is a name
 # a third of the hosts cannot run: an Apple silicon laptop running the Linux
 # asset gets an exec format error and reads the assets as broken when they are
@@ -651,10 +666,11 @@ check-release:
 # before it can be published.
 #
 # The version check runs the asset for the host's own platform and architecture,
-# found from `uname` rather than named: an ELF is not runnable on Darwin and a
-# Mach-O is not runnable on Linux, so naming the Linux one unconditionally made
-# this target fail on both macOS runners and on an arm64 Linux host with a
-# message about a version that was never read. A host the release publishes no
+# named by HOST_TARGET rather than written here: an ELF is not runnable on
+# Darwin and a Mach-O is not runnable on Linux, so naming the Linux one
+# unconditionally made this target fail on both macOS runners and on an arm64
+# Linux host with a message about a version that was never read. A host the
+# release publishes no
 # asset for runs nothing and says so, and the object-format check below still
 # covers all of them.
 check-assets:
@@ -677,13 +693,8 @@ check-assets:
 	  }; \
 	  want="$(patsubst v%,%,$(TAG))"; \
 	fi; \
-	host_os="$$(uname -s)"; \
-	host_target=; \
-	case "$$host_os" in \
-	Darwin) host_target="$(MUSL_ARCH)-macos" ;; \
-	Linux) host_target="$(MUSL_ARCH)-linux-musl" ;; \
-	*) host_target= ;; \
-	esac; \
+	host_os="$(HOST_OS)"; \
+	host_target="$(HOST_TARGET)"; \
 	ran=; \
 	for target in $(RELEASE_TARGETS); do \
 	  if [ "$$target" = "$$host_target" ]; then ran=$$target; break; fi; \
@@ -735,6 +746,45 @@ check-assets:
 	else \
 	  echo "$${prefix}* is a $$want build of every published target, none of which runs on this host"; \
 	fi
+
+# The binary this tree builds, started. `update` is the one subcommand that
+# names the running executable, so both of its paths are worth exercising on a
+# real filesystem. It builds at $(OPT) first, so it is runnable on its own from
+# a clean tree, and `check-asset-run` asks the same two questions of the
+# cross-built asset, so the host build and the published one are never checked
+# by different commands.
+check-binary: build
+	./$(BIN) --version
+	./$(BIN) update --help >/dev/null
+
+# The published asset for this host, cross-built and started. ci.yml runs it on
+# every push, once per runner that has a published target, and it was the one
+# check of that list with no other way to run it: `make check` builds the host's
+# own target, which is the same code on the same machine, and `make
+# check-assets` reads files `make release-assets` wrote for all four targets,
+# which is minutes of work to ask a question about one of them. A Mach-O that
+# links but does not start, or an asset that needs a libc its own target does
+# not have, fails here rather than on a user's machine.
+#
+# TARGET names the asset when the caller already knows it, which is how ci.yml
+# passes the runner's own row. It is checked against what this host reads
+# rather than trusted: a matrix row that drifts from uname would then run one
+# asset on a runner meant to check another, and the run would pass on the wrong
+# binary.
+check-asset-run: zig-version
+	@test -n "$(HOST_TARGET)" || { \
+	  echo "this host ($(HOST_OS) $(MUSL_ARCH)) is not one the release publishes an asset for:" >&2; \
+	  echo "there is no published target to build and run here, so nothing was checked" >&2; \
+	  exit 2; \
+	}; \
+	test -z "$(TARGET)" || test "$(TARGET)" = "$(HOST_TARGET)" || { \
+	  echo "TARGET=$(TARGET), but this host ($(HOST_OS) $(MUSL_ARCH)) publishes $(HOST_TARGET)" >&2; \
+	  exit 1; \
+	}; \
+	$(ZIG) build -Dtarget=$(HOST_TARGET) -Doptimize=ReleaseSmall
+	./$(BIN) --version
+	./$(BIN) update --help >/dev/null
+	@echo "the $(HOST_TARGET) asset builds and starts on this host"
 
 # Every published target, cross-built, under the name release.yml publishes and
 # update.zig asks for. Running it without TAG is the rehearsal ci.yml does on

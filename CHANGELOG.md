@@ -14,6 +14,16 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+### Added
+
+- `make check-asset-run` builds the published release asset for the host it runs
+  on and starts it, and `make check-binary` builds and starts the host binary.
+  Both were inline steps in the push workflow with no local command behind them,
+  so a change that only broke the shipped binary surfaced as a red push rather
+  than as a command a contributor could run. The workflow calls these targets
+  now, and `check-asset-run` refuses a `TARGET=` that is not the one the host
+  publishes.
+
 ### Fixed
 
 - The session store kept its 200 newest logs and nothing else, which is a size
