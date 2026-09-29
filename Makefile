@@ -15,7 +15,7 @@ BIN := zig-out/bin/microagent
 export LC_ALL := C
 export TZ := UTC
 
-.PHONY: default help preflight version build small musl test test-sanitize test-one watch fmt fmt-check fmt-python lint lint-versions lint-lock zig-version required-zig-version release-targets check-targets check-assets check-changelog check-changelog-sections check-unreleased check-release check-reproducible lint-shell lint-python lint-yaml check bench gauntlet instructions overhead install release-assets checksums clean
+.PHONY: default help preflight version build small musl test test-sanitize test-one watch fmt fmt-check fmt-python lint lint-versions lint-lock zig-version required-zig-version release-targets check-targets check-assets check-changelog check-changelog-sections check-unreleased check-readme check-release check-reproducible lint-shell lint-python lint-yaml check bench gauntlet instructions overhead install release-assets checksums clean
 
 # The targets `microagent update` asks for, in the names release.yml publishes.
 # ci.yml rehearses the same list on every push and release.yml publishes it, so
@@ -120,6 +120,7 @@ help:
 	  'check-changelog-sections  the five Keep a Changelog headings, once each, in order' \
 	  'check-unreleased      the [Unreleased] entry has the five sections, once each, in order' \
 	  'check-changelog-sections SECTION=...  the same five-section shape under one named heading' \
+	  'check-readme      the README installs and names the version build.zig.zon declares' \
 	  'check-release TAG=vX.Y.Z  the tag names build.zig.zon, nothing is stranded unreleased' \
 	  'check-reproducible    every published target rebuilds byte-identical' \
 	  'checksums             sha256 sidecars for dist/ (after a tagged build)' \
@@ -441,6 +442,7 @@ check:
 	$(MAKE) zig-version
 	$(MAKE) check-targets
 	$(MAKE) check-unreleased
+	$(MAKE) check-readme
 	$(MAKE) fmt-check
 	$(MAKE) lint
 	$(ZIG) build test --summary all
@@ -613,6 +615,27 @@ check-changelog:
 	  fi; \
 	fi
 
+# The version the README names in the two places a reader copies or trusts: the
+# install snippet's `v=`, and the Status line's version. build.zig.zon is where
+# the version is declared, and `check-release` and release.yml both read it from
+# there, so a README left on the previous release is a consumer handed a command
+# that fetches the old binary and a status line that is one release stale, with
+# nothing refusing either. Both lines are matched whole rather than swept for
+# version-shaped text: the README also carries the Zig version, which is its own
+# pin and is not the release being cut.
+check-readme:
+	@set -eu; \
+	want="$$($(MAKE) --no-print-directory version)"; \
+	grep -q "^v=v$$want t=" README.md || { \
+	  echo "the install snippet in README.md does not install v$$want, the version build.zig.zon declares" >&2; \
+	  echo "a reader who copies it gets the previous release, so the two are checked in step with the bump" >&2; \
+	  exit 1; \
+	}; \
+	grep -q "^Version $$want\. " README.md || { \
+	  echo "the Status section of README.md does not read \"Version $$want.\", the version build.zig.zon declares" >&2; \
+	  exit 1; \
+	}
+
 # What a tag has to satisfy before release.yml will publish it: it names the
 # version build.zig.zon declares, and nothing is left stranded under
 # [Unreleased], where the tag would drop those entries from the published notes
@@ -638,6 +661,7 @@ check-release:
 	  exit 1; \
 	}; \
 	$(MAKE) --no-print-directory check-changelog VERSION=$(patsubst v%,%,$(TAG))
+	$(MAKE) --no-print-directory check-readme
 
 # The assets in dist/ are the ones the tag will publish, read back off the disk
 # rather than assumed from the build that wrote them. release.yml did this inline

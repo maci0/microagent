@@ -81,6 +81,13 @@ jobs:
       - name: the unreleased changelog entry is well formed
         run: make check-unreleased
 
+      # A bump that moves build.zig.zon and CHANGELOG.md but leaves the README
+      # behind publishes a release whose install snippet still fetches the
+      # previous binary, so the README is asked the same question a push asks
+      # of the changelog. Grep and make only.
+      - name: the readme installs the version this tree declares
+        run: make check-readme
+
       - name: unit tests pass
         run: zig build test --summary all
 

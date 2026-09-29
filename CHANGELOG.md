@@ -4,7 +4,9 @@ All notable changes to microagent, in the order a consumer meets them. The forma
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project follows [SemVer](https://semver.org)
 from `0.1.0`: under `0.y` the minor carries features and changes that alter a run's default behavior, the
 patch carries fixes, and a patch never changes what an existing invocation does. The version lives in
-`build.zig.zon` and nothing else declares it; `microagent --version` prints it, and the release workflow
+`build.zig.zon`, and the README is the one place that repeats it, in the install snippet and the status
+line; `make check-readme` refuses a bump that moves the former and leaves the latter behind, and both
+`make check` and the push workflow run it. `microagent --version` prints it, and the release workflow
 refuses to publish a tag that does not name it.
 
 Only the latest release is supported. There is no backport window and no LTS line: a fix ships in the next
@@ -14,6 +16,12 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- The README named version 0.3.0 after 0.4.0 shipped, in both the install
+  snippet and the status line. A reader who copied the snippet installed 0.3.0,
+  and the status line was a release behind. `make check-readme` now refuses a
+  bump that moves `build.zig.zon` and the changelog and leaves either README
+  line behind; it runs in `make check` and in the push workflow, and
+  `make check-release` asks it before a tag is cut.
 - Compaction no longer copies the whole conversation to add the closing bracket
   the JSON parser needs. The byte is appended to the conversation buffer and
   taken back before the rewrite, which is about 0.4% of a run whose tool results

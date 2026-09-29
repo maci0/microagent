@@ -244,15 +244,18 @@ of the rules, so a release note is written against something runnable:
 ```sh
 make check-changelog              # the section for the version build.zig.zon declares, its shape, and the 0.y policy on it
 make check-changelog VERSION=0.2.1
-make check-release TAG=v0.2.1     # what a tag has to satisfy: the version, and nothing left under [Unreleased]
+make check-readme                 # the README installs and names the version this tree declares
+make check-release TAG=v0.2.1     # what a tag has to satisfy: the version, nothing left under [Unreleased], the README
 ```
 
 `make check-changelog` prints the section it checked, which a release publishes
 as its notes, and refuses it on the same five headings `check-unreleased` asks
 of a draft. `check-release` is the whole tag gate. It refuses an entry still
 under `[Unreleased]`, since the tag would drop it from the published notes and
-land it in the next release under a version nobody ran. Run it after the
-version bump and the entry are written, before the tag is cut.
+land it in the next release under a version nobody ran, and it refuses a README
+still naming the previous release, since the install snippet a reader copies
+would fetch the older binary under the new tag. Run it after the
+version bump, the entry and the README line are written, before the tag is cut.
 
 The four published binaries and their asset names are spelled once, in the
 [Makefile](Makefile), so a release can be built and checksummed on a laptop
