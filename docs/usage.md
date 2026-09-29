@@ -92,11 +92,14 @@ usage: microagent [options] "<prompt>"
   -V, --version          version
 
 every long flag also takes --flag=value. A flag wins over the environment
-variable for the same option. A bare -- ends the flags, so a task that
-begins with a dash is passed after it. A bare "help" asks for this text
-when the prompt is still empty, the way "microagent update help" does; any
-other bare word, or a value of --print, is a task. A second bare word is
-the one thing this does not read as a task: two prompts are a usage error.
+variable for the same option, and wins over one the run could not use:
+MICROAGENT_MAX_TURNS=0 with --max-turns 5 is a run with five turns, and the
+variable is named on stderr rather than stopping it. A bare -- ends the
+flags, so a task that begins with a dash is passed after it. A bare "help"
+asks for this text when the prompt is still empty, the way "microagent
+update help" does; any other bare word, or a value of --print, is a task. A
+second bare word is the one thing this does not read as a task: two prompts
+are a usage error.
 
 reply style (MICROAGENT_CAVEMAN / MICROAGENT_PONYTAIL, or the same two keys
 in the config named above):
@@ -156,8 +159,9 @@ answer and the token counters.
 MDEBUG=1                 trace a stuck stream on stderr, and print the
                          configuration this run resolved: model, base
                          url, ceilings, style levels, the style config
-                         file that was read, and the name of the source
-                         the api key came from, never the key.
+                         file that was read, the skill roots, and the
+                         name of the source the api key came from, never
+                         the key.
                          0, off, no, false and an empty value all leave
                          it off.
 
@@ -179,6 +183,12 @@ A flag wins over its environment variable, and the environment wins over the con
 value is checked where it is set, so a mistyped level, a ceiling of zero or a non-numeric budget is
 refused before the first request rather than becoming a 400 or an empty run.
 
+A flag wins over a variable the run could not use, because the flag is read after the environment
+and the value it sets is the one in force. `MICROAGENT_MAX_TURNS=0 microagent --max-turns 5` is a
+run with five turns; the variable is named on stderr and the run goes on. With no such flag the
+variable is the run's, and the message stops the run as a bad argument would. `--base-url` and
+`MICROAGENT_BASE_URL` have always worked this way: the url is checked where the run uses it.
+
 A variable set to an empty string is not a value:
 `MICROAGENT_MODEL`, `MICROAGENT_BASE_URL`, `MICROAGENT_REASONING_EFFORT`,
 `MICROAGENT_BUDGET_SECONDS`, `MICROAGENT_MAX_SPEND_TOKENS`, `MICROAGENT_MAX_TURNS`,
@@ -197,9 +207,11 @@ monitor looks in, and a `HOME` ending in a newline moves every default path
 empty `HOME` is no home rather than a path off the root.
 
 `MDEBUG=1` prints the configuration the run resolved: model, base url (credentials in it redacted),
-the ceilings, the level each style key took, the config file that was read, and the name of the
-variable or file the api key came from. The key itself is never printed. Each option has up to three
-sources, and this is how you tell which one answered.
+the ceilings, the level each style key took, the config file that was read, the skill roots, and the
+name of the variable or file the api key came from. The key itself is never printed. Each option has
+up to three sources, and this is how you tell which one answered. The skill roots are named because
+`skills=0` on its own is the same line for a machine with no skills installed and one reading the
+wrong directories.
 
 ## Providers and keys
 

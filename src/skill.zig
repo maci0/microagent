@@ -118,7 +118,11 @@ pub const Skills = struct {
 /// the operator named is one they believe is there, so a directory that is
 /// missing, unreadable or not a directory is worth a line; the default root is
 /// absent on most machines and silence about it is correct.
-const Root = struct { path: []const u8, named: bool };
+///
+/// Public because the trace names the roots: a run that found no skills and a
+/// run that looked in the wrong directories print the same count, and the count
+/// is the one thing a reader of that line cannot act on.
+pub const Root = struct { path: []const u8, named: bool };
 
 /// The roots this run reads skills from, in precedence order: the directories
 /// MICROAGENT_SKILLS names, else the `skills` list the config file declared,

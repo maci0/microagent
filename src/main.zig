@@ -251,6 +251,11 @@ const Options = struct {
     /// What the command line asked for. `--help` and `--version` stop the
     /// parse where they appear, before any option value is needed.
     action: Action = .run,
+    /// The options the command line set, so a variable the same option's flag
+    /// overrode is not the run's misconfiguration. The help states that a flag
+    /// wins over the environment variable for the same option, and this is
+    /// what makes that true of a value the environment got wrong.
+    from_flag: std.EnumSet(ValuedOption) = .{},
 };
 
 /// The allocator behind `init.gpa`. std's start code picks `SmpAllocator` for
@@ -339,24 +344,25 @@ fn runMain(init: std.process.Init) !u8 {
     }
 
     var opts: Options = .{};
+    // A value the environment named that this run could not use, held until the
+    // command line says whether it is still in force.
+    var env_problem: ?EnvProblem = null;
     if (envValue(init.environ_map, "MICROAGENT_MODEL")) |v| opts.model = v;
     if (envValue(init.environ_map, "MICROAGENT_BASE_URL")) |v| opts.base_url = v;
-    if (envValue(init.environ_map, "MICROAGENT_REASONING_EFFORT")) |v| {
-        var env_buf: [256]u8 = undefined;
-        if (reasoningEffort(&env_buf, v, &opts.reasoning_effort)) |m| configError(io, "{s}", .{m});
-    }
-    ceilingFromEnv(io, usize, init.environ_map, "MICROAGENT_MAX_TURNS", &opts.max_turns);
-    ceilingFromEnv(io, u32, init.environ_map, "MICROAGENT_MAX_TOKENS", &opts.max_tokens);
-    ceilingFromEnv(io, u32, init.environ_map, "MICROAGENT_STALL_TIMEOUT", &opts.stall_timeout_s);
+    reasoningEffortFromEnv(init.environ_map, "MICROAGENT_REASONING_EFFORT", &opts.reasoning_effort, &env_problem);
+    ceilingFromEnv(usize, init.environ_map, "MICROAGENT_MAX_TURNS", .max_turns, &opts.max_turns, &env_problem);
+    ceilingFromEnv(u32, init.environ_map, "MICROAGENT_MAX_TOKENS", .max_tokens, &opts.max_tokens, &env_problem);
+    ceilingFromEnv(u32, init.environ_map, "MICROAGENT_STALL_TIMEOUT", .stall_timeout, &opts.stall_timeout_s, &env_problem);
     opts.ca_bundle = net.caBundlePath(init.environ_map);
-    optionalCeilingFromEnv(io, init.environ_map, "MICROAGENT_BUDGET_SECONDS", &opts.budget_s);
-    optionalCeilingFromEnv(io, init.environ_map, "MICROAGENT_MAX_SPEND_TOKENS", &opts.max_spend_tokens);
+    optionalCeilingFromEnv(init.environ_map, "MICROAGENT_BUDGET_SECONDS", .budget, &opts.budget_s, &env_problem);
+    optionalCeilingFromEnv(init.environ_map, "MICROAGENT_MAX_SPEND_TOKENS", .max_spend_tokens, &opts.max_spend_tokens, &env_problem);
     opts.session_dir = session_mod.sessionDir(init.environ_map, init.arena.allocator());
 
     var err_buf: [512]u8 = undefined;
     if (parseArgs(&err_buf, args.items[1..], &opts)) |msg| return usageError(io, "{s}", .{msg});
     writeAction(io, opts.action);
     if (opts.action != .run) return 0;
+    if (env_problem) |problem| reportEnvProblem(io, init.arena.allocator(), problem, opts.from_flag, &err_buf);
 
     if (opts.prompt.len == 0) return usageError(io, "no prompt: pass it as an argument or with --print", .{});
     tool_mod.forwardInterruptsToToolGroup();
@@ -401,14 +407,15 @@ fn runMain(init: std.process.Init) !u8 {
     // part of the system prompt, so a skill added between the two reads would
     // otherwise be advertised without a body to load.
     const arena = init.arena.allocator();
-    opts.skills = skill_mod.discover(io, arena, skill_mod.roots(init.environ_map, arena, loaded.skills));
+    const skill_roots = skill_mod.roots(init.environ_map, arena, loaded.skills);
+    opts.skills = skill_mod.discover(io, arena, skill_roots);
     // The servers are connected before the first request for the same reason:
     // their tools are in the schema the request carries. A server that fails
     // to start or to answer is reported and skipped, so this cannot fail the
     // run, and the ones that did connect are shut down with the run.
     opts.mcp = mcp_mod.connect(io, arena, &tool_env, loaded.mcp, version);
     defer opts.mcp.shutdown(io);
-    traceConfig(io, arena, opts, loaded, key.source);
+    traceConfig(io, arena, opts, loaded, skill_roots, key.source);
     const reply_style = try loaded.style.ruleset(arena);
     const skill_block = try opts.skills.prompt(arena);
     // One string, so a run with no styles and no skills sends exactly the
@@ -519,11 +526,14 @@ const help_text =
     \\  -V, --version          version
     \\
     \\every long flag also takes --flag=value. A flag wins over the environment
-    \\variable for the same option. A bare -- ends the flags, so a task that
-    \\begins with a dash is passed after it. A bare "help" asks for this text
-    \\when the prompt is still empty, the way "microagent update help" does; any
-    \\other bare word, or a value of --print, is a task. A second bare word is
-    \\the one thing this does not read as a task: two prompts are a usage error.
+    \\variable for the same option, and wins over one the run could not use:
+    \\MICROAGENT_MAX_TURNS=0 with --max-turns 5 is a run with five turns, and the
+    \\variable is named on stderr rather than stopping it. A bare -- ends the
+    \\flags, so a task that begins with a dash is passed after it. A bare "help"
+    \\asks for this text when the prompt is still empty, the way "microagent
+    \\update help" does; any other bare word, or a value of --print, is a task. A
+    \\second bare word is the one thing this does not read as a task: two prompts
+    \\are a usage error.
     \\
     \\reply style (MICROAGENT_CAVEMAN / MICROAGENT_PONYTAIL, or the same two keys
     \\in the config named above):
@@ -583,8 +593,9 @@ const help_text =
     \\MDEBUG=1                 trace a stuck stream on stderr, and print the
     \\                         configuration this run resolved: model, base
     \\                         url, ceilings, style levels, the style config
-    \\                         file that was read, and the name of the source
-    \\                         the api key came from, never the key.
+    \\                         file that was read, the skill roots, and the
+    \\                         name of the source the api key came from, never
+    \\                         the key.
     \\                         0, off, no, false and an empty value all leave
     \\                         it off.
     \\
@@ -780,21 +791,120 @@ fn ceiling(comptime T: type, buf: []u8, from: []const u8, value: []const u8, out
     return null;
 }
 
+/// A value the environment named that this run could not use, and the option it
+/// configures. Recorded where the value is read and reported after the command
+/// line, because the command line is read after the environment and a flag
+/// wins over the variable for the same option: `MICROAGENT_MAX_TURNS=0
+/// microagent --max-turns 5` is a run with five turns, and stopping on the
+/// variable would send an operator after a value the run never used. The base
+/// url has always been checked after `parseArgs` for the same reason, and this
+/// brings the ceilings and the reasoning level to the same rule.
+const EnvProblem = struct {
+    option: ValuedOption,
+    /// The variable's name, which is what a message about the value leads with.
+    name: []const u8,
+    /// The value as the environment spelled it, trimmed, so the line is spelled
+    /// from the same text the reader saw rather than from a copy of it.
+    value: []const u8,
+};
+
 /// A ceiling read out of the environment, for the reason `ceiling` returns a
-/// message rather than stopping. Each one is a name, a type and a field, so
-/// `main` calls this once per variable and the buffer a message is spelled into
-/// is this function's rather than six blocks of it.
-fn ceilingFromEnv(io: Io, comptime T: type, env: *const std.process.Environ.Map, name: []const u8, out: *T) void {
+/// message rather than stopping. Each one is a name, an option, a type and a
+/// field, so `main` calls this once per variable and the block that reads a
+/// value this build cannot use is this function's rather than six of them.
+fn ceilingFromEnv(
+    comptime T: type,
+    env: *const std.process.Environ.Map,
+    name: []const u8,
+    option: ValuedOption,
+    out: *T,
+    problem: *?EnvProblem,
+) void {
     const v = envValue(env, name) orelse return;
-    var buf: [256]u8 = undefined;
-    if (ceiling(T, &buf, name, v, out)) |m| configError(io, "{s}", .{m});
+    if (ceiling(T, &.{}, name, v, out) != null) {
+        if (problem.* == null) problem.* = .{ .option = option, .name = name, .value = v };
+    }
 }
 
 /// The same for a ceiling that zero turns off rather than forbids.
-fn optionalCeilingFromEnv(io: Io, env: *const std.process.Environ.Map, name: []const u8, out: *?u64) void {
+fn optionalCeilingFromEnv(
+    env: *const std.process.Environ.Map,
+    name: []const u8,
+    option: ValuedOption,
+    out: *?u64,
+    problem: *?EnvProblem,
+) void {
     const v = envValue(env, name) orelse return;
-    var buf: [256]u8 = undefined;
-    if (optionalCeiling(&buf, name, v, out)) |m| configError(io, "{s}", .{m});
+    if (optionalCeiling(&.{}, name, v, out) != null) {
+        if (problem.* == null) problem.* = .{ .option = option, .name = name, .value = v };
+    }
+}
+
+/// The reasoning level the environment named, checked where it is read and
+/// recorded rather than reported, for the reason the ceilings above are.
+fn reasoningEffortFromEnv(
+    env: *const std.process.Environ.Map,
+    name: []const u8,
+    out: *?[]const u8,
+    problem: *?EnvProblem,
+) void {
+    const v = envValue(env, name) orelse return;
+    if (reasoningEffort(&.{}, v, out) != null) {
+        if (problem.* == null) problem.* = .{ .option = .reasoning_effort, .name = name, .value = v };
+    }
+}
+
+/// The line about a value the environment could not use, spelled by the reader
+/// that would have reported it where the value was read. Derived rather than
+/// carried, so each message is spelled once in the tree, and it lands in a
+/// buffer the caller owns for the rest of the run.
+fn envProblemMessage(buf: []u8, problem: EnvProblem) []const u8 {
+    switch (problem.option) {
+        .reasoning_effort => {
+            var unused: ?[]const u8 = null;
+            return reasoningEffort(buf, problem.value, &unused) orelse reasoning_effort_names;
+        },
+        .budget, .max_spend_tokens => {
+            var unused: ?u64 = null;
+            return optionalCeiling(buf, problem.name, problem.value, &unused) orelse problem.name;
+        },
+        .max_turns => return ceilingMessage(usize, buf, problem),
+        .max_tokens, .stall_timeout => return ceilingMessage(u32, buf, problem),
+        // No variable is read for the rest: a model id and a base url are
+        // values the provider refuses, and the base url is checked where the
+        // run uses it rather than where it is read. The name is the one line
+        // that is true of any of them.
+        .prompt, .model, .base_url, .api_key, .ca_bundle, .config => {},
+    }
+    return problem.name;
+}
+
+/// One recorded problem through the ceiling reader that recorded it. A value
+/// recorded as unusable stays unusable when it is read again, so the message
+/// is the one the first read wrote.
+fn ceilingMessage(comptime T: type, buf: []u8, problem: EnvProblem) []const u8 {
+    var unused: T = 1;
+    return ceiling(T, buf, problem.name, problem.value, &unused) orelse problem.name;
+}
+
+/// What the run does about a value the environment could not use, once the
+/// command line says whether it is still in force. A flag for the same option
+/// wins, so the line is a note naming what the run used instead; with no such
+/// flag the value is the run's, and the message stops the run as a bad argument
+/// would.
+fn reportEnvProblem(
+    io: Io,
+    arena: std.mem.Allocator,
+    problem: EnvProblem,
+    from_flag: std.EnumSet(ValuedOption),
+    buf: []u8,
+) void {
+    const msg = envProblemMessage(buf, problem);
+    if (from_flag.contains(problem.option)) {
+        net.note(io, arena, "microagent: {s}; the command line sets this option, so the run goes on\n", .{msg});
+        return;
+    }
+    configError(io, "{s}", .{msg});
 }
 
 /// The same list spelled as the sentence an error needs, so adding a provider
@@ -1018,6 +1128,7 @@ fn setValued(
     option: ValuedOption,
     value: []const u8,
 ) ?[]const u8 {
+    opts.from_flag.insert(option);
     switch (option) {
         .prompt => return setPrompt(buf, opts, value),
         .model => opts.model = value,
@@ -1423,8 +1534,15 @@ fn reportConfigProblem(io: Io, arena: std.mem.Allocator, source: StyleSource, un
 /// is about to be written rather than once for the run: every use of it is an
 /// error path, and most runs take none of them, so computing it up front meant
 /// walking the path byte by byte into a fresh allocation that was then dropped.
+///
+/// Escaped whole rather than cut to `net.quoted_value_bytes`, and the trace
+/// below already spells the same path that way: this line is on the path a
+/// reader has to go and fix, and a path cut at 80 bytes ends mid-directory
+/// naming one that is not there. The key of a config problem is still cut,
+/// because a key is short by construction and a line quoting a whole file is
+/// not a diagnostic.
 fn configPathText(arena: std.mem.Allocator, source: StyleSource) []const u8 {
-    return chat_mod.safeText(arena, source.path orelse "", net.quoted_value_bytes);
+    return chat_mod.safeTextAll(arena, source.path orelse "");
 }
 
 /// The configuration this run resolved, on stderr when MDEBUG is on. Precedence
@@ -1439,7 +1557,14 @@ fn configPathText(arena: std.mem.Allocator, source: StyleSource) []const u8 {
 /// `MICROAGENT_SESSION_DIR` carrying a C0 byte wrote it to the terminal
 /// unsanitized on the one line whose whole job is telling an operator what the
 /// run resolved.
-fn traceConfig(io: Io, arena: std.mem.Allocator, opts: Options, loaded: LoadedConfig, key_source: []const u8) void {
+fn traceConfig(
+    io: Io,
+    arena: std.mem.Allocator,
+    opts: Options,
+    loaded: LoadedConfig,
+    skill_roots: []const skill_mod.Root,
+    key_source: []const u8,
+) void {
     if (!debug_enabled) return;
     net.note(io, arena,
         \\[mdebug] model={s} base_url={s}
@@ -1447,7 +1572,7 @@ fn traceConfig(io: Io, arena: std.mem.Allocator, opts: Options, loaded: LoadedCo
         \\[mdebug] ca_bundle={s} session_dir={s}
         \\[mdebug] style_config={s}
         \\[mdebug] caveman={s} ponytail={s}
-        \\[mdebug] skills={d}
+        \\[mdebug] skills={d} skill_roots={s}
         \\[mdebug] mcp_servers={d} mcp_tools={d}
         \\[mdebug] api key from {s}
         \\
@@ -1465,10 +1590,26 @@ fn traceConfig(io: Io, arena: std.mem.Allocator, opts: Options, loaded: LoadedCo
         loaded.style.caveman.name(),
         loaded.style.ponytail.name(),
         opts.skills.items.len,
+        skillRootsText(arena, skill_roots),
         opts.mcp.items.len,
         opts.mcp.toolCount(),
         chat_mod.safeTextAll(arena, key_source),
     });
+}
+
+/// The roots skills were read from, as one line: a run that found no skills
+/// and a run that looked in the wrong directories report the same count, and
+/// the directories are the only part of that line a reader can go and look at.
+/// Each path is escaped on its own and the paths are joined by a comma, so one
+/// path carrying a separator does not read as two roots.
+fn skillRootsText(arena: std.mem.Allocator, roots: []const skill_mod.Root) []const u8 {
+    if (roots.len == 0) return "none";
+    var buf: std.ArrayList(u8) = .empty;
+    for (roots, 0..) |root, i| {
+        if (i != 0) buf.appendSlice(arena, ", ") catch return "none";
+        buf.appendSlice(arena, traceText(arena, root.path)) catch return "none";
+    }
+    return buf.items;
 }
 
 /// A configuration value the way the trace should spell it: escaped, and in
@@ -4032,6 +4173,32 @@ test "every value on the config trace is escaped and left readable" {
     // the one a reader is scanning for.
     try std.testing.expectEqualStrings("some/model", traceText(arena, "some/model"));
     try std.testing.expectEqualStrings("unset", traceText(arena, "unset"));
+
+    // The roots are the one value on the line that is a list, so the joining is
+    // what the test is about: one root, several, and none. A run that found no
+    // skills says which directories it looked in, because a count of zero is
+    // the same number for a wrong root and an empty one.
+    try std.testing.expectEqualStrings("none", skillRootsText(arena, &.{}));
+    try std.testing.expectEqualStrings(
+        "/home/me/.microagent/skills",
+        skillRootsText(arena, &.{.{ .path = "/home/me/.microagent/skills", .named = false }}),
+    );
+    try std.testing.expectEqualStrings(
+        "/one, /two",
+        skillRootsText(arena, &.{
+            .{ .path = "/one", .named = true },
+            .{ .path = "/two", .named = true },
+        }),
+    );
+    // A path is escaped on its own, so a directory name carrying a C0 byte
+    // cannot move the cursor on the line that names the roots.
+    try std.testing.expectEqualStrings(
+        "/one\\x1b[2J, /two",
+        skillRootsText(arena, &.{
+            .{ .path = "/one\x1b[2J", .named = true },
+            .{ .path = "/two", .named = true },
+        }),
+    );
 
     // A C0 byte is spelled, so a session directory or a model id carrying one
     // cannot move the cursor, clear the screen or rewrite the line under it.
@@ -7595,6 +7762,114 @@ test "an environment variable set to nothing is not a value" {
     // Whitespace alone is the empty case, not a value.
     try env.put("MICROAGENT_MODEL", " \t\r\n");
     try std.testing.expect(envValue(&env, "MICROAGENT_MODEL") == null);
+}
+
+// The help says a flag wins over the environment variable for the same option,
+// and a variable the run cannot use is a value the run is not going to use once
+// the flag has been read. Reporting it where it was read made
+// `MICROAGENT_MAX_TURNS=0 microagent --max-turns 5` a usage error, which is the
+// same mistake the early `--help` scan already refuses to make: a variable this
+// machine cannot use takes away the one command line that says what it would
+// have been. The base url has always been checked after `parseArgs` for this
+// reason, and these values now follow it.
+test "a flag for the same option wins over a variable the run could not use" {
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    var opts: Options = .{};
+    var problem: ?EnvProblem = null;
+    var buf: [512]u8 = undefined;
+
+    try env.put("MICROAGENT_MAX_TURNS", "0");
+    try env.put("MICROAGENT_REASONING_EFFORT", "soon");
+    try env.put("MICROAGENT_MAX_TOKENS", "4096");
+    ceilingFromEnv(usize, &env, "MICROAGENT_MAX_TURNS", .max_turns, &opts.max_turns, &problem);
+    reasoningEffortFromEnv(&env, "MICROAGENT_REASONING_EFFORT", &opts.reasoning_effort, &problem);
+    ceilingFromEnv(u32, &env, "MICROAGENT_MAX_TOKENS", .max_tokens, &opts.max_tokens, &problem);
+
+    // The first problem is the run's to report and the later one does not
+    // overwrite it, and a variable the run could use is read as it always was:
+    // refusing one value stops nothing else being configured.
+    try std.testing.expectEqualStrings("MICROAGENT_MAX_TURNS", problem.?.name);
+    try std.testing.expectEqual(ValuedOption.max_turns, problem.?.option);
+    try std.testing.expectEqualStrings("MICROAGENT_MAX_TURNS must be at least 1", envProblemMessage(&buf, problem.?));
+    try std.testing.expectEqual(max_turns_default, opts.max_turns);
+    try std.testing.expectEqual(@as(u32, 4096), opts.max_tokens);
+    try std.testing.expect(opts.reasoning_effort == null);
+    try std.testing.expect(!opts.from_flag.contains(.max_turns));
+
+    // The flag wins, and it is recorded as having won: that is the fact
+    // `reportEnvProblem` asks about, and nothing else in the run can say it.
+    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &.{ "--max-turns", "5" }, &opts));
+    try std.testing.expectEqual(@as(usize, 5), opts.max_turns);
+    try std.testing.expect(opts.from_flag.contains(.max_turns));
+    // A flag for a different option says nothing about this one.
+    try std.testing.expect(!opts.from_flag.contains(.max_tokens));
+
+    // The message is spelled from the value as the environment wrote it, so a
+    // wrapper's trailing newline is not part of what the operator is shown.
+    try env.put("MICROAGENT_MAX_TOKENS", "soon\n");
+    var second: ?EnvProblem = null;
+    var tokens: u32 = default_max_tokens;
+    ceilingFromEnv(u32, &env, "MICROAGENT_MAX_TOKENS", .max_tokens, &tokens, &second);
+    try std.testing.expectEqualStrings("MICROAGENT_MAX_TOKENS must be a number, got 'soon'", envProblemMessage(&buf, second.?));
+
+    // Every ceiling a variable can name is reachable through this path, and
+    // each is the option its flag sets, so no one of them reports a value the
+    // run then overrode.
+    for ([_]struct { name: []const u8, option: ValuedOption, flag: []const u8, value: []const u8 }{
+        .{ .name = "MICROAGENT_MAX_TURNS", .option = .max_turns, .flag = "--max-turns", .value = "0" },
+        .{ .name = "MICROAGENT_MAX_TOKENS", .option = .max_tokens, .flag = "--max-tokens", .value = "0" },
+        .{ .name = "MICROAGENT_STALL_TIMEOUT", .option = .stall_timeout, .flag = "--stall-timeout", .value = "0" },
+        .{ .name = "MICROAGENT_BUDGET_SECONDS", .option = .budget, .flag = "--budget", .value = "0" },
+        .{ .name = "MICROAGENT_MAX_SPEND_TOKENS", .option = .max_spend_tokens, .flag = "--max-spend-tokens", .value = "0" },
+    }) |one| {
+        var each: std.process.Environ.Map = .init(std.testing.allocator);
+        defer each.deinit();
+        try each.put(one.name, one.value);
+        var option: Options = .{};
+        var found: ?EnvProblem = null;
+        switch (one.option) {
+            .max_turns => ceilingFromEnv(usize, &each, one.name, one.option, &option.max_turns, &found),
+            .max_tokens => ceilingFromEnv(u32, &each, one.name, one.option, &option.max_tokens, &found),
+            .stall_timeout => ceilingFromEnv(u32, &each, one.name, one.option, &option.stall_timeout_s, &found),
+            .budget => optionalCeilingFromEnv(&each, one.name, one.option, &option.budget_s, &found),
+            .max_spend_tokens => optionalCeilingFromEnv(&each, one.name, one.option, &option.max_spend_tokens, &found),
+            else => unreachable,
+        }
+        try std.testing.expect(found != null);
+        try std.testing.expectEqual(one.option, found.?.option);
+        const flag_args = [_][]const u8{ one.flag, "1" };
+        try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &flag_args, &option));
+        try std.testing.expect(option.from_flag.contains(one.option));
+    }
+}
+
+test "a config path in a diagnostic is spelled whole rather than cut" {
+    // The line naming the file a run could not read is the one a reader has to
+    // go and fix, and the trace below already spells this same path whole for
+    // the same reason. Cut at `quoted_value_bytes` a path ends mid-directory
+    // naming one that is not there, which is worse than no path at all: the
+    // reader goes looking for a file that does not exist.
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    const long = try std.fmt.allocPrint(arena, "{s}config.toml", .{"/opt/microagent/config/" ** 10});
+    try std.testing.expect(long.len > net.quoted_value_bytes);
+    try std.testing.expectEqualStrings(long, configPathText(arena, .{ .path = long, .named = true }));
+
+    // It is the escaping that is kept, not the length: a path is bytes a
+    // directory name or a reviewed repository's config file can carry, and one
+    // holding a control character still reaches the terminal as text.
+    try std.testing.expectEqualStrings(
+        "/home/me/.microagent/config.toml",
+        configPathText(arena, .{ .path = "/home/me/.microagent/config.toml", .named = true }),
+    );
+    try std.testing.expectEqualStrings(
+        "/home/me\\x1b[2J",
+        configPathText(arena, .{ .path = "/home/me\x1b[2J", .named = true }),
+    );
+    try std.testing.expectEqualStrings("", configPathText(arena, .{ .path = null, .named = false }));
 }
 
 test "a style config that cannot be read is reported, a missing one is not" {
