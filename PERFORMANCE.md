@@ -115,6 +115,41 @@ all: compaction fires once per half-limit of growth and discards a prompt of abo
 the product is the conversation's growth and the limit cancels. Deciding it needs a live provider,
 and it is the only thing here that does.
 
+## Are these fixes still guarded?
+
+A fix with no guard is a fix that will be undone by the next refactor and
+nobody will notice. Each row below was re-checked on this tree; the third column
+is the result of *defeating the fix* and confirming the guard fails, not just
+the guard's existence.
+
+| fix | guard | defeated? |
+| --- | --- | --- |
+| constant request fields ahead of `messages` | `one request body is the previous one`, `the tool schema sits inside the cacheable prefix` | 5 tests fail |
+| declared frame shapes | `bench/instructions.sh --check`, `stream content frame` row | 4,101 to 7,431, exit 1 |
+| ranged-read cursor and self-copy | `bench/instructions.sh --check`, `ranged read` row | 7,543,604 to 47,965,253, exit 1 |
+| retry waits inside the budget | `a wait the budget cannot cover` | present |
+| bounded turn-arena retention | `a turn that outgrows the retained size` | present |
+| session pruning by path | `a log in a subdirectory is pruned` | present |
+| escaper correctness | `a fuzzed byte string leaves a JSON string that reads back as itself` | fuzzer |
+
+Re-checking one of these takes a minute and is worth doing after any refactor
+that touches a test file, because guards move. Three things have to be told
+apart, and confusing the first two is how a broken guard gets reported as a
+sound one:
+
+1. the build **failed** — nothing ran, so nothing was proven either way;
+2. the test ran and **passed**;
+3. the test ran and **failed** — the guard fired.
+
+Only the third proves anything, and a check that greps for a failure string
+reports 1 and 2 identically.
+
+**A guard that disappears is not automatically lost coverage.** Two escaper
+tests here were removed by a refactor and looked like a regression twice. They
+had been replaced by a fuzzer over arbitrary byte strings, which subsumes the
+fixed cases they covered — so putting them back would have duplicated a better
+check. Check what replaced a guard before rebuilding it.
+
 ## Reproducing any of this
 
 ```sh
