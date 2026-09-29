@@ -81,6 +81,8 @@ run-to-run noise, so there is no build flag to reach for either.
 | the same library, system time to the first request | 9.3 ms | **2.0 ms** | the same change: 21 MB of reads become about 1.6 MB, and kernel time is the half that carries it |
 | three MCP servers with 1 MB `tools/list` answers | 12.2 MB resident | **4.5 MB** | a `tools/list` answer was parsed into the run arena, tree and line both, and the buffer it arrived in kept its size; the answer is parsed in a scratch arena now, only the schema bytes are copied out, and that buffer has its own allocator and is handed back |
 | one such server | 8.5 MB | **4.5 MB** | the same change |
+| a 3000-turn run's client CPU | 211.9 M instr | **177.8 M instr** | `sendBodyComplete` needs the whole body in one buffer, so the conversation was copied into a fresh one every turn; the prefix and the conversation now go to the wire from where they are |
+| the same run, peak resident | 13.3 MB | **11.0 MB** | with the body buffer gone, the turn arena crosses its retention ceiling less often |
 | an MCP answer read in 8 KB chunks, three servers of 1 MB each | 91.1 M instr | **75.3 M instr** | the newline scan restarted at the front of the buffer on every chunk, so a one megabyte line was searched 128 times over growing prefixes, about 66 MB of the same bytes; it resumes where it stopped now |
 | three 4 MB MCP tool results | 19.1 MB resident | **12.8 MB** | the text was built whole and clamped to 24 KB a moment later, so the copy and the clamp both worked over bytes nobody keeps; it stops at the cap while it is built, and the note names the size it would have had |
 
@@ -207,6 +209,14 @@ wall figure is `hyperfine -w 3 -r 20` and it moves with the page cache (11.1 ms 
 run warm, 27.2 against 12.9 loaded and cold); the system time does not, 9.3 ms against 2.0 ms, which
 is the read volume. A library of ordinary size pays nothing either way: 2.9 MB against 2.9 MB with
 none, 5.5 against 5.9 for 200 skills of 4 KB.
+
+The request-body rows are `perf stat --no-inherit -e instructions`, median of three, at
+`--max-turns 3000` against a stub that always calls a tool that does not exist, so the conversation
+grows to the compaction plateau and the per-turn copy is at its largest. They were kept on the
+strength of the bytes as much as the numbers: a stub that writes each request body to a file was run
+for a five-turn turn with the old and the new binary, and all five bodies were identical, byte for
+byte. The same test is what a provider's prompt cache sees, so it is the gate for a change to the
+send path even though it is a shell comparison rather than a test in the suite.
 
 The MCP line row is `perf stat -e instructions`, median of three, on the release binary against three
 fake servers whose `tools/list` answer carries 1 MB, with `--max-turns 1`. It is measured with

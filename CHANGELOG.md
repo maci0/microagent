@@ -14,6 +14,13 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- A request body is sent as the constant prefix, the conversation and the
+  closing bytes, instead of first being built in one buffer. That buffer copied
+  the conversation every turn, and on a long run it was the largest single memcpy
+  the harness made: a 3000-turn run costs 211.9 M instructions before and 177.8 M
+  after, with peak resident memory down from 13.3 MB to 11.0 MB. The bytes on
+  the wire are unchanged, which was checked by recording the request body of
+  every turn of a five-turn run before and after.
 - An MCP server's answer is read with the newline scan resuming where it
   stopped, instead of restarting at the front of the buffer on every 8 KB chunk.
   A one megabyte `tools/list` answer was searched 128 times over growing

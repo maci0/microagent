@@ -2008,14 +2008,14 @@ fn runTurn(
     progress: *Progress,
     mcp: *mcp_mod.Servers,
 ) !TurnEnd {
-    const body = try buildBody(arena, opts, msgs.items);
+    const prefix = try bodyPrefix(arena, opts);
     // Stamped on `model_clock`, which `elapsedMs` below is read on: the two
     // ends of one duration on one clock, not the difference between origins.
     const asked = Io.Timestamp.now(io, model_clock).nanoseconds;
     // A turn the budget cut off is not a turn: half a tool call's arguments is
     // not a tool call, so nothing of it is appended and the run ends here with
     // the reason already on stderr.
-    var result = streamChat(client, io, gpa, arena, opts, body, budget, msgs.items) catch |err| switch (err) {
+    var result = streamChat(client, io, gpa, arena, opts, prefix, budget, msgs.items) catch |err| switch (err) {
         error.BudgetExhausted => return .cut_off,
         else => return err,
     };
@@ -2123,13 +2123,13 @@ fn extraToolsJson(arena: std.mem.Allocator, opts: Options) ![]const u8 {
 /// prefix on every turn of every run, so the provider re-read it each time.
 /// Member order is not significant in JSON, so the constant fields go first and
 /// the conversation ends the body.
-fn buildBody(arena: std.mem.Allocator, opts: Options, messages: []const u8) ![]u8 {
-    // The body is the conversation plus the constant fields, and both sizes are
-    // in hand before the first write. Reserving them costs one allocation:
-    // starting from zero walks the doubling ladder up to the conversation's
-    // size, reallocating and copying the whole thing at every step, once per
-    // turn, on an arena that keeps each intermediate block.
-    var jb = chat_mod.JsonBuf.initCapacity(arena, messages.len + body_scaffolding_bytes);
+fn bodyPrefix(arena: std.mem.Allocator, opts: Options) ![]u8 {
+    // The constant fields are written into one buffer reserved for them, so the
+    // scaffold never walks the doubling ladder and never lands in the
+    // conversation's shadow. The conversation follows this on the wire, from
+    // where it already is: `sendRequest` writes the two together without making
+    // one buffer hold both.
+    var jb = chat_mod.JsonBuf.initCapacity(arena, body_scaffolding_bytes);
     const w = jb.writer();
     try w.print("{{\"model\":", .{});
     try chat_mod.writeJsonString(w, opts.model);
@@ -2160,9 +2160,39 @@ fn buildBody(arena: std.mem.Allocator, opts: Options, messages: []const u8) ![]u
         }
     }
     try w.writeAll(",\"messages\":");
-    try w.writeAll(messages);
-    try w.writeAll("]}");
     return jb.items();
+}
+
+/// The two bytes that close the conversation array and the request object.
+const body_close = "]}";
+
+/// The request body as one buffer, for the callers that need the bytes in hand:
+/// the tests that read a body back, and anything comparing two of them. The
+/// wire does not, which is what `sendRequest` is for, so this is defined as the
+/// same three parts the stream sends, in the same order.
+fn buildBody(arena: std.mem.Allocator, opts: Options, messages: []const u8) ![]u8 {
+    const prefix = try bodyPrefix(arena, opts);
+    const body = try arena.alloc(u8, prefix.len + messages.len + body_close.len);
+    @memcpy(body[0..prefix.len], prefix);
+    @memcpy(body[prefix.len..][0..messages.len], messages);
+    @memcpy(body[prefix.len + messages.len ..], body_close);
+    return body;
+}
+
+/// Sends one request: the constant prefix, the conversation where it already
+/// is, and the closing bytes. `sendBodyComplete` wants the whole body in one
+/// buffer, and building that buffer copies the conversation once per turn,
+/// which on a long run is the largest single memcpy the harness makes. The
+/// bytes on the wire are the same ones in the same order; only the copy is
+/// gone.
+fn sendRequest(open: *std.http.Client.Request, chunk: []u8, prefix: []const u8, msgs: []const u8) !void {
+    open.transfer_encoding = .{ .content_length = prefix.len + msgs.len + body_close.len };
+    var bw = try open.sendBodyUnflushed(chunk);
+    try bw.writer.writeAll(prefix);
+    try bw.writer.writeAll(msgs);
+    try bw.writer.writeAll(body_close);
+    try bw.end();
+    try open.connection.?.flush();
 }
 
 /// The request headers carrying the credential. The authorization header is
@@ -2196,7 +2226,7 @@ fn streamChat(
     gpa: std.mem.Allocator,
     arena: std.mem.Allocator,
     opts: Options,
-    body: []const u8,
+    prefix: []const u8,
     budget: Budget,
     msgs: []const u8,
 ) !chat_mod.ChatResult {
@@ -2227,7 +2257,11 @@ fn streamChat(
     // `400 Validation: Unsupported parameter(s): reasoning`. One retry without
     // them, on a 400, is the difference between "this provider cannot run the
     // harness" and a run.
-    var body_now = body;
+    var prefix_now = prefix;
+    // One buffer for the request writer to run through: the body itself is
+    // written straight from the prefix and the conversation, so this only ever
+    // holds a flush's worth.
+    var body_chunk: [64 * 1024]u8 = undefined;
     var dropped_optional = false;
     var attempt: u32 = 0;
     // A rate limit, or a connection that died before the request was on the
@@ -2257,12 +2291,11 @@ fn streamChat(
         if (req_slot.?.connection) |connection|
             setStallTimeout(connection.stream_reader.stream.socket.handle, opts.stall_timeout_s);
         var open = &req_slot.?;
-        open.transfer_encoding = .{ .content_length = body_now.len };
-        open.sendBodyComplete(@constCast(body_now)) catch |err| {
+        sendRequest(open, &body_chunk, prefix_now, msgs) catch |err| {
             if (worthAnotherAttempt(.sending, err) and waitBeforeRetry(io, arena, shown_url, attempt, "sending the request body to", err, budget)) continue;
             return err;
         };
-        if (debug_enabled) std.debug.print("[mdebug] request sent, body={d} bytes\n", .{body.len});
+        if (debug_enabled) std.debug.print("[mdebug] request sent, body={d} bytes\n", .{prefix_now.len + msgs.len + body_close.len});
 
         var response = open.receiveHead(&redirect_buffer) catch |err| {
             // `worthAnotherAttempt` is what says a head is not worth another
@@ -2288,7 +2321,7 @@ fn streamChat(
                 attempt = 0;
                 var plain = opts;
                 plain.reasoning_effort = null;
-                body_now = try buildBody(arena, plain, msgs);
+                prefix_now = try bodyPrefix(arena, plain);
                 net.note(io, arena, "microagent: {s} refused the optional request fields (HTTP 400); retrying once without them\n", .{shown_url});
                 continue;
             }
@@ -4543,6 +4576,24 @@ test "skills add one tool to the schema and change nothing when there are none" 
     const plain = try buildBody(arena, .{ .model = "m" }, msgs.items);
     try std.testing.expect(std.mem.indexOf(u8, plain, "\"skill\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, plain, tools_json) != null);
+}
+
+// The wire gets the prefix and the conversation as two writes and the closing
+// bytes as a third; `buildBody` is those three parts in one buffer for the
+// tests that read a body back. This pins the two together, so a change to one
+// that forgets the other is caught here rather than by a provider's cache.
+test "the streamed body is the prefix, the conversation and the close" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    const opts: Options = .{ .model = "m" };
+    const messages = "[{\"role\":\"user\",\"content\":\"hi\"}]";
+    const prefix = try bodyPrefix(arena, opts);
+    try std.testing.expect(std.mem.endsWith(u8, prefix, ",\"messages\":"));
+    const body = try buildBody(arena, opts, messages);
+    try std.testing.expectEqualStrings(prefix, body[0..prefix.len]);
+    try std.testing.expectEqualStrings(messages, body[prefix.len..][0..messages.len]);
+    try std.testing.expectEqualStrings(body_close, body[prefix.len + messages.len ..]);
 }
 
 // The routing half: a `skill` call reaches the run's set rather than the tool
