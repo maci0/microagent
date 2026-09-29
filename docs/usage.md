@@ -677,9 +677,10 @@ reads a log back.
   request.
 - **A sent turn is never re-sent.** When the whole turn was sent and no response arrives, the
   provider may already have generated and billed the completion, so the run ends with the connection
-  error on stderr rather than paying twice. A failure the provider reports part way through a stream
-  is named in its own words and ends the run for the same reason: whatever reached stdout is a
-  prefix of an answer it abandoned.
+  error on stderr rather than paying twice. A failure the provider reports is named in its own words;
+  one that arrives before any content, with no tool call half assembled, is asked again on the same
+  1 s and 2 s schedule, since nothing was generated to pay for. One that arrives part way through a
+  stream ends the run: whatever reached stdout is a prefix of an answer it abandoned.
 - **Every request carries `max_tokens`**, so a model that fails to stop is not billed until something
   else stops it. `--max-turns` counts turns, not tokens, and a turn re-sends the whole conversation,
   so `--max-spend-tokens` is the ceiling on what a run spends.

@@ -681,8 +681,8 @@ const help_text =
     \\Tools (`[tools.<name>]` tables in the config):
     \\  `enabled = false` removes a built-in tool (bash, read, write, edit,
     \\  multi_edit, search, ast, git, todo) from the schema and refuses its calls;
-    \\  at least one must stay on. The presets web_search, context7 and grep_app
-    \\  are public remote MCP servers, off until `enabled = true`, and take `url`,
+    \\  at least one must stay on. The presets web_search, context7, grep_app and deepwiki
+    \\  are public remote MCP servers, on until `enabled = false`, and take `url`,
     \\  `api_key_env` (the NAME of a variable holding the key), `api_key_header`
     \\  and `timeout` (seconds). A name that is not a tool stops the run with exit
     \\  status 2.
@@ -1982,7 +1982,11 @@ fn run(
             // loop exists to catch, and one extra turn is a cheap way to catch
             // it.
             .answered => {
-                if (!verify_asked and progress.edited and !progress.tested) {
+                // A verification turn is a turn like any other, so the ceiling
+                // is asked first: `--max-turns 2` on a run that answers on the
+                // second turn would otherwise ask for a third, fall out of the
+                // loop, and report exit 3 for an answer that is whole.
+                if (!verify_asked and turn + 1 < opts.max_turns and progress.edited and !progress.tested) {
                     verify_asked = true;
                     net.note(io, arena, "microagent: no test runner was used; asking for one verification turn\n", .{});
                     try conversation_mod.appendMessage(gpa, msgs, "user", verify_push);
