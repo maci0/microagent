@@ -665,18 +665,14 @@ test "a repeated session log writes beside the first and never over it" {
 // can say so. Every one of these is a null, and every one of them names itself.
 test "a session directory that cannot be used is named, and keeps no log" {
     const alloc = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(alloc, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
+    var f = try StoreFixture.init(alloc);
+    defer f.deinit();
+    const io = f.io();
+    const arena = f.arena();
     // The store sits under the test's own temporary directory, which is under
     // the working directory, so the relative spelling a run is given reaches it
     // and the cleanup takes it with the rest.
-    const store = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const store = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{f.tmp.sub_path});
 
     // Off is not a failure and says nothing: the caller asked for no log.
     try std.testing.expect(open(io, arena, "", "test/model") == null);
@@ -707,7 +703,7 @@ test "a session directory that cannot be used is named, and keeps no log" {
     close(io, &session);
     session = null;
 
-    var logs = try tmp.dir.openDir(io, "sessions", .{ .iterate = true });
+    var logs = try f.tmp.dir.openDir(io, "sessions", .{ .iterate = true });
     defer logs.close(io);
     var it = logs.iterate();
     var lines: std.ArrayList([]const u8) = .empty;
@@ -738,19 +734,15 @@ test "a session directory that cannot be used is named, and keeps no log" {
 // says once that the rest of it is unrecorded and stops writing to it.
 test "a session log that cannot be written is dropped, not written to again" {
     const alloc = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(alloc, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
+    var f = try StoreFixture.init(alloc);
+    defer f.deinit();
+    const io = f.io();
+    const arena = f.arena();
 
     // Opened for reading, so every write to it is refused the way a full disk
     // or a removed directory refuses one.
-    try tmp.dir.writeFile(io, .{ .sub_path = "read-only.jsonl", .data = "" });
-    const file = try tmp.dir.openFile(io, "read-only.jsonl", .{ .mode = .read_only });
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "read-only.jsonl", .data = "" });
+    const file = try f.tmp.dir.openFile(io, "read-only.jsonl", .{ .mode = .read_only });
 
     var session: ?Session = .{ .file = file, .cwd = ".", .model = "test/model", .dir = "/sessions" };
     var result: chat.ChatResult = .{};
@@ -760,7 +752,7 @@ test "a session log that cannot be written is dropped, not written to again" {
 
     // A second record has nowhere to go: the log was dropped, not retried.
     writeRecord(io, arena, &session, 2, &result);
-    const empty = try tmp.dir.readFileAlloc(io, "read-only.jsonl", alloc, .limited(64));
+    const empty = try f.tmp.dir.readFileAlloc(io, "read-only.jsonl", alloc, .limited(64));
     defer alloc.free(empty);
     try std.testing.expectEqualStrings("", empty);
 }
@@ -784,25 +776,21 @@ fn sessionScope(io: Io, arena: std.mem.Allocator, session: ?Session) void {
 // back the number the log held, and the stray close takes it away.
 test "a run that drops its session log closes the handle once" {
     const alloc = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(alloc, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
+    var f = try StoreFixture.init(alloc);
+    defer f.deinit();
+    const io = f.io();
+    const arena = f.arena();
 
-    try tmp.dir.writeFile(io, .{ .sub_path = "read-only.jsonl", .data = "" });
-    const file = try tmp.dir.openFile(io, "read-only.jsonl", .{ .mode = .read_only });
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "read-only.jsonl", .data = "" });
+    const file = try f.tmp.dir.openFile(io, "read-only.jsonl", .{ .mode = .read_only });
     const session: ?Session = .{ .file = file, .cwd = ".", .model = "test/model", .dir = "/sessions" };
 
     sessionScope(io, arena, session);
 
-    const after = try tmp.dir.createFile(io, "after.jsonl", .{ .truncate = true });
+    const after = try f.tmp.dir.createFile(io, "after.jsonl", .{ .truncate = true });
     defer after.close(io);
     try after.writeStreamingAll(io, "kept");
-    const kept = try tmp.dir.readFileAlloc(io, "after.jsonl", alloc, .limited(64));
+    const kept = try f.tmp.dir.readFileAlloc(io, "after.jsonl", alloc, .limited(64));
     defer alloc.free(kept);
     try std.testing.expectEqualStrings("kept", kept);
 }

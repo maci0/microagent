@@ -6956,58 +6956,79 @@ test "a response releases the copies it made of a tool call" {
     result.deinit(gpa);
 }
 
+// The threaded io, the temporary directory and the arena the three atomic
+// write tests below share: what varies between them is the tree they put in
+// the directory and what they then write over.
+const WriteFixture = struct {
+    arena_state: std.heap.ArenaAllocator,
+    threaded: std.Io.Threaded,
+    tmp: std.testing.TmpDir,
+
+    fn init() WriteFixture {
+        return .{
+            .arena_state = std.heap.ArenaAllocator.init(std.testing.allocator),
+            .threaded = std.Io.Threaded.init(std.testing.allocator, .{}),
+            .tmp = std.testing.tmpDir(.{}),
+        };
+    }
+
+    fn deinit(self: *WriteFixture) void {
+        self.tmp.cleanup();
+        self.threaded.deinit();
+        self.arena_state.deinit();
+    }
+
+    fn io(self: *WriteFixture) Io {
+        return self.threaded.io();
+    }
+
+    fn arena(self: *WriteFixture) std.mem.Allocator {
+        return self.arena_state.allocator();
+    }
+};
+
 // The rename that puts a rewritten file in place brings the temporary file's
 // mode with it, so a 0o600 file the run never asked to change comes back 0o644
 // and a secret the repository kept private becomes readable by everyone on the
 // machine.
 test "an atomic write keeps the mode the destination already had" {
-    const alloc = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(alloc, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
+    var f = WriteFixture.init();
+    defer f.deinit();
+    const io = f.io();
+    const arena = f.arena();
 
-    try tmp.dir.writeFile(io, .{ .sub_path = "secret", .data = "old" });
-    try tmp.dir.setFilePermissions(io, "secret", Io.File.Permissions.fromMode(0o600), .{});
-    try tool_mod.writeFileAtomic(io, tmp.dir, "secret", "new");
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "secret", .data = "old" });
+    try f.tmp.dir.setFilePermissions(io, "secret", Io.File.Permissions.fromMode(0o600), .{});
+    try tool_mod.writeFileAtomic(io, f.tmp.dir, "secret", "new");
 
-    try std.testing.expectEqualStrings("new", try tmp.dir.readFileAlloc(io, "secret", arena, .limited(64)));
-    const stat = try tmp.dir.statFile(io, "secret", .{});
+    try std.testing.expectEqualStrings("new", try f.tmp.dir.readFileAlloc(io, "secret", arena, .limited(64)));
+    const stat = try f.tmp.dir.statFile(io, "secret", .{});
     try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), stat.permissions.toMode() & tool_mod.permission_bits);
 
     // A file that is not there yet is created with the default mode, so the
     // helper does not need a caller to say what a new file should be.
-    try tool_mod.writeFileAtomic(io, tmp.dir, "fresh", "content");
-    try std.testing.expectEqualStrings("content", try tmp.dir.readFileAlloc(io, "fresh", arena, .limited(64)));
+    try tool_mod.writeFileAtomic(io, f.tmp.dir, "fresh", "content");
+    try std.testing.expectEqualStrings("content", try f.tmp.dir.readFileAlloc(io, "fresh", arena, .limited(64)));
 }
 
 // A rename replaces the name it is given, so writing over a symlink without
 // following it leaves a regular file where the link was and the file the link
 // named exactly as it was.
 test "an atomic write follows a symlink to the file it names" {
-    const alloc = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(alloc, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
+    var f = WriteFixture.init();
+    defer f.deinit();
+    const io = f.io();
+    const arena = f.arena();
 
-    try tmp.dir.writeFile(io, .{ .sub_path = "real", .data = "old" });
-    try tmp.dir.symLink(io, "real", "link", .{});
-    try tool_mod.writeFileAtomic(io, tmp.dir, "link", "new");
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "real", .data = "old" });
+    try f.tmp.dir.symLink(io, "real", "link", .{});
+    try tool_mod.writeFileAtomic(io, f.tmp.dir, "link", "new");
 
-    try std.testing.expectEqualStrings("new", try tmp.dir.readFileAlloc(io, "real", arena, .limited(64)));
+    try std.testing.expectEqualStrings("new", try f.tmp.dir.readFileAlloc(io, "real", arena, .limited(64)));
     // The link is still a link: a run that resolves paths from the repository
     // has not gained a second copy of every file it wrote through one.
     var link_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const n = try tmp.dir.readLink(io, "link", &link_buf);
+    const n = try f.tmp.dir.readLink(io, "link", &link_buf);
     try std.testing.expectEqualStrings("real", link_buf[0..n]);
 }
 
@@ -7021,34 +7042,29 @@ test "an atomic write follows a symlink to the file it names" {
 // run twice leaves the file, the link and the mode the first run left, rather
 // than a second pass over a file the first pass already rewrote.
 test "a write issued twice leaves the file the first run left" {
-    const alloc = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(alloc, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
+    var f = WriteFixture.init();
+    defer f.deinit();
+    const io = f.io();
+    const arena = f.arena();
 
-    try tmp.dir.writeFile(io, .{ .sub_path = "real", .data = "old" });
-    try tmp.dir.setFilePermissions(io, "real", Io.File.Permissions.fromMode(0o600), .{});
-    try tmp.dir.symLink(io, "real", "link", .{});
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "real", .data = "old" });
+    try f.tmp.dir.setFilePermissions(io, "real", Io.File.Permissions.fromMode(0o600), .{});
+    try f.tmp.dir.symLink(io, "real", "link", .{});
 
-    try tool_mod.writeFileAtomic(io, tmp.dir, "link", "new");
-    try tool_mod.writeFileAtomic(io, tmp.dir, "link", "new");
+    try tool_mod.writeFileAtomic(io, f.tmp.dir, "link", "new");
+    try tool_mod.writeFileAtomic(io, f.tmp.dir, "link", "new");
 
-    try std.testing.expectEqualStrings("new", try tmp.dir.readFileAlloc(io, "real", arena, .limited(64)));
+    try std.testing.expectEqualStrings("new", try f.tmp.dir.readFileAlloc(io, "real", arena, .limited(64)));
     // The link survives the duplicate: a second run that replaced the name
     // rather than the file it names leaves a regular file where the link was,
     // so a repository holding links grows one copy per run.
     var link_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const n = try tmp.dir.readLink(io, "link", &link_buf);
+    const n = try f.tmp.dir.readLink(io, "link", &link_buf);
     try std.testing.expectEqualStrings("real", link_buf[0..n]);
     // The mode is read after the second run, because the rename brings the
     // temporary file's mode with it and the duplicate is the run that would
     // hand a 0o600 file back as whatever the second one created.
-    const stat = try tmp.dir.statFile(io, "real", .{});
+    const stat = try f.tmp.dir.statFile(io, "real", .{});
     try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), stat.permissions.toMode() & tool_mod.permission_bits);
 }
 
