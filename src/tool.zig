@@ -1495,13 +1495,15 @@ fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, writable
 /// What one replacement made of a file's text, or the refusal the model reads. `edit` and
 /// `multi_edit` both ask it, so a replacement is judged by one set of rules however it arrives.
 const Edited = union(enum) {
-    text: struct { bytes: []const u8, count: usize },
+    text: struct { bytes: []u8, count: usize },
     refused: []const u8,
 };
 
-/// Replaces `old` with `new` in `raw`, once or everywhere with `all`, and writes nothing. The
+/// Replaces `old` with `new` in `raw`, once or everywhere with `all`, and writes nothing. `raw` is
+/// the caller's own buffer for the file and is rewritten in place whenever the replacements are
+/// short enough to fit behind the read cursor, so a caller holding it keeps holding it. The
 /// refusals are the ones an edit that could be issued twice has to make: see the comments below.
-fn applyEdit(arena: std.mem.Allocator, path: []const u8, raw: []const u8, old: []const u8, new: []const u8, all: bool) error{OutOfMemory}!Edited {
+fn applyEdit(arena: std.mem.Allocator, path: []const u8, raw: []u8, old: []const u8, new: []const u8, all: bool) error{OutOfMemory}!Edited {
     if (old.len == 0) return .{ .refused = "error: old_string is empty" };
     // An edit is a tool call the model can issue twice: a turn that was cut
     // before the result reached it, a re-read to check the change landed, a
@@ -1534,20 +1536,47 @@ fn applyEdit(arena: std.mem.Allocator, path: []const u8, raw: []const u8, old: [
 
     // The checks above leave either every occurrence replaced or, without
     // `all`, exactly one to replace, and one match is the loop below run once.
-    // `count` is in hand, so the rewritten file's exact size is too, and the
-    // buffer is allocated once rather than doubling up to it: `raw` is a file
-    // of up to `max_edit_bytes`, and the arena keeps every intermediate block
-    // a doubling leaves behind.
     const replacements = if (all) count else 1;
     var buf: std.ArrayList(u8) = .empty;
-    try buf.ensureTotalCapacity(arena, raw.len - replacements * old.len + replacements * new.len);
-    var rest = raw;
-    while (std.mem.indexOf(u8, rest, old)) |at| {
-        try buf.appendSlice(arena, rest[0..at]);
-        try buf.appendSlice(arena, new);
-        rest = rest[at + old.len ..];
+    if (new.len <= old.len) {
+        // Every replacement is at least as long as the text it replaces is
+        // short of it, so the rewrite never runs ahead of what it reads and
+        // `raw` itself holds the result. That is the common edit (a dedent, a
+        // rename, a shorter replacement) and it costs no allocation at all:
+        // a second buffer per edit is retained for the rest of the turn by the
+        // arena, so a batch of `max_multi_edits` over files of up to
+        // `max_edit_bytes` held one whole copy of every intermediate file,
+        // hundreds of megabytes for the largest files the tool accepts.
+        //
+        // `copyForwards` is what makes writing into the read buffer legal: the
+        // destination always starts at or before the source, and the two ranges
+        // only overlap in the span being replaced.
+        var written: usize = 0;
+        var rest = raw;
+        while (std.mem.indexOf(u8, rest, old)) |at| {
+            std.mem.copyForwards(u8, raw[written..][0..at], rest[0..at]);
+            written += at;
+            std.mem.copyForwards(u8, raw[written..][0..new.len], new);
+            written += new.len;
+            rest = rest[at + old.len ..];
+        }
+        std.mem.copyForwards(u8, raw[written..][0..rest.len], rest);
+        buf = .{ .items = raw[0 .. written + rest.len], .capacity = raw.len };
+    } else {
+        // A replacement longer than the text it replaces cannot be written
+        // behind the read cursor, so the result is a fresh buffer. `count` is
+        // in hand, so its exact size is too, and it is allocated once rather
+        // than doubling up to it: `raw` is a file of up to `max_edit_bytes`, and
+        // the arena keeps every intermediate block a doubling leaves behind.
+        try buf.ensureTotalCapacity(arena, raw.len - replacements * old.len + replacements * new.len);
+        var rest = raw;
+        while (std.mem.indexOf(u8, rest, old)) |at| {
+            try buf.appendSlice(arena, rest[0..at]);
+            try buf.appendSlice(arena, new);
+            rest = rest[at + old.len ..];
+        }
+        try buf.appendSlice(arena, rest);
     }
-    try buf.appendSlice(arena, rest);
     // A match the check above cannot see: it proves `new` cannot re-create
     // `old` inside itself, and not that `old` is gone from the file. The
     // rewrite is `P ++ new ++ S`, so the bytes before the span are still there
@@ -1578,7 +1607,7 @@ const max_multi_edits: usize = 64;
 const PendingFile = struct {
     key: []const u8,
     path: []const u8,
-    text: []const u8,
+    text: []u8,
     replacements: usize = 0,
 };
 
@@ -2745,7 +2774,11 @@ fn fuzzEdit(_: void, smith: *std.testing.Smith) !void {
     defer state.deinit();
     const arena = state.allocator();
 
-    const done = switch (try applyEdit(arena, "f.zig", raw, old, new, all)) {
+    // The rewrite happens in the caller's own buffer, so the file the fuzzer
+    // described is copied into one first rather than handed over as the const
+    // slice the corpus holds.
+    const file = try arena.dupe(u8, raw);
+    const done = switch (try applyEdit(arena, "f.zig", file, old, new, all)) {
         .refused => |message| {
             // A refusal is a line the model reads and acts on, so it says
             // something rather than handing back an empty answer.
@@ -2767,7 +2800,47 @@ fn fuzzEdit(_: void, smith: *std.testing.Smith) !void {
 
     // And the call itself, run on what it produced, is refused: a turn that was
     // cut before its result reached the model must not change the file twice.
-    try std.testing.expect(try applyEdit(arena, "f.zig", done.bytes, old, new, all) == .refused);
+    try std.testing.expect(try applyEdit(arena, "f.zig", @constCast(done.bytes), old, new, all) == .refused);
+}
+
+test "a short enough rewrite lands in the caller's own buffer" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    // The file's buffer is a fixed one, so an edit that allocated a fresh
+    // result would leave these bytes untouched and the assertion below would
+    // read the text the edit was supposed to have replaced. Every replacement
+    // here is shorter than what it replaces, which is the case the rewrite
+    // handles without a second copy of the file.
+    var file: [64]u8 = undefined;
+    const raw = "let name = alpha;\nlet other = alpha;\n".*;
+    @memcpy(file[0..raw.len], &raw);
+    const whole = file[0..raw.len];
+
+    const done = try applyEdit(arena, "f.zig", whole, "alpha", "b", true);
+    const text = switch (done) {
+        .refused => |message| {
+            std.debug.print("refused: {s}\n", .{message});
+            return error.UnexpectedRefusal;
+        },
+        .text => |t| t,
+    };
+    try std.testing.expectEqual(@as(usize, 2), text.count);
+    try std.testing.expectEqualStrings("let name = b;\nlet other = b;\n", text.bytes);
+    try std.testing.expectEqual(@intFromPtr(&whole[0]), @intFromPtr(text.bytes.ptr));
+
+    // A replacement longer than the text it replaces cannot be written behind
+    // the read cursor, so it is the one case that allocates. The bytes are the
+    // same either way, which is what the case above and this one share.
+    var grown: [64]u8 = undefined;
+    const raw2 = "q\nq\n".*;
+    @memcpy(grown[0..raw2.len], &raw2);
+    const up = try applyEdit(arena, "f.zig", grown[0..raw2.len], "q", "zoo", true);
+    switch (up) {
+        .refused => return error.UnexpectedRefusal,
+        .text => |t| try std.testing.expectEqualStrings("zoo\nzoo\n", t.bytes),
+    }
 }
 
 test "a capped tool result says how much was dropped" {
