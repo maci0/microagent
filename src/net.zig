@@ -1410,7 +1410,10 @@ fn firstRetryAfterLine(head: []const u8) ?[]const u8 {
                 return std.mem.trim(u8, line[colon + 1 ..], " \t");
             }
         }
-        rest = rest[at.? + 2 ..];
+        // The line just read had no terminator of its own, so there is no line
+        // after it to read.
+        const at_index = at orelse return null;
+        rest = rest[at_index + 2 ..];
     }
 }
 

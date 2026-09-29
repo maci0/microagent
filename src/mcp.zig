@@ -1297,7 +1297,7 @@ fn openRemote(
     // The key is written into a header line, so a byte that ends the line would
     // split the request.
     if (net.hasHeaderControlBytes(entry.api_key)) {
-        net.note(io, arena, "microagent: MCP server {s}: the key in ${s} holds a control character; it is skipped\n", .{ shown, chat.safeTextAll(arena, entry.api_key_env) });
+        net.note(io, arena, "microagent: MCP server {s}: the key in {s} holds a control character; it is skipped\n", .{ shown, chat.safeTextAll(arena, entry.api_key_env) });
         return;
     }
     // Every way this can leave an entry out says so, the way the two above do:
@@ -1307,7 +1307,7 @@ fn openRemote(
         ""
     else if (std.ascii.eqlIgnoreCase(entry.api_key_header, default_key_header))
         std.fmt.allocPrint(arena, "Bearer {s}", .{entry.api_key}) catch |err| {
-            net.note(io, arena, "microagent: MCP server {s}: the key in ${s} could not be prepared for the request ({s}); it is skipped\n", .{
+            net.note(io, arena, "microagent: MCP server {s}: the key in {s} could not be prepared for the request ({s}); it is skipped\n", .{
                 shown, chat.safeTextAll(arena, entry.api_key_env), @errorName(err),
             });
             return;

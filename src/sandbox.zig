@@ -1,6 +1,5 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const chat = @import("chat.zig");
 const net = @import("net.zig");
 
 const Io = std.Io;

@@ -1556,10 +1556,6 @@ const LoadedConfig = struct {
     model: []const u8,
     base_url: []const u8,
     api_key: []const u8,
-    /// The repository instruction files the config file named, or null when
-    /// it named none, which is how `agentsBlock` tells "read AGENTS.md" from
-    /// "the file turned the read off".
-    agents_files: ?[]const []const u8,
     /// The skill directories the config file named, or null when it named
     /// none, which is how the caller tells "use the default root" from "the
     /// file turned skills off".
@@ -1587,7 +1583,6 @@ fn fromConfig(parsed: config_mod.Config, source: ?[]const u8) LoadedConfig {
         .model = parsed.model,
         .base_url = parsed.base_url,
         .api_key = parsed.api_key,
-        .agents_files = parsed.agents_files,
         .skills = parsed.skills,
         .mcp = parsed.mcp,
         .deny_commands = parsed.deny_commands,

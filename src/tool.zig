@@ -217,12 +217,17 @@ fn runSearchTool(
     // object` failed the same way. `captureResult` keeps the clean call
     // zero-copy, so passing the streams through costs a search that worked
     // nothing.
-    if (res.stdout.len != 0 or res.stderr.len != 0) return captureResult(arena, .{
-        .stdout = res.stdout,
-        .stderr = res.stderr,
-        .at_limit = res.partial().atCaptureLimit(),
-        .term = res.term,
-    });
+    // A search that printed nothing and did not exit cleanly takes this path
+    // too: the exit status says it failed, and "(no matches)" is the one
+    // answer a failed search must not give. `gitRanNothing` refuses the same
+    // case for the same reason.
+    if (res.stdout.len != 0 or res.stderr.len != 0 or res.term != .exited or res.term.exited != 0)
+        return captureResult(arena, .{
+            .stdout = res.stdout,
+            .stderr = res.stderr,
+            .at_limit = res.partial().atCaptureLimit(),
+            .term = res.term,
+        });
     return "(no matches)";
 }
 

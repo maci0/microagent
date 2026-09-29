@@ -57,6 +57,8 @@ const max_prompt_bytes: usize = 8 * 1024;
 /// description is prose and is cut when the prompt is written.
 const max_name_bytes: usize = 64;
 const max_description_bytes: usize = 200;
+/// The longest escaped name a `skill` call writes to the trace.
+const max_shown_name_bytes: usize = 120;
 
 /// One skill on disk, as discovery found it.
 const Skill = struct {
@@ -243,8 +245,8 @@ pub fn discover(io: Io, arena: std.mem.Allocator, root_list: []const Root) Skill
                 .description = skillDescription(text),
                 .path = path,
             }) catch |err| {
-                net.note(io, arena, "microagent: skill {s} could not be added to the listing ({s}), and the {d} skill(s) after it are not found\n", .{
-                    chat.safeTextAll(arena, name), @errorName(err), found.items.len,
+                net.note(io, arena, "microagent: skill {s} could not be added to the listing ({s}), and the skills after it are not listed\n", .{
+                    chat.safeTextAll(arena, name), @errorName(err),
                 });
                 return .{ .items = found.items };
             };
@@ -407,7 +409,9 @@ pub fn call(io: Io, arena: std.mem.Allocator, args_text: []const u8, set: Skills
         else => return "error: tool arguments must be an object",
     };
     const name = chat.str(args.get("name")) orelse return "error: missing name";
-    const shown = chat.safeText(arena, name, 120);
+    // The name as a diagnostic spells it, which is a different bound from the
+    // one discovery holds it to: the escape can make a short name longer.
+    const shown = chat.safeText(arena, name, max_shown_name_bytes);
     net.writeErr(io, try std.fmt.allocPrint(arena, "\u{23fa} {s} {s}\n", .{ tool_name, shown }));
     const skill = set.get(name) orelse return std.fmt.allocPrint(
         arena,

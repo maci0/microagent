@@ -497,14 +497,12 @@ pub fn writeRecord(io: Io, arena: std.mem.Allocator, session: *?Session, elapsed
     const ts_ms = recordStampMs(Io.Clock.real.now(io).nanoseconds);
     const line = sessionRecord(arena, ts_ms, s.cwd, s.model, elapsed_ms, result) catch |err| {
         net.note(io, arena, "microagent: a session record for {s} could not be built ({s}); the rest of this run is not recorded\n", .{ shown, @errorName(err) });
-        s.file.close(io);
-        session.* = null;
+        close(io, session);
         return;
     };
     s.file.writeStreamingAll(io, line) catch |err| {
         net.note(io, arena, "microagent: the session log under {s} could not be written ({s}); the rest of this run is not recorded\n", .{ shown, @errorName(err) });
-        s.file.close(io);
-        session.* = null;
+        close(io, session);
     };
 }
 

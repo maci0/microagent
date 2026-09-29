@@ -83,8 +83,10 @@ fn compareVersions(running: []const u8, tag: []const u8) std.math.Order {
     for (a.triple, b.triple) |an, bn| {
         if (an != bn) return if (an < bn) .lt else .gt;
     }
-    if (a.prerelease) return .lt;
-    if (b.prerelease) return .gt;
+    // Two pre-releases of the same triple are the same release, so neither
+    // sorts below the other; only a pre-release against its own final build is
+    // an ordering.
+    if (a.prerelease != b.prerelease) return if (a.prerelease) .lt else .gt;
     return .eq;
 }
 
@@ -515,6 +517,11 @@ pub fn run(
     const tag = quoteUntrusted(arena, rel.tag);
     const order = compareVersions(version, rel.tag);
     const current = sameRelease(version, rel.tag);
+    // A tag that is not a version triple cannot be ordered against the running
+    // build, so the message above says so and nothing is installed from it: an
+    // unversioned asset published under such a tag is not a release, and a run
+    // that replaced the binary with it said the running build was older.
+    const tag_is_version = parseVersion(rel.tag) != null;
     switch (order) {
         .eq => if (current)
             say(io, "{s} {s} is current (latest release: {s})", .{ tool_name, version, tag })
@@ -529,6 +536,7 @@ pub fn run(
             return fail(io, "could not write the release page to stdout ({s})", .{@errorName(err)});
         return 0;
     }
+    if (!tag_is_version) return 0;
 
     const asset_name = assetName(arena, rel.tag, builtin.cpu.arch, builtin.os.tag) catch
         return fail(io, "out of memory", .{});
