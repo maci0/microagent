@@ -21,6 +21,7 @@ const Io = std.Io;
 
 const build_options = @import("build_options");
 const chat_mod = @import("chat.zig");
+const config_mod = @import("config.zig");
 const fuzzargv = @import("fuzzargv.zig");
 const mcp_mod = @import("mcp.zig");
 const net = @import("net.zig");
@@ -237,13 +238,10 @@ const Options = struct {
     /// both come from here, so the model is offered exactly the skills the run
     /// can load. Empty means the tool is not advertised at all.
     skills: skill_mod.Skills = .{},
-    /// The MCP server registry to read. Set by --mcp-config or
-    /// MICROAGENT_MCP_CONFIG, else `$HOME/.microagent/mcp.json`. An absent
-    /// file is not an error and means no servers.
-    mcp_config: []const u8 = "",
     /// The servers this run connected to, each a child process whose tools are
-    /// in the request schema. Connected once before the first request and shut
-    /// down when the run ends.
+    /// in the request schema. Declared by the `[[mcp]]` tables of the config
+    /// file, connected once before the first request, and shut down when the
+    /// run ends.
     mcp: mcp_mod.Servers = .{},
     /// What the command line asked for. `--help` and `--version` stop the
     /// parse where they appear, before any option value is needed.
@@ -346,7 +344,7 @@ pub fn main(init: std.process.Init) !void {
     // message is appended once, in the wire format, with no model in between.
     var msgs: std.ArrayList(u8) = .empty;
     defer msgs.deinit(gpa);
-    const loaded = loadStyle(io, init, init.arena.allocator(), opts.config);
+    const loaded = loadConfig(io, init, init.arena.allocator(), opts.config);
     // Built before the skills and the servers, because a tool subprocess and
     // an MCP server both inherit the environment it withholds the provider
     // key from. Built once for the run: a tool subprocess is spawned once per
@@ -357,12 +355,12 @@ pub fn main(init: std.process.Init) !void {
     // part of the system prompt, so a skill added between the two reads would
     // otherwise be advertised without a body to load.
     const arena = init.arena.allocator();
-    opts.skills = skill_mod.discover(io, arena, skill_mod.roots(init.environ_map, arena));
+    opts.skills = skill_mod.discover(io, arena, skill_mod.roots(init.environ_map, arena, loaded.skills));
     // The servers are connected before the first request for the same reason:
     // their tools are in the schema the request carries. A server that fails
     // to start or to answer is reported and skipped, so this cannot fail the
     // run, and the ones that did connect are shut down with the run.
-    opts.mcp = mcp_mod.connect(io, arena, &tool_env, mcpConfigPath(init.environ_map, arena, opts.mcp_config), version);
+    opts.mcp = mcp_mod.connect(io, arena, &tool_env, loaded.mcp, version);
     defer opts.mcp.shutdown(io);
     traceConfig(io, arena, opts, loaded, key.source);
     const reply_style = try loaded.style.ruleset(arena);
@@ -440,12 +438,9 @@ const help_text =
     \\      --max-tokens <n>   max_tokens sent to the provider: the ceiling on
     \\                         one response's generated tokens, at least 1
 ++ (std.fmt.comptimePrint("\n                         (env MICROAGENT_MAX_TOKENS, default {d})\n", .{default_max_tokens})) ++
-    \\      --config <file>    reply-style TOML config (env MICROAGENT_CONFIG,
-    \\                         default ~/.microagent/config.toml)
-    \\      --mcp-config <file>
-    \\                         MCP server registry, JSON (env
-    \\                         MICROAGENT_MCP_CONFIG, default
-    \\                         ~/.microagent/mcp.json; empty uses none)
+    \\      --config <file>    TOML config: reply style, skills and MCP
+    \\                         servers (env MICROAGENT_CONFIG, default
+    \\                         ~/.microagent/config.toml)
     \\      --ca-bundle <file>
     \\                         PEM file to trust instead of the system store
     \\                         (env MICROAGENT_CA_BUNDLE, SSL_CERT_FILE). Needed in
@@ -492,20 +487,20 @@ const help_text =
     \\  MICROAGENT_SESSION_DIR where the per-response JSONL session log goes
     \\                         (default ~/.microagent/sessions; empty writes none)
     \\
-    \\skills (MICROAGENT_SKILLS, a colon-separated list of directories, default
-    \\$HOME/.microagent/skills; empty turns them off):
+    \\skills (the `skills` list in the config, or MICROAGENT_SKILLS as a
+    \\colon-separated list that wins over it; default $HOME/.microagent/skills):
     \\  a skill is a directory holding SKILL.md, with an optional frontmatter
     \\  block naming it and saying when it applies. The run lists what it found
     \\  in the system prompt, and the model loads one body at a time with the
     \\  `skill` tool, so a skill the task never needs costs the listing alone.
     \\  Skills are instructions the operator installed: nothing under the
-    \\  working directory is read unless MICROAGENT_SKILLS names it.
+    \\  working directory is read unless the config or the variable names it.
     \\
-    \\MCP servers (--mcp-config, MICROAGENT_MCP_CONFIG, default
-    \\$HOME/.microagent/mcp.json; empty uses none):
-    \\  a JSON registry of the shape other MCP clients use,
-    \\  {"mcpServers":{"name":{"command":"...","args":[...],"env":{...}}}}.
-    \\  Each server is run over stdio and its tools are offered to the model as
+    \\MCP servers (`[[mcp]]` tables in the config):
+    \\  each table names one server, with `name` and `command` required and
+    \\  `args` (a list of strings) and `env` (an inline table) optional, e.g.
+    \\  [[mcp]] name = "fs" command = "npx" args = ["-y", "server-fs", "/tmp"].
+    \\  Every server is run over stdio and its tools are offered to the model as
     \\  mcp__<server>__<tool>, on the same deadline as any other tool. A server
     \\  that cannot start or answer is reported on stderr and skipped.
     \\
@@ -549,9 +544,8 @@ const help_text =
     \\MICROAGENT_STALL_TIMEOUT and MDEBUG keep their defaults, and
     \\MICROAGENT_CA_BUNDLE, the four api key variables and
     \\MICROAGENT_CAVEMAN/PONYTAIL fall through to whatever comes next.
-    \\MICROAGENT_CONFIG, MICROAGENT_SESSION_DIR, MICROAGENT_SKILLS and
-    \\MICROAGENT_MCP_CONFIG are the four where empty means off: no style file, no
-    \\session log, no skills, no MCP servers. HOME is trimmed like the rest, and an
+    \\MICROAGENT_CONFIG, MICROAGENT_SESSION_DIR and MICROAGENT_SKILLS are the
+    \\three where empty means off: no style file, no session log, no skills. HOME is trimmed like the rest, and an
     \\empty one is no home rather than a path off the root.
     \\
 ;
@@ -897,7 +891,6 @@ const ValuedOption = enum {
     api_key,
     ca_bundle,
     config,
-    mcp_config,
     reasoning_effort,
     budget,
     max_spend_tokens,
@@ -928,7 +921,6 @@ const valued_flags = [_]ValuedFlag{
     .{ .short = "-k", .long = "--api-key", .noun = "a key", .option = .api_key },
     .{ .short = null, .long = "--ca-bundle", .noun = "a file", .option = .ca_bundle },
     .{ .short = null, .long = "--config", .noun = "a file", .option = .config },
-    .{ .short = null, .long = "--mcp-config", .noun = "a file", .option = .mcp_config },
     .{ .short = null, .long = "--reasoning-effort", .noun = "a level", .option = .reasoning_effort },
     .{ .short = null, .long = "--budget", .noun = "a number of seconds", .option = .budget },
     .{ .short = null, .long = "--max-spend-tokens", .noun = "a number", .option = .max_spend_tokens },
@@ -965,7 +957,6 @@ fn setValued(
         .api_key => opts.api_key = value,
         .ca_bundle => opts.ca_bundle = value,
         .config => opts.config = value,
-        .mcp_config => opts.mcp_config = value,
         .reasoning_effort => return reasoningEffort(buf, value, &opts.reasoning_effort),
         .budget => return optionalCeiling(buf, "--budget", value, &opts.budget_s),
         .max_spend_tokens => return optionalCeiling(buf, "--max-spend-tokens", value, &opts.max_spend_tokens),
@@ -1213,7 +1204,6 @@ const env_vars = [_][]const u8{
     "MICROAGENT_REASONING_EFFORT",
     "MICROAGENT_CONFIG",
     "MICROAGENT_SKILLS",
-    "MICROAGENT_MCP_CONFIG",
     "MICROAGENT_CA_BUNDLE",
     "SSL_CERT_FILE",
     "MICROAGENT_CAVEMAN",
@@ -1298,17 +1288,25 @@ fn childEnviron(gpa: std.mem.Allocator, env: *const std.process.Environ.Map) !st
 /// The reply-style levels for this run and the file they were read from, the
 /// latter for the trace: precedence here spans three sources, so a level on its
 /// own cannot say whether a file, a variable or a built-in default set it.
-const LoadedStyle = struct { style: style_mod.Style, source: ?[]const u8 };
+const LoadedConfig = struct {
+    style: style_mod.Style,
+    /// The skill directories the config file named, or null when it named
+    /// none, which is how the caller tells "use the default root" from "the
+    /// file turned skills off".
+    skills: ?[]const []const u8,
+    /// The MCP servers the config file declared.
+    mcp: []const mcp_mod.Entry,
+    source: ?[]const u8,
+};
 
-/// The reply-style levels for this run, from the TOML config named by
-/// --config, MICROAGENT_CONFIG or `$HOME/.microagent/config.toml`, then the
-/// MICROAGENT_CAVEMAN / MICROAGENT_PONYTAIL overrides, then the built-in
-/// defaults. A missing file, an unreadable one, or an unknown key costs the run
-/// nothing: the levels that were understood still apply. The source is the file
-/// that was looked for, readable or not, because the question the trace answers
-/// is which one was consulted.
-fn loadStyle(io: Io, init: std.process.Init, arena: std.mem.Allocator, config: []const u8) LoadedStyle {
-    var style: style_mod.Style = .{};
+/// Everything the config file said, from the TOML named by --config,
+/// MICROAGENT_CONFIG or `$HOME/.microagent/config.toml`, with the
+/// MICROAGENT_CAVEMAN / MICROAGENT_PONYTAIL / MICROAGENT_SKILLS overrides
+/// applied on top of it. A missing file, an unreadable one, or a line the
+/// reader could not use costs the run nothing: everything that was understood
+/// still applies. The source is the file that was looked for, readable or not,
+/// because the question the trace answers is which one was consulted.
+fn loadConfig(io: Io, init: std.process.Init, arena: std.mem.Allocator, config: []const u8) LoadedConfig {
     const source = styleConfigPath(init.environ_map, arena, config);
     // Both a path and a key out of this file are quoted through `safeText`
     // rather than `clip`: a config is a file a reviewed repository can
@@ -1316,26 +1314,40 @@ fn loadStyle(io: Io, init: std.process.Init, arena: std.mem.Allocator, config: [
     // is true of a path a directory name was spelled with. The two untrusted
     // byte paths this program already has normalize what they print, and a
     // diagnostic is the third.
-    var text: ?[]const u8 = null;
+    var parsed: config_mod.Config = .{};
     if (source.path) |p| {
-        text = std.Io.Dir.cwd().readFileAlloc(io, p, arena, .limited(max_config_bytes)) catch |err| blk: {
+        const text = std.Io.Dir.cwd().readFileAlloc(io, p, arena, .limited(max_config_bytes)) catch |err| blk: {
             if (configReadWorthReporting(source.named, err))
-                net.note(io, arena, "microagent: config {s}: {s}; using the built-in levels\n", .{ configPathText(arena, source), @errorName(err) });
+                net.note(io, arena, "microagent: config {s}: {s}; using the built-in defaults\n", .{ configPathText(arena, source), @errorName(err) });
             break :blk null;
         };
+        if (text) |t| parsed = config_mod.parse(arena, t);
     }
-    if (resolveStyle(&style, text, envValue(init.environ_map, "MICROAGENT_CAVEMAN"), envValue(init.environ_map, "MICROAGENT_PONYTAIL"))) |unknown| {
-        const key = chat_mod.safeText(arena, unknown.key, net.quoted_value_bytes);
-        if (unknown.from_config) {
-            if (unknown.bad_value)
-                net.note(io, arena, "microagent: config {s}: '{s}' is not a level; keeping the default\n", .{ configPathText(arena, source), key })
-            else
-                net.note(io, arena, "microagent: config {s}: '{s}' is not a key this file uses; keeping the default\n", .{ configPathText(arena, source), key });
-        } else {
-            net.note(io, arena, "microagent: {s} is not a level; keeping the default\n", .{key});
-        }
+    if (applyConfig(&parsed.style, parsed, envValue(init.environ_map, "MICROAGENT_CAVEMAN"), envValue(init.environ_map, "MICROAGENT_PONYTAIL"))) |unknown|
+        reportConfigProblem(io, arena, source, unknown);
+    return .{
+        .style = parsed.style,
+        .skills = parsed.skills,
+        .mcp = parsed.mcp,
+        .source = source.path,
+    };
+}
+
+/// One line on stderr for the first thing the config could not use. The kind
+/// decides the sentence: a level the build does not have, a key the file does
+/// not define, and a `[[mcp]]` table with no server in it are three different
+/// mistakes with three different fixes.
+fn reportConfigProblem(io: Io, arena: std.mem.Allocator, source: StyleSource, unknown: ConfigProblem) void {
+    const key = chat_mod.safeText(arena, unknown.key, net.quoted_value_bytes);
+    if (!unknown.from_config) {
+        net.note(io, arena, "microagent: {s} is not a level; keeping the default\n", .{key});
+        return;
     }
-    return .{ .style = style, .source = source.path };
+    switch (unknown.kind) {
+        .bad_value => net.note(io, arena, "microagent: config {s}: '{s}' is not a value this key takes; keeping the default\n", .{ configPathText(arena, source), key }),
+        .unknown_key => net.note(io, arena, "microagent: config {s}: '{s}' is not a key this file uses; keeping the default\n", .{ configPathText(arena, source), key }),
+        .bad_server => net.note(io, arena, "microagent: config {s}: a [[mcp]] entry with no name or no command is skipped\n", .{configPathText(arena, source)}),
+    }
 }
 
 /// The config path as a diagnostic should spell it. Built where a diagnostic
@@ -1358,7 +1370,7 @@ fn configPathText(arena: std.mem.Allocator, source: StyleSource) []const u8 {
 /// `MICROAGENT_SESSION_DIR` carrying a C0 byte wrote it to the terminal
 /// unsanitized on the one line whose whole job is telling an operator what the
 /// run resolved.
-fn traceConfig(io: Io, arena: std.mem.Allocator, opts: Options, style: LoadedStyle, key_source: []const u8) void {
+fn traceConfig(io: Io, arena: std.mem.Allocator, opts: Options, loaded: LoadedConfig, key_source: []const u8) void {
     if (!debug_enabled) return;
     net.note(io, arena,
         \\[mdebug] model={s} base_url={s}
@@ -1380,9 +1392,9 @@ fn traceConfig(io: Io, arena: std.mem.Allocator, opts: Options, style: LoadedSty
         traceText(arena, opts.reasoning_effort orelse "unset"),
         traceText(arena, if (opts.ca_bundle.len == 0) "unset" else opts.ca_bundle),
         traceText(arena, if (opts.session_dir.len == 0) "off" else opts.session_dir),
-        traceText(arena, style.source orelse "none"),
-        style.style.caveman.name(),
-        style.style.ponytail.name(),
+        traceText(arena, loaded.source orelse "none"),
+        loaded.style.caveman.name(),
+        loaded.style.ponytail.name(),
         opts.skills.items.len,
         opts.mcp.items.len,
         opts.mcp.toolCount(),
@@ -1406,22 +1418,6 @@ fn traceText(arena: std.mem.Allocator, value: []const u8) []const u8 {
 /// silence there is a misconfiguration nothing reports.
 fn configReadWorthReporting(named: bool, err: anyerror) bool {
     return named or err != error.FileNotFound;
-}
-
-/// Where the MCP server registry is read from: --mcp-config, else
-/// MICROAGENT_MCP_CONFIG, else `$HOME/.microagent/mcp.json`. Null when there
-/// is nothing to read: an empty variable and a home that is not there both
-/// mean no servers, which is a run with the seven built-in tools and no note.
-fn mcpConfigPath(env: *const std.process.Environ.Map, arena: std.mem.Allocator, flag: []const u8) ?[]const u8 {
-    if (flag.len > 0) return std.fs.path.resolve(arena, &.{flag}) catch flag;
-    if (env.get("MICROAGENT_MCP_CONFIG")) |raw| {
-        const path = std.mem.trim(u8, raw, net.env_surrounding);
-        if (path.len == 0) return null;
-        return std.fs.path.resolve(arena, &.{path}) catch path;
-    }
-    const home = net.homeDir(env) orelse return null;
-    const path = std.fs.path.join(arena, &.{ home, ".microagent", "mcp.json" }) catch return null;
-    return std.fs.path.resolve(arena, &.{path}) catch path;
 }
 
 /// The file the style config is read from, and whether anything named it. A
@@ -1448,39 +1444,62 @@ fn styleConfigPath(env: *const std.process.Environ.Map, arena: std.mem.Allocator
 
 /// A level named by a key or a variable that the parser does not have, so the
 /// caller can say so on stderr and keep what it understood.
-const UnknownLevel = struct {
+const ConfigProblem = struct {
     key: []const u8,
-    /// The value came from the config file, so the message can name the file.
+    /// The problem came from the config file, so the message can name the
+    /// file; a variable's own bad value cannot.
     from_config: bool,
-    /// The value is what names no level, rather than the key naming no
-    /// setting; a variable can only be the former.
-    bad_value: bool,
+    kind: config_mod.Problem.Kind,
 };
 
 /// The levels, in the order the doc comment names: the config file, then the
 /// environment overrides, over the built-in defaults. One value that is not a
 /// level does not cost the run the others, so every source is read to the end
 /// and the first offending value is the one named on stderr.
-fn resolveStyle(
+///
+/// The config is taken already parsed, because the same document also carries
+/// the skill directories and the MCP servers and is read once; what this adds
+/// is the environment, which wins over the file for the two levels and for the
+/// skills list, since naming a value for one run is the more explicit
+/// statement.
+fn applyConfig(
     style: *style_mod.Style,
-    config: ?[]const u8,
+    config: config_mod.Config,
     caveman_env: ?[]const u8,
     ponytail_env: ?[]const u8,
-) ?UnknownLevel {
-    var unknown: ?UnknownLevel = null;
-    if (config) |text| {
-        if (style.applyToml(text)) |problem| {
-            if (unknown == null)
-                unknown = .{ .key = problem.key, .from_config = true, .bad_value = problem.bad_value };
-        }
+) ?ConfigProblem {
+    // The file's levels are the base the environment overrides: a key the
+    // file set survives a variable that names the other knob, and a key
+    // neither names stays at the built-in default.
+    style.* = config.style;
+    var problem: ?ConfigProblem = null;
+    if (config.problem) |from_file| {
+        problem = .{ .key = from_file.key, .from_config = true, .kind = from_file.kind };
     }
+    // A level the environment names is applied whether or not the file's own
+    // line was usable: the two sources are independent statements.
     if (caveman_env) |v| {
-        if (style_mod.parseCaveman(v)) |level| style.caveman = level else if (unknown == null) unknown = .{ .key = "MICROAGENT_CAVEMAN", .from_config = false, .bad_value = true };
+        if (style_mod.parseCaveman(v)) |level| style.caveman = level else if (problem == null) problem = .{ .key = "MICROAGENT_CAVEMAN", .from_config = false, .kind = .bad_value };
     }
     if (ponytail_env) |v| {
-        if (style_mod.parsePonytail(v)) |level| style.ponytail = level else if (unknown == null) unknown = .{ .key = "MICROAGENT_PONYTAIL", .from_config = false, .bad_value = true };
+        if (style_mod.parsePonytail(v)) |level| style.ponytail = level else if (problem == null) problem = .{ .key = "MICROAGENT_PONYTAIL", .from_config = false, .kind = .bad_value };
     }
-    return unknown;
+    return problem;
+}
+
+/// The config text through the reader and then the environment overrides,
+/// which is what a run does with both. The tests below drive this rather than
+/// the two halves, so a rule that only holds when the two are put together is
+/// a rule one of them has to state.
+fn applyConfigText(
+    arena: std.mem.Allocator,
+    style: *style_mod.Style,
+    text: ?[]const u8,
+    caveman_env: ?[]const u8,
+    ponytail_env: ?[]const u8,
+) ?ConfigProblem {
+    const parsed: config_mod.Config = if (text) |t| config_mod.parse(arena, t) else .{};
+    return applyConfig(style, parsed, caveman_env, ponytail_env);
 }
 
 /// The clock the run's budget is measured on: the one that keeps counting
@@ -6257,15 +6276,18 @@ test "a tool argument is a string or it is refused" {
 // the rest of the file still apply, because a typo in one variable is not a
 // reason to silently run the run the user did not ask for.
 test "one bad style value does not cost the run the levels it did understand" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
     var style: style_mod.Style = .{};
 
-    const bad_env = resolveStyle(&style, null, "brief", "off").?;
+    const bad_env = applyConfigText(arena, &style, null, "brief", "off").?;
     try std.testing.expectEqualStrings("MICROAGENT_CAVEMAN", bad_env.key);
     try std.testing.expectEqual(style_mod.CavemanLevel.ultra, style.caveman);
     try std.testing.expectEqual(style_mod.PonytailLevel.off, style.ponytail);
 
     var from_file: style_mod.Style = .{};
-    const bad_file = resolveStyle(&from_file, "ponytail = \"lazy\"\ncaveman = \"lite\"\n", null, null).?;
+    const bad_file = applyConfigText(arena, &from_file, "ponytail = \"lazy\"\ncaveman = \"lite\"\n", null, null).?;
     try std.testing.expectEqualStrings("ponytail", bad_file.key);
     try std.testing.expectEqual(style_mod.PonytailLevel.full, from_file.ponytail);
     // The key after the bad one is still read.
@@ -7197,34 +7219,42 @@ fn fuzzStream(_: void, smith: *std.testing.Smith) !void {
 }
 
 test "the env levels override the config file's, and a bad one is named" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
     var style: style_mod.Style = .{};
-    try std.testing.expect(resolveStyle(&style, "caveman = \"off\"\nponytail = \"lite\"\n", "wenyan-ultra", "ultra") == null);
+    try std.testing.expect(applyConfigText(arena, &style, "caveman = \"off\"\nponytail = \"lite\"\n", "wenyan-ultra", "ultra") == null);
     try std.testing.expectEqual(style_mod.CavemanLevel.wenyan_ultra, style.caveman);
     try std.testing.expectEqual(style_mod.PonytailLevel.ultra, style.ponytail);
 
     // The file still decides the knob the environment says nothing about.
-    try std.testing.expect(resolveStyle(&style, "caveman = \"lite\"\n", null, null) == null);
+    try std.testing.expect(applyConfigText(arena, &style, "caveman = \"lite\"\n", null, null) == null);
     try std.testing.expectEqual(style_mod.CavemanLevel.lite, style.caveman);
 
     // A value that is not a level is reported, and the level that would have
-    // been replaced stands, whichever source it came from.
-    const bad_env = resolveStyle(&style, null, "brief", null).?;
+    // been replaced stands, whichever source it came from: the file is the
+    // base, and the variable that is wrong changes nothing.
+    const bad_env = applyConfigText(arena, &style, "caveman = \"lite\"\nponytail = \"ultra\"\n", "brief", null).?;
     try std.testing.expectEqualStrings("MICROAGENT_CAVEMAN", bad_env.key);
     try std.testing.expect(!bad_env.from_config);
     try std.testing.expectEqual(style_mod.CavemanLevel.lite, style.caveman);
+    try std.testing.expectEqual(style_mod.PonytailLevel.ultra, style.ponytail);
 
-    const bad_file = resolveStyle(&style, "ponytail = \"lazy\"\n", "lite", null).?;
+    // The file's own bad value is named, and the good key beside it still
+    // applies: one unusable line does not cost the run the rest of the file.
+    const bad_file = applyConfigText(arena, &style, "ponytail = \"lazy\"\ncaveman = \"lite\"\n", null, null).?;
     try std.testing.expectEqualStrings("ponytail", bad_file.key);
     try std.testing.expect(bad_file.from_config);
-    try std.testing.expect(bad_file.bad_value);
-    try std.testing.expectEqual(style_mod.PonytailLevel.ultra, style.ponytail);
+    try std.testing.expectEqual(config_mod.Problem.Kind.bad_value, bad_file.kind);
+    try std.testing.expectEqual(style_mod.PonytailLevel.full, style.ponytail);
+    try std.testing.expectEqual(style_mod.CavemanLevel.lite, style.caveman);
 
     // A misspelled key is named as a key, not as a level, and the default it
     // would have replaced stands.
-    const typo = resolveStyle(&style, "cavmen = \"off\"\n", "lite", null).?;
+    const typo = applyConfigText(arena, &style, "cavmen = \"off\"\n", "lite", null).?;
     try std.testing.expectEqualStrings("cavmen", typo.key);
     try std.testing.expect(typo.from_config);
-    try std.testing.expect(!typo.bad_value);
+    try std.testing.expectEqual(config_mod.Problem.Kind.unknown_key, typo.kind);
     try std.testing.expectEqual(style_mod.CavemanLevel.lite, style.caveman);
 
     // Every level a config key may name, a variable may name too, because both
@@ -7233,30 +7263,30 @@ test "the env levels override the config file's, and a bad one is named" {
     // disagreeing is only visible where both paths are, which is here.
     for (std.enums.values(style_mod.CavemanLevel)) |level| {
         var from_env: style_mod.Style = .{};
-        try std.testing.expect(resolveStyle(&from_env, null, level.name(), null) == null);
+        try std.testing.expect(applyConfigText(arena, &from_env, null, level.name(), null) == null);
         try std.testing.expectEqual(level, from_env.caveman);
 
         var cfg_buf: [96]u8 = undefined;
         const cfg = try std.fmt.bufPrint(&cfg_buf, "caveman = \"{s}\"\n", .{level.name()});
         var from_file: style_mod.Style = .{};
-        try std.testing.expect(resolveStyle(&from_file, cfg, null, null) == null);
+        try std.testing.expect(applyConfigText(arena, &from_file, cfg, null, null) == null);
         try std.testing.expectEqual(level, from_file.caveman);
     }
     for (std.enums.values(style_mod.PonytailLevel)) |level| {
         var from_env: style_mod.Style = .{};
-        try std.testing.expect(resolveStyle(&from_env, null, null, level.name()) == null);
+        try std.testing.expect(applyConfigText(arena, &from_env, null, null, level.name()) == null);
         try std.testing.expectEqual(level, from_env.ponytail);
 
         var cfg_buf: [96]u8 = undefined;
         const cfg = try std.fmt.bufPrint(&cfg_buf, "ponytail = \"{s}\"\n", .{level.name()});
         var from_file: style_mod.Style = .{};
-        try std.testing.expect(resolveStyle(&from_file, cfg, null, null) == null);
+        try std.testing.expect(applyConfigText(arena, &from_file, cfg, null, null) == null);
         try std.testing.expectEqual(level, from_file.ponytail);
     }
     // The bare `wenyan` shorthand is a config spelling, and the environment
     // reads the same table, so it answers there too.
     var shorthand: style_mod.Style = .{};
-    try std.testing.expect(resolveStyle(&shorthand, null, "wenyan", null) == null);
+    try std.testing.expect(applyConfigText(arena, &shorthand, null, "wenyan", null) == null);
     try std.testing.expectEqual(style_mod.CavemanLevel.wenyan_full, shorthand.caveman);
 }
 
@@ -7784,16 +7814,15 @@ test "the help text and the README name every variable the program reads" {
         }
     }
 
-    // The four that read empty as off are named in the same paragraph as the
+    // The three that read empty as off are named in the same paragraph as the
     // exception, which is why they are not in the list above: an empty
     // MICROAGENT_CONFIG means no style file rather than the default one, an
     // empty MICROAGENT_SESSION_DIR means no session log rather than one
-    // under $HOME, an empty MICROAGENT_SKILLS means no skills rather than the
-    // default directory, and an empty MICROAGENT_MCP_CONFIG means no servers
-    // rather than the default registry. Requiring them here is what keeps a
-    // fifth convention from starting, where a variable is settled in a
-    // paragraph and in no list.
-    for ([_][]const u8{ "MICROAGENT_CONFIG", "MICROAGENT_SESSION_DIR", "MICROAGENT_SKILLS", "MICROAGENT_MCP_CONFIG" }) |name| {
+    // under $HOME, and an empty MICROAGENT_SKILLS means no skills rather than
+    // the default directory. Requiring them here is what keeps a fourth
+    // convention from starting, where a variable is settled in a paragraph and
+    // in no list.
+    for ([_][]const u8{ "MICROAGENT_CONFIG", "MICROAGENT_SESSION_DIR", "MICROAGENT_SKILLS" }) |name| {
         if (!namesWholeToken(help_rule, name) or !namesWholeToken(readme_rule, name)) {
             std.debug.print("\n" ++ readme_path ++ ": {s} reads empty as off rather than falling through, and one paragraph saying so does not name it\n", .{name});
             return error.TestUnexpectedResult;

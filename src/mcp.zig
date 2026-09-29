@@ -6,13 +6,9 @@
 //! `mcp__<server>__<tool>`. A call is a `tools/call` request; the text the
 //! server returns is the tool result, exactly as a built-in's output is.
 //!
-//! The config is the shape the rest of the ecosystem already uses, so a server
-//! block can be copied from another client:
-//!
-//! ```json
-//! {"mcpServers": {"fs": {"command": "npx", "args": ["-y", "server-filesystem", "/tmp"],
-//!                        "env": {"LOG": "debug"}}}}
-//! ```
+//! Where the servers come from is `config.zig`: one `[[mcp]]` table in the run's
+//! TOML config, read into an `Entry` per server, so this module only speaks the
+//! protocol and never reads a config file.
 //!
 //! A server that cannot be started, or that fails the handshake, is reported on
 //! stderr and skipped: one broken entry costs the run that entry, not the run.
@@ -38,8 +34,6 @@ const net = @import("net.zig");
 /// time for exactly that.
 pub const tool_prefix = "mcp__";
 
-/// Ceiling on the config file. A registry of servers is a page, not a document.
-const max_config_bytes: usize = 256 * 1024;
 /// Ceiling on one protocol line. A `tools/list` answer for a large server is
 /// the biggest frame there is; past this the connection is not one this run
 /// can follow, and the server is skipped rather than grown for.
@@ -354,73 +348,13 @@ fn describeError(arena: std.mem.Allocator, value: std.json.Value) ![]const u8 {
     return chat.safeText(arena, message, max_description_bytes);
 }
 
-/// One server out of the config file.
+/// One server out of the config file: one `[[mcp]]` table.
 pub const Entry = struct {
     name: []const u8,
     command: []const u8,
-    args: []const []const u8,
-    env: []const [2][]const u8,
+    args: []const []const u8 = &.{},
+    env: []const [2][]const u8 = &.{},
 };
-
-/// What the config file names, or null when it names no servers or cannot be
-/// understood. Two shapes are refused rather than half-read: a root that is
-/// not an object, and a `mcpServers` that is not one. An entry that is not a
-/// usable server is skipped by `connect`, which can say which one on stderr;
-/// this returns what the file holds, in name order so two runs of the same
-/// file connect in the same order.
-pub fn parseConfig(arena: std.mem.Allocator, text: []const u8) ?[]const Entry {
-    const parsed = std.json.parseFromSliceLeaky(std.json.Value, arena, text, .{}) catch return null;
-    const root = switch (parsed) {
-        .object => |o| o,
-        else => return null,
-    };
-    const servers = switch (root.get("mcpServers") orelse return null) {
-        .object => |o| o,
-        else => return null,
-    };
-    var entries: std.ArrayList(Entry) = .empty;
-    var it = servers.iterator();
-    while (it.next()) |pair| {
-        const name = pair.key_ptr.*;
-        if (!validName(name)) continue;
-        const server = switch (pair.value_ptr.*) {
-            .object => |o| o,
-            else => continue,
-        };
-        const command = chat.str(server.get("command")) orelse continue;
-        if (command.len == 0) continue;
-        var args: std.ArrayList([]const u8) = .empty;
-        if (server.get("args")) |args_value| switch (args_value) {
-            .array => |a| for (a.items) |item| {
-                if (chat.str(item)) |s| args.append(arena, s) catch break;
-            },
-            else => {},
-        };
-        var env: std.ArrayList([2][]const u8) = .empty;
-        if (server.get("env")) |env_value| switch (env_value) {
-            .object => |o| {
-                var env_it = o.iterator();
-                while (env_it.next()) |e| {
-                    const v = chat.str(e.value_ptr.*) orelse continue;
-                    env.append(arena, .{ e.key_ptr.*, v }) catch break;
-                }
-            },
-            else => {},
-        };
-        entries.append(arena, .{
-            .name = name,
-            .command = command,
-            .args = args.items,
-            .env = env.items,
-        }) catch break;
-    }
-    std.mem.sort(Entry, entries.items, {}, struct {
-        fn lessThan(_: void, a: Entry, b: Entry) bool {
-            return std.mem.lessThan(u8, a.name, b.name);
-        }
-    }.lessThan);
-    return entries.items;
-}
 
 /// Whether a name can be half of an exposed tool name: the letters, digits,
 /// dot, dash and underscore a tool name may hold, with no `__` in it, because
@@ -435,28 +369,17 @@ fn validName(name: []const u8) bool {
     return true;
 }
 
-/// Connects to every server the config names. A file that is absent, empty, or
-/// not a server registry yields no servers in silence, the way an absent style
-/// config yields the defaults; an entry that cannot be used is said on stderr,
-/// because a server the operator wrote down and this run does not connect to
-/// is a silent no-op otherwise.
+/// Connects to every server the config declared, in the order the tables
+/// appeared. An entry that cannot run, or that fails its handshake, is said on
+/// stderr and skipped, because a server the operator wrote down and this run
+/// does not connect to is a silent no-op otherwise.
 pub fn connect(
     io: Io,
     arena: std.mem.Allocator,
     environ_map: *const std.process.Environ.Map,
-    config_path: ?[]const u8,
+    entries: []const Entry,
     client_version: []const u8,
 ) Servers {
-    const path = config_path orelse return .{};
-    const text = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_config_bytes)) catch |err| {
-        if (err != error.FileNotFound)
-            net.note(io, arena, "microagent: MCP config {s}: {s}; no MCP servers are used\n", .{ chat.safeTextAll(arena, path), @errorName(err) });
-        return .{};
-    };
-    const entries = parseConfig(arena, text) orelse {
-        net.note(io, arena, "microagent: MCP config {s} is not a server registry (`mcpServers` object); no MCP servers are used\n", .{chat.safeTextAll(arena, path)});
-        return .{};
-    };
     var servers: std.ArrayList(Server) = .empty;
     for (entries) |entry| {
         connectOne(io, arena, environ_map, entry, client_version, &servers);
@@ -621,12 +544,10 @@ test "a configured server is connected, listed and called" {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const base = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
     const script = try std.fs.path.join(arena, &.{ base, "server.sh" });
-    const config = try std.fmt.allocPrint(arena, "{{\"mcpServers\":{{\"fake\":{{\"command\":\"/bin/sh\",\"args\":[\"{s}\"]}}}}}}", .{script});
-    try tmp.dir.writeFile(io, .{ .sub_path = "mcp.json", .data = config });
-    const config_path = try std.fs.path.join(arena, &.{ base, "mcp.json" });
 
     var env: std.process.Environ.Map = .init(arena);
-    var servers = connect(io, arena, &env, config_path, "test");
+    const entries = [_]Entry{.{ .name = "fake", .command = "/bin/sh", .args = &.{script} }};
+    var servers = connect(io, arena, &env, &entries, "test");
     defer servers.shutdown(io);
 
     try std.testing.expectEqual(@as(usize, 1), servers.items.len);
@@ -655,61 +576,18 @@ test "a server that cannot be started, or that exits, is skipped" {
     const arena = state.allocator();
     const io = std.testing.io;
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const base = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
-
-    const missing = "{\"mcpServers\":{\"gone\":{\"command\":\"definitely-not-a-real-command-xyz\"}}}";
-    try tmp.dir.writeFile(io, .{ .sub_path = "missing.json", .data = missing });
-    const missing_path = try std.fs.path.join(arena, &.{ base, "missing.json" });
     var env: std.process.Environ.Map = .init(arena);
-    var none = connect(io, arena, &env, missing_path, "test");
+    const missing = [_]Entry{.{ .name = "gone", .command = "definitely-not-a-real-command-xyz" }};
+    var none = connect(io, arena, &env, &missing, "test");
     defer none.shutdown(io);
     try std.testing.expectEqual(@as(usize, 0), none.items.len);
 
     // A child that exits before answering leaves nothing to resolve, and the
     // run keeps the servers it did connect.
-    const exits = "{\"mcpServers\":{\"exit\":{\"command\":\"/bin/sh\",\"args\":[\"-c\",\"exit 0\"]}}}";
-    try tmp.dir.writeFile(io, .{ .sub_path = "exits.json", .data = exits });
-    const exits_path = try std.fs.path.join(arena, &.{ base, "exits.json" });
-    var gone = connect(io, arena, &env, exits_path, "test");
+    const exits = [_]Entry{.{ .name = "exit", .command = "/bin/sh", .args = &.{ "-c", "exit 0" } }};
+    var gone = connect(io, arena, &env, &exits, "test");
     defer gone.shutdown(io);
     try std.testing.expectEqual(@as(usize, 0), gone.items.len);
-}
-
-test "the config reader takes the registry shape and refuses anything else" {
-    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer state.deinit();
-    const arena = state.allocator();
-
-    const text =
-        \\{"mcpServers":{
-        \\  "beta": {"command":"b","args":["--x","1"],"env":{"K":"v"}},
-        \\  "alpha": {"command":"a"},
-        \\  "no-command": {"args":["x"]},
-        \\  "bad name": {"command":"c"},
-        \\  "double__under": {"command":"d"}
-        \\}}
-    ;
-    const entries = parseConfig(arena, text).?;
-    // Name order, so two runs of one file connect in one order; the entries
-    // with no command, a space, or the separator inside them are gone.
-    try std.testing.expectEqual(@as(usize, 2), entries.len);
-    try std.testing.expectEqualStrings("alpha", entries[0].name);
-    try std.testing.expectEqualStrings("beta", entries[1].name);
-    try std.testing.expectEqualStrings("b", entries[1].command);
-    try std.testing.expectEqual(@as(usize, 2), entries[1].args.len);
-    try std.testing.expectEqualStrings("1", entries[1].args[1]);
-    try std.testing.expectEqual(@as(usize, 1), entries[1].env.len);
-    try std.testing.expectEqualStrings("K", entries[1].env[0][0]);
-    try std.testing.expectEqualStrings("v", entries[1].env[0][1]);
-
-    try std.testing.expect(parseConfig(arena, "{}") == null);
-    try std.testing.expect(parseConfig(arena, "[]") == null);
-    try std.testing.expect(parseConfig(arena, "{\"mcpServers\":[]}") == null);
-    try std.testing.expect(parseConfig(arena, "not json") == null);
-    try std.testing.expectEqual(@as(usize, 0), parseConfig(arena, "{\"mcpServers\":{}}").?.len);
 }
 
 test "a non-text result block is named rather than dropped" {

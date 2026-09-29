@@ -79,10 +79,9 @@ The flags, abridged; `microagent --help` is the full text.
     --max-tokens <n>   max_tokens sent to the provider: the ceiling on one
                        response's generated tokens, at least 1
                        (env MICROAGENT_MAX_TOKENS, default 65536)
-    --config <file>    reply-style TOML config (env MICROAGENT_CONFIG)
-    --mcp-config <file>
-                       MCP server registry, JSON (env MICROAGENT_MCP_CONFIG,
-                       default ~/.microagent/mcp.json; empty uses none)
+    --config <file>    TOML config: reply style, skills and MCP servers
+                       (env MICROAGENT_CONFIG, default
+                       ~/.microagent/config.toml)
     --ca-bundle <file>
                        PEM file to trust instead of the system store
                        (env MICROAGENT_CA_BUNDLE, SSL_CERT_FILE). Needed in
@@ -121,19 +120,18 @@ session log:
   MICROAGENT_SESSION_DIR where the per-response JSONL session log goes
                          (default ~/.microagent/sessions; empty writes none)
 
-skills (MICROAGENT_SKILLS, a colon-separated list of directories, default
-$HOME/.microagent/skills; empty turns them off):
+skills (the `skills` list in the config, or MICROAGENT_SKILLS as a
+colon-separated list that wins over it; default $HOME/.microagent/skills):
   a skill is a directory holding SKILL.md, with an optional frontmatter
   block naming it and saying when it applies. The run lists what it found
   in the system prompt, and the model loads one body at a time with the
   `skill` tool, so a skill the task never needs costs the listing alone.
 
-MCP servers (--mcp-config, MICROAGENT_MCP_CONFIG, default
-$HOME/.microagent/mcp.json; empty uses none):
-  a registry of the shape other MCP clients use,
-  {"mcpServers":{"name":{"command":"...","args":[...],"env":{...}}}}. Each
-  server is run over stdio, its tools are offered as mcp__<server>__<tool>,
-  and a server that cannot start or answer is reported and skipped.
+MCP servers (`[[mcp]]` tables in the config):
+  each table names one server: `name` and `command` required, `args` a list
+  of strings and `env` an inline table. Every server is run over stdio and
+  its tools are offered as mcp__<server>__<tool>; a server that cannot
+  start or answer is reported and skipped.
 
 subcommand:
   update [--check] [--repo owner/name]
@@ -176,9 +174,9 @@ string is not a value:
 api key variables fall through to whatever comes next, `MICROAGENT_CA_BUNDLE` falls through to
 `SSL_CERT_FILE`, and
 `MICROAGENT_CAVEMAN`/`MICROAGENT_PONYTAIL` fall through to the config file.
-Four variables are the exception: `MICROAGENT_CONFIG`, `MICROAGENT_SESSION_DIR`,
-`MICROAGENT_SKILLS` and `MICROAGENT_MCP_CONFIG` read empty as off, so no style
-file, no session log, no skills and no MCP servers.
+Three variables are the exception: `MICROAGENT_CONFIG`, `MICROAGENT_SESSION_DIR`
+and `MICROAGENT_SKILLS` read empty as off, so no style file, no session log and
+no skills.
 
 Every variable is trimmed before it is read, `HOME` included, and one holding
 nothing but whitespace reads as the empty case above. A wrapper that populates the
@@ -213,9 +211,10 @@ base url is refused before the first one unless the host is loopback (`localhost
 
 ### Reply style
 
-Two prompt-level knobs, set in one TOML file so a gauntlet loop, a container run and a laptop all
-start the same way. Neither touches the tools or the request shape: both are text appended to the
-system prompt, and the conversation is still the plain OpenAI message array.
+Two prompt-level knobs, set in the same TOML file as the skills and the MCP servers, so a gauntlet
+loop, a container run and a laptop all start the same way. Neither touches the tools or the request
+shape: both are text appended to the system prompt, and the conversation is still the plain OpenAI
+message array.
 
 ```toml
 caveman  = "ultra"   # how terse the reply is
@@ -241,7 +240,8 @@ parser.
 
 The file is `MICROAGENT_CONFIG`, else `~/.microagent/config.toml`; a missing file means the defaults, and
 one that is there but cannot be read, is a directory, or is over the 64 KB cap says so on stderr before
-the run continues on the defaults. [`config.example.toml`](config.example.toml) is a commented template
+the run continues on the defaults. The same file carries the `skills` list and the `[[mcp]]` server
+tables documented below. [`config.example.toml`](config.example.toml) is a commented template
 with both keys and their defaults. `MICROAGENT_CAVEMAN` and `MICROAGENT_PONYTAIL` set a level for one run
 without touching the file and win over it, since naming a level in the environment is the more explicit
 statement. A level that is not recognized is reported on stderr with that key's default kept, and so
@@ -276,26 +276,35 @@ name may hold only letters, digits, dot, dash and underscore — it is what the 
 tool call. A file without frontmatter still works; anything else in the block is ignored. The
 listing is bounded, and skills past that bound are counted rather than named.
 
-The roots are `MICROAGENT_SKILLS` (a colon-separated list, resolved against the working directory,
-empty turns skills off) else `$HOME/.microagent/skills`. The working directory is deliberately not a
-root: a `SKILL.md` in a repository under review was written by whoever wrote that repository, and a
-skill body is prompt text the model is told to follow. Naming a repository's directory in
-`MICROAGENT_SKILLS` is the operator saying those bytes are instructions.
+The roots are the config file's `skills` list, else `$HOME/.microagent/skills`:
+
+```toml
+skills = ["./skills", "~/.microagent/skills"]   # [] turns skills off
+```
+
+`MICROAGENT_SKILLS` (a colon-separated list) names the roots for one run and wins over the file; an
+empty value turns skills off. A relative path is resolved against the working directory. The working
+directory is deliberately not a default root: a `SKILL.md` in a repository under review was written
+by whoever wrote that repository, and a skill body is prompt text the model is told to follow.
+Naming a repository's directory in the file or the variable is the operator saying those bytes are
+instructions.
 
 ### MCP servers
 
-An MCP server is a child process speaking JSON-RPC over stdio. The registry is the shape the rest of
-the ecosystem already uses, so a server block copies from another client:
+An MCP server is a child process speaking JSON-RPC over stdio. One `[[mcp]]` table declares one:
 
-```json
-{"mcpServers": {"fs": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]}}}
+```toml
+[[mcp]]
+name    = "fs"
+command = "npx"
+args    = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+env     = { LOG = "debug" }
 ```
 
-The file is `--mcp-config`, else `MICROAGENT_MCP_CONFIG`, else `~/.microagent/mcp.json`; an absent
-file means no servers, and an empty variable means the same rather than falling back to the default.
-Every server is started before the first request, asked for its tool list, and its tools are
-advertised to the model as `mcp__<server>__<tool>` with the server's own `inputSchema`, so the model
-sees them beside the built-ins. A call is a `tools/call`; the text the server returns is the tool
+`name` and `command` are required; a table missing either is named on stderr and skipped. Every
+server is started before the first request, asked for its tool list, and its tools are advertised to
+the model as `mcp__<server>__<tool>` with the server's own `inputSchema`, so the model sees them
+beside the built-ins. A call is a `tools/call`; the text the server returns is the tool
 result, on the same deadline as any other tool. A server that cannot be started, that exits during
 the handshake, or that refuses a call is reported on stderr and skipped — one broken entry costs the
 run that entry, not the run. The server's own stderr is inherited, which is where an MCP server

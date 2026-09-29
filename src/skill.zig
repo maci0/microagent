@@ -8,8 +8,9 @@
 //! the conversation re-sends every turn, so a run that never needs a skill
 //! never pays for one.
 //!
-//! Skills are read from `$HOME/.microagent/skills` and from the directories
-//! MICROAGENT_SKILLS names, and from nowhere else. The working directory is
+//! Skills are read from `$HOME/.microagent/skills` and from the directories the
+//! `skills` key of the config file or MICROAGENT_SKILLS names, and from nowhere
+//! else. The working directory is
 //! deliberately not a source: a `SKILL.md` in a repository under review is
 //! written by whoever wrote that repository, and a skill body is prompt text
 //! the model is told to follow. Reading one from the tree would let a task's
@@ -111,14 +112,22 @@ pub const Skills = struct {
 /// absent on most machines and silence about it is correct.
 pub const Root = struct { path: []const u8, named: bool };
 
-/// The roots this run reads skills from: the directories MICROAGENT_SKILLS
-/// names, else `$HOME/.microagent/skills`. An empty MICROAGENT_SKILLS turns
-/// skills off, the way an empty MICROAGENT_CONFIG turns the style file off; a
-/// home that is not there leaves no roots at all.
+/// The roots this run reads skills from, in precedence order: the directories
+/// MICROAGENT_SKILLS names, else the `skills` list the config file declared,
+/// else `$HOME/.microagent/skills`. An empty MICROAGENT_SKILLS turns skills off,
+/// the way an empty MICROAGENT_CONFIG turns the style file off, and so does
+/// `skills = []` in the file; a home that is not there leaves no roots at all.
 ///
-/// The separator is `:`, the one PATH uses, because that is what an operator
-/// already reaches for when naming directories in an environment variable.
-pub fn roots(env: *const std.process.Environ.Map, arena: std.mem.Allocator) []const Root {
+/// The environment wins over the file for the reason it does on the style
+/// levels: naming the directories for one run is the more explicit statement.
+/// The variable's separator is `:`, the one PATH uses, because that is what an
+/// operator already reaches for when naming directories in an environment
+/// variable.
+pub fn roots(
+    env: *const std.process.Environ.Map,
+    arena: std.mem.Allocator,
+    configured: ?[]const []const u8,
+) []const Root {
     if (env.get("MICROAGENT_SKILLS")) |raw| {
         const list = std.mem.trim(u8, raw, net.env_surrounding);
         if (list.len == 0) return &.{};
@@ -127,18 +136,28 @@ pub fn roots(env: *const std.process.Environ.Map, arena: std.mem.Allocator) []co
         while (parts.next()) |part| {
             const path = std.mem.trim(u8, part, " \t");
             if (path.len == 0) continue;
-            out.append(arena, .{
-                .path = std.fs.path.resolve(arena, &.{path}) catch path,
-                .named = true,
-            }) catch return out.items;
+            out.append(arena, resolvedRoot(arena, path)) catch return out.items;
         }
+        return out.items;
+    }
+    if (configured) |dirs| {
+        var out: std.ArrayList(Root) = .empty;
+        for (dirs) |path| out.append(arena, resolvedRoot(arena, path)) catch break;
         return out.items;
     }
     const home = net.homeDir(env) orelse return &.{};
     const path = std.fs.path.join(arena, &.{ home, ".microagent", "skills" }) catch return &.{};
     const one = arena.alloc(Root, 1) catch return &.{};
-    one[0] = .{ .path = std.fs.path.resolve(arena, &.{path}) catch path, .named = false };
+    one[0] = resolvedRoot(arena, path);
+    one[0].named = false;
     return one;
+}
+
+/// A root named by an operator, in either source: a path relative to the
+/// working directory, resolved once here so nothing downstream has to know
+/// which of the two it came from.
+fn resolvedRoot(arena: std.mem.Allocator, path: []const u8) Root {
+    return .{ .path = std.fs.path.resolve(arena, &.{path}) catch path, .named = true };
 }
 
 /// Every skill the roots hold, sorted by name. A root is one directory of
@@ -480,13 +499,13 @@ test "the roots are the default home directory or the ones the variable names" {
 
     var env: std.process.Environ.Map = .init(arena);
     try env.put("HOME", "/home/tester");
-    const def = roots(&env, arena);
+    const def = roots(&env, arena, null);
     try std.testing.expectEqual(@as(usize, 1), def.len);
     try std.testing.expectEqualStrings("/home/tester/.microagent/skills", def[0].path);
     try std.testing.expect(!def[0].named);
 
     try env.put("MICROAGENT_SKILLS", "/one:/two ");
-    const two = roots(&env, arena);
+    const two = roots(&env, arena, null);
     try std.testing.expectEqual(@as(usize, 2), two.len);
     try std.testing.expectEqualStrings("/one", two[0].path);
     try std.testing.expectEqualStrings("/two", two[1].path);
@@ -494,7 +513,23 @@ test "the roots are the default home directory or the ones the variable names" {
 
     // An empty value turns skills off rather than falling back to the default.
     try env.put("MICROAGENT_SKILLS", "");
-    try std.testing.expectEqual(@as(usize, 0), roots(&env, arena).len);
+    try std.testing.expectEqual(@as(usize, 0), roots(&env, arena, null).len);
+
+    // With nothing in the environment, the file's list is what is read, and an
+    // empty list there is the same statement: skills off.
+    var bare: std.process.Environ.Map = .init(arena);
+    try bare.put("HOME", "/home/tester");
+    const from_file = roots(&bare, arena, &.{ "/from/file", "/second" });
+    try std.testing.expectEqual(@as(usize, 2), from_file.len);
+    try std.testing.expectEqualStrings("/from/file", from_file[0].path);
+    try std.testing.expect(from_file[0].named);
+    try std.testing.expectEqual(@as(usize, 0), roots(&bare, arena, &.{}).len);
+
+    // The environment still wins over the file.
+    try env.put("MICROAGENT_SKILLS", "/env");
+    const won = roots(&env, arena, &.{"/from/file"});
+    try std.testing.expectEqual(@as(usize, 1), won.len);
+    try std.testing.expectEqualStrings("/env", won[0].path);
 }
 
 test "a skill call loads a body, and an unknown name lists what is there" {

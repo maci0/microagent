@@ -1,11 +1,12 @@
-# microagent reply style. Copy to ~/.microagent/config.toml, or point
-# MICROAGENT_CONFIG or --config at it. Every key here is optional: an absent
-# one, a bad level, and a file that is not there at all all keep the built-in
-# default, and the first key this file gets wrong is named on stderr.
+# microagent configuration: the reply style, the skills, and the MCP servers.
+# Copy to ~/.microagent/config.toml, or point MICROAGENT_CONFIG or --config at
+# it. Every key here is optional: an absent one, a bad value, and a file that is
+# not there at all all keep the built-in default, and the first line this file
+# gets wrong is named on stderr.
 #
-# MICROAGENT_CAVEMAN and MICROAGENT_PONYTAIL set the same two levels for one
-# run and win over this file, since naming a level in the environment is the
-# more explicit statement.
+# MICROAGENT_CAVEMAN, MICROAGENT_PONYTAIL and MICROAGENT_SKILLS set the same
+# values for one run and win over this file, since naming a value in the
+# environment is the more explicit statement.
 
 # How terse the agent's own prose is. off, lite, full, ultra, or one of the
 # three wenyan levels (wenyan-lite, wenyan-full, wenyan-ultra) that write the
@@ -14,3 +15,31 @@ caveman = "ultra"
 
 # How lazy the code it writes is. off, lite, full, ultra. Default full.
 ponytail = "full"
+
+# Where skills are read from: one directory per root, each holding one
+# directory per skill, each with a SKILL.md in it. A relative path is resolved
+# against the working directory. Leaving the key out uses
+# $HOME/.microagent/skills; `skills = []` turns skills off. The working
+# directory is deliberately not a default root: a SKILL.md in a repository
+# under review was written by whoever wrote that repository, and a skill body
+# is instructions the model follows. Name one here, or in MICROAGENT_SKILLS,
+# to say those bytes are instructions.
+#
+# skills = ["./skills", "~/.microagent/skills"]
+
+# One table per MCP server. `name` and `command` are required; `args` is a list
+# of strings and `env` is an inline table. The server is started over stdio
+# before the first request and its tools are offered to the model as
+# mcp__<server>__<tool>. A server that cannot start or answer is reported on
+# stderr and skipped.
+#
+# [[mcp]]
+# name = "fs"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+# env = { LOG = "debug" }
+#
+# [[mcp]]
+# name = "git"
+# command = "mcp-server-git"
+# args = ["--repository", "."]

@@ -14,26 +14,27 @@ release, and `microagent update` moves you to it.
 
 ### Added
 
-- MCP servers: `--mcp-config <file>`, else `MICROAGENT_MCP_CONFIG`, else
-  `$HOME/.microagent/mcp.json` names a registry in the shape the rest of the
-  ecosystem already uses, and every server in it is started over stdio before
-  the first request and asked for its tool list. Its tools are offered to the
-  model as `mcp__<server>__<tool>`, with the server's own `inputSchema` copied
-  into the request verbatim; a call is a `tools/call` on the same deadline as
-  any other tool, and the text the server returns is the tool result. A server
-  that cannot be started, exits during the handshake, or refuses a call is
-  reported on stderr and skipped, so one broken entry costs the run that entry
-  rather than the run: the seven built-in tools still work, and a run whose
-  registry is absent (or whose `MICROAGENT_MCP_CONFIG` is empty) sends exactly
-  the schema it sent before this existed. The server inherits the scrubbed
+- MCP servers, declared in the config file as one `[[mcp]]` table per server
+  (`name` and `command` required, `args` a list of strings, `env` an inline
+  table). Every server is started over stdio before the first request and asked
+  for its tool list; its tools are offered to the model as
+  `mcp__<server>__<tool>`, with the server's own `inputSchema` copied into the
+  request verbatim; a call is a `tools/call` on the same deadline as any other
+  tool, and the text the server returns is the tool result. A server that
+  cannot be started, exits during the handshake, or refuses a call is reported
+  on stderr and skipped, so one broken entry costs the run that entry rather
+  than the run: the seven built-in tools still work, and a run with no `[[mcp]]`
+  table sends exactly the schema it sent before this existed. The server inherits the scrubbed
   environment tool subprocesses get -- never the provider key -- plus whatever
   its own `env` block adds, and its stderr is inherited rather than captured,
   because that is where an MCP server writes its diagnostics and a pipe nobody
   drains is a server that blocks.
-- Skills: a run reads a `SKILL.md` from each directory under
-  `$HOME/.microagent/skills`, or under the `:`-separated directories
-  `MICROAGENT_SKILLS` names, lists what it found in the system prompt, and
-  advertises a `skill` tool the model calls to load one body. The split is the
+- Skills, declared in the config file as `skills = ["dir", ...]` (an empty
+  list turns them off; an absent key means `$HOME/.microagent/skills`). A run
+  reads a `SKILL.md` from each directory under those roots, or under the
+  `:`-separated directories `MICROAGENT_SKILLS` names, which win over the file,
+  lists what it found in the system prompt, and advertises a `skill` tool the
+  model calls to load one body. The split is the
   point: a body is kilobytes and the conversation re-sends every turn, so a
   skill the task never needs costs the one line it is listed as. A skill is a
   directory with an optional frontmatter block naming it and saying when it
