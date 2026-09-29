@@ -50,6 +50,14 @@ session row is the same run with `MICROAGENT_SESSION_DIR=` (no log). A hundred t
 not open a connection per turn either: ten turns against a keep-alive stub opened one TCP
 connection, because the client's pool returns the socket after each response is read.
 
+A thousand turns against the same stub is 744 M instructions, 2.3 s of wall (most of that the stub,
+which is Python), and peak RSS flat at 12.9 MB. The per-turn cost grows with the conversation, from
+about 195 k instructions around the hundredth turn to about 800 k around the thousandth, because
+every request carries the whole conversation and building it copies it once more locally. That copy
+is a few instructions per byte, it is the same bytes the provider bills for on every turn, and it is
+the only part of a long run that grows; a chunked send would save the copy and leave the bill, so it
+is left as it is.
+
 ## What was changed, and what it bought
 
 | | before | after | why |
