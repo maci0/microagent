@@ -214,6 +214,18 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- The README's list of the variables an empty value leaves at their default
+  named eight of the nine `--help` names, missing `MICROAGENT_STALL_TIMEOUT`.
+  Nothing reads the README against the help, so the two disagreed about what an
+  empty value means for a third of the configuration surface, and neither run
+  said so: an empty value reads as unset either way. A test now holds both
+  documents to `env_vars` and to `empty_is_unset_vars`, checked in the paragraph
+  that states the rule rather than anywhere in the file, since a name a document
+  spells elsewhere satisfies a search of the whole of it.
+- `zig build test` is a cache hit after a tracked file the suite reads is
+  edited, so the tests that read `README.md`, `config.example.toml` and the
+  Harbor adapter never saw the edit. Both run steps now depend on those files'
+  contents, so a change to one of them reruns the suite.
 - `bench/harbor.sh` hands the opencode provider overlay to harbor as a real
   argument and reads the provider key the way the adapter reads it. The overlay
   was one string of backslash-escaped JSON, expanded unquoted, which shellcheck

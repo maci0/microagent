@@ -1113,6 +1113,65 @@ fn resolveKey(io: Io, environ: *std.process.Environ.Map, arena_state: *std.heap.
 /// them: the project's own variable first, then the provider's.
 const key_vars = [_][]const u8{ "MICROAGENT_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY" };
 
+/// Every environment variable the program reads, which is what a user has to
+/// know to configure it. The resolution order each one is read in is spelled by
+/// the reader that reads it; this list is the documentation check and nothing
+/// else, so a variable added to a reader and to neither `--help` nor the README
+/// is one a user finds by reading the source. `key_vars` carries the order the
+/// four credentials are tried in, `net.caBundlePath` the bundle's two, and
+/// `secret_env_vars` the credentials scrubbed from a tool's environment; this is
+/// the union of those with the ceilings, the style levels, the paths and the
+/// GitHub token, held to one list so the two documents cannot each name a
+/// different subset of it.
+const env_vars = [_][]const u8{
+    "MICROAGENT_MODEL",
+    "MICROAGENT_BASE_URL",
+    "MICROAGENT_API_KEY",
+    "OPENAI_API_KEY",
+    "OPENROUTER_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "MICROAGENT_MAX_TURNS",
+    "MICROAGENT_MAX_TOKENS",
+    "MICROAGENT_STALL_TIMEOUT",
+    "MICROAGENT_BUDGET_SECONDS",
+    "MICROAGENT_MAX_SPEND_TOKENS",
+    "MICROAGENT_REASONING_EFFORT",
+    "MICROAGENT_CONFIG",
+    "MICROAGENT_CA_BUNDLE",
+    "SSL_CERT_FILE",
+    "MICROAGENT_CAVEMAN",
+    "MICROAGENT_PONYTAIL",
+    "MICROAGENT_SESSION_DIR",
+    "GITHUB_TOKEN",
+    "MDEBUG",
+    "HOME",
+};
+
+/// The variables whose empty value is not a value: a wrapper that populates
+/// the environment from a file exports a name with nothing behind it, and
+/// `envValue` reads that as unset, so each of these keeps its default rather
+/// than becoming a request the provider refuses. The rest of `env_vars` reads
+/// empty as something else, and the two documents below spell out which is
+/// which: `MICROAGENT_CONFIG` and `MICROAGENT_SESSION_DIR` turn their feature
+/// off, and the bundle and the style levels fall through to the next source.
+///
+/// The help text states this in prose and so does the README, and the two have
+/// drifted: the help named `MICROAGENT_STALL_TIMEOUT` here and the README did
+/// not, so a reader of the README alone could not tell that an empty
+/// `MICROAGENT_STALL_TIMEOUT` falls back rather than reaching the provider. The
+/// list is the category, and the test below holds both documents to it.
+const empty_is_unset_vars = [_][]const u8{
+    "MICROAGENT_MODEL",
+    "MICROAGENT_BASE_URL",
+    "MICROAGENT_REASONING_EFFORT",
+    "MICROAGENT_BUDGET_SECONDS",
+    "MICROAGENT_MAX_SPEND_TOKENS",
+    "MICROAGENT_MAX_TURNS",
+    "MICROAGENT_MAX_TOKENS",
+    "MICROAGENT_STALL_TIMEOUT",
+    "MDEBUG",
+};
+
 /// Every variable this program reads a credential out of, and which a tool
 /// subprocess therefore never sees. The four provider keys plus the GitHub
 /// token `microagent update` presents to the releases API: all of them are
@@ -7266,6 +7325,115 @@ test "the harbor adapter mirrors this binary's configuration schema" {
 const harbor_adapter_path = "integrations/harbor/microagent_agent.py";
 /// The adapter is a few hundred lines; a bigger file is not the one tracked.
 const max_harbor_adapter_bytes: usize = 128 * 1024;
+
+// Every variable the program reads is named by `--help` and by the README, and
+// the two documents state the empty-value rule for the same subset. Nothing
+// else in the tree connects the two: the readers are spread over main.zig,
+// net.zig and session.zig, a variable added to one of them works from the first
+// request, and the only place a user looks for its name is the help text, so a
+// variable that reached none of the three documents is one a user finds by
+// reading this source.
+//
+// The empty-value rule is the narrower half and the one that has drifted: the
+// help text named MICROAGENT_STALL_TIMEOUT among the variables an empty value
+// leaves at their default, and the README did not, so the two documents
+// disagreed about what an empty value means for a third of the surface. Both
+// are prose about `empty_is_unset_vars` rather than a rendering of it, since
+// the help wraps its lines by hand; the test is what holds the prose to the
+// list.
+test "the help text and the README name every variable the program reads" {
+    const gpa = std.testing.allocator;
+    // The test runs with the build root as its working directory, which is
+    // where the README is tracked.
+    const readme = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, readme_path, gpa, .limited(max_readme_bytes));
+    defer gpa.free(readme);
+
+    for (env_vars) |name| {
+        if (!namesWholeToken(help_text, name)) {
+            std.debug.print("\n" ++ readme_path ++ ": --help does not name {s}, so a user has to read the source to find it\n", .{name});
+            return error.TestUnexpectedResult;
+        }
+        if (!namesWholeToken(readme, name)) {
+            std.debug.print("\n" ++ readme_path ++ ": does not name {s}, so a user has to read the source to find it\n", .{name});
+            return error.TestUnexpectedResult;
+        }
+    }
+
+    // The empty-value rule, in both documents, in the paragraph that states it
+    // rather than anywhere in the file. A member of the list missing from one
+    // of them is the drift this test exists for, and it is silent twice over:
+    // an empty value reads as unset either way, so nothing tells a user the
+    // document is wrong, and a name the document happens to spell elsewhere
+    // (MICROAGENT_STALL_TIMEOUT in the flag table) would satisfy a search of
+    // the whole file. The paragraph is what a reader of the rule reads.
+    const rule_anchor = "is not a value:";
+    const help_rule = paragraphFrom(help_text, rule_anchor) orelse {
+        std.debug.print("\n--help has no paragraph saying an empty value is not a value\n", .{});
+        return error.TestUnexpectedResult;
+    };
+    const readme_rule = paragraphFrom(readme, rule_anchor) orelse {
+        std.debug.print("\n" ++ readme_path ++ ": has no paragraph saying an empty value is not a value\n", .{});
+        return error.TestUnexpectedResult;
+    };
+    for (empty_is_unset_vars) |name| {
+        if (!namesWholeToken(help_rule, name)) {
+            std.debug.print("\n--help: {s} keeps its default on an empty value and the paragraph saying so does not name it\n", .{name});
+            return error.TestUnexpectedResult;
+        }
+        if (!namesWholeToken(readme_rule, name)) {
+            std.debug.print("\n" ++ readme_path ++ ": {s} keeps its default on an empty value and the paragraph saying so does not name it\n", .{name});
+            return error.TestUnexpectedResult;
+        }
+    }
+
+    // The two that read empty as off are named in the same paragraph as the
+    // exception, which is why they are not in the list above: an empty
+    // MICROAGENT_CONFIG means no style file rather than the default one, and
+    // an empty MICROAGENT_SESSION_DIR means no session log rather than one
+    // under $HOME. Requiring them here is what keeps a fourth convention from
+    // starting, where a variable is settled in a paragraph and in no list.
+    for ([_][]const u8{ "MICROAGENT_CONFIG", "MICROAGENT_SESSION_DIR" }) |name| {
+        if (!namesWholeToken(help_rule, name) or !namesWholeToken(readme_rule, name)) {
+            std.debug.print("\n" ++ readme_path ++ ": {s} reads empty as off rather than falling through, and one paragraph saying so does not name it\n", .{name});
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+/// The paragraph holding `anchor`: from the anchor to the blank line that ends
+/// it. Both documents write the rule as one paragraph, and both end it the same
+/// way, so a blank line is the whole delimiter and no paragraph grammar is
+/// needed. Null when the anchor is in neither.
+fn paragraphFrom(text: []const u8, anchor: []const u8) ?[]const u8 {
+    const at = std.mem.indexOf(u8, text, anchor) orelse return null;
+    const end = std.mem.indexOfPos(u8, text, at, "\n\n") orelse text.len;
+    return text[at..end];
+}
+
+const readme_path = "README.md";
+/// The README is prose; a bigger file is not the one tracked.
+const max_readme_bytes: usize = 256 * 1024;
+
+/// Whether `text` spells `name` as a word of its own, rather than as a part of
+/// a longer one: a plain substring search lets `MICROAGENT_MAX_TOKENS` be
+/// satisfied by a document naming only `MICROAGENT_MAX_TOKENS_TOTAL`, which is
+/// a variable this build does not read and one the test would then have passed
+/// without the documentation it was asked for.
+fn namesWholeToken(text: []const u8, name: []const u8) bool {
+    var from: usize = 0;
+    while (std.mem.indexOfPos(u8, text, from, name)) |at| {
+        from = at + 1;
+        const before_ok = at == 0 or !isNameByte(text[at - 1]);
+        const after = at + name.len;
+        const after_ok = after == text.len or !isNameByte(text[after]);
+        if (before_ok and after_ok) return true;
+    }
+    return false;
+}
+
+fn isNameByte(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '_';
+}
 
 /// Every one of `names` in the tuple that starts at `anchor`, each after the one
 /// before it, and nowhere outside it. The anchor is the assignment or the loop
