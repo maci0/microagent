@@ -95,35 +95,46 @@ pub fn isPathWritable(io: Io, arena: std.mem.Allocator, path: []const u8, writab
         // nothing changes directory, so it saves a realpath per call.
         std.fs.path.resolve(arena, &.{ writable_roots[0], trimmed }) catch return false;
 
-    // If file exists on disk (or is a symlink), also check the real path target
-    if (std.Io.Dir.cwd().realPathFileAlloc(io, trimmed, arena)) |real| {
-        var real_ok = false;
-        for (writable_roots) |raw_root| {
-            const root = std.mem.trimEnd(u8, raw_root, "/\\");
-            if (root.len == 0) {
-                real_ok = true;
-                break;
-            }
-            if (std.mem.startsWith(u8, real, root)) {
-                if (real.len == root.len or real[root.len] == std.fs.path.sep) {
-                    real_ok = true;
-                    break;
-                }
-            }
-        }
-        if (!real_ok) return false;
-    } else |_| {}
+    // If the file exists on disk (or is a symlink), also check the real path target. A file that is
+    // not there yet resolves only as far as the deepest ancestor of it that is, and that ancestor
+    // is what the check reads: a tree carrying `link -> /etc` and a call for `link/passwd` is a
+    // path that begins inside a root and leaves it, which the lexical check cannot see because it
+    // never looks at what a link points at. Both halves have to hold: the resolved path names
+    // where the bytes land, and the lexical one is the path the call named.
+    const real = resolvedPrefix(io, arena, abs_path) orelse return false;
+    if (!withinAnyRoot(real, writable_roots)) return false;
+    return withinAnyRoot(abs_path, writable_roots);
+}
 
+/// Whether `path` is under any of `writable_roots`, reading a root as covering a whole path
+/// component and nothing more: a root that is a prefix of a longer name is not a parent of it, so
+/// `/tmp` does not cover `/tmpd`.
+fn withinAnyRoot(path: []const u8, writable_roots: []const []const u8) bool {
     for (writable_roots) |raw_root| {
         const root = std.mem.trimEnd(u8, raw_root, "/\\");
         if (root.len == 0) return true;
-        if (std.mem.startsWith(u8, abs_path, root)) {
-            if (abs_path.len == root.len or abs_path[root.len] == std.fs.path.sep) {
-                return true;
-            }
+        if (std.mem.startsWith(u8, path, root)) {
+            if (path.len == root.len or path[root.len] == std.fs.path.sep) return true;
         }
     }
     return false;
+}
+
+/// The resolved path of `abs_path` where it stops being one: the deepest ancestor that exists,
+/// with every symlink on the way to it followed. A path whose own name resolves is itself, and a
+/// path with no existing ancestor (every one of its components missing) is null, which the caller
+/// reads as unwritable rather than as permitted.
+///
+/// `abs_path` is the lexically resolved form, so the components walked back over carry no `.` or
+/// `..` and the tail that is dropped is exactly the part that does not exist yet. That tail cannot
+/// change which root the path is under, so answering for the prefix answers for the path.
+fn resolvedPrefix(io: Io, arena: std.mem.Allocator, abs_path: []const u8) ?[]const u8 {
+    var probe = abs_path;
+    while (std.Io.Dir.cwd().realPathFileAlloc(io, probe, arena)) |real| return real else |_| {}
+    const parent = std.fs.path.dirname(probe) orelse return null;
+    if (parent.len == 0 or std.mem.eql(u8, parent, probe)) return null;
+    probe = parent;
+    return resolvedPrefix(io, arena, probe);
 }
 
 const linux = std.os.linux;
@@ -290,6 +301,35 @@ test "isPathWritable allows paths within writable roots and denies paths outside
     // Prefix collision: root + "-other" is not under root
     const collision = try std.fmt.allocPrint(arena, "{s}-other/file.txt", .{root});
     try std.testing.expect(!isPathWritable(io, arena, collision, &writable_roots));
+}
+
+test "isPathWritable follows a symlinked parent of a file that does not exist yet" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var other = std.testing.tmpDir(.{});
+    defer other.cleanup();
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = buf[0..try tmp.dir.realPath(io, &buf)];
+    var other_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const elsewhere = other_buf[0..try other.dir.realPath(io, &other_buf)];
+    try tmp.dir.createDirPath(io, "inside");
+    try tmp.dir.symLink(io, elsewhere, "inside/link", .{});
+
+    const writable_roots = [_][]const u8{root};
+
+    // The file is not there, so the only thing that can answer is the directory
+    // that will hold it, and the directory is a link out of the root.
+    try std.testing.expect(!isPathWritable(io, arena, try std.fs.path.join(arena, &.{ root, "inside", "link", "new.txt" }), &writable_roots));
+    // The same call one component short of the link is inside the root.
+    try std.testing.expect(isPathWritable(io, arena, try std.fs.path.join(arena, &.{ root, "inside", "new.txt" }), &writable_roots));
+    // And through the link to something that does exist is refused on the target.
+    try std.testing.expect(!isPathWritable(io, arena, try std.fs.path.join(arena, &.{ root, "inside", "link" }), &writable_roots));
 }
 
 test "resolveWritableRoots resolves cwd, tmp, session_dir, and custom roots" {
