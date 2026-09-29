@@ -159,6 +159,21 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- A pre-release tag carrying dots of its own no longer reads as no version at
+  all. `v0.2.0-rc.1` was split on `.` and came out as four components, so it was
+  refused as an unorderable tag and compared equal to whatever build was
+  running: a build on `0.3.0` installed `0.2.0-rc.1` over itself, silently. The
+  suffix is now taken off the whole tag before the components are split, which
+  is what the parser has always documented. The same change makes build
+  metadata (`v1.2.3+build.1`) read as the triple it describes.
+- The `Retry-After` reading used to cross-check the one the fetches use now
+  reads a head the sender stopped writing short. It walked only to a `\r\n`, so
+  a header on an unterminated last line was invisible to it and present to the
+  fetches, and the check comparing the two failed on a value both had read.
+- `zig build test-sanitize` pinned neither `LC_ALL` nor `TZ` while `zig build
+  test` pinned both, so on a host whose locale is not `C` the sanitized run
+  failed a child-environment test the plain run passed. Both runs now take the
+  pair from one place in `build.zig`.
 - A session record's `elapsed_ms` no longer counts a suspend as model time. The
   stamp and the reading were both taken on the clock `--budget` is measured on,
   which keeps counting while the machine is off, so a laptop closed for eight

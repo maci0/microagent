@@ -1261,15 +1261,22 @@ fn firstRetryAfterLine(head: []const u8) ?[]const u8 {
     // after it and a head that is nothing but one line has no header on it.
     const status_end = std.mem.indexOf(u8, rest, "\r\n") orelse return null;
     rest = rest[status_end + 2 ..];
-    while (std.mem.indexOf(u8, rest, "\r\n")) |at| {
-        const line = rest[0..at];
-        rest = rest[at + 2 ..];
+    while (true) {
+        const at = std.mem.indexOf(u8, rest, "\r\n");
+        // A head the sender stopped writing short ends on a line carrying no
+        // terminator of its own, and the reader splits on the sequence rather
+        // than on the terminator, so it reads that line. Skipping it here made
+        // the two readings disagree on a truncated response, and the fuzz check
+        // that compares them would have failed on a header the reader found.
+        const line = if (at) |i| rest[0..i] else rest;
         if (line.len == 0) return null;
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
-        if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, line[0..colon], " \t"), "retry-after")) continue;
-        return std.mem.trim(u8, line[colon + 1 ..], " \t");
+        if (std.mem.indexOfScalar(u8, line, ':')) |colon| {
+            if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, line[0..colon], " \t"), "retry-after")) {
+                return std.mem.trim(u8, line[colon + 1 ..], " \t");
+            }
+        }
+        rest = rest[at.? + 2 ..];
     }
-    return null;
 }
 
 /// Days from 1970-01-01 to the date the header spells, counted the long way.

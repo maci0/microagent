@@ -124,22 +124,20 @@ const Version = struct {
 /// suffix is a version, so it parses; only what carries no order does not.
 fn parseVersion(release: []const u8) ?Version {
     const v = bareVersion(release);
-    var out: Version = .{ .triple = .{ 0, 0, 0 }, .prerelease = false };
-    var it = std.mem.splitScalar(u8, v, '.');
+    // The suffix is taken off the whole tag before the components are split,
+    // because a semver pre-release may carry dots of its own: `0.2.0-rc.1`
+    // split on `.` alone is four components, and reading that as a fourth one
+    // returned no version at all, so `compareVersions` answered `.eq` and a
+    // build on `0.3.0` installed `0.2.0-rc.1` over itself. A `+` is build
+    // metadata and orders before nothing, so it marks no pre-release.
+    const cut = std.mem.indexOfAny(u8, v, "-+") orelse v.len;
+    // The suffix is read as present or absent rather than compared, so no order
+    // between two pre-releases of one triple is claimed here.
+    var out: Version = .{ .triple = .{ 0, 0, 0 }, .prerelease = cut != v.len and v[cut] == '-' };
+    var it = std.mem.splitScalar(u8, v[0..cut], '.');
     var n: usize = 0;
     while (it.next()) |c| {
         if (n == out.triple.len) return null;
-        // The suffix is a `-` on the patch component, which is where semver
-        // puts it. It is read as present or absent rather than compared, so no
-        // order between two pre-releases of one triple is claimed here.
-        if (n == out.triple.len - 1) {
-            const base = c[0 .. std.mem.indexOfAny(u8, c, "-+") orelse c.len];
-            if (base.len == 0) return null;
-            if (std.mem.indexOfAny(u8, c, "-") != null) out.prerelease = true;
-            out.triple[n] = std.fmt.parseInt(u64, base, 10) catch return null;
-            n += 1;
-            continue;
-        }
         if (c.len == 0) return null;
         out.triple[n] = std.fmt.parseInt(u64, c, 10) catch return null;
         n += 1;
@@ -1570,6 +1568,14 @@ test "update: a build ahead of the latest release is not downgraded" {
     try std.testing.expectEqual(std.math.Order.gt, compareVersions("0.2.0", "v0.2.0-rc1"));
     // And the other way, so a pre-release build takes the release it precedes.
     try std.testing.expectEqual(std.math.Order.lt, compareVersions("v0.2.0-rc1", "0.2.0"));
+    // A pre-release may carry dots of its own, and one that does is still the
+    // same triple: reading the suffix's dots as a fourth component made the tag
+    // parse as no version at all, which ordered it as `.eq` and let it past the
+    // guard.
+    try std.testing.expectEqual(std.math.Order.gt, compareVersions("0.3.0", "v0.2.0-rc.1"));
+    try std.testing.expectEqual(std.math.Order.gt, compareVersions("0.2.0", "v0.2.0-rc.1"));
+    try std.testing.expectEqual(std.math.Order.eq, compareVersions("0.2.0", "v0.2.0+build.1"));
+    try std.testing.expect(!fetchesAsset(false, "0.3.0", "v0.2.0-rc.1"));
     // A tag that is not a dotted triple at all carries no order to claim, so it
     // stays on the caller's explicit request rather than being blocked.
     try std.testing.expectEqual(std.math.Order.eq, compareVersions("0.2.0", "nightly"));

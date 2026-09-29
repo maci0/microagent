@@ -89,6 +89,13 @@ pub const Session = struct {
 /// log costs the run nothing.
 const session_name_attempts = 8;
 
+/// The buffer `createSessionLog` spells the `-<attempt>` suffix into, sized
+/// from the attempt count rather than chosen beside it. The widest suffix the
+/// loop can reach is `-` and the last attempt below, and a count wide enough to
+/// need one more digit than this holds is a compile error rather than a run
+/// that reports "a session log name could not be built" and records no usage.
+const session_suffix_max = std.fmt.count("{d}", .{session_name_attempts - 1}) + 1;
+
 /// The mode a session log is created with, and the mode its directory is
 /// created with when the run is the one that made the directory.
 ///
@@ -130,7 +137,7 @@ fn createSessionLog(io: Io, arena: std.mem.Allocator, session_dir: []const u8, s
     const shown = chat.safeTextAll(arena, session_dir);
     var attempt: usize = 0;
     while (attempt < session_name_attempts) : (attempt += 1) {
-        var suffix_buf: [4]u8 = undefined;
+        var suffix_buf: [session_suffix_max]u8 = undefined;
         // A name this program cannot spell or cannot join is a failure like any
         // other one to open the log, and the doc above promises it is named.
         // The three silent nulls this replaces left a monitor reading a store

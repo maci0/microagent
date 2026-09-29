@@ -55,8 +55,19 @@ pub fn build(b: *std.Build) void {
     // Makefile exports the same two for the release builds, and `zig build
     // test` is the command the README and ci.yml both run, so the guarantee
     // belongs here rather than only under `make`.
-    run_tests.setEnvironmentVariable("LC_ALL", "C");
-    run_tests.setEnvironmentVariable("TZ", "UTC");
+    //
+    // Both test runs get it, and through this one function so they cannot drift:
+    // the sanitized run is the same suite, so a child it spawns is under the
+    // same host locale, and pinning only the plain run left
+    // `zig build test-sanitize` failing a child-environment test that the plain
+    // run passed.
+    const pin_test_env = struct {
+        fn pin(step: *std.Build.Step.Run) void {
+            step.setEnvironmentVariable("LC_ALL", "C");
+            step.setEnvironmentVariable("TZ", "UTC");
+        }
+    }.pin;
+    pin_test_env(run_tests);
     b.step("test", "Run unit tests").dependOn(&run_tests.step);
 
     // The same suite again, compiled with the undefined-behavior sanitizer, so
@@ -84,5 +95,6 @@ pub fn build(b: *std.Build) void {
         .filters = if (test_filter) |f| &[_][]const u8{f} else &.{},
     });
     const run_sanitize = b.addRunArtifact(sanitize_tests);
+    pin_test_env(run_sanitize);
     b.step("test-sanitize", "Run unit tests under the undefined-behavior sanitizer").dependOn(&run_sanitize.step);
 }
