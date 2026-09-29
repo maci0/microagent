@@ -4,12 +4,25 @@
 # same commands.
 line-length = 120
 
+# The ruff these rules are written against, the one lint-requirements.txt pins
+# by hash and the Makefile names in RUFF_VERSION. A contributor running a bare
+# `ruff check --config ruff.toml` gets this file under whatever ruff is on
+# their PATH otherwise, and the rule set moves between ruff releases: a green
+# run on a version nobody gated is a green run against a different linter.
+# This is the pin ruff itself reads, so it holds for the direct invocation too.
+# `make lint-versions` checks it against the other two, so the three cannot
+# drift apart with the file the gate reads the one that moved.
+required-version = "0.16.4"
+
 # The Python the adapter runs on, not the one ruff assumes. Left unset, ruff
 # falls back to py39 and every UP rule that only fires from 3.10 on is never
 # evaluated: the tree is checked against a Python it does not support and
 # passes there, which says nothing about the one it does. 3.12 is the floor
 # integrations/harbor/requirements.txt records, in the `uv pip compile
 # --python-version 3.12` that generates the lock the adapter is installed from.
+# `make lint-versions` checks the two agree, because a py target raised here
+# without the floor being raised there lints against an interpreter the lock
+# does not resolve for.
 target-version = "py312"
 
 lint.select = [

@@ -272,6 +272,15 @@ lint-versions:
 	yamllint_pin="$$(sed -n 's/^yamllint==\([^ ]*\).*/\1/p' lint-requirements.txt)"; \
 	{ [ "$$ruff_pin" = "$(RUFF_VERSION)" ] && [ "$$yamllint_pin" = "$(YAMLLINT_VERSION)" ]; } || { \
 	  echo "lint-requirements.txt pins ruff==$$ruff_pin and yamllint==$$yamllint_pin, not $(RUFF_VERSION) and $(YAMLLINT_VERSION): CI installs that file, so a bump here has to bump the Makefile too" >&2; bad=1; }; \
+	ruff_required="$$(sed -n 's/^required-version = "\(.*\)"/\1/p' ruff.toml)"; \
+	[ "$$ruff_required" = "$(RUFF_VERSION)" ] || { \
+	  echo "ruff.toml requires ruff $$ruff_required, not $(RUFF_VERSION): a contributor running 'ruff check --config ruff.toml' directly is told nothing by the gate, and 'required-version' is the one pin ruff reads there" >&2; \
+	  echo "a bump to RUFF_VERSION has to bump required-version, and lint-requirements.txt, in the same change" >&2; bad=1; }; \
+	ruff_target="$$(sed -n 's/^target-version = "\(py[0-9]*\)"/\1/p' ruff.toml)"; \
+	lock_target="$$(sed -n 's/.*uv pip compile.*--python-version \([0-9][0-9.]*\).*/\1/p' integrations/harbor/requirements.txt)"; \
+	{ [ -n "$$ruff_target" ] && [ -n "$$lock_target" ] && [ "$$ruff_target" = "py$$(printf '%s' "$$lock_target" | tr -d .)" ]; } || { \
+	  echo "ruff.toml checks against $$ruff_target and integrations/harbor/requirements.txt resolves its lock for $$lock_target: a py target raised here without the floor raised there lints against an interpreter the lock does not resolve for" >&2; \
+	  echo "a bump to either has to bump the other, and the 'uv pip compile' at the top of that manifest with it" >&2; bad=1; }; \
 	unhashed="$$(awk '/^[A-Za-z0-9_.-]+==/ { if (name != "" && hashes == 0) print name; name = $$1; sub(/==.*/, "", name); hashes = 0; next } /--hash=sha256:/ { hashes++ } END { if (name != "" && hashes == 0) print name }' lint-requirements.txt)"; \
 	if [ -n "$$unhashed" ]; then \
 	  echo "lint-requirements.txt pins $$unhashed with no --hash=sha256, and setup-linters installs it with --require-hashes:" >&2; \
