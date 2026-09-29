@@ -4876,18 +4876,8 @@ test "a shown commit does not carry who wrote it" {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
 
-    // A real repository, so git's own header is what is under test. The
-    // identity is set on the repository rather than with `-c` because that is
-    // where git reads it from when it writes a commit header.
-    const script = try std.fmt.allocPrint(arena,
-        \\git -C '{s}' init -q && git -C '{s}' config commit.gpgsign false && git -C '{s}' config core.hooksPath '' && git -C '{s}' config user.name 'Rosa Fixture' && git -C '{s}' config user.email rosa@example.invalid && git -C '{s}' add -A && git -C '{s}' commit -qm 'a subject line'
-    , .{ root, root, root, root, root, root, root });
-    const setup = [_][]const u8{ "/bin/sh", "-c", script };
-    const made = try runCapped(io, arena, &setup, 1 << 20, net.durationMs(60_000), null, null);
-    if (made.term != .exited or made.term.exited != 0) {
-        std.debug.print("could not build the fixture repository: {s}\n", .{made.stderr});
-        return error.TestUnexpectedResult;
-    }
+    // A real repository, so git's own header is what is under test.
+    try commitOneFixture(io, arena, root);
 
     const res = try runCapped(io, arena, try gitIn(arena, root, "show", null, null), 1 << 20, net.durationMs(60_000), null, null);
     const text = try arena.dupe(u8, res.stdout);
@@ -4931,15 +4921,7 @@ test "a blamed line does not carry the name of whoever wrote it" {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
 
-    const script = try std.fmt.allocPrint(arena,
-        \\git -C '{s}' init -q && git -C '{s}' config commit.gpgsign false && git -C '{s}' config core.hooksPath '' && git -C '{s}' config user.name 'Rosa Fixture' && git -C '{s}' config user.email rosa@example.invalid && git -C '{s}' add -A && git -C '{s}' commit -qm 'a subject line'
-    , .{ root, root, root, root, root, root, root });
-    const setup = [_][]const u8{ "/bin/sh", "-c", script };
-    const made = try runCapped(io, arena, &setup, 1 << 20, net.durationMs(60_000), null, null);
-    if (made.term != .exited or made.term.exited != 0) {
-        std.debug.print("could not build the fixture repository: {s}\n", .{made.stderr});
-        return error.TestUnexpectedResult;
-    }
+    try commitOneFixture(io, arena, root);
 
     // `git` runs in the process's own working directory and the test cannot
     // move it, so this is the argv `toolGit` builds pointed at the fixture with
@@ -5050,6 +5032,23 @@ test "a blame line is only rewritten when it has the shape git prints" {
         "^abc1234 (2026-09-30 03:29:32 +0800 1) one\ndef5678 (2026-09-30 03:29:32 +0800 2) two\n",
         try redactBlameNames(arena, "^abc1234 (Rosa Fixture 2026-09-30 03:29:32 +0800 1) one\ndef5678 (Someone Else 2026-09-30 03:29:32 +0800 2) two\n"),
     );
+}
+
+/// A real repository at `root` holding one commit by a named person, which is
+/// what the tests over `git show` and `git blame` read. The identity is set on
+/// the repository rather than with `-c` because that is where git reads it from
+/// when it writes a commit header, and both tests below look for that name in
+/// the output, so a header that came back whole is found by name and by address.
+fn commitOneFixture(io: Io, arena: std.mem.Allocator, root: []const u8) !void {
+    const script = try std.fmt.allocPrint(arena,
+        \\git -C '{s}' init -q && git -C '{s}' config commit.gpgsign false && git -C '{s}' config core.hooksPath '' && git -C '{s}' config user.name 'Rosa Fixture' && git -C '{s}' config user.email rosa@example.invalid && git -C '{s}' add -A && git -C '{s}' commit -qm 'a subject line'
+    , .{ root, root, root, root, root, root, root });
+    const setup = [_][]const u8{ "/bin/sh", "-c", script };
+    const made = try runCapped(io, arena, &setup, 1 << 20, net.durationMs(60_000), null, null);
+    if (made.term != .exited or made.term.exited != 0) {
+        std.debug.print("could not build the fixture repository: {s}\n", .{made.stderr});
+        return error.TestUnexpectedResult;
+    }
 }
 
 /// The argv `gitArgv` builds, pointed at `root` the way the tool's own

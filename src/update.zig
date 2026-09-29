@@ -349,6 +349,14 @@ fn fetch(
 /// machine that suspended mid-wait is a machine whose operator is not watching.
 const sleep_clock: std.Io.Clock = .awake;
 
+/// The download that could not be started, made or read. None of those is
+/// retried: the run has no body to give and no other endpoint to try, and a
+/// second attempt would print the same line.
+fn notDownloaded(io: std.Io, what: []const u8, err: anyerror) Outcome {
+    _ = fail(io, "could not download {s} ({s})", .{ what, @errorName(err) });
+    return .{ .body = null, .retry = false };
+}
+
 /// One GET, raced against its own deadline. `client.fetch` has no timeout
 /// option, so the clock is a task of its own and the exchange is the other:
 /// whichever finishes first ends this, and the one that did not is cancelled
@@ -395,10 +403,7 @@ fn fetchOnce(
             return .{ .body = null, .retry = true };
         },
     }
-    const body = capped.body.toOwnedSlice() catch |err| {
-        _ = fail(io, "could not download {s} ({s})", .{ what, @errorName(err) });
-        return .{ .body = null, .retry = false };
-    };
+    const body = capped.body.toOwnedSlice() catch |err| return notDownloaded(io, what, err);
     return .{ .body = body, .retry = false };
 }
 
