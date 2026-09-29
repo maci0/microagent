@@ -25,7 +25,8 @@
 # api_key  = "sk-..."
 
 # Text appended to the system prompt after a blank line, at most 16 KB. A basic
-# string ("..." with the escapes \n \t \r \" \\), a literal string ('...'), or
+# string ("..." with the escapes \b \t \n \f \r \" \\ \uXXXX \UXXXXXXXX), a
+# literal string ('...') in which nothing is an escape, or
 # either kind over several lines ("""...""" or '''...''').
 #
 # system_prompt_extra = "Answer in at most three sentences."

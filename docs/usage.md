@@ -422,8 +422,10 @@ Name the file and the line when you cite code.
 """
 ```
 
-The value is a TOML string: `"..."` with the escapes `\n`, `\t`, `\r`, `\"` and `\\`, a literal
-`'...'` with none, or either kind as a multi-line string. It is at most 16 KB, because it is re-sent
+The value is a TOML string: `"..."` with the escapes `\b`, `\t`, `\n`, `\f`, `\r`, `"`, `\\`, `\uXXXX` and `\UXXXXXXXX`, a
+literal `'...'` in which nothing is an escape, or either kind as a multi-line string. A `\uXXXX` naming a
+lone surrogate, or a code point past the last one, is reported as a bad value rather than sent as bytes
+that are not a character. It is at most 16 KB, because it is re-sent
 on every turn; a longer value is reported as a bad value and the prompt stays the built-in one.
 
 ### Skills

@@ -299,7 +299,7 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8) Config {
             .top => topKey(&config, arena, &lines, key, value_text),
             .sandbox => sandboxOnly(&config, arena, key, value_text),
             .mcp => if (open) |server| serverKey(&config, arena, server, key, value_text),
-            .tool => if (open_tool) |target| toolKey(&config, target, &presets, key, value_text),
+            .tool => if (open_tool) |target| toolKey(arena, &config, target, &presets, key, value_text),
             .other => {},
         }
     }
@@ -391,9 +391,9 @@ fn topKey(config: *Config, arena: std.mem.Allocator, lines: *Lines, key: []const
         config.agents_files = paths;
         return;
     }
-    if (std.mem.eql(u8, key, "model")) return topString(config, key, value_text, &config.model);
-    if (std.mem.eql(u8, key, "base_url")) return topString(config, key, value_text, &config.base_url);
-    if (std.mem.eql(u8, key, "api_key")) return topString(config, key, value_text, &config.api_key);
+    if (std.mem.eql(u8, key, "model")) return topString(arena, config, key, value_text, &config.model);
+    if (std.mem.eql(u8, key, "base_url")) return topString(arena, config, key, value_text, &config.base_url);
+    if (std.mem.eql(u8, key, "api_key")) return topString(arena, config, key, value_text, &config.api_key);
     if (std.mem.eql(u8, key, "skills")) {
         const dirs = stringArray(arena, value_text) orelse
             return config.note(.{ .key = key, .kind = .bad_value });
@@ -413,20 +413,19 @@ fn topKey(config: *Config, arena: std.mem.Allocator, lines: *Lines, key: []const
 /// `api_key`. Quoted or not is not the point; a value this reader cannot see
 /// the end of is, because none of the three has a useful default to fall back
 /// to silently.
-fn topString(config: *Config, key: []const u8, value_text: []const u8, out: *[]const u8) void {
-    const value = stringValue(value_text) orelse
+fn topString(arena: std.mem.Allocator, config: *Config, key: []const u8, value_text: []const u8, out: *[]const u8) void {
+    const value = stringValue(arena, value_text) orelse
         return config.note(.{ .key = key, .kind = .bad_value });
     out.* = value;
 }
 
 /// One quoted string, or null when the text is not one: empty, bare, a number,
-/// or a quote with no closing quote. `unquote` returns an unterminated value as
-/// written, so the length is what tells the two apart.
-fn stringValue(raw: []const u8) ?[]const u8 {
+/// a quote with no closing quote, or an escape `unquote` cannot resolve.
+fn stringValue(arena: std.mem.Allocator, raw: []const u8) ?[]const u8 {
     const text = std.mem.trim(u8, raw, " \t");
     if (text.len < 2) return null;
     if (text[0] != '"' and text[0] != '\'') return null;
-    const value = unquote(text);
+    const value = unquote(arena, text) orelse return null;
     if (value.len == text.len) return null;
     return value;
 }
@@ -500,11 +499,13 @@ fn addDenyCommands(config: *Config, arena: std.mem.Allocator, list: []const []co
 /// One line inside an open `[[mcp]]` table.
 fn serverKey(config: *Config, arena: std.mem.Allocator, server: *Server, key: []const u8, value_text: []const u8) void {
     if (std.mem.eql(u8, key, "name")) {
-        server.name = unquote(value_text);
+        server.name = unquote(arena, value_text) orelse
+            return config.note(.{ .key = key, .kind = .bad_value });
         return;
     }
     if (std.mem.eql(u8, key, "command")) {
-        server.command = unquote(value_text);
+        server.command = unquote(arena, value_text) orelse
+            return config.note(.{ .key = key, .kind = .bad_value });
         return;
     }
     if (std.mem.eql(u8, key, "args")) {
@@ -527,12 +528,13 @@ fn serverKey(config: *Config, arena: std.mem.Allocator, server: *Server, key: []
         return;
     }
     if (std.mem.eql(u8, key, "url")) {
-        server.url = unquote(value_text);
+        server.url = unquote(arena, value_text) orelse
+            return config.note(.{ .key = key, .kind = .bad_value });
         return;
     }
     // The options a remote server takes are checked as they are read. A
     // server given a key it cannot use is dropped, not connected without one.
-    if (remoteOption(&server.api_key_env, &server.api_key_header, &server.timeout_s, key, value_text)) |usable| {
+    if (remoteOption(arena, &server.api_key_env, &server.api_key_header, &server.timeout_s, key, value_text)) |usable| {
         server.remote_key_set = true;
         if (!usable) server.invalid = true;
         return;
@@ -544,8 +546,8 @@ fn serverKey(config: *Config, arena: std.mem.Allocator, server: *Server, key: []
 /// table. Null when `key` is not one of them, false when the value is not
 /// usable. A named key variable is a name, never a key: what is stored is the
 /// variable to read.
-fn remoteOption(api_key_env: *[]const u8, api_key_header: *[]const u8, timeout_s: *u32, key: []const u8, value_text: []const u8) ?bool {
-    const value = std.mem.trim(u8, unquote(value_text), " \t");
+fn remoteOption(arena: std.mem.Allocator, api_key_env: *[]const u8, api_key_header: *[]const u8, timeout_s: *u32, key: []const u8, value_text: []const u8) ?bool {
+    const value = std.mem.trim(u8, unquote(arena, value_text) orelse return false, " \t");
     if (std.mem.eql(u8, key, "api_key_env")) {
         if (value.len != 0 and !mcp_mod.validEnvName(value)) return false;
         api_key_env.* = value;
@@ -568,7 +570,7 @@ fn remoteOption(api_key_env: *[]const u8, api_key_header: *[]const u8, timeout_s
 /// One line inside an open `[tools.<name>]` table. Every problem here is one
 /// the run stops on except a key the table does not have, which is noted like
 /// any other unknown key.
-fn toolKey(config: *Config, target: ToolTarget, presets: *std.EnumArray(mcp_mod.Preset, PresetSetting), key: []const u8, value_text: []const u8) void {
+fn toolKey(arena: std.mem.Allocator, config: *Config, target: ToolTarget, presets: *std.EnumArray(mcp_mod.Preset, PresetSetting), key: []const u8, value_text: []const u8) void {
     const name = switch (target) {
         .builtin => |tool| tool.name(),
         .preset => |preset| @tagName(preset),
@@ -588,12 +590,12 @@ fn toolKey(config: *Config, target: ToolTarget, presets: *std.EnumArray(mcp_mod.
         };
         const setting = presets.getPtr(preset);
         if (std.mem.eql(u8, key, "url")) {
-            const url = unquote(value_text);
+            const url = unquote(arena, value_text) orelse break :ok false;
             if (!mcp_mod.validUrl(url)) break :ok false;
             setting.url = url;
             break :ok true;
         }
-        break :ok remoteOption(&setting.api_key_env, &setting.api_key_header, &setting.timeout_s, key, value_text) orelse
+        break :ok remoteOption(arena, &setting.api_key_env, &setting.api_key_header, &setting.timeout_s, key, value_text) orelse
             return config.note(.{ .key = key, .kind = .unknown_key });
     };
     if (usable or config.tool_problem != null) return;
@@ -671,48 +673,107 @@ fn promptString(arena: std.mem.Allocator, lines: *Lines, value_text: []const u8)
     return null;
 }
 
-/// The text with its TOML escapes resolved, or null on one this reader does not
-/// have.
-fn unescape(arena: std.mem.Allocator, text: []const u8) ?[]const u8 {
-    if (std.mem.indexOfScalar(u8, text, '\\') == null) return text;
+/// A quoted TOML value as the run reads it, or null when the text is not one
+/// this reader can follow whole. A bare value stops at a `#`; it is otherwise
+/// taken as written, because `skills = [a]` is not valid TOML but is not worth
+/// an error either.
+///
+/// The two quoting forms are read as TOML reads them, which is the difference
+/// between them. A single-quoted value is a literal string: nothing in it is an
+/// escape, so a backslash is a backslash. A double-quoted value is a basic
+/// string, and its escapes are decoded by `unescape` -- including
+/// `\uXXXX` and `\UXXXXXXXX`, which is how a value holding a character outside
+/// ASCII is written without the file carrying its encoding.
+///
+/// The closing quote is looked for before any `#` is, so a `#` between the
+/// quotes is text, and it is looked for past `\"`, so a `\"` inside the value
+/// does not end it. Both were missed: `base_url = "https://h/a?b=\"x\""` ended
+/// at the escaped quote and the url the run dialled carried a `\"` in it, and
+/// `deny_commands = ["echo \"hi\""]` was cut at the same place. A value with no
+/// closing quote is null rather than taken as written, because the bytes up to
+/// the end of the line are not a value the operator can see.
+fn unquote(arena: std.mem.Allocator, raw: []const u8) ?[]const u8 {
+    if (raw.len < 2) return raw;
+    switch (raw[0]) {
+        '\'' => {
+            const end = std.mem.indexOfScalarPos(u8, raw, 1, '\'') orelse return null;
+            return raw[1..end];
+        },
+        '"' => {
+            const end = closingQuote(raw) orelse return null;
+            return unescape(arena, raw[1..end]);
+        },
+        else => return raw[0 .. std.mem.indexOfScalar(u8, raw, '#') orelse raw.len],
+    }
+}
+
+/// The `"` that ends a basic string, stepping over the `\"` inside it.
+fn closingQuote(raw: []const u8) ?usize {
+    var i: usize = 1;
+    while (i < raw.len) : (i += 1) {
+        switch (raw[i]) {
+            '\\' => i += 1,
+            '"' => return i,
+            else => {},
+        }
+    }
+    return null;
+}
+
+/// The bytes of a basic string's body, with its escapes decoded, or null when
+/// one of them is not one TOML defines or names a code point that is not a
+/// character.
+///
+/// The decoded value is UTF-8, because everything the run does with a config
+/// value afterwards -- an argv entry, a url, a prompt line, a header value --
+/// carries it as text. A lone surrogate is refused rather than encoded: UTF-8
+/// has no spelling for one, and the three bytes that would stand in for it
+/// reach a provider or a child process as a sequence no reader decodes back into
+/// the character the file named. A value written with a literal non-ASCII
+/// character needs none of this, and is copied through byte for byte, which is
+/// what keeps a file's own encoding the one that decides how it reads.
+fn unescape(arena: std.mem.Allocator, body: []const u8) ?[]const u8 {
+    // A body with no escape is the value as written, and it is returned as
+    // written rather than copied, because that is the case every value in a
+    // file written by hand is in.
+    if (std.mem.indexOfScalar(u8, body, '\\') == null) return body;
     var out: std.ArrayList(u8) = .empty;
     var i: usize = 0;
-    while (i < text.len) : (i += 1) {
-        if (text[i] != '\\') {
-            out.append(arena, text[i]) catch return null;
+    while (i < body.len) {
+        const c = body[i];
+        if (c != '\\') {
+            out.append(arena, c) catch return null;
+            i += 1;
             continue;
         }
         i += 1;
-        if (i == text.len) return null;
-        const c: u8 = switch (text[i]) {
-            'n' => '\n',
-            't' => '\t',
-            'r' => '\r',
-            '"' => '"',
-            '\\' => '\\',
+        if (i >= body.len) return null;
+        const escape = body[i];
+        i += 1;
+        switch (escape) {
+            '"', '\\' => out.append(arena, escape) catch return null,
+            'b' => out.append(arena, 0x08) catch return null,
+            't' => out.append(arena, '\t') catch return null,
+            'n' => out.append(arena, '\n') catch return null,
+            'f' => out.append(arena, 0x0c) catch return null,
+            'r' => out.append(arena, '\r') catch return null,
+            'u', 'U' => {
+                const digits: usize = if (escape == 'u') 4 else 8;
+                if (i + digits > body.len) return null;
+                const cp = std.fmt.parseInt(u32, body[i .. i + digits], 16) catch return null;
+                i += digits;
+                // A surrogate half is not a character, and a value past the last
+                // one is not either. TOML forbids both, and a value carrying
+                // one has no UTF-8 spelling to be decoded into.
+                if (cp > 0x10ffff or (cp >= 0xd800 and cp <= 0xdfff)) return null;
+                var buf: [4]u8 = undefined;
+                const n = std.unicode.utf8Encode(@intCast(cp), &buf) catch return null;
+                out.appendSlice(arena, buf[0..n]) catch return null;
+            },
             else => return null,
-        };
-        out.append(arena, c) catch return null;
+        }
     }
     return out.items;
-}
-
-/// A quoted TOML value without its quotes, stopping at the closing quote so a
-/// trailing `# comment` is not part of the value. A bare value stops at a `#`
-/// for the same reason; it is otherwise taken as written, because
-/// `skills = [a]` is not valid TOML but is not worth an error either.
-///
-/// The closing quote is looked for before any `#` is, so a `#` between the
-/// quotes is text. A quoted value with no closing quote is returned as written
-/// rather than cut at a `#` it may legitimately carry.
-fn unquote(raw: []const u8) []const u8 {
-    if (raw.len < 2) return raw;
-    const quote = raw[0];
-    if (quote == '"' or quote == '\'') {
-        const end = std.mem.indexOfScalarPos(u8, raw, 1, quote) orelse return raw;
-        return raw[1..end];
-    }
-    return raw[0 .. std.mem.indexOfScalar(u8, raw, '#') orelse raw.len];
 }
 
 /// An array of strings, or null when the text is not one. A bare `[]` is an
@@ -725,7 +786,7 @@ fn stringArray(arena: std.mem.Allocator, raw: []const u8) ?[]const []const u8 {
     const parts = splitQuoted(arena, text[1 .. text.len - 1], ',') orelse return null;
     var out: std.ArrayList([]const u8) = .empty;
     for (parts) |part| {
-        const item = unquote(part);
+        const item = unquote(arena, part) orelse return null;
         if (item.len == 0) continue;
         out.append(arena, item) catch return null;
     }
@@ -749,9 +810,9 @@ fn inlineTable(arena: std.mem.Allocator, raw: []const u8) ?[]const [2][]const u8
     for (parts) |pair| {
         if (pair.len == 0) continue;
         const eq = indexOutsideQuotes(pair, '=') orelse return null;
-        const key = unquote(std.mem.trim(u8, pair[0..eq], " \t"));
+        const key = unquote(arena, std.mem.trim(u8, pair[0..eq], " \t")) orelse return null;
         const value_text = std.mem.trim(u8, pair[eq + 1 ..], " \t");
-        const value = unquote(value_text);
+        const value = unquote(arena, value_text) orelse return null;
         // A bare value may not carry the separator: `{ A = B = "v" }` is one
         // pair written three times over, and reading the first `=` as the
         // separator would hand the child `A` and the value `B = "v"`, which is
@@ -770,9 +831,13 @@ fn inlineTable(arena: std.mem.Allocator, raw: []const u8) ?[]const [2][]const u8
 /// that cannot be read whole.
 fn indexOutsideQuotes(raw: []const u8, sep: u8) ?usize {
     var quote: u8 = 0;
-    for (raw, 0..) |c, i| {
+    var i: usize = 0;
+    while (i < raw.len) : (i += 1) {
+        const c = raw[i];
         if (quote != 0) {
-            if (c == quote) quote = 0;
+            // A backslash escapes only inside a basic string, which is where
+            // the `"` that would end one can be written as `\"`.
+            if (quote == '"' and c == '\\') i += 1 else if (c == quote) quote = 0;
             continue;
         }
         if (c == '"' or c == '\'') {
@@ -802,9 +867,15 @@ fn splitQuoted(arena: std.mem.Allocator, inner: []const u8, sep: u8) ?[]const []
     var out: std.ArrayList([]const u8) = .empty;
     var start: usize = 0;
     var quote: u8 = 0;
-    for (inner, 0..) |c, i| {
+    var i: usize = 0;
+    while (i < inner.len) : (i += 1) {
+        const c = inner[i];
         if (quote != 0) {
-            if (c == quote) quote = 0;
+            // A `,` or a `"` an escape stands in front of is text, which is the
+            // other half of what `indexOutsideQuotes` does above: a value that
+            // opened with `"` is still open after a `\"`, so the element is not
+            // cut in the middle of it.
+            if (quote == '"' and c == '\\') i += 1 else if (c == quote) quote = 0;
             continue;
         }
         if (c == '"' or c == '\'') {
@@ -1048,15 +1119,94 @@ test "a comment trails a key, a value and a table header" {
 
 // A `#` between the quotes is text, so the closing quote is found before any
 // comment is cut. Cutting at the first `#` instead left the opening quote glued
-// to the front of the value.
+// to the front of the value. A quote with no closing one is not a value at all,
+// rather than the rest of the line taken as one.
 test "a hash inside a quoted value is text, not a comment" {
-    try std.testing.expectEqualStrings("lite # off", unquote("\"lite # off\""));
-    try std.testing.expectEqualStrings("lite", unquote("\"lite\" # a comment"));
-    try std.testing.expectEqualStrings("lite # off", unquote("'lite # off'"));
-    try std.testing.expectEqualStrings("lite ", unquote("lite # a comment"));
-    try std.testing.expectEqualStrings("\"lite # off", unquote("\"lite # off"));
-    try std.testing.expectEqualStrings("l", unquote("l"));
-    try std.testing.expectEqualStrings("", unquote(""));
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    try std.testing.expectEqualStrings("lite # off", unquote(arena, "\"lite # off\"").?);
+    try std.testing.expectEqualStrings("lite", unquote(arena, "\"lite\" # a comment").?);
+    try std.testing.expectEqualStrings("lite # off", unquote(arena, "'lite # off'").?);
+    try std.testing.expectEqualStrings("lite ", unquote(arena, "lite # a comment").?);
+    try std.testing.expectEqual(@as(?[]const u8, null), unquote(arena, "\"lite # off"));
+    try std.testing.expectEqualStrings("l", unquote(arena, "l").?);
+    try std.testing.expectEqualStrings("", unquote(arena, "").?);
+}
+
+// The escapes of a basic string are the value, and a `#`, a `,` or a `;` behind
+// one of them is text like any other. Reading a basic string as though every
+// `"` ended it cut the value at the first `\"` in it, so a url with a quoted
+// query parameter reached the run with the rest of the line inside it, and a
+// `\uXXXX` for a character outside ASCII reached the provider as six literal
+// characters. A lone surrogate is refused rather than encoded, because UTF-8
+// has no spelling for one.
+test "a basic string carries its escapes, and a literal string carries none" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    // The closing quote is the one that is not escaped, and the escapes decode
+    // to the bytes they name.
+    try std.testing.expectEqualStrings("say \"hi\"", unquote(arena, "\"say \\\"hi\\\"\"").?);
+    try std.testing.expectEqualStrings("a\\b", unquote(arena, "\"a\\\\b\"").?);
+    try std.testing.expectEqualStrings("a\tb\nc", unquote(arena, "\"a\\tb\\nc\"").?);
+    // A `#` behind an escaped quote is still inside the string, so it is not a
+    // comment and the value does not end at it.
+    try std.testing.expectEqualStrings("a \"# b", unquote(arena, "\"a \\\"# b\" # comment").?);
+
+    // A character outside ASCII written as an escape is the character, as
+    // UTF-8: the decoded value is the same bytes a literal one gives.
+    try std.testing.expectEqualStrings("caf\u{e9}", unquote(arena, "\"caf\\u00e9\"").?);
+    try std.testing.expectEqualStrings("\u{1f600}", unquote(arena, "\"\\U0001f600\"").?);
+    // A literal one is copied through byte for byte, and a string with no
+    // escape at all is the caller's own bytes rather than a copy of them.
+    const literal = "caf\u{e9} \u{1f600}";
+    try std.testing.expectEqualStrings(literal, unquote(arena, "\"" ++ literal ++ "\"").?);
+
+    // A single-quoted value is a literal string: nothing in it is an escape, so
+    // a backslash is a backslash and a `\"` is two characters.
+    try std.testing.expectEqualStrings("a\\tb", unquote(arena, "'a\\tb'").?);
+    try std.testing.expectEqualStrings("\\u00e9", unquote(arena, "'\\u00e9'").?);
+
+    // What cannot be read is not a value. A lone surrogate, a half of a
+    // supplementary character, has no UTF-8 spelling and is refused; so is an
+    // escape TOML does not define, a short one, and one past the last code
+    // point.
+    try std.testing.expectEqual(@as(?[]const u8, null), unquote(arena, "\"\\ud800\""));
+    try std.testing.expectEqual(@as(?[]const u8, null), unquote(arena, "\"\\udfff\\udbff\""));
+    try std.testing.expectEqual(@as(?[]const u8, null), unquote(arena, "\"\\U00110000\""));
+    try std.testing.expectEqual(@as(?[]const u8, null), unquote(arena, "\"\\q\""));
+    try std.testing.expectEqual(@as(?[]const u8, null), unquote(arena, "\"\\u00\""));
+    try std.testing.expectEqual(@as(?[]const u8, null), unquote(arena, "\"\\"));
+    // A `#` that is not escaped is still a comment on a value that has no
+    // closing quote, and the value is refused rather than cut.
+    try std.testing.expectEqual(@as(?[]const u8, null), unquote(arena, "\"unterminated # cut here"));
+
+    // And a config reads through the whole path: the escapes are decoded
+    // before the value is validated, and a value that cannot be decoded is
+    // named as a bad one rather than kept as the text it was written in.
+    const url = parse(arena, "base_url = \"https://h/a?b=\\\"x\\\"&c=\\u00e9\"\n");
+    try std.testing.expect(url.problem == null);
+    try std.testing.expectEqualStrings("https://h/a?b=\"x\"&c=\u{e9}", url.base_url);
+    const surrogate = parse(arena, "base_url = \"https://h/\\ud800\"\n");
+    try std.testing.expectEqualStrings("base_url", surrogate.problem.?.key);
+}
+
+// A list is cut on the separators outside the quotes, which a `,` behind an
+// escape is not. `splitQuoted` and `indexOutsideQuotes` read the two quoting
+// forms the way `unquote` does, so the element and the comment are found at the
+// same place the value ends.
+test "a separator behind an escape stays inside the element" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    const list = parse(arena, "deny_commands = [\"echo \\\"a,b\\\"\", \"rm -rf / # go\"]\n");
+    try std.testing.expect(list.problem == null);
+    try std.testing.expectEqual(@as(usize, 2), list.deny_commands.len);
+    try std.testing.expectEqualStrings("echo \"a,b\"", list.deny_commands[0]);
+    try std.testing.expectEqualStrings("rm -rf / # go", list.deny_commands[1]);
 }
 
 test "a config an editor saved with a byte order mark reads the same" {
