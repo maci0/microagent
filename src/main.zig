@@ -289,7 +289,12 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
     defer threaded.deinit();
     var environ_map = try minimal.environ.createMap(gpa);
     defer environ_map.deinit();
-    return runMain(.{
+    // `runMain` reports the exit status rather than leaving the process from
+    // inside itself: a `std.process.exit` between two of its defers skips
+    // them, and the one it skips on a failed run is the MCP shutdown, which is
+    // what kills the server process groups. The exit is here instead, after
+    // every defers this frame owns has run.
+    const status = try runMain(.{
         .minimal = minimal,
         .arena = &arena,
         .gpa = gpa,
@@ -297,9 +302,10 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
         .environ_map = &environ_map,
         .preopens = .empty,
     });
+    if (status != 0) std.process.exit(status);
 }
 
-fn runMain(init: std.process.Init) !void {
+fn runMain(init: std.process.Init) !u8 {
     const gpa = init.gpa;
     const io = init.io;
 
@@ -313,7 +319,7 @@ fn runMain(init: std.process.Init) !void {
     // `microagent update` is a subcommand, not a prompt: it is dispatched
     // before the agent's own flags so it never needs an API key.
     if (args.items.len > 1 and std.mem.eql(u8, args.items[1], "update")) {
-        std.process.exit(update_mod.run(io, gpa, init.arena.allocator(), init.environ_map, args.items[2..]));
+        return update_mod.run(io, gpa, init.arena.allocator(), init.environ_map, args.items[2..]);
     }
 
     // `--help` and `--version` before the environment is read, so a variable
@@ -325,7 +331,7 @@ fn runMain(init: std.process.Init) !void {
     // update`, dispatched above, answers the same way.
     if (earlyAction(args.items[1..])) |action| {
         writeAction(io, action);
-        return;
+        return 0;
     }
 
     var opts: Options = .{};
@@ -361,7 +367,7 @@ fn runMain(init: std.process.Init) !void {
     var err_buf: [512]u8 = undefined;
     if (parseArgs(&err_buf, args.items[1..], &opts)) |msg| return usageError(io, "{s}", .{msg});
     writeAction(io, opts.action);
-    if (opts.action != .run) return;
+    if (opts.action != .run) return 0;
 
     if (opts.prompt.len == 0) return usageError(io, "no prompt: pass it as an argument or with --print", .{});
     tool_mod.forwardInterruptsToToolGroup();
@@ -436,13 +442,14 @@ fn runMain(init: std.process.Init) !void {
             @errorName(err),
         });
         net.writeErr(io, msg);
-        std.process.exit(1);
+        return 1;
     };
     // A run that stopped at a ceiling still has the model's words on stdout,
     // and they are a prefix of the work rather than an answer to it. Reporting
     // 0 would tell a script reading them that the task finished, which is the
     // one claim a ceiling-truncated answer cannot support.
-    if (ended != .answered) std.process.exit(exit_incomplete);
+    if (ended != .answered) return exit_incomplete;
+    return 0;
 }
 
 /// Injected once when a run that already edited the tree stops without having
@@ -2226,10 +2233,15 @@ fn authHeaders(arena: std.mem.Allocator, api_key: []const u8) !std.http.Client.R
 /// receive timeout turns that hang into a read error the loop already handles.
 /// Applied per request because the client pools connections and `std.http` has
 /// no per-request read timeout.
-fn setStallTimeout(handle: std.posix.socket_t, seconds: u32) void {
+///
+/// A socket that refused the option leaves a read that can block forever, and
+/// that is the whole failure this exists to prevent, so the refusal is the
+/// caller's to hear about: swallowing it would run the turn with the guard
+/// silently absent and nothing to tell that from a socket that took it.
+fn setStallTimeout(handle: std.posix.socket_t, seconds: u32) !void {
     if (@import("builtin").os.tag == .windows or seconds == 0) return;
     const tv = std.posix.timeval{ .sec = @intCast(seconds), .usec = 0 };
-    std.posix.setsockopt(handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {};
+    return std.posix.setsockopt(handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv));
 }
 
 /// Streams one completion, printing visible text as it arrives and accumulating
@@ -2303,8 +2315,10 @@ fn streamChat(
             return err;
         };
         req_slot = req;
+        // A turn with no stall guard can hang until the caller kills it, so the
+        // failure to install one ends the request rather than reading on.
         if (req_slot.?.connection) |connection|
-            setStallTimeout(connection.stream_reader.stream.socket.handle, opts.stall_timeout_s);
+            try setStallTimeout(connection.stream_reader.stream.socket.handle, opts.stall_timeout_s);
         var open = &req_slot.?;
         sendRequest(open, &body_chunk, prefix_now, msgs) catch |err| {
             if (worthAnotherAttempt(.sending, err) and waitBeforeRetry(io, arena, shown_url, attempt, "sending the request body to", err, budget)) continue;
