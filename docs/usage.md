@@ -727,7 +727,9 @@ from a failed invocation.
 ### Session log
 
 Each run appends one JSONL record per model response to `~/.microagent/sessions/<unix-ns>.jsonl`, so
-a monitor can follow a run while it is going. `MICROAGENT_SESSION_DIR` moves the store and an empty
+a monitor can follow a run while it is going. A turn whose provider call never answered gets a record
+of the same shape carrying the reason, so the log ends where the run ended rather than at the last
+response that arrived. `MICROAGENT_SESSION_DIR` moves the store and an empty
 value turns it off. A run that finds its name taken writes `-1`, `-2`, ... beside it rather than over
 it. The store keeps the 200 most recent runs and prunes older ones, and it drops any log older than 30
 days whatever the count says, so a machine that runs rarely does not keep every run it has ever done.
@@ -736,12 +738,17 @@ days whatever the count says, so a machine that runs rarely does not keep every 
 {"ts":1790608347342,"cwd":"/home/you/Desktop/Projects/microagent","model":"deepseek/deepseek-v4-flash","finish_reason":"stop","served_model":"deepseek/deepseek-v4-flash-0726","fingerprint":"fp_9c1e","elapsed_ms":1448,"usage":{"prompt_tokens":998,"cached_tokens":896,"completion_tokens":19,"reasoning_tokens":16,"total_tokens":1017}}
 ```
 
+```json
+{"ts":1790608351204,"cwd":"/home/you/Desktop/Projects/microagent","model":"deepseek/deepseek-v4-flash","finish_reason":"","served_model":"","fingerprint":"","error":"ConnectionRefused","elapsed_ms":902,"usage":{"prompt_tokens":0,"cached_tokens":0,"completion_tokens":0,"reasoning_tokens":0,"total_tokens":0}}
+```
+
 | key | meaning |
 | --- | --- |
-| `usage` | this response's own counters, not the run's cumulative ones |
+| `usage` | this response's own counters, not the run's cumulative ones. Zero on a record carrying `error`, because no response was billed and none arrived. |
 | `cwd` | the directory the run works in |
-| `finish_reason` | why the provider stopped. `length` means the response was cut at `--max-tokens` and the run says so on stderr; the empty string is a stream that carried no reason. |
+| `finish_reason` | why the provider stopped. `length` means the response was cut at `--max-tokens` and the run says so on stderr; the empty string is a stream that carried no reason, and every value on a record carrying `error`. |
 | `model` / `served_model` / `fingerprint` | what the run asked for, what the provider says answered, and the weights fingerprint it reported. A gateway routes a name to whichever snapshot it holds that week, so two runs are comparable only when these match. Empty when the stream named none. |
+| `error` | why the provider call never answered, on a record for a turn that failed rather than a turn that returned. Absent from a record for a turn that returned. |
 | `elapsed_ms` | the model's time on this response, for tokens per second without tool time mixed in. Measured on a clock that stops while the machine is suspended (`--budget`, by contrast, counts suspend: it bounds wall time). |
 
 A directory that cannot be created, or a log that cannot be opened or written, is named on stderr

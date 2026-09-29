@@ -2577,7 +2577,15 @@ fn runTurn(
     // the reason already on stderr.
     var result = streamChat(client, io, gpa, arena, opts, ep, prefix, budget, msgs.items) catch |err| switch (err) {
         error.BudgetExhausted => return .cut_off,
-        else => return err,
+        // A call the provider never answered is still a turn the log has to
+        // account for. Without the record the run's last line is the last
+        // response that did arrive, so a monitor counting records reads a run
+        // that ended where it was last heard from rather than one that failed
+        // there, and the reason survives only on a stderr nobody is reading.
+        else => {
+            session_mod.writeFailure(io, arena, session, session_mod.elapsedMs(io, model_clock, asked), @errorName(err));
+            return err;
+        },
     };
     defer result.deinit(gpa);
     // The model time is taken here, before the tool calls `finishTurn` runs:

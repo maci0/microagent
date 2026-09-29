@@ -497,12 +497,48 @@ pub fn elapsedMs(io: Io, clock: Io.Clock, since: i96) u64 {
 /// the log is dropped, so the run is not left appending to a file nothing reads
 /// and saying nothing about the gap.
 pub fn writeRecord(io: Io, arena: std.mem.Allocator, session: *?Session, elapsed_ms: u64, result: *const chat.ChatResult) void {
+    write(io, arena, session, .{ .elapsed_ms = elapsed_ms, .response = result });
+}
+
+/// One turn whose provider call never answered, as a line of the same shape a
+/// response is.
+///
+/// A record per response is not a record per turn: a run that dies on an HTTP
+/// 500, a transport error or a stall on its third request leaves a log whose
+/// last line is the second response, and a reader counting records finds a run
+/// that ended where it was last heard from rather than one that failed there.
+/// The reason is this program's own `@errorName` text, and the counters are
+/// zero because no response was billed and none arrived; a monitor summing
+/// `usage` is unaffected, and one looking for the end of a run finds it.
+pub fn writeFailure(io: Io, arena: std.mem.Allocator, session: *?Session, elapsed_ms: u64, failure: []const u8) void {
+    write(io, arena, session, .{ .elapsed_ms = elapsed_ms, .failure = failure });
+}
+
+/// What one line says about one turn. A turn the provider answered carries the
+/// response; a turn it did not carries the reason and no response. One shape
+/// rather than two, so a reader does not have to know which of the two a line
+/// is before it can read the line.
+pub const Record = struct {
+    /// The turn's model time, on the run's own clock and taken the same way
+    /// `writeRecord`'s caller takes it, so a failed turn's time and a
+    /// successful one's are the same measure.
+    elapsed_ms: u64,
+    /// The response, or null for a call that never answered.
+    response: ?*const chat.ChatResult = null,
+    /// The `@errorName` for a call that never answered, and empty for one that
+    /// did. It is this program's own vocabulary rather than a provider's
+    /// message, so it carries no provider bytes and needs nothing but the
+    /// escaper every other string in the line gets.
+    failure: []const u8 = "",
+};
+
+fn write(io: Io, arena: std.mem.Allocator, session: *?Session, record: Record) void {
     const s = session.* orelse return;
     // `s.dir` is the directory the run was given, escaped for the reason
     // `createSessionLog` gives.
     const shown = chat.safeTextAll(arena, s.dir);
     const ts_ms = recordStampMs(Io.Clock.real.now(io).nanoseconds);
-    const line = sessionRecord(arena, ts_ms, s.cwd, s.model, elapsed_ms, result) catch |err| {
+    const line = sessionRecord(arena, ts_ms, s.cwd, s.model, record) catch |err| {
         net.note(io, arena, "microagent: a session record for {s} could not be built ({s}); the rest of this run is not recorded\n", .{ shown, @errorName(err) });
         close(io, session);
         return;
@@ -519,48 +555,78 @@ pub fn writeRecord(io: Io, arena: std.mem.Allocator, session: *?Session, elapsed
 /// growth ladder still covers a record that outgrows it.
 const session_record_scaffolding_bytes = 512;
 
-/// One response's line: this response's own counters, not the run's cumulative
-/// ones, so a reader sums them; the directory it ran in; the model the
-/// provider said answered, beside the one the run asked for; and the model time
-/// it took. The keys are the OpenAI-shaped ones toktop already reads by name.
+/// One turn's line: this turn's own counters, not the run's cumulative ones, so
+/// a reader sums them; the directory it ran in; the model the provider said
+/// answered, beside the one the run asked for; and the model time it took. The
+/// keys are the OpenAI-shaped ones toktop already reads by name.
+///
+/// A turn that has no `Record.response` writes the empty string for the three
+/// fields a stream fills and an `error` beside them, so the line is the same
+/// object a monitor already parses rather than a second shape it has to learn.
 fn sessionRecord(
     allocator: std.mem.Allocator,
     ts_ms: i64,
     cwd: []const u8,
     model: []const u8,
-    elapsed_ms: u64,
-    result: *const chat.ChatResult,
+    record: Record,
 ) ![]u8 {
     // Sized from the strings the record carries, so it is allocated once
     // rather than doubling up to a few hundred bytes on a ladder of copies.
     // Escape expansion can still push it past this, which the ladder handles.
     var jb = chat.JsonBuf.initCapacity(allocator, session_record_scaffolding_bytes +
-        cwd.len + model.len + result.finish_reason.len + result.served_model.len + result.fingerprint.len);
+        cwd.len + model.len + record.failure.len + streamStringBytes(record.response));
     const w = jb.writer();
     try w.print("{{\"ts\":{d},\"cwd\":", .{ts_ms});
     try chat.writeJsonString(w, cwd);
     try w.writeAll(",\"model\":");
     try chat.writeJsonString(w, model);
-    // Why the provider stopped, so a record that was cut at the generation
-    // ceiling is distinguishable from one that ran to its own end. The empty
-    // string is a stream that carried no finish_reason at all.
-    try w.writeAll(",\"finish_reason\":");
-    try chat.writeJsonString(w, result.finish_reason);
-    // The model that answered, next to the one the run asked for. A gateway
-    // routes a name to whichever snapshot it holds this week, so the request's
-    // `model` is what was asked for and this is what produced the record: a
-    // reader comparing two runs needs both, and `system_fingerprint` is the
-    // half that moves when the weights do behind a served name that did not.
-    // Both are empty strings when the provider's stream named neither.
-    try w.writeAll(",\"served_model\":");
-    try chat.writeJsonString(w, result.served_model);
-    try w.writeAll(",\"fingerprint\":");
-    try chat.writeJsonString(w, result.fingerprint);
+    // A turn with no response is a call that never answered, so the three fields
+    // a stream fills are the empty strings and the reason sits beside them.
+    const result = record.response;
+    if (result) |r| {
+        // Why the provider stopped, so a record that was cut at the generation
+        // ceiling is distinguishable from one that ran to its own end. The empty
+        // string is a stream that carried no finish_reason at all.
+        try w.writeAll(",\"finish_reason\":");
+        try chat.writeJsonString(w, r.finish_reason);
+        // The model that answered, next to the one the run asked for. A gateway
+        // routes a name to whichever snapshot it holds this week, so the request's
+        // `model` is what was asked for and this is what produced the record: a
+        // reader comparing two runs needs both, and `system_fingerprint` is the
+        // half that moves when the weights do behind a served name that did not.
+        // Both are empty strings when the provider's stream named neither.
+        try w.writeAll(",\"served_model\":");
+        try chat.writeJsonString(w, r.served_model);
+        try w.writeAll(",\"fingerprint\":");
+        try chat.writeJsonString(w, r.fingerprint);
+    } else {
+        try w.writeAll(",\"finish_reason\":\"\",\"served_model\":\"\",\"fingerprint\":\"\"");
+    }
+    if (record.failure.len != 0) {
+        try w.writeAll(",\"error\":");
+        try chat.writeJsonString(w, record.failure);
+    }
+    // A turn with no response was never billed, so it reports the zero every
+    // counter starts at rather than a field spelled separately here.
+    const usage: chat.Usage = if (result) |r| .{
+        .prompt = r.prompt_tokens,
+        .cached = r.cached_tokens,
+        .completion = r.completion_tokens,
+        .reasoning = r.reasoning_tokens,
+        .total = r.total_tokens,
+    } else .{};
     try w.print(",\"elapsed_ms\":{d},\"usage\":{{" ++ chat.usage_fields, .{
-        elapsed_ms, result.prompt_tokens, result.cached_tokens, result.completion_tokens, result.reasoning_tokens, result.total_tokens,
+        record.elapsed_ms, usage.prompt, usage.cached, usage.completion, usage.reasoning, usage.total,
     });
     try w.writeAll("}}\n");
     return jb.items();
+}
+
+/// The bytes the three stream strings add to the reservation above, or zero
+/// for a turn that never got one.
+fn streamStringBytes(result: ?*const chat.ChatResult) usize {
+    const r = result orelse return 0;
+    return r.finish_reason.len + r.served_model.len + r.fingerprint.len;
 }
 
 test "the session directory is the variable, trimmed, and empty means off" {
@@ -613,7 +679,7 @@ test "session record carries one response's counters, cwd and model time" {
     result.served_model = try arena.dupe(u8, "deepseek/deepseek-v4-flash-0726");
     result.fingerprint = try arena.dupe(u8, "fp_9c1e");
 
-    const line = try sessionRecord(arena, 1759000000000, "/home/me/proj", "deepseek/deepseek-v4-flash", 1234, &result);
+    const line = try sessionRecord(arena, 1759000000000, "/home/me/proj", "deepseek/deepseek-v4-flash", .{ .elapsed_ms = 1234, .response = &result });
     try std.testing.expectEqualStrings(
         "{\"ts\":1759000000000,\"cwd\":\"/home/me/proj\",\"model\":\"deepseek/deepseek-v4-flash\"," ++
             "\"finish_reason\":\"stop\"," ++
@@ -624,11 +690,48 @@ test "session record carries one response's counters, cwd and model time" {
     );
 }
 
+// A turn the provider never answered is a line of the same shape, because a
+// monitor walks one store and parses one object per line. The three fields a
+// stream fills are the empty strings a stream that carried none would write, so
+// only `error` says what happened, and the counters are the zeros the run was
+// never charged for.
+test "a turn that never got a response is a record with the reason and no counters" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    const line = try sessionRecord(arena, 1759000000000, "/home/me/proj", "deepseek/deepseek-v4-flash", .{
+        .elapsed_ms = 900,
+        .failure = "ConnectionRefused",
+    });
+    try std.testing.expectEqualStrings(
+        "{\"ts\":1759000000000,\"cwd\":\"/home/me/proj\",\"model\":\"deepseek/deepseek-v4-flash\"," ++
+            "\"finish_reason\":\"\",\"served_model\":\"\",\"fingerprint\":\"\"," ++
+            "\"error\":\"ConnectionRefused\"," ++
+            "\"elapsed_ms\":900,\"usage\":{\"prompt_tokens\":0,\"cached_tokens\":0," ++
+            "\"completion_tokens\":0,\"reasoning_tokens\":0,\"total_tokens\":0}}\n",
+        line,
+    );
+
+    // The reason is this program's own vocabulary, but a caller that names its
+    // own error is one `writeFailure` call away, and a newline in it would split
+    // the record into two the monitor will not join back together.
+    const split = try sessionRecord(arena, 2, "/tmp", "m", .{ .elapsed_ms = 1, .failure = "a\"b\\c\nd" });
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, split, "\n"));
+
+    // And a line a monitor already parses: the whole record is one JSON object,
+    // so the failure branch did not fall back to a second shape.
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena, line, .{});
+    try std.testing.expect(parsed == .object);
+    try std.testing.expectEqualStrings("ConnectionRefused", parsed.object.get("error").?.string);
+    try std.testing.expectEqual(@as(i64, 0), parsed.object.get("usage").?.object.get("total_tokens").?.integer);
+}
+
 test "session record escapes a directory that needs it" {
     var state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer state.deinit();
     var result: chat.ChatResult = .{ .completion_tokens = 4 };
-    const line = try sessionRecord(state.allocator(), 1, "/tmp/a\"b\\c", "m", 5, &result);
+    const line = try sessionRecord(state.allocator(), 1, "/tmp/a\"b\\c", "m", .{ .elapsed_ms = 5, .response = &result });
     try std.testing.expectEqualStrings(
         "{\"ts\":1,\"cwd\":\"/tmp/a\\\"b\\\\c\",\"model\":\"m\"," ++
             "\"finish_reason\":\"\"," ++
@@ -1567,7 +1670,7 @@ fn fuzzSessionRecord(_: void, smith: *std.testing.Smith) !void {
         .fingerprint = fingerprint,
     };
 
-    const line = try sessionRecord(arena, ts_ms, cwd, model, elapsed_ms, &result);
+    const line = try sessionRecord(arena, ts_ms, cwd, model, .{ .elapsed_ms = elapsed_ms, .response = &result });
 
     // One record, one line. The store is JSONL and a monitor reads it while the
     // run is still going, so a newline inside any of the strings splits the

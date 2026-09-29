@@ -127,6 +127,21 @@ release, and `microagent update` moves you to it.
 
 ### Changed
 
+- A tool's description and its argument schema are named in the system prompt
+  as text the model does not take orders from. The rule that covers tool
+  results did not reach them, and they are the one place a remote server's bytes
+  sit where the model reads instructions: an MCP server writes both, and the
+  schema is sent as a tool definition ahead of the conversation on every turn,
+  so a description carrying an instruction reaches further than a tool result
+  does. The prompt says who writes them and bounds what one is still good for.
+
+- A turn whose provider call never answered is recorded in the session log. The
+  log held one record per response, so a run that died on an HTTP 500 or a
+  stalled socket left a last line that read as a clean end, and the reason
+  survived only on a stderr nobody was reading. The record is the same JSON
+  object a monitor already parses, with an `error` beside counters that are zero
+  because nothing was billed.
+
 - `microagent --help` names `-c` beside `--check` in the `update` subcommand
   synopsis, so it reads the way `microagent update --help`, the man page
   synopsis and the update's own usage line already did. The top-level help is
