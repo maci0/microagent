@@ -131,10 +131,16 @@ fn trustedGithubUrl(url: []const u8) bool {
 
 /// The `GITHUB_TOKEN` as a bearer value, or null when unset or blank. Lives in
 /// the run arena.
-fn githubBearer(arena: std.mem.Allocator, env: *std.process.Environ.Map) ?[]const u8 {
+///
+/// The outer error is the allocation the header is built with. It is not
+/// folded into the null: a token that is simply absent is an anonymous
+/// request, and one that was set and could not be copied is the same
+/// anonymous request with nothing on stderr, which arrives as the rate-limit
+/// refusal the token was there to avoid.
+fn githubBearer(arena: std.mem.Allocator, env: *std.process.Environ.Map) (std.mem.Allocator.Error!?[]const u8) {
     const tok = std.mem.trim(u8, env.get("GITHUB_TOKEN") orelse return null, net.env_surrounding);
     if (tok.len == 0) return null;
-    return std.fmt.allocPrint(arena, "Bearer {s}", .{tok}) catch null;
+    return try std.fmt.allocPrint(arena, "Bearer {s}", .{tok});
 }
 
 /// The bearer only for api.github.com; the public asset hosts never see it.
@@ -536,7 +542,8 @@ pub fn run(
     var client: std.http.Client = .{ .allocator = gpa, .io = io };
     defer client.deinit();
     net.loadCaBundle(&client, io, gpa, net.caBundlePath(env), arena);
-    const bearer = githubBearer(arena, env);
+    const bearer = githubBearer(arena, env) catch
+        return fail(io, "the GITHUB_TOKEN could not be held for the request; the release is fetched anonymously", .{});
 
     const body = fetch(io, &client, arena, "the latest release of " ++ default_repo, release_api_url, bearer, max_api_bytes) orelse return 1;
     const rel = parseRelease(arena, body) catch |err|
@@ -838,11 +845,11 @@ test "update: the GitHub token is trimmed, and an empty one is no token" {
     defer state.deinit();
     const arena = state.allocator();
 
-    try std.testing.expect(githubBearer(arena, &env) == null);
+    try std.testing.expect(try githubBearer(arena, &env) == null);
     try env.put("GITHUB_TOKEN", "ghp_abc123\n");
-    try std.testing.expectEqualStrings("Bearer ghp_abc123", githubBearer(arena, &env).?);
+    try std.testing.expectEqualStrings("Bearer ghp_abc123", (try githubBearer(arena, &env)).?);
     try env.put("GITHUB_TOKEN", "  ");
-    try std.testing.expect(githubBearer(arena, &env) == null);
+    try std.testing.expect(try githubBearer(arena, &env) == null);
 }
 
 test "update: only the releases API carries the GitHub token" {

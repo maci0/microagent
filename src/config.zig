@@ -193,6 +193,10 @@ pub const Problem = struct {
         /// joined, so the key holds only the values declared before the one
         /// that was lost.
         list_truncated,
+        /// An MCP server that could not be recorded, so it and every server
+        /// after it are not in this run at all. The key is the server's name,
+        /// or the `[[mcp]]` header as written where the name was never read.
+        server_dropped,
     };
 };
 
@@ -230,6 +234,11 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8) Config {
                 section = .sandbox;
             } else if (std.mem.eql(u8, header.name, "mcp") and header.array) {
                 servers.append(arena, .{}) catch {
+                    // The header is what is named, for the reason the header
+                    // this reader cannot follow is: a server the operator
+                    // wrote down that this run does not start reads from
+                    // outside as one that was never configured.
+                    config.note(.{ .key = line, .kind = .server_dropped });
                     section = .other;
                     open = null;
                     continue;
@@ -304,7 +313,13 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8) Config {
             .api_key_env = setting.api_key_env,
             .api_key_header = setting.api_key_header,
             .timeout_s = setting.timeout_s,
-        }) catch break;
+        }) catch {
+            // A preset the file left enabled and this run cannot record is a
+            // server whose tools are missing from every request, and the file
+            // said nothing about it, so the preset is named here.
+            config.note(.{ .key = @tagName(preset), .kind = .server_dropped });
+            break;
+        };
     }
 
     var entries: std.ArrayList(mcp_mod.Entry) = .empty;
@@ -333,6 +348,9 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8) Config {
             config.note(.{ .key = server.name, .kind = .duplicate_server });
             continue;
         }
+        // A server that survived every check above and still could not be
+        // copied is a server this run does not start, and each check above
+        // names the server it skipped. This one is named the same way.
         entries.append(arena, .{
             .name = server.name,
             .command = server.command,
@@ -342,7 +360,10 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8) Config {
             .api_key_env = server.api_key_env,
             .api_key_header = server.api_key_header,
             .timeout_s = server.timeout_s,
-        }) catch break;
+        }) catch {
+            config.note(.{ .key = server.name, .kind = .server_dropped });
+            break;
+        };
     }
     config.mcp = entries.items;
     return config;
@@ -1138,6 +1159,24 @@ test "a list declared twice is joined, and a join that fails names the key" {
     try std.testing.expectEqualSlices([]const u8, &first, joined);
     try std.testing.expectEqual(Problem.Kind.list_truncated, config.problem.?.kind);
     try std.testing.expectEqualStrings("deny_commands", config.problem.?.key);
+}
+
+// Every way a server the file wrote down fails to reach `config.mcp` says so.
+// A server that is skipped with a name the operator cannot read is one the
+// model is never offered the tools of, and the file is the only place the
+// operator wrote them down.
+test "an MCP server this run cannot record is named, not dropped in silence" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    // The `[[mcp]]` header opens the server, so this allocation is the first
+    // one the reader makes and the only one needed to lose a whole table.
+    var failing: std.testing.FailingAllocator = .init(arena, .{ .fail_index = 0 });
+    const dropped = parse(failing.allocator(), "[[mcp]]\nname = \"fs\"\ncommand = \"npx\"\n");
+    try std.testing.expectEqual(Problem.Kind.server_dropped, dropped.problem.?.kind);
+    try std.testing.expectEqualStrings("[[mcp]]", dropped.problem.?.key);
+    try std.testing.expectEqual(@as(usize, 0), dropped.mcp.len);
 }
 
 test "the sandbox is the [sandbox] table with enabled and writable, and only true or false" {

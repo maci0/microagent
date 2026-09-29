@@ -504,7 +504,7 @@ fn runMain(init: std.process.Init) !u8 {
     // Discovered before the trace and before the first request: the listing is
     // part of the system prompt, so a skill added between the two reads would
     // otherwise be advertised without a body to load.
-    const skill_roots = skill_mod.roots(init.environ_map, arena, loaded.skills);
+    const skill_roots = skill_mod.roots(io, init.environ_map, arena, loaded.skills);
     opts.skills = skill_mod.discover(io, arena, skill_roots);
     // The servers are connected before the first request for the same reason:
     // their tools are in the schema the request carries. A server that fails
@@ -584,7 +584,17 @@ fn readAgentsFile(io: Io, arena: std.mem.Allocator, dir: std.Io.Dir, path: []con
     // One byte past the cap is what says the file is longer than the run
     // follows: the read stops there, so a repository cannot hand the prompt a
     // megabyte by naming the file.
-    const buf = arena.alloc(u8, max_agents_bytes + 1) catch return null;
+    const buf = arena.alloc(u8, max_agents_bytes + 1) catch |err| {
+        // Not a file that could not be read: the file opened. This is the run
+        // failing to hold what it read, which every other way out of this
+        // function names and which used to leave the prompt without them and
+        // stderr without a word.
+        net.note(io, arena, "microagent: the repository instructions {s} could not be held for this run's prompt ({s}); this run follows the system prompt alone\n", .{
+            chat_mod.safeTextAll(arena, path),
+            @errorName(err),
+        });
+        return null;
+    };
     var got: usize = 0;
     while (got < buf.len) {
         const n = file.readStreaming(io, &.{buf[got..]}) catch |err| switch (err) {
@@ -1800,6 +1810,7 @@ fn reportConfigProblem(io: Io, arena: std.mem.Allocator, source: ConfigSource, p
         .bad_server => net.note(io, arena, "microagent: config {s}: a [[mcp]] entry with no usable name or command is skipped\n", .{configPathText(arena, source)}),
         .duplicate_server => net.note(io, arena, "microagent: config {s}: the MCP server '{s}' is declared twice; the second entry is skipped\n", .{ configPathText(arena, source), key }),
         .list_truncated => net.note(io, arena, "microagent: config {s}: '{s}' is declared more than once and its values could not be joined; only the ones declared before the lost one are in force\n", .{ configPathText(arena, source), key }),
+        .server_dropped => net.note(io, arena, "microagent: config {s}: '{s}' could not be recorded, and neither is any server declared after it; only the ones before it are in force\n", .{ configPathText(arena, source), key }),
     }
 }
 

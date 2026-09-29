@@ -1232,8 +1232,13 @@ pub fn connect(
     // one server and one slot of `ready`; the tool list, the notes and which
     // server answers for a name still follow the order the file wrote, because
     // the results are read back in that order once every task has finished.
-    const ready = arena.alloc(bool, spawned.items.len) catch {
+    // Every server is reaped and the run carries on with none, which is the
+    // same thing this function does with a server it cannot start. The line
+    // says so, because a run with no MCP tools at all and nothing on stderr is
+    // a run whose operator cannot tell from a missing config.
+    const ready = arena.alloc(bool, spawned.items.len) catch |err| {
         for (spawned.items) |*server| server.reap(io);
+        net.note(io, arena, "microagent: the {d} configured MCP server(s) could not be connected ({s}); none of them is in this run\n", .{ spawned.items.len, @errorName(err) });
         return .{ .items = &.{} };
     };
     @memset(ready, false);
@@ -1263,14 +1268,23 @@ pub fn connect(
     var connected: std.ArrayList(Server) = .empty;
     for (spawned.items, ready) |*server, ok| {
         if (!ok) {
+            // A handshake that gave up before it could record why leaves the
+            // field empty, and a line reading "server X: ; it is skipped"
+            // names the server without saying one word about what stopped it.
+            // The wording is the one the lazy handshake's own refusal uses.
             net.note(io, arena, "microagent: MCP server {s}: {s}; it is skipped\n", .{
                 chat.safeTextAll(arena, server.name),
-                server.last_error,
+                if (server.last_error.len != 0) server.last_error else "no answer",
             });
             server.reap(io);
             continue;
         }
-        connected.append(arena, server.*) catch server.reap(io);
+        connected.append(arena, server.*) catch |err| {
+            net.note(io, arena, "microagent: MCP server {s}: it could not be recorded ({s}); it is stopped and skipped\n", .{
+                chat.safeTextAll(arena, server.name), @errorName(err),
+            });
+            server.reap(io);
+        };
     }
     return .{ .items = connected.items };
 }
