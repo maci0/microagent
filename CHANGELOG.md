@@ -22,6 +22,13 @@ release, and `microagent update` moves you to it.
 
 ### Changed
 
+- The run says where it is. Every `bash` call starts in the current directory and no shell carries
+  over, but the prompt never named that directory, so on a fresh context the model guessed one and
+  prefixed commands with `cd <guess> || cd .`. The prompt and the bash tool now say the call starts
+  where the run is, and the `ast` tool names ast-grep's language list, which has no Zig. Against one
+  review prompt the agent went from three `cd /home/...` commands of four to six relative commands
+  and none; a request is 227 bytes longer.
+
 - The `web_search` preset's `web_search_exa` is described to the model without exa's
   `category:people` and `category:company` hints. Nothing in a run needs a profile index, and a query
   naming an individual puts that name in a third party's search log to answer a coding task. Both
