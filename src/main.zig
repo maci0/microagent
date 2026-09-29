@@ -17,6 +17,7 @@
 //! parsers, this one and `update`'s, import it, and only their fuzzers call it.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 
 const build_options = @import("build_options");
@@ -248,7 +249,42 @@ const Options = struct {
     action: Action = .run,
 };
 
-pub fn main(init: std.process.Init) !void {
+/// The allocator behind `init.gpa`. std's start code picks `SmpAllocator` for
+/// a multi-threaded build with no libc, and that allocator hops to another
+/// CPU's slot and maps a fresh 64 KB slab whenever the current slot has none
+/// for a size class. A process that allocates from one thread at a time pays
+/// that on nearly every first use of a class: `--version` alone mapped 89
+/// slabs. The bucket allocator maps a page per size class instead. Debug
+/// builds keep the checked one, so a leak still fails the run that has it.
+var gpa_state: std.heap.DebugAllocator(if (builtin.mode == .Debug) .{} else .{
+    .safety = false,
+    .stack_trace_frames = 0,
+}) = .init;
+
+/// Builds what std's start code would hand `main`, around `gpa_state` rather
+/// than the allocator start code would choose.
+pub fn main(minimal: std.process.Init.Minimal) !void {
+    defer if (builtin.mode == .Debug) {
+        _ = gpa_state.deinit();
+    };
+    const gpa = gpa_state.allocator();
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(gpa, .{ .argv0 = .init(minimal.args), .environ = minimal.environ });
+    defer threaded.deinit();
+    var environ_map = try minimal.environ.createMap(gpa);
+    defer environ_map.deinit();
+    return runMain(.{
+        .minimal = minimal,
+        .arena = &arena,
+        .gpa = gpa,
+        .io = threaded.io(),
+        .environ_map = &environ_map,
+        .preopens = .empty,
+    });
+}
+
+fn runMain(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
 
