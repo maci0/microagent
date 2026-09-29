@@ -182,6 +182,14 @@ release, and `microagent update` moves you to it.
   workflow's `release-assets` job, which now rehearses the tagged asset names
   so `make sbom` and `make checksums` have the real ones to work on.
 
+- `make check-changelog-history` asks the 0.y bump rule of every released
+  section, not only the one a tag is about to cut. `check-changelog` reads its
+  version from `build.zig.zon`, so the section it checked is never asked again
+  once the next release moves that version: an `Added`, `Changed`, `Removed` or
+  `Security` entry that later lands in an already published patch is history a
+  consumer has read, and no tag will ever name it a second time. The sweep runs
+  in `make check` and in the push workflow, oldest release first.
+
 ### Changed
 
 - `mcp__grep_app__searchGitHub` is offered `query` and its matching flags, and

@@ -81,6 +81,15 @@ jobs:
       - name: the unreleased changelog entry is well formed
         run: make check-unreleased
 
+      # `check-changelog` is asked of the version build.zig.zon declares, so
+      # the 0.y bump rule is checked when a tag is cut and never again: an edit
+      # that moves an `Added` or a `Security` entry into an already published
+      # patch is history a consumer has read, and no tag will ever name it. This
+      # asks the same rule of every released section, oldest first. Make and awk
+      # only, like the step above.
+      - name: every released changelog entry matches its bump
+        run: make check-changelog-history
+
       # A bump that moves build.zig.zon and CHANGELOG.md but leaves the README
       # behind publishes a release whose install snippet still fetches the
       # previous binary, so the README is asked the same question a push asks

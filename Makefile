@@ -15,7 +15,7 @@ BIN := zig-out/bin/microagent
 export LC_ALL := C
 export TZ := UTC
 
-.PHONY: default help preflight version build musl test watch test-sanitize fmt fmt-check fmt-python lint lint-versions lint-lock lint-ci check-sbom check-refs zig-version required-zig-version release-targets check-assets check-asset-run check-binary check-changelog check-changelog-links check-changelog-sections check-unreleased check-readme check-help check-man check-release check-reproducible lint-shell lint-python lint-yaml lint-md check bench gauntlet instructions overhead install release-assets checksums check-checksums sbom sha256-of clean
+.PHONY: default help preflight version build musl test watch test-sanitize fmt fmt-check fmt-python lint lint-versions lint-lock lint-ci check-sbom check-refs zig-version required-zig-version release-targets check-assets check-asset-run check-binary check-changelog check-changelog-links check-changelog-sections check-unreleased check-changelog-history check-readme check-help check-man check-release check-reproducible lint-shell lint-python lint-yaml lint-md check bench gauntlet instructions overhead install release-assets checksums check-checksums sbom sha256-of clean
 
 # The Harbor adapter's directory, the one place that path is written down.
 # lint-lock.sh and lint-versions.sh both take it as an argument rather than
@@ -160,7 +160,7 @@ help:
 	  'fmt                   rewrite every tracked .zig and .py file in format style' \
 	  'fmt-python            rewrite the tracked .py files, which zig fmt does not reach' \
 	  'fmt-check             what check runs over the same files, without rewriting' \
-	  'check                 preflight, zig-version, check-unreleased, check-readme, check-help, check-man, fmt-check, the linters, the tests, an optimized build' \
+	  'check                 preflight, zig-version, check-unreleased, check-changelog-history, check-readme, check-help, check-man, fmt-check, the linters, the tests, an optimized build' \
 	  'lint                  the version and lock checks, the release inventory, then shellcheck, ruff and yamllint' \
 	  'lint-shell            shellcheck over every tracked .sh file' \
 	  'lint-ci               shellcheck over the run: steps in the workflows and composite actions' \
@@ -186,6 +186,7 @@ help:
 	  'check-binary [OPT=...]  the binary this tree builds, started (what check runs)' \
 	  'check-changelog [VERSION=...]  the changelog entry a tag would publish, its shape, and the 0.y policy on it' \
 	  'check-changelog-sections  the five Keep a Changelog headings, once each, in order' \
+	  'check-changelog-history  the 0.y bump policy over every released section, oldest first' \
 	  'check-unreleased      the [Unreleased] entry has the five sections, once each, in order' \
 	  'check-changelog-sections SECTION=...  the same five-section shape under one named heading' \
 	  'check-changelog-links  every heading has the compare link its version implies' \
@@ -597,6 +598,7 @@ check:
 	$(MAKE) preflight
 	$(MAKE) zig-version
 	$(MAKE) check-unreleased
+	$(MAKE) check-changelog-history
 	$(MAKE) check-readme
 	$(MAKE) check-help
 	$(MAKE) check-man
@@ -829,6 +831,28 @@ check-changelog:
 	    exit 1; \
 	  fi; \
 	fi
+
+# The 0.y rule over every released section, not only the one a tag is about to
+# cut. `check-changelog` reads its version from build.zig.zon unless VERSION
+# says otherwise, so the moment the next release bumps the minor the section it
+# just left is never asked again: an edit that moves an `Added` or a `Security`
+# entry into a patch, or drops the `Changed` a minor needs, lands in the
+# published history and nothing refuses it. The tag gate cannot catch that one,
+# the tag is behind it, and a section that has been published is the one a
+# reader has already installed from.
+#
+# Oldest first, so the failure named is the earliest release a consumer is still
+# being pointed at. The section each check prints is dropped: a release
+# publishes that text, and here it is eight copies of notes nobody is reading.
+# The reason a check fails is on stderr and still shows.
+check-changelog-history:
+	@set -eu; \
+	for v in $$(awk '/^## \[/ { \
+	  name = $$0; sub(/^## \[/, "", name); sub(/\].*/, "", name); \
+	  if (name ~ /^[0-9]+\.[0-9]+\.[0-9]+$$/) print name \
+	}' CHANGELOG.md | sort -V); do \
+	  $(MAKE) --no-print-directory check-changelog VERSION=$$v >/dev/null; \
+	done
 
 # The version the README names in the two places a reader copies or trusts: the
 # install snippet's `v=`, and the Status line's version. build.zig.zon is where

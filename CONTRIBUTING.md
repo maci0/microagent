@@ -95,6 +95,7 @@ make lint-ci                # shellcheck over the run: steps in the workflows, o
 make check-asset-run        # the published asset for this host, cross-built and started
 make instructions CHECK=--check   # retired instructions per unit, and a band it must stay inside
 make check-unreleased       # the [Unreleased] entry has the five sections, once each, in order
+make check-changelog-history # the 0.y bump rule over every released section, oldest first
 ```
 
 `make help` lists every target.
@@ -102,7 +103,7 @@ make check-unreleased       # the [Unreleased] entry has the five sections, once
 ### The gate
 
 `make check` runs, in order: `preflight`, `zig-version`,
-`check-unreleased`, `check-readme`, `check-help`, `check-man`, `fmt-check`, `lint`
+`check-unreleased`, `check-changelog-history`, `check-readme`, `check-help`, `check-man`, `fmt-check`, `lint`
 (`lint-versions`, `lint-lock`, `check-sbom`, shellcheck over the tracked scripts
 and over the `run:` steps in the workflows, `ruff check`, `ruff format --check`,
 yamllint, the Markdown check and `check-refs`), `zig build test`,
@@ -341,9 +342,18 @@ of the rules, so a release note is written against something runnable:
 ```sh
 make check-changelog              # the section for the version build.zig.zon declares, its shape, and the 0.y policy on it
 make check-changelog VERSION=0.2.1
+make check-changelog-history      # the same 0.y policy over every released section, oldest first
 make check-readme                 # the README installs and names the version this tree declares
 make check-release TAG=v0.2.1     # what a tag has to satisfy: the version, nothing left under [Unreleased], the README
 ```
+
+`check-changelog` is asked of one version, the one `build.zig.zon` declares, so
+the 0.y bump rule is checked at the moment a tag is cut and never again after it:
+a later edit that moves an `Added` or a `Security` entry into a patch that has
+already been published is history a consumer has read, and no tag will ever name
+it a second time. `check-changelog-history` asks the same rule of every released
+section, oldest first, and runs in `make check` and in the push workflow, so a
+bad bump in the file is a red build rather than a note somebody has to notice.
 
 `make check-changelog` prints the section it checked, which a release publishes
 as its notes, and refuses it on the same five headings `check-unreleased` asks
