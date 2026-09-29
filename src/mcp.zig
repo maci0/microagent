@@ -2272,6 +2272,15 @@ test "a remote entry's url, key variable and key header are held to what they ca
     try std.testing.expect(!validHeaderName("X Api Key"));
     try std.testing.expect(!validHeaderName("X-Key:"));
     try std.testing.expect(!validHeaderName("X-Key\r\nHost"));
+
+    // The bound is the same one `validName` carries, on the two names that
+    // reach the wire beside the entry's url. A name past it is refused rather
+    // than truncated, so a server that answers nothing names the entry's own
+    // field instead of an arbitrary prefix of it.
+    try std.testing.expect(validEnvName("A" ** 64));
+    try std.testing.expect(!validEnvName("A" ** 65));
+    try std.testing.expect(validHeaderName("A" ** 64));
+    try std.testing.expect(!validHeaderName("A" ** 65));
 }
 
 test "a key is read from the environment by the name the entry gives" {

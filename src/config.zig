@@ -1611,26 +1611,36 @@ test "a preset is one more remote server once it is enabled, with its options va
     try std.testing.expect(local.tool_problem == null);
     try std.testing.expectEqualStrings("http://127.0.0.1:9000/mcp", local.mcp[0].url);
 
-    // Each of these is a value the run cannot honor, and names the key.
-    const bad = [_][]const u8{
-        "url = \"http://search.example/mcp\"",
-        "url = \"https://u:p@search.example/mcp\"",
-        "url = \"nonsense\"",
-        "timeout = 0",
-        "timeout = 601",
-        "timeout = 30s",
-        "timeout = -1",
-        "api_key_env = \"A=B\"",
-        "api_key_env = \"MY KEY\"",
-        "api_key_header = \"X Key\"",
-        "api_key_header = \"\"",
-        "enabled = sure",
+    // Each of these is a value the run cannot honor, and names the key. The
+    // key is spelled out beside the line rather than read back out of it: a
+    // problem whose key is the empty string is a prefix of every line, so
+    // `startsWith` would hold for a reader that named nothing at all.
+    const bad = [_]struct { line: []const u8, key: []const u8 }{
+        .{ .line = "url = \"http://search.example/mcp\"", .key = "url" },
+        .{ .line = "url = \"https://u:p@search.example/mcp\"", .key = "url" },
+        .{ .line = "url = \"nonsense\"", .key = "url" },
+        .{ .line = "timeout = 0", .key = "timeout" },
+        .{ .line = "timeout = 601", .key = "timeout" },
+        .{ .line = "timeout = 30s", .key = "timeout" },
+        .{ .line = "timeout = -1", .key = "timeout" },
+        .{ .line = "api_key_env = \"A=B\"", .key = "api_key_env" },
+        .{ .line = "api_key_env = \"MY KEY\"", .key = "api_key_env" },
+        .{ .line = "api_key_header = \"X Key\"", .key = "api_key_header" },
+        .{ .line = "api_key_header = \"\"", .key = "api_key_header" },
+        .{ .line = "enabled = sure", .key = "enabled" },
     };
-    for (bad) |line| {
-        const text = try std.fmt.allocPrint(arena, "[tools.web_search]\nenabled = true\n{s}\n", .{line});
+    for (bad) |entry| {
+        const text = try std.fmt.allocPrint(arena, "[tools.web_search]\nenabled = true\n{s}\n", .{entry.line});
         const parsed = parseBare(arena, text);
-        try std.testing.expectEqualStrings("web_search", parsed.tool_problem.?.name);
-        try std.testing.expect(std.mem.startsWith(u8, line, parsed.tool_problem.?.key));
+        const problem = parsed.tool_problem.?;
+        std.testing.expectEqualStrings("web_search", problem.name) catch |err| {
+            std.debug.print("line {s}\n", .{entry.line});
+            return err;
+        };
+        std.testing.expectEqualStrings(entry.key, problem.key) catch |err| {
+            std.debug.print("line {s}\n", .{entry.line});
+            return err;
+        };
     }
     // An empty variable name is no key, not an error.
     const unset = parseBare(arena, "[tools.web_search]\nenabled = true\napi_key_env = \"\"\n");
@@ -1651,10 +1661,29 @@ test "a tool name this build does not have is a problem the run stops on" {
     // It is a tool problem and not a note, so the run cannot carry on with it.
     try std.testing.expect(typo.problem == null);
 
-    // A name is exact: case, a prefix and a missing name are all unknown.
-    for ([_][]const u8{ "[tools.Bash]", "[tools.bas]", "[tools]", "[tools.]", "[tools.bash.x]", "[tools.mcp__fs__x]" }) |header| {
-        const parsed = parse(arena, try std.fmt.allocPrint(arena, "{s}\nenabled = false\n", .{header}));
-        try std.testing.expect(parsed.tool_problem != null);
+    // A name is exact: case, a prefix and a missing name are all unknown, and
+    // each names the spelling the header carried rather than any problem at
+    // all: the `enabled = false` below is a valid value, so a `.bad_value`
+    // from it would satisfy a bare `!= null`.
+    const headers = [_]struct { header: []const u8, name: []const u8 }{
+        .{ .header = "[tools.Bash]", .name = "Bash" },
+        .{ .header = "[tools.bas]", .name = "bas" },
+        .{ .header = "[tools]", .name = "" },
+        .{ .header = "[tools.]", .name = "" },
+        .{ .header = "[tools.bash.x]", .name = "bash.x" },
+        .{ .header = "[tools.mcp__fs__x]", .name = "mcp__fs__x" },
+    };
+    for (headers) |entry| {
+        const parsed = parse(arena, try std.fmt.allocPrint(arena, "{s}\nenabled = false\n", .{entry.header}));
+        const problem = parsed.tool_problem.?;
+        std.testing.expectEqual(@as(@TypeOf(problem.kind), .unknown_tool), problem.kind) catch |err| {
+            std.debug.print("header {s}\n", .{entry.header});
+            return err;
+        };
+        std.testing.expectEqualStrings(entry.name, problem.name) catch |err| {
+            std.debug.print("header {s}\n", .{entry.header});
+            return err;
+        };
         try std.testing.expectEqual(@as(usize, 0), parsed.disabled_tools.count());
     }
     // The first one is the one named.

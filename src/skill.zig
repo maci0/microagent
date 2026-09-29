@@ -843,6 +843,7 @@ test "a skill call loads a body, and an unknown name lists what is there" {
     try std.testing.expectEqualStrings("the body\n", try call(io, arena, "{\"name\":\"one\"}", set));
     try std.testing.expectEqualStrings("error: missing name", try call(io, arena, "{}", set));
     try std.testing.expectEqualStrings("error: tool arguments must be an object", try call(io, arena, "[]", set));
+    try std.testing.expectEqualStrings("error: tool arguments are not valid JSON", try call(io, arena, "{", set));
     const unknown = try call(io, arena, "{\"name\":\"two\"}", set);
     try std.testing.expect(std.mem.startsWith(u8, unknown, "error: unknown skill 'two'"));
     try std.testing.expect(std.mem.indexOf(u8, unknown, "one") != null);

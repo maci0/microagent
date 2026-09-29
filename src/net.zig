@@ -697,6 +697,127 @@ fn daysFromCivil(year: i64, month: u32, day: u32) i64 {
     return era * 146097 + day_of_era - 719468;
 }
 
+// The key rides in an Authorization header on every request, so the rule is
+// the one that decides whether it crosses the network in the clear. It is
+// asserted case by case rather than left to the callers that ask it: a
+// hostname check that widened to "ends with localhost" or a prefix check that
+// stopped before the fourth octet would still let the providers below resolve,
+// and nothing else in the file would notice.
+test "a key is only sent over a scheme that keeps it off the wire" {
+    const cases = [_]struct { url: []const u8, carries: bool }{
+        .{ .url = "https://api.example.com/v1/chat", .carries = true },
+        .{ .url = "HTTPS://api.example.com/v1", .carries = true },
+        // A gateway on this machine is named in the clear, and there is no
+        // path out of loopback to intercept.
+        .{ .url = "http://localhost:1234/v1", .carries = true },
+        .{ .url = "http://gateway.localhost:1234/v1", .carries = true },
+        .{ .url = "http://LOCALHOST/v1", .carries = true },
+        .{ .url = "http://127.0.0.1:8080/v1", .carries = true },
+        .{ .url = "http://127.1.2.3/v1", .carries = true },
+        .{ .url = "http://[::1]:8080/v1", .carries = true },
+        // Everything else on a plaintext url hands the key to the path.
+        .{ .url = "http://api.example.com/v1", .carries = false },
+        .{ .url = "http://127.0.0.1.evil.com/v1", .carries = false },
+        // The host is read past the userinfo, so a name that looks like
+        // loopback on the left of an `@` names whoever is on the right.
+        .{ .url = "http://127.0.0.1@evil.com/v1", .carries = false },
+        // A name that only begins 127. is a host somebody else can point
+        // anywhere, and an out-of-range octet is not an address at all.
+        .{ .url = "http://127.256.0.1/v1", .carries = false },
+        .{ .url = "http://127.0.0.1.1/v1", .carries = false },
+        .{ .url = "http://127x.0.0.1/v1", .carries = false },
+        .{ .url = "http://127.0.0/v1", .carries = false },
+        .{ .url = "http://[::2]/v1", .carries = false },
+        // A scheme that is not one of the two is not a url this sends to, and
+        // an unparsable one is refused rather than assumed safe.
+        .{ .url = "ftp://127.0.0.1/v1", .carries = false },
+        .{ .url = "not a url", .carries = false },
+        .{ .url = "", .carries = false },
+    };
+    for (cases) |case| {
+        std.testing.expectEqual(case.carries, urlCarriesKey(case.url)) catch |err| {
+            std.debug.print("url {s}\n", .{case.url});
+            return err;
+        };
+    }
+}
+
+// The statuses and the transport errors decide whether a turn is asked again,
+// and a set that grows by accident retries a request the server has already
+// answered and refuses. 404 is the one exclusion, and it is pinned here
+// because it is deliberate rather than an oversight.
+test "only a busy or a broken server is asked again" {
+    for ([_]std.http.Status{ .request_timeout, .conflict, .too_early, .too_many_requests, .internal_server_error, .bad_gateway, .service_unavailable, .gateway_timeout }) |status| {
+        std.testing.expect(retryableStatus(status)) catch |err| {
+            std.debug.print("status {d}\n", .{@intFromEnum(status)});
+            return err;
+        };
+    }
+    for ([_]std.http.Status{ .ok, .created, .bad_request, .unauthorized, .payment_required, .forbidden, .not_found, .method_not_allowed, .not_acceptable, .upgrade_required, .unprocessable_entity }) |status| {
+        std.testing.expect(!retryableStatus(status)) catch |err| {
+            std.debug.print("status {d}\n", .{@intFromEnum(status)});
+            return err;
+        };
+    }
+    // The 5xx block is a range rather than a list, so the ends of it are named
+    // as well as the statuses inside it.
+    try std.testing.expect(retryableStatus(@enumFromInt(500)));
+    try std.testing.expect(retryableStatus(@enumFromInt(599)));
+    try std.testing.expect(retryableStatus(@enumFromInt(600)));
+    try std.testing.expect(!retryableStatus(@enumFromInt(499)));
+}
+
+// The schedule the two network paths share. Saturating at both ends, because
+// the shift and the multiply overflow long before a u32 attempt counter does
+// and a checked build panicking where a release one wraps is not a property to
+// want in a sleep.
+test "the backoff doubles from the base and stops at the caller's cap" {
+    // 0 and 1 both wait the base: the counter names attempts already made.
+    try std.testing.expectEqual(@as(u64, 1000), retryBackoffMs(0, 60_000));
+    try std.testing.expectEqual(@as(u64, 1000), retryBackoffMs(1, 60_000));
+    try std.testing.expectEqual(@as(u64, 2000), retryBackoffMs(2, 60_000));
+    try std.testing.expectEqual(@as(u64, 4000), retryBackoffMs(3, 60_000));
+    try std.testing.expectEqual(@as(u64, 32_000), retryBackoffMs(6, 60_000));
+    // Past the last shift the cap is the only thing left to bound it.
+    try std.testing.expectEqual(@as(u64, 60_000), retryBackoffMs(7, 60_000));
+    try std.testing.expectEqual(@as(u64, 60_000), retryBackoffMs(64, 60_000));
+    try std.testing.expectEqual(@as(u64, 30_000), retryBackoffMs(7, 30_000));
+    // A counter that would overflow the shift, and one that would overflow the
+    // multiply, both come back as the cap rather than as a wrapped number.
+    try std.testing.expectEqual(@as(u64, 60_000), retryBackoffMs(std.math.maxInt(u32), 60_000));
+    try std.testing.expectEqual(@as(u64, 1000), retryBackoffMs(std.math.maxInt(u32), 1000));
+    // A cap below the base is the cap, not a negative or a wrapped wait.
+    try std.testing.expectEqual(@as(u64, 250), retryBackoffMs(0, 250));
+}
+
+// Both commands answer a misspelling the same way, from their own flag lists.
+// The rules are the edit budget, the third-of-the-longer budget, and the
+// prefix rule; none of them is visible in a caller's own tests, and a
+// threshold that widened to three edits would suggest a flag for every word.
+test "a mistyped flag is answered from the nearest one that command has" {
+    const flags = [_][]const u8{ "--model", "--print", "--api-key", "--check", "--help", "-m" };
+    // A truncation is one edit whatever tail is missing, so it is suggested:
+    // `--mode` and `--api-ke` are prefixes of exactly one flag each.
+    try std.testing.expectEqualStrings("--model", nearestFlag("--mode", &flags).?);
+    try std.testing.expectEqualStrings("--api-key", nearestFlag("--api-ke", &flags).?);
+    try std.testing.expectEqualStrings("--model", nearestFlag("mod", &flags).?);
+    // A substitution is one edit, and the shorter the name the more of it one
+    // edit is: `--model` and `--print` are five letters, so a single letter
+    // swapped is inside the third of the longer that the rule allows.
+    try std.testing.expectEqualStrings("--print", nearestFlag("--pront", &.{"--print"}).?);
+    try std.testing.expectEqual(@as(?[]const u8, null), nearestFlag("--pirnt", &.{"--print"}));
+    // Two swaps is two edits, which is past a third of a five-letter name.
+    try std.testing.expectEqual(@as(?[]const u8, null), nearestFlag("--modle", &flags));
+    // Three edits, or an edit in a name this short, are further than a
+    // suggestion worth: `nope` is three from `model` and four from `print`.
+    try std.testing.expectEqual(@as(?[]const u8, null), nearestFlag("nope", &flags));
+    try std.testing.expectEqual(@as(?[]const u8, null), nearestFlag("-modl", &flags));
+    // A word shorter than three characters has no budget to spend an edit in.
+    try std.testing.expectEqual(@as(?[]const u8, null), nearestFlag("mo", &flags));
+    // A list of nothing suggests nothing, however well the word is spelled.
+    try std.testing.expectEqual(@as(?[]const u8, null), nearestFlag("--model", &.{}));
+}
+
 test "a header value is refused for every control byte and accepted for the rest" {
     try std.testing.expect(!hasHeaderControlBytes("sk-a-key"));
     try std.testing.expect(!hasHeaderControlBytes(""));
@@ -1057,8 +1178,8 @@ test "a Retry-After date is read as the instant it names" {
     // dates sit at the century rule's own edge: 2400 is divisible by four
     // hundred and 9996 by four, so both have a 29 February.
     try std.testing.expectEqual(@as(?i64, 253_402_300_799), httpDateEpochSeconds("Fri, 31 Dec 9999 23:59:59 GMT"));
-    try std.testing.expect(httpDateEpochSeconds("Fri, 29 Feb 2400 00:00:00 GMT") != null);
-    try std.testing.expect(httpDateEpochSeconds("Wed, 29 Feb 9996 00:00:00 GMT") != null);
+    try std.testing.expectEqual(@as(?i64, 13_574_563_200), httpDateEpochSeconds("Fri, 29 Feb 2400 00:00:00 GMT"));
+    try std.testing.expectEqual(@as(?i64, 253_281_168_000), httpDateEpochSeconds("Wed, 29 Feb 9996 00:00:00 GMT"));
     try std.testing.expectEqual(@as(?i64, null), httpDateEpochSeconds("Wed, 29 Feb 9999 00:00:00 GMT"));
     // A weekday that does not match the date is ignored rather than refused:
     // it is redundant, and a server a second off writes the wrong one.
@@ -1067,27 +1188,29 @@ test "a Retry-After date is read as the instant it names" {
 
 // The dates above name three months of the twelve, so a table reordered, a
 // month dropped or the case-insensitive match narrowed to a byte comparison
-// would pass them all and misread the rest. Every name is pinned to the number
-// `daysFromCivil` counts it by: the twelfth day of each month, whose epoch is
-// the number of days from the epoch to it, so an off-by-one in either the table
-// or the arithmetic moves the answer rather than being asserted twice.
-test "every month name reads as the month the epoch counts" {
+// would pass them all and misread the rest. Every name is pinned to a literal
+// epoch second: the twelfth day of each month of 2021, counted from the Unix
+// epoch by something other than the arithmetic under test. A `daysFromCivil`
+// call is the same code the parser runs, so a leap rule or an off-by-one
+// inside it moves both sides of the comparison together and the test holds for
+// a reader that gets every date of the year wrong.
+test "every month name reads as the month its epoch names" {
     // Spelled out here rather than walked out of `calendar_months`, because
     // the point is that the two agree: reading the name back out of the table
     // the name came from cannot fail when the table is reordered.
-    const months = [_]struct { name: []const u8, number: u32 }{
-        .{ .name = "Jan", .number = 1 },
-        .{ .name = "Feb", .number = 2 },
-        .{ .name = "Mar", .number = 3 },
-        .{ .name = "Apr", .number = 4 },
-        .{ .name = "May", .number = 5 },
-        .{ .name = "Jun", .number = 6 },
-        .{ .name = "Jul", .number = 7 },
-        .{ .name = "Aug", .number = 8 },
-        .{ .name = "Sep", .number = 9 },
-        .{ .name = "Oct", .number = 10 },
-        .{ .name = "Nov", .number = 11 },
-        .{ .name = "Dec", .number = 12 },
+    const months = [_]struct { name: []const u8, number: u32, epoch: i64 }{
+        .{ .name = "Jan", .number = 1, .epoch = 1_610_409_600 },
+        .{ .name = "Feb", .number = 2, .epoch = 1_613_088_000 },
+        .{ .name = "Mar", .number = 3, .epoch = 1_615_507_200 },
+        .{ .name = "Apr", .number = 4, .epoch = 1_618_185_600 },
+        .{ .name = "May", .number = 5, .epoch = 1_620_777_600 },
+        .{ .name = "Jun", .number = 6, .epoch = 1_623_456_000 },
+        .{ .name = "Jul", .number = 7, .epoch = 1_626_048_000 },
+        .{ .name = "Aug", .number = 8, .epoch = 1_628_726_400 },
+        .{ .name = "Sep", .number = 9, .epoch = 1_631_404_800 },
+        .{ .name = "Oct", .number = 10, .epoch = 1_633_996_800 },
+        .{ .name = "Nov", .number = 11, .epoch = 1_636_675_200 },
+        .{ .name = "Dec", .number = 12, .epoch = 1_639_267_200 },
     };
     try std.testing.expectEqual(calendar_months.len, months.len);
     for (months) |entry| {
@@ -1100,7 +1223,7 @@ test "every month name reads as the month the epoch counts" {
             .{name},
         );
         defer std.testing.allocator.free(header);
-        const want = daysFromCivil(2021, month, 12) * @as(i64, std.time.s_per_day);
+        const want = entry.epoch;
         try std.testing.expectEqual(@as(?i64, want), httpDateEpochSeconds(header));
         try std.testing.expectEqual(@as(?u32, month), monthFromName(name));
         // The name a sender is allowed to spell any other way is still this

@@ -653,12 +653,19 @@ test "compaction leaves the cached prefix byte-identical" {
     const prefix = try gpa.dupe(u8, msgs.items);
     defer gpa.free(prefix);
     try appendToolResults(gpa, &msgs, 120, blob);
+    const before = msgs.items.len;
 
     try std.testing.expect(msgs.items.len > conversation_soft_limit);
 
     var floor: usize = 0;
     try compactMessages(std.testing.io, gpa, &msgs, scratch_state.allocator(), &floor);
 
+    // The pass ran: a compaction that returned without rewriting anything
+    // leaves the buffer longer than the prefix and its prefix equal, which is
+    // what the two assertions below would then be asserting about a no-op.
+    try std.testing.expect(msgs.items.len < before);
+    try std.testing.expect(std.mem.indexOf(u8, msgs.items, "[earlier tool output elided: 8192 bytes]") != null);
+    try std.testing.expectEqual(conversation_soft_limit, floor);
     try std.testing.expect(msgs.items.len > prefix.len);
     try std.testing.expectEqualStrings(prefix, msgs.items[0..prefix.len]);
     // The prefix is cached, not just unchanged: the newest turn is still whole.

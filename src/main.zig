@@ -5780,6 +5780,11 @@ fn retryAfterDateHead(buf: []u8, now: i64, seconds: i64) []const u8 {
 // wall clock: a clock an NTP step can move is not a ceiling.
 test "the budget is measured on a clock that keeps counting through a suspend" {
     const io = std.testing.io;
+    // The clock is named, not just measured: `boot >= awake` holds for any
+    // clock read after the `.awake` one, `.awake` included, so reading the
+    // name is the only assertion that would fail if the budget were measured
+    // on the clock that stops for a suspend.
+    try std.testing.expectEqual(Io.Clock.boot, budget_clock);
     const awake = Io.Timestamp.now(io, .awake).nanoseconds;
     const boot = Io.Timestamp.now(io, budget_clock).nanoseconds;
     try std.testing.expect(boot >= awake);

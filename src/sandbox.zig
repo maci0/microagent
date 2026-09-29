@@ -282,7 +282,15 @@ test "isPathWritable allows paths within writable roots and denies paths outside
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = buf[0..try tmp.dir.realPath(io, &buf)];
 
-    const writable_roots = [_][]const u8{ root, "/tmp" };
+    // The second root is a real directory of its own rather than the literal
+    // `/tmp`, which is `/private/tmp` on a host that resolves the link, so a
+    // root spelled that way asserts a false on every machine but this one.
+    var second = std.testing.tmpDir(.{});
+    defer second.cleanup();
+    var second_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const second_root = second_buf[0..try second.dir.realPath(io, &second_buf)];
+
+    const writable_roots = [_][]const u8{ root, second_root };
 
     // Path inside tmp root
     const inside = try std.fs.path.join(arena, &.{ root, "file.txt" });
@@ -292,8 +300,8 @@ test "isPathWritable allows paths within writable roots and denies paths outside
     const nested = try std.fs.path.join(arena, &.{ root, "sub", "dir", "file.txt" });
     try std.testing.expect(isPathWritable(io, arena, nested, &writable_roots));
 
-    // Under /tmp
-    try std.testing.expect(isPathWritable(io, arena, "/tmp/test.txt", &writable_roots));
+    // Under the second root
+    try std.testing.expect(isPathWritable(io, arena, try std.fs.path.join(arena, &.{ second_root, "test.txt" }), &writable_roots));
 
     // Outside path: /etc/passwd
     try std.testing.expect(!isPathWritable(io, arena, "/etc/passwd", &writable_roots));
@@ -305,6 +313,33 @@ test "isPathWritable allows paths within writable roots and denies paths outside
     // Prefix collision: root + "-other" is not under root
     const collision = try std.fmt.allocPrint(arena, "{s}-other/file.txt", .{root});
     try std.testing.expect(!isPathWritable(io, arena, collision, &writable_roots));
+
+    // A path that is nothing but whitespace is not a path, and a run with no
+    // roots at all has no sandbox, so both answers are refusals of different
+    // kinds and neither is reached by the six cases above.
+    try std.testing.expect(!isPathWritable(io, arena, "  \t\r\n", &writable_roots));
+    try std.testing.expect(!isPathWritable(io, arena, "", &writable_roots));
+    try std.testing.expect(isPathWritable(io, arena, "/etc/passwd", &.{}));
+}
+
+// A ruleset may only name bits the running kernel knows, so the mask is the
+// ABI's. A dropped bit is not a build failure, it is a right quietly left off:
+// `access_truncate` missing turns TRUNCATE enforcement off on every kernel
+// that has it, and nothing at run time says so.
+test "handledAccess names only the rights the running ABI has" {
+    try std.testing.expectEqual(access_abi1, handledAccess(1));
+    try std.testing.expectEqual(access_abi1, handledAccess(0));
+    try std.testing.expectEqual(access_abi1 | access_refer, handledAccess(2));
+    try std.testing.expectEqual(access_abi1 | access_refer | access_truncate, handledAccess(3));
+    try std.testing.expectEqual(access_abi1 | access_refer | access_truncate, handledAccess(4));
+    try std.testing.expectEqual(
+        access_abi1 | access_refer | access_truncate | access_ioctl_dev,
+        handledAccess(5),
+    );
+    try std.testing.expectEqual(
+        access_abi1 | access_refer | access_truncate | access_ioctl_dev,
+        handledAccess(6),
+    );
 }
 
 test "isPathWritable follows a symlinked parent of a file that does not exist yet" {

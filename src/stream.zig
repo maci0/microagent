@@ -1752,6 +1752,16 @@ test "a failure the provider reported in the stream is kept, in its own words" {
     try noteStreamError(gpa, &bare, parsed.value.object.get("error"));
     try std.testing.expectEqualStrings("the provider reported an error and named no reason", bare.stream_error);
     bare.deinit(gpa);
+
+    // The same report sent as the member's own value rather than as an object
+    // under it. `bare` cannot be reused: the first report is the one kept, so
+    // this needs the run the shape arrives in, which is the one `feed` builds.
+    var own_value: chat_mod.ChatResult = .{};
+    var own_parsed = try std.json.parseFromSlice(std.json.Value, gpa, "{\"error\":\"boom\"}", .{});
+    defer own_parsed.deinit();
+    try noteStreamError(gpa, &own_value, own_parsed.value.object.get("error"));
+    try std.testing.expectEqualStrings("boom", own_value.stream_error);
+    own_value.deinit(gpa);
 }
 
 // A generation the provider cut at `max_tokens` arrives with a clean

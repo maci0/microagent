@@ -1076,6 +1076,43 @@ test "a value quoting a bidi override names the override, not the name it revers
     // ZWJ is not one of them: it is how an emoji sequence is spelled, and
     // escaping it would split one glyph into three.
     try std.testing.expectEqualStrings("\u{1f469}\u{200d}\u{1f4bb}", safeText(arena, "\u{1f469}\u{200d}\u{1f4bb}", 40));
+    // Both sides of every range the set carries, because the escaping above
+    // only ever reaches three of its code points and an off-by-one at an edge
+    // would leave the neighbouring character readable in a file name.
+    const edges = [_]struct { cp: u21, invisible: bool }{
+        .{ .cp = 0x00ac, .invisible = false },
+        .{ .cp = 0x00ad, .invisible = true },
+        .{ .cp = 0x00ae, .invisible = false },
+        .{ .cp = 0x061b, .invisible = false },
+        .{ .cp = 0x061c, .invisible = true },
+        .{ .cp = 0x061d, .invisible = false },
+        // 0x2029 is the paragraph separator, which is not an embedding and has
+        // a visible line break of its own.
+        .{ .cp = 0x2029, .invisible = false },
+        .{ .cp = 0x202a, .invisible = true },
+        .{ .cp = 0x202e, .invisible = true },
+        .{ .cp = 0x202f, .invisible = false },
+        .{ .cp = 0x200a, .invisible = false },
+        .{ .cp = 0x200b, .invisible = true },
+        .{ .cp = 0x200c, .invisible = true },
+        .{ .cp = 0x200d, .invisible = false },
+        .{ .cp = 0x200e, .invisible = true },
+        .{ .cp = 0x200f, .invisible = true },
+        .{ .cp = 0x2060, .invisible = true },
+        .{ .cp = 0x2061, .invisible = false },
+        .{ .cp = 0x2065, .invisible = false },
+        .{ .cp = 0x2066, .invisible = true },
+        .{ .cp = 0x206f, .invisible = true },
+        .{ .cp = 0x2070, .invisible = false },
+        .{ .cp = 0xfeff, .invisible = true },
+        .{ .cp = 0xfffe, .invisible = false },
+    };
+    for (edges) |edge| {
+        std.testing.expectEqual(edge.invisible, isInvisibleFormat(edge.cp)) catch |err| {
+            std.debug.print("U+{X:0>4}\n", .{edge.cp});
+            return err;
+        };
+    }
     // The two-byte spellings cost six bytes each and the budget bounds what
     // comes out rather than what went in, so a cut lands between the escapes
     // and never inside one.
@@ -1447,13 +1484,30 @@ test "a usage count that is not a count is absent, not zero" {
     try std.testing.expectEqual(@as(?u64, null), maybeNum(.{ .bool = true }, &unparsable));
     try std.testing.expectEqual(@as(?u64, null), maybeNum(.{ .array = items }, &unparsable));
     try std.testing.expectEqual(@as(?u64, null), maybeNum(.{ .integer = -1 }, &unparsable));
+    // The same count spelled as a float reaches the other arm, so both
+    // spellings are named here: a `-1.0` that read as zero would fold a zero
+    // into the total the spend ceiling is checked against.
+    try std.testing.expectEqual(@as(?u64, null), maybeNum(.{ .float = -1.0 }, &unparsable));
+    try std.testing.expectEqual(@as(?u64, null), maybeNum(.{ .float = -0.5 }, &unparsable));
     try std.testing.expectEqual(@as(usize, 0), unparsable);
+    // A non-negative float truncates, the way the integer arm does.
+    try std.testing.expectEqual(@as(?u64, 5), maybeNum(.{ .float = 5.9 }, &unparsable));
 
     // A count of zero is a count, and is folded in like any other.
     try std.testing.expectEqual(@as(?u64, 0), maybeNum(.{ .integer = 0 }, &unparsable));
     // The saturated float `num` is documented to answer stays a real number
     // here, so a provider quoting a huge count does not erase the total.
     try std.testing.expectEqual(@as(?u64, std.math.maxInt(u64)), maybeNum(.{ .float = 1e30 }, &unparsable));
+
+    // The `usize` reader over the same saturating value, whose whole reason to
+    // exist is the 32-bit build that cannot hold the `u64` ceiling. The clamp
+    // is the assertion there, and a build that trapped on it would be the bug
+    // it prevents.
+    try std.testing.expectEqual(@as(usize, 3), numCount(.{ .integer = 3 }));
+    try std.testing.expectEqual(@as(usize, 0), numCount(null));
+    try std.testing.expectEqual(@as(usize, 0), numCount(.{ .string = "many" }));
+    const saturated: usize = std.math.cast(usize, std.math.maxInt(u64)) orelse std.math.maxInt(usize);
+    try std.testing.expectEqual(saturated, numCount(.{ .float = 1e30 }));
 }
 
 // The three readers of a count answer differently on purpose, and agree on

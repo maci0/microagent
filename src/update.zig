@@ -731,15 +731,46 @@ test "update: a misspelled flag names the one it is closest to" {
     try std.testing.expectEqualStrings("unknown argument 'x'", unknownArgument(arena, "x"));
 }
 
+// The drift this names is a flag added to `parseArgs` and not to `known_words`,
+// so the check is driven from the parser rather than from the list: iterating
+// `known_words` against a hand copy of itself can only fail if the list is
+// edited, and passes untouched for the edit it exists to catch. The parser's
+// own flag literals are read out of its source at compile time, so a seventh
+// flag is compared against a list that did not grow.
 test "update: every flag the parser reads is one a misspelling can be answered from" {
-    // A flag added to `parseArgs` and not to `known_words` gets no suggestion,
-    // silently, and the message is the only place a reader learns the spelling.
-    for (known_words) |word| {
-        var named_by_parser = false;
-        for ([_][]const u8{ "--check", "-c", "--help", "-h", "--version", "-V" }) |parsed| {
-            if (std.mem.eql(u8, parsed, word)) named_by_parser = true;
+    const source = @embedFile("update.zig");
+    const start = std.mem.indexOf(u8, source, "fn parseArgs(") orelse return error.TestUnexpectedResult;
+    const body = source[start..];
+    const end = std.mem.indexOf(u8, body, "\n}\n") orelse return error.TestUnexpectedResult;
+    const parser = body[0..end];
+
+    var read: usize = 0;
+    var flags_read: usize = 0;
+    while (std.mem.indexOfPos(u8, parser, read, "\"")) |open| {
+        const close = std.mem.indexOfPos(u8, parser, open + 1, "\"") orelse break;
+        const word = parser[open + 1 .. close];
+        read = close + 1;
+        if (word.len < 2 or word[0] != '-') continue;
+        var listed = false;
+        for (known_words) |known| {
+            if (std.mem.eql(u8, known, word)) listed = true;
         }
-        if (!named_by_parser) {
+        if (!listed) {
+            std.debug.print("\n{s} is a flag parseArgs reads and known_words does not carry\n", .{word});
+            return error.TestUnexpectedResult;
+        }
+        flags_read += 1;
+    }
+    // The scan found something, or it found nothing and the guard is vacuous:
+    // the parser's body is six literals and this count is what proves the
+    // window above is the parser's and not an empty slice of the file.
+    try std.testing.expectEqual(@as(usize, 6), flags_read);
+
+    // The other direction: a word the parser answers for that a reader would
+    // never be told about is a word `known_words` invented.
+    for (known_words) |word| {
+        const parsed = parseArgs(&.{word});
+        if (parsed == .unknown) {
             std.debug.print("\n{s} is in known_words and no flag of parseArgs reads it\n", .{word});
             return error.TestUnexpectedResult;
         }
