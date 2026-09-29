@@ -838,6 +838,123 @@ test "update: a build ahead of the latest release is not downgraded" {
     try std.testing.expectEqual(std.math.Order.eq, compareVersions("0.2.0", "v1.2.3.4"));
 }
 
+// The spellings a GitHub tag really carries, plus the ones that are not a
+// version at all: the `v` prefix, a missing component, a `-pre` and a `+build`
+// suffix, four components, a component too large for `u64`, and the names a
+// release is tagged with instead. `std.testing.fuzz` runs this corpus on every
+// `zig build test`, and through the fuzzer's mutations when the test binary is
+// built in fuzz mode.
+const version_corpus = [_][]const u8{
+    "0.1.0\x00v0.2.0",
+    "1.0.0\x00v0.9.9",
+    "0.2.0-rc1\x00v0.1.1",
+    "0.2.0\x00v0.2.0-rc1",
+    "0.2.0\x00v0.2.0+build.1",
+    "0.1\x00v0.1.0",
+    "0.2.0\x00nightly",
+    "0.2.0\x00v1.2.3.4",
+    "0.2.0\x00v0.1.x",
+    "0.2.0\x00v-",
+    "0.2.0\x00v..",
+    "0.2.0\x00v1.2.99999999999999999999999",
+    "0.2.0\x00v99999999999999999999999999999.0.0",
+    "0.2.0\x00v18446744073709551616.0.0",
+    "0.2.0\x00v18446744073709551615.0.0",
+    "0.2.0\x00v1.2.3-",
+    "0.2.0\x00v+",
+    "0.2.0\x00v1.2.3+",
+    "vv1.2.3\x00v1.2.3",
+    "\x00",
+    "v1.0.0\x00v1.0.0-rc",
+    "1.2.3\x00v2.0.0-alpha.1+build.7",
+};
+
+test "update: fuzz: a tag and a running version order the way their triples read" {
+    try std.testing.fuzz({}, fuzzVersion, .{ .corpus = &version_corpus });
+}
+
+fn flip(o: std.math.Order) std.math.Order {
+    return switch (o) {
+        .lt => .gt,
+        .eq => .eq,
+        .gt => .lt,
+    };
+}
+
+/// The running build against a tag the GitHub API chose, which is the one
+/// decision that decides whether a binary is replaced. The assertions are the
+/// order the caller relies on rather than a crash: a comparison that is not
+/// antisymmetric, or that reports a version as below itself, would replace a
+/// good binary with an old one or hold one forever, and neither shows up as a
+/// failure anywhere else.
+fn fuzzVersion(_: void, smith: *std.testing.Smith) !void {
+    var raw: [512]u8 = undefined;
+    const bytes: []const u8 = if (smith.in) |seed| seed else raw[0..smith.slice(&raw)];
+    // Two versions from one seed, so a mutation reaches either side. A nul
+    // separates them because no version reads it and it cannot appear inside
+    // one; a seed with none is one version against itself.
+    const nul = std.mem.indexOfScalar(u8, bytes, 0) orelse bytes.len;
+    const running = bytes[0..nul];
+    const tag = bytes[@min(nul + 1, bytes.len)..];
+
+    const order = compareVersions(running, tag);
+    // Antisymmetry: the same pair read the other way round is the other order,
+    // and the same pair read the same way is the same answer.
+    const flipped = compareVersions(tag, running);
+    try std.testing.expectEqual(order, flip(flipped));
+    try std.testing.expectEqual(order, compareVersions(running, tag));
+    // Nothing is below itself, whatever it spells. This is the one that a
+    // pre-release flag read off the wrong byte of the tag would break.
+    try std.testing.expectEqual(std.math.Order.eq, compareVersions(running, running));
+    try std.testing.expectEqual(std.math.Order.eq, compareVersions(tag, tag));
+
+    const a = parseVersion(running) orelse return;
+    const b = parseVersion(tag) orelse return;
+    // Two versions that agree on every component and on whether they are a
+    // pre-release are the same release, so the dotted suffixes and the build
+    // metadata cannot decide anything.
+    if (std.mem.eql(u64, &a.triple, &b.triple) and a.prerelease == b.prerelease)
+        try std.testing.expectEqual(std.math.Order.eq, order);
+    // The order follows the first component that differs and nothing after it,
+    // which is what keeps a long suffix from reordering a pair the triple
+    // already decided.
+    for (a.triple, b.triple) |an, bn| {
+        if (an == bn) continue;
+        try std.testing.expectEqual(if (an < bn) std.math.Order.lt else std.math.Order.gt, order);
+        break;
+    }
+    // The pre-release flag is read off the spelling and not off a second
+    // parse of the same bytes, which is the only way a wrong `-`/`+` cut, or a
+    // flag that never got set, shows up here rather than as a release that
+    // replaces itself forever.
+    try std.testing.expectEqual(spelledPrerelease(running), a.prerelease);
+    try std.testing.expectEqual(spelledPrerelease(tag), b.prerelease);
+    // And a pre-release sorts below the final build carrying the same triple.
+    if (a.prerelease) {
+        var buf: [64]u8 = undefined;
+        const final = try std.fmt.bufPrint(&buf, "{d}.{d}.{d}", .{ a.triple[0], a.triple[1], a.triple[2] });
+        try std.testing.expectEqual(std.math.Order.lt, compareVersions(running, final));
+    }
+    // A `+build` suffix is not a pre-release, so a build tagged with one is the
+    // same release as the same triple without it, and the suffix cannot demote a
+    // final build the way a `-` suffix does.
+    const plus_at = std.mem.indexOfScalar(u8, bareVersion(running), '+') orelse return;
+    const without = bareVersion(running)[0..plus_at];
+    const stripped = parseVersion(without) orelse return;
+    try std.testing.expectEqual(stripped.prerelease, a.prerelease);
+    try std.testing.expectEqual(std.math.Order.eq, compareVersions(running, without));
+}
+
+/// The spelling that marks a pre-release: a `-` that ends the triple, before
+/// any `+`. Whether `parseVersion` agrees is the caller's reading of the same
+/// bytes, so the harness checks it against this and not against itself.
+fn spelledPrerelease(v: []const u8) bool {
+    const bare = bareVersion(v);
+    const dash = std.mem.indexOfScalar(u8, bare, '-') orelse return false;
+    const plus = std.mem.indexOfScalar(u8, bare, '+') orelse return true;
+    return dash < plus;
+}
+
 test "update: the GitHub token is trimmed, and an empty one is no token" {
     var env: std.process.Environ.Map = .init(std.testing.allocator);
     defer env.deinit();

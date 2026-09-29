@@ -1465,12 +1465,25 @@ fn handshake(io: Io, arena: std.mem.Allocator, server: *Server, client_version: 
     }
     server.send(io, arena, null, "notifications/initialized", "") catch return false;
     const listed = server.request(io, arena, scratch, "tools/list", "", timeout) catch return false;
+    server.tools = buildTools(io, arena, scratch, server, listed) orelse {
+        server.last_error = "tools/list answered with no result object";
+        return false;
+    };
+    return true;
+}
+
+/// The tool table a `tools/list` result turns into, in the order the server
+/// listed them. Null when the answer is not a result object or an allocation
+/// failed, which the caller cannot tell apart and reports the same way.
+///
+/// Split out of `handshake` because it is the one step of the connection that
+/// turns bytes the server chose into names, descriptions and schemas this run
+/// offers the model and sends back on every later turn, and it is the only
+/// step that can be handed an answer without a server on the other end.
+fn buildTools(io: Io, arena: std.mem.Allocator, scratch: std.mem.Allocator, server: *const Server, listed: std.json.Value) ?[]const Tool {
     const object = switch (listed) {
         .object => |o| o,
-        else => {
-            server.last_error = "tools/list answered with no result object";
-            return false;
-        },
+        else => return null,
     };
     const tools: []std.json.Value = if (object.get("tools")) |value| switch (value) {
         .array => |a| a.items,
@@ -1485,34 +1498,150 @@ fn handshake(io: Io, arena: std.mem.Allocator, server: *Server, client_version: 
         // The name is the one slice of the answer the tool table keeps, so it
         // is copied out of the arena the answer is parsed in.
         const name = chat.str(entry.get("name")) orelse continue;
-        const kept_name = arena.dupe(u8, name) catch return false;
+        const kept_name = arena.dupe(u8, name) catch return null;
         if (!validName(name)) {
             net.note(io, arena, "microagent: MCP server {s} offers a tool named {s}, which cannot be spelled in a tool name; it is skipped\n", .{ chat.safeTextAll(arena, server.name), chat.safeText(arena, name, 120) });
             continue;
         }
-        const exposed = std.fmt.allocPrint(arena, "{s}{s}__{s}", .{ tool_prefix, server.name, kept_name }) catch return false;
+        const exposed = std.fmt.allocPrint(arena, "{s}{s}__{s}", .{ tool_prefix, server.name, kept_name }) catch return null;
         if (terseForServer(server, name)) |terse| {
-            found.append(arena, .{ .name = kept_name, .exposed = exposed, .description = terse.description, .schema = terse.schema }) catch return false;
+            found.append(arena, .{ .name = kept_name, .exposed = exposed, .description = terse.description, .schema = terse.schema }) catch return null;
             continue;
         }
         const description = chat.str(entry.get("description")) orelse "";
         // Stringify grows through a ladder of buffers and only the last one is
         // the schema the request carries, so it is built in the scratch arena
         // and copied once into the run's.
-        const schema_text = schemaJson(scratch, entry.get("inputSchema")) catch return false;
-        const schema = arena.dupe(u8, schema_text) catch return false;
+        const schema_text = schemaJson(scratch, entry.get("inputSchema")) catch return null;
+        const schema = arena.dupe(u8, schema_text) catch return null;
         found.append(arena, .{
             .name = kept_name,
             .exposed = exposed,
             .description = if (description.len == 0)
-                std.fmt.allocPrint(arena, "MCP tool '{s}' from server '{s}'", .{ name, server.name }) catch return false
+                std.fmt.allocPrint(arena, "MCP tool '{s}' from server '{s}'", .{ name, server.name }) catch return null
             else
                 chat.safeText(arena, description, max_description_bytes),
             .schema = schema,
-        }) catch return false;
+        }) catch return null;
     }
-    server.tools = found.items;
-    return true;
+    return found.items;
+}
+
+// The shapes a `tools/list` answer really takes: the empty list, one tool, a
+// name the model cannot be handed, a name that is not a string, a schema that
+// is not an object, a schema over the ceiling, and an answer that is not the
+// shape at all. `std.testing.fuzz` runs this corpus on every `zig build test`,
+// and through the fuzzer's mutations when the test binary is built in fuzz
+// mode.
+const tools_corpus = [_][]const u8{
+    \\{"tools":[]}
+    \\{"tools":[{"name":"search","description":"Search the web","inputSchema":{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}}]}
+    \\{"tools":[{"name":"read_file","description":"Read a file","inputSchema":{"type":"object"}}]}
+    \\{"tools":[{"name":"bad name with spaces","description":"skipped"},{"name":"good","inputSchema":{"type":"object"}}]}
+    \\{"tools":[{"name":"has__separator"},{"name":"UPPER.case-ok_1"}]}
+    \\{"tools":[{"name":123},{"name":null},{"description":"no name at all"},{"name":"kept","description":42,"inputSchema":"not an object"}]}
+    \\{"tools":[{"name":"a","inputSchema":{"type":"object"}},{"name":"b","inputSchema":{"type":"object"}},{"name":"c","inputSchema":{"type":"object"}}]}
+    \\{"tools":[{"name":"","description":"empty name"},{"name":"kept2","inputSchema":{"type":"object"}}]}
+    \\{"tools":"not an array"}
+    \\{"tools":[1,2,3,{"name":"after the scalars"}]}
+    \\{"result":{"tools":[{"name":"wrapped","description":"inside a result","inputSchema":{"type":"object"}}]}}
+    \\{"tools":[{"name":"nul\u0000name"},{"name":"esc\u001b[31mname","description":"ansi"},{"name":"cjk-名前","description":"日本語の説明"}]}
+    \\{"tools":[{"name":"dup"},{"name":"dup"}]}
+    \\{}
+    \\[],
+    \\null,
+    \\"",
+    \\{"tools":[{"name":"schema_far_too_large","inputSchema":{"type":"object","description":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]},
+};
+
+test "a fuzzed tools/list answer offers only tools the request can name and carry" {
+    try std.testing.fuzz({}, fuzzTools, .{ .corpus = &tools_corpus });
+}
+
+/// A server's own list, read into the table every later turn sends. The
+/// assertions are what a crash-only harness cannot say: the answer decides the
+/// names, descriptions and schemas the model is offered, so a table that names
+/// a tool twice, offers one whose name cannot be spelled, or carries a schema
+/// that is not an object the provider accepts is wrong whether or not it
+/// crashed.
+fn fuzzTools(_: void, smith: *std.testing.Smith) !void {
+    var raw: [32 * 1024]u8 = undefined;
+    const bytes: []const u8 = if (smith.in) |seed| seed else raw[0..smith.slice(&raw)];
+
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    var scratch_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer scratch_state.deinit();
+    const scratch = scratch_state.allocator();
+
+    // An answer is a result object, and a fuzzer that only ever produced valid
+    // ones would never reach the object/array/string arms below it, so bytes
+    // that are not an object are carried as the one member a real answer can
+    // hold them in.
+    const parsed = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{}) catch blk: {
+        var jb = chat.JsonBuf.init(arena);
+        const w = jb.writer();
+        try w.writeAll("{\"tools\":");
+        try chat.writeJsonString(w, bytes);
+        try w.writeAll("}");
+        break :blk try std.json.parseFromSliceLeaky(std.json.Value, arena, jb.items(), .{});
+    };
+
+    const server: Server = .{ .name = "srv", .transport = .{ .stdio = undefined }, .tools = &.{} };
+    const built = buildTools(std.testing.io, arena, scratch, &server, parsed) orelse {
+        // A non-object answer is refused, and a refusal leaves the table empty
+        // rather than holding what a previous connection offered.
+        try std.testing.expect(parsed != .object);
+        return;
+    };
+
+    // Count what the answer offered, so the table can be held to it: a build
+    // that drops an entry it should keep loses a tool the server has.
+    var offered: usize = 0;
+    if (parsed == .object) {
+        if (parsed.object.get("tools")) |value| {
+            if (value == .array) {
+                for (value.array.items) |item| {
+                    const entry = switch (item) {
+                        .object => |o| o,
+                        else => continue,
+                    };
+                    const name = chat.str(entry.get("name")) orelse continue;
+                    if (!validName(name)) continue;
+                    offered += 1;
+                }
+            }
+        }
+    }
+    try std.testing.expectEqual(offered, built.len);
+
+    for (built, 0..) |tool, i| {
+        // The half of the exposed name the model calls with, so a `tools/call`
+        // built from it reaches the tool the server listed.
+        try std.testing.expect(validName(tool.name));
+        try std.testing.expect(tool.name.len <= max_name_bytes);
+        var want: [512]u8 = undefined;
+        const exposed = try std.fmt.bufPrint(&want, tool_prefix ++ "{s}__{s}", .{ server.name, tool.name });
+        try std.testing.expectEqualStrings(exposed, tool.exposed);
+
+        // Every schema on the table is copied into the request whole, and a
+        // provider refuses an entry whose `parameters` is not an object, so the
+        // ceiling and the object-ness are the two things asserted here.
+        try std.testing.expect(tool.schema.len > 0);
+        try std.testing.expect(tool.schema.len <= max_schema_bytes);
+        const schema = try std.json.parseFromSliceLeaky(std.json.Value, scratch, tool.schema, .{});
+        try std.testing.expect(schema == .object);
+
+        // A description is read by the model and printed on the operator's
+        // terminal, so it is bounded and carries no byte a terminal acts on.
+        try std.testing.expect(tool.description.len > 0);
+        try std.testing.expectEqual(@as(?usize, null), std.mem.indexOfScalar(u8, tool.description, 0x1b));
+
+        // Two entries the model cannot tell apart are one tool called two
+        // ways, and the second call lands on whichever the table kept.
+        for (built[0..i]) |earlier| try std.testing.expect(!std.mem.eql(u8, earlier.name, tool.name));
+    }
 }
 
 /// A tool's `inputSchema` as the request carries it: the server's own bytes
@@ -1520,7 +1649,6 @@ fn handshake(io: Io, arena: std.mem.Allocator, server: *Server, client_version: 
 /// names the omission when they are not. A tool with no schema still has to be
 /// callable, and a provider refuses an entry whose `parameters` is not an
 /// object, so both replacements are objects.
-///
 /// The size is checked on the stringified bytes rather than on the value,
 /// because the value is what the server sent and the string is what every
 /// later turn of the run pays for.

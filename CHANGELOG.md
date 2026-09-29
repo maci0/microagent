@@ -31,6 +31,23 @@ release, and `microagent update` moves you to it.
   so `NO_COLOR=0` and `NO_COLOR=false` both turn it off; an empty value is the
   name with nothing behind it, and is not a setting.
 
+- An MCP server's `tools/list` answer is fuzzed. It is the one step of a
+  connection that turns bytes the server chose into the names, descriptions and
+  schemas this run offers the model and sends back on every later turn, and no
+  harness reached it. The table build is split out of `handshake` into
+  `buildTools` so an answer can be handed to it without a server on the other
+  end, and the harness holds the table to what the request needs: every name is
+  one that can be spelled in an exposed tool name, no name appears twice, every
+  schema is an object under the ceiling, and no description carries a byte a
+  terminal acts on.
+
+- The running build against a tag the GitHub API chose is fuzzed through
+  `std.testing.fuzz`. `parseVersion` and `compareVersions` are what decides
+  whether a binary is replaced, and the assertions are the order the caller
+  relies on rather than a crash: the comparison is antisymmetric, nothing
+  sorts below itself, two versions agreeing on every component agree on the
+  order, and a pre-release reads below the final build carrying its triple.
+
 - Repository instructions are read at start-up: `AGENTS.md` in the working
   directory, or whatever `agents_files` names, appended to the system prompt
   between a `--- begin repository instructions: <path> ---` marker and a
