@@ -144,28 +144,34 @@ pub fn roots(
         while (parts.next()) |part| {
             const path = std.mem.trim(u8, part, net.env_surrounding);
             if (path.len == 0) continue;
-            out.append(arena, resolvedRoot(arena, path)) catch return out.items;
+            out.append(arena, resolvedRoot(env, arena, path)) catch return out.items;
         }
         return out.items;
     }
     if (configured) |dirs| {
         var out: std.ArrayList(Root) = .empty;
-        for (dirs) |path| out.append(arena, resolvedRoot(arena, path)) catch break;
+        for (dirs) |path| out.append(arena, resolvedRoot(env, arena, path)) catch break;
         return out.items;
     }
     const home = net.homeDir(env) orelse return &.{};
     const path = std.fs.path.join(arena, &.{ home, ".microagent", "skills" }) catch return &.{};
     const one = arena.alloc(Root, 1) catch return &.{};
-    one[0] = resolvedRoot(arena, path);
+    one[0] = resolvedRoot(env, arena, path);
     one[0].named = false;
     return one;
 }
 
 /// A root named by an operator, in either source: a path relative to the
 /// working directory, resolved once here so nothing downstream has to know
-/// which of the two it came from.
-fn resolvedRoot(arena: std.mem.Allocator, path: []const u8) Root {
-    return .{ .path = std.fs.path.resolve(arena, &.{path}) catch path, .named = true };
+/// which of the two it came from. A leading `~` is the home directory first,
+/// because the config file and the variable are read by this program and not
+/// by a shell: `skills = ["~/.microagent/skills"]` is the line the docs and
+/// `config.example.toml` print, and without the expansion here it names a
+/// directory called `~` under the working directory, which is not a path any
+/// of these machines holds.
+fn resolvedRoot(env: *const std.process.Environ.Map, arena: std.mem.Allocator, path: []const u8) Root {
+    const expanded = net.expandHome(env, arena, path);
+    return .{ .path = std.fs.path.resolve(arena, &.{expanded}) catch expanded, .named = true };
 }
 
 /// Every skill the roots hold, sorted by name. A root is one directory of
@@ -669,6 +675,48 @@ test "the roots are the default home directory or the ones the variable names" {
     const won = roots(&env, arena, &.{"/from/file"});
     try std.testing.expectEqual(@as(usize, 1), won.len);
     try std.testing.expectEqualStrings("/env", won[0].path);
+}
+
+test "a root written with a leading tilde is the home directory, not a directory named tilde" {
+    const gpa = std.testing.allocator;
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", "/home/tester");
+
+    // The spelling config.example.toml and docs/usage.md print. Nothing reads
+    // these through a shell, so the program expands it or the root does not
+    // exist.
+    const from_file = roots(&env, arena, &.{"~/.microagent/skills"});
+    try std.testing.expectEqual(@as(usize, 1), from_file.len);
+    try std.testing.expectEqualStrings("/home/tester/.microagent/skills", from_file[0].path);
+
+    const bare_tilde = roots(&env, arena, &.{"~"});
+    try std.testing.expectEqualStrings("/home/tester", bare_tilde[0].path);
+
+    try env.put("MICROAGENT_SKILLS", "~/one:~/two");
+    const from_env = roots(&env, arena, null);
+    try std.testing.expectEqual(@as(usize, 2), from_env.len);
+    try std.testing.expectEqualStrings("/home/tester/one", from_env[0].path);
+    try std.testing.expectEqualStrings("/home/tester/two", from_env[1].path);
+
+    // `~other` is another account's home and is not looked up here, and a `~`
+    // that is not the first character is an ordinary character. Both keep the
+    // relative reading they have always had.
+    try env.put("MICROAGENT_SKILLS", "~other/a:dir~name");
+    const untouched = roots(&env, arena, null);
+    try std.testing.expectEqual(@as(usize, 2), untouched.len);
+    try std.testing.expect(std.mem.indexOf(u8, untouched[0].path, "~other") != null);
+    try std.testing.expect(std.mem.endsWith(u8, untouched[1].path, "dir~name"));
+
+    // With no home to expand to, the value is left as written rather than
+    // becoming a path under the root directory.
+    var bare: std.process.Environ.Map = .init(arena);
+    const no_home = roots(&bare, arena, &.{"~/skills"});
+    try std.testing.expectEqual(@as(usize, 1), no_home.len);
+    try std.testing.expect(std.mem.indexOf(u8, no_home[0].path, "~") != null);
 }
 
 test "a skill call loads a body, and an unknown name lists what is there" {

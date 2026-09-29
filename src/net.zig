@@ -122,6 +122,28 @@ pub fn homeDir(env: *const std.process.Environ.Map) ?[]const u8 {
     return if (v.len == 0) null else v;
 }
 
+/// `path` with a leading `~` or `~/` replaced by the home directory, for a
+/// path this program reads itself rather than one a shell hands it.
+///
+/// Nothing expands `~` on the way in: the config file, `MICROAGENT_CONFIG` and
+/// `MICROAGENT_SKILLS` are values in a file or a variable, and a program with
+/// no shell in it has to do what the shell would have done. Left alone, the
+/// `~` is an ordinary character, so `~/.microagent/skills` names a directory
+/// called `~` under the working directory, which is a path no machine holds and
+/// a silent no-op rather than an error.
+///
+/// `~user` is another account's home and is not looked up here, and a `~`
+/// that is not the first character is an ordinary character in a directory
+/// name, so both come back unchanged. A home that is not set is no expansion
+/// either, for the same reason an empty `HOME` is: nothing is invented.
+pub fn expandHome(env: *const std.process.Environ.Map, arena: std.mem.Allocator, path: []const u8) []const u8 {
+    if (path.len == 0 or path[0] != '~') return path;
+    if (path.len != 1 and path[1] != '/' and path[1] != std.fs.path.sep) return path;
+    const home = homeDir(env) orelse return path;
+    if (path.len == 1) return home;
+    return std.fs.path.join(arena, &.{ home, path[2..] }) catch path;
+}
+
 /// The file `path` names once every symlink on it is followed, which is the
 /// file opening `path` would have written to and the only one a rename may
 /// replace.
@@ -663,6 +685,32 @@ test "the home directory is trimmed, and an empty one is no home" {
     try std.testing.expect(homeDir(&env) == null);
     try env.put("HOME", "  \r\n");
     try std.testing.expect(homeDir(&env) == null);
+}
+
+test "a leading tilde is the home directory, and nothing else is" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", "/home/me");
+
+    try std.testing.expectEqualStrings("/home/me", expandHome(&env, arena, "~"));
+    try std.testing.expectEqualStrings("/home/me/x", expandHome(&env, arena, "~/x"));
+    try std.testing.expectEqualStrings("/home/me/x", expandHome(&env, arena, &[_]u8{ '~', std.fs.path.sep, 'x' }));
+
+    // Every other tilde is an ordinary character: another account's home is not
+    // this program's to look up, and a tilde inside a name is a tilde.
+    try std.testing.expectEqualStrings("~other/x", expandHome(&env, arena, "~other/x"));
+    try std.testing.expectEqualStrings("/abs", expandHome(&env, arena, "/abs"));
+    try std.testing.expectEqualStrings("a/~b", expandHome(&env, arena, "a/~b"));
+    try std.testing.expectEqualStrings("", expandHome(&env, arena, ""));
+
+    // A home that is not set is no expansion, rather than a path under the root
+    // directory built from nothing.
+    var bare: std.process.Environ.Map = .init(std.testing.allocator);
+    defer bare.deinit();
+    try std.testing.expectEqualStrings("~/x", expandHome(&bare, arena, "~/x"));
 }
 
 /// `resolveSymlinkTarget` over the three caller-owned buffers the tests below

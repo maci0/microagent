@@ -263,8 +263,10 @@ output text.
 ## Config file
 
 One TOML file carries the reply style, the skill roots and the MCP servers. It is `--config`, else
-`MICROAGENT_CONFIG`, else `~/.microagent/config.toml`. [`config.example.toml`](../config.example.toml)
-is a commented template.
+`MICROAGENT_CONFIG`, else `~/.microagent/config.toml`. A named path may start with `~` or `~/`, which
+is the home directory: a shell expands the tilde in a command line before the flag is read, but a
+value that came out of `MICROAGENT_CONFIG` never went through one, so microagent expands it here.
+[`config.example.toml`](../config.example.toml) is a commented template.
 
 A missing file means the defaults. A file that cannot be read, is a directory, or is over the 64 KB
 cap is named on stderr and the run continues on the defaults. An unrecognized level, and a key the
@@ -328,10 +330,12 @@ skills = ["./skills", "~/.microagent/skills"]   # [] turns skills off
 ```
 
 `MICROAGENT_SKILLS` (colon-separated) names the roots for one run and wins over the file; an empty
-value turns skills off. A relative path resolves against the working directory. The working
-directory is deliberately not a default root: a `SKILL.md` in a repository under review was written
-by whoever wrote that repository, and a skill body is text the model is told to follow. Naming a
-repository's directory is the operator saying those bytes are instructions.
+value turns skills off. A relative path resolves against the working directory, and a leading `~` or
+`~/` is the home directory: nothing expands it on the way in, because these are values in a file or a
+variable rather than words a shell reads. `~user` names another account and is left alone. The
+working directory is deliberately not a default root: a `SKILL.md` in a repository under review was
+written by whoever wrote that repository, and a skill body is text the model is told to follow. Naming
+a repository's directory is the operator saying those bytes are instructions.
 
 ### MCP servers
 

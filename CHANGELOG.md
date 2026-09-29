@@ -86,6 +86,15 @@ release, and `microagent update` moves you to it.
   `# because:` comment above it covers, so a suppression that outlives its
   reason, or arrives without one, fails the gate rather than the next reader.
 
+- A `~` at the front of a path in the config file, in `MICROAGENT_CONFIG` or in
+  `MICROAGENT_SKILLS` named a directory called `~` under the working directory,
+  which is a path no machine holds. Nothing expands a tilde on the way in: a
+  shell does it for a word on a command line, and these are values in a file
+  and in a variable, read by a program with no shell in it. The spelling both
+  the docs and `config.example.toml` print now resolves to the home directory,
+  and the same expansion answers `--config ~/x.toml` for a caller whose shell
+  did not get to it first. `~user` is left alone: another account's home is not
+  this program's to look up.
 - The Harbor README named nine of the ten variables its adapter reads. The one
   it left out, `MICROAGENT_STALL_TIMEOUT`, is the one a slow provider needs: the
   adapter checked it, forwarded it and never wrote it down, so an operator

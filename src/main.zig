@@ -1496,14 +1496,17 @@ const StyleSource = struct { path: ?[]const u8, named: bool };
 
 /// Where the style config is read from: --config, else MICROAGENT_CONFIG, else
 /// `$HOME/.microagent/config.toml`. An empty MICROAGENT_CONFIG turns the
-/// file off, as does a home that is not there. Takes the environment map
-/// rather than the whole `Init`, so the precedence is testable without one.
+/// file off, as does a home that is not there. A named path may start with
+/// `~`, which `net.expandHome` answers: a value that came out of a wrapper's
+/// environment file never went through a shell, and the help text prints the
+/// tilde spelling. Takes the environment map rather than the whole `Init`, so
+/// the precedence is testable without one.
 fn styleConfigPath(env: *const std.process.Environ.Map, arena: std.mem.Allocator, config: []const u8) StyleSource {
-    if (config.len > 0) return .{ .path = std.fs.path.resolve(arena, &.{config}) catch config, .named = true };
+    if (config.len > 0) return .{ .path = std.fs.path.resolve(arena, &.{net.expandHome(env, arena, config)}) catch config, .named = true };
     if (env.get("MICROAGENT_CONFIG")) |raw| {
         const path = std.mem.trim(u8, raw, net.env_surrounding);
         if (path.len == 0) return .{ .path = null, .named = false };
-        return .{ .path = std.fs.path.resolve(arena, &.{path}) catch path, .named = true };
+        return .{ .path = std.fs.path.resolve(arena, &.{net.expandHome(env, arena, path)}) catch path, .named = true };
     }
     const home = net.homeDir(env) orelse return .{ .path = null, .named = false };
     const path = std.fs.path.join(arena, &.{ home, ".microagent", "config.toml" }) catch
@@ -7655,6 +7658,22 @@ test "the style config path follows flag, then variable, then home" {
     // An empty home is no home, not a root-relative directory.
     try home_only.put("HOME", "");
     try std.testing.expect(styleConfigPath(&home_only, arena, "").path == null);
+}
+
+test "a config path written with a leading tilde is read from the home directory" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", "/home/one");
+
+    // A shell expands the tilde in `--config ~/x.toml` before the flag is
+    // read, but nothing expands it in a value that came out of a variable or a
+    // wrapper's environment file, and the help text prints the tilde spelling.
+    try env.put("MICROAGENT_CONFIG", "~/.microagent/other.toml");
+    try std.testing.expectEqualStrings("/home/one/.microagent/other.toml", styleConfigPath(&env, arena, "").path.?);
+    try std.testing.expectEqualStrings("/home/one/from/flag.toml", styleConfigPath(&env, arena, "~/from/flag.toml").path.?);
 }
 
 // The name and the id of a streamed tool call are copies the run allocator
