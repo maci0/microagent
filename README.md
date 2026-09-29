@@ -51,11 +51,9 @@ $ hyperfine -N -w 5 -r 30 './zig-out/bin/microagent --version'
   Time (mean ± σ):     130.0 µs ±  64.5 µs    [User: 87.1 µs, System: 4.4 µs]
 ```
 
-`ReleaseSmall` is the build the release assets and `make` use, because it has the smallest
-footprint of the three release modes: 540 kB resident at start where `ReleaseFast` holds 788 kB
-and `ReleaseSafe` 1.1 MB, and 39% less than `ReleaseFast` up to the first request. It retires about
-1.4 times the instructions of `ReleaseFast`, which is under 1% of a turn either way. The measurements
-are in [docs/benchmark.md](docs/benchmark.md#memory-footprint).
+`ReleaseSmall` is the build the release assets and `make` use, because it holds the least of the three
+release modes; the three, their memory and their instruction counts are in
+[docs/benchmark.md](docs/benchmark.md#memory-footprint).
 
 A run prints the model's answer to stdout and a usage line after each response; tool calls show on
 stderr as a one-line gutter such as `⏺ read src/main.zig`:

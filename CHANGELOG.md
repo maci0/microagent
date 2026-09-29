@@ -72,6 +72,9 @@ release, and `microagent update` moves you to it.
 
 ### Changed
 
+The figures behind the changes below, with the method and the guard for each, are in
+[docs/performance.md](docs/performance.md). This section keeps what changed and why.
+
 - A preset with no key is no longer handshaken when the run starts. Its tool list and schemas are in
   this binary (`ask_wiki_question` and the other deepwiki tools were added to that table), so the model
   sees them with no request made; the first call to one of those tools is what connects and initializes,
@@ -79,55 +82,52 @@ release, and `microagent update` moves you to it.
   config drops from about 2.8 s to under a millisecond on the test machine. A preset with a key, and any
   `url` server the config wrote, are still connected at start: a key can unlock tools the table cannot
   name, and only a server's own `tools/list` can say what a `[[mcp]]` url offers.
-- The release binary is not position-independent and carries no unwind tables. `--version` retires 52,181 instructions instead of about 11,000 more, the binary is 850,936 bytes instead of 912,992, and a plain run is 592 kB resident instead of 636 kB.
-- The main thread's stack pages below the frame are returned to the kernel once the TLS handshake is done (`net.releaseDeadStack`, Linux). A streaming HTTPS run holds 1,324 kB instead of about 1,530 kB for the rest of its life; the peak is unchanged.
+- The release binary is not position-independent and carries no unwind tables, which takes 62 KB off
+  the file and keeps the pages they landed in out of its resident set.
+- The main thread's stack pages below the frame are returned to the kernel once the TLS handshake is
+  done (`net.releaseDeadStack`, Linux), so a streaming HTTPS run holds less resident memory for the
+  rest of its life. The peak is unchanged.
 
 - `make` and `make musl` build `ReleaseSmall`, as the release assets already did, because it holds the
-  least resident memory of the three release modes: 540 kB against 788 kB (`ReleaseFast`) and 1,120 kB
-  (`ReleaseSafe`) at `--version`, 764 kB against 1,244 kB and 2,156 kB up to the first request, and 1,300 kB
-  against 1,812 kB and 3,164 kB after 50,000 streamed frames. It retires about 1.4 times the instructions of
-  `ReleaseFast`. `make small` is gone (it was this build); `make OPT=ReleaseFast` builds the other. The
-  Harbor benchmark binary is now the shipped build, where it was `ReleaseFast`.
+  least resident memory of the three release modes and retires about 1.4 times the instructions of
+  `ReleaseFast`, which is under 1% of a turn either way. `make small` is gone (it was this build);
+  `make OPT=ReleaseFast` builds the other. The Harbor benchmark binary is now the shipped build, where
+  it was `ReleaseFast`.
 - The documentation leads with memory footprint, not file size: the README, `docs/benchmark.md` and
   `docs/performance.md` give peak resident memory for microagent and for `grok`, `codex`, `claude`,
   `crush`, `opencode` and `kimi` at `--version` (0.6 MB against 25 MB to 326 MB).
 - The instructions the model is sent are shorter with the same rules: the system prompt, the tool
   descriptions and the skills listing say each thing once, and the credential list lives in `read`'s
-  description, which the other tools point to. The fixed part of every request falls from 9,038 to 6,516
-  bytes (system prompt 2,831 to 2,273, tool schemas 4,468 to 4,123 with `todo` and `multi_edit` added; the
-  reply-style block is gone). The five tools of the remote presets ship compact descriptions and schemas,
-  3.4 KB where the servers send 8.4 KB, applied only to the preset's own host and to tools it knows.
-  It changes the prompt the model sees, so a benchmark run before and one after are not the same experiment.
+  description, which the other tools point to. The fixed part of every request is smaller, the
+  reply-style block is gone, and the remote presets ship compact descriptions and schemas, applied only
+  to the preset's own host and to tools it knows. It changes the prompt the model sees, so a benchmark
+  run before and one after are not the same experiment.
 - Release builds no longer give every thread a 256 KB signal stack, which std zeroed at thread start
-  whether or not the segfault handler was on. `--version` retires 46,256 instructions instead of
-  477,472 (`ReleaseFast`), the path to the first request 82,786 instead of 1,329,995, and a run that never connects
-  peaks at 1,304 kB resident instead of 2,164 kB.
+  whether or not the segfault handler was on.
 - The environment map is built without copying: its keys and values are slices of the process's own
   environment block, and the credentials are removed from it in place
   after the key is read, where it was copied twice and freed at exit.
 - The stock system prompt is escaped at compile time, and the JSON string writer skips plain text a
-  word at a time. Compaction of a 1 MB conversation retires 31.0 M instructions instead of 37.2 M.
+  word at a time.
 - The sandbox path check resolves a relative path against the working directory it recorded at startup,
   saving one `realpath` (open, readlink, close) per `write` or `edit` call.
-- The shipped `ReleaseSmall` build is faster where its code generation was weakest. The environment map
-  needs no copy and no key validation, and its string lengths are found a word at a time; a word-at-a-time
-  `memcpy` (`src/copy.zig`, built with `-fno-builtin`, Linux `ReleaseSmall` only) replaces the compiler
-  runtime's byte loop; and the stream's `"error":` check compares a machine word per position. `--version`
-  retires 63,683 instructions instead of 154,657, a full one-frame run 171,991 instead of 255,644, and
-  a 5,000-frame stream 37.8 M instead of 54.3 M. `ReleaseFast` is unchanged apart from the environment map.
+- The shipped `ReleaseSmall` build is faster where its code generation was weakest: the environment map
+  needs no copy and no key validation, and its string lengths are found a word at a time; a
+  word-at-a-time `memcpy` (`src/copy.zig`, built with `-fno-builtin`, Linux `ReleaseSmall` only)
+  replaces the compiler runtime's byte loop; and the stream's `"error":` check compares a machine word
+  per position. `ReleaseFast` is unchanged apart from the environment map.
 - Remote MCP servers (`url` entries and the `web_search`, `context7` and `grep_app` presets) are connected
-  concurrently at startup instead of one after another. With all three presets on, time to the first
-  request drops from about 4.7 s to about 2.9 s on the test machine. Server and tool order still follow the
-  config, and a server that fails is still reported and skipped. Peak resident memory of that startup
-  rises by about 0.45 MB (1.8 MB to 2.2 MB), because three TLS handshakes are alive at once.
+  concurrently at startup instead of one after another. Server and tool order still follow the config,
+  and a server that fails is still reported and skipped; peak resident memory of that startup rises by
+  about 0.45 MB, because three TLS handshakes are alive at once.
 - The async-slot limit is sixteen, not four. `Io.Threaded` runs an operation inline once every slot is
   busy, and a connection dials every address its host resolves to at once, so at four the four default
   remote presets cost about 4.6 s before the first request: the `deepwiki` preset's five addresses were
   serialized against the three handshakes already there. At sixteen the same run is about 2.8 s, which is
   the slowest server's own answer time. Every connection pays this, not just MCP: a provider reached over
-  a name with several addresses was serialized the same way. Address space rises about 2.9 MB (`VmPeak`,
-  300-turn run) and peak resident about 0.5 MB, only while an operation is on the extra workers; `--version`
-  resident is unchanged. No instruction row carries a wait, so the guard is a test.
+  a name with several addresses was serialized the same way. Address space and peak resident rise a
+  little while an operation is on the extra workers; `--version` resident is unchanged. No instruction
+  row carries a wait, so the guard is a test.
 - The API key is read from one variable, `MICROAGENT_API_KEY` (or `--api-key`, or `~/.secrets/openrouter`).
   `OPENAI_API_KEY`, `OPENROUTER_API_KEY` and `DEEPSEEK_API_KEY` are no longer read, and the "key is for
   another provider" warning is gone. If you exported one of those, export `MICROAGENT_API_KEY` instead.
