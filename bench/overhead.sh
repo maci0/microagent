@@ -34,8 +34,20 @@ for agent in $agents; do
 	# machine-wide path is written by two runs at once and read by the other,
 	# so each row's startup number is the other row's measurement.
 	work=$(mktemp -d)
+	# The mean is read by the key it is written under, not by its column: a
+	# field position is only right for one layout, and hyperfine's export is
+	# pretty-printed on some releases and a single line on others. Read as a
+	# column, the compact form put the command string where the number is and
+	# every harness answered 0.0 ms as though it started in no time at all. A
+	# key no line carries leaves the column `-`, which is what an unreadable
+	# export already is elsewhere in this script.
 	startup=$(hyperfine -w 3 -r 20 -N --export-json "$work/startup.json" "$agent --version" >/dev/null 2>&1 \
-		&& awk -F'[:,]' '/"mean"/{printf "%.1f", $2*1000; exit}' "$work/startup.json")
+		&& awk 'match($0, /"mean"[[:space:]]*:[[:space:]]*[0-9.eE+-]+/) {
+			seconds = substr($0, RSTART, RLENGTH)
+			sub(/^[^:]*:[[:space:]]*/, "", seconds)
+			printf "%.1f", seconds * 1000
+			exit
+		}' "$work/startup.json")
 	[ -z "$startup" ] && startup=-
 
 	# The startup column above comes from hyperfine, which has the resolution

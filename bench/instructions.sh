@@ -92,7 +92,11 @@ fi
 
 # Median of $runs samples of one binary. The median, not the mean, because the
 # first run pays for the page faults on a binary that was just written and the
-# rest do not.
+# rest do not. An even count takes the mean of the two middle samples, since one
+# of them alone is not the median: `RUNS=4` on samples 100 200 300 400 answered
+# 200, a whole sample below the middle, and that sample lands in
+# `instr_per_unit` and in the band check below. The mean is floored rather than
+# rounded, because the row is compared in shell integer arithmetic.
 #
 # A build that fails, a test that no longer exists and a perf that measures
 # nothing all used to leave no output, which the row printed as "not built" and
@@ -142,7 +146,10 @@ measure() {
 		printf 'bench/instructions.sh: perf counted no instructions for filter %s, so the row has no number to compare\n' "$filter" >&2
 		return 3
 	}
-	sort -n "$samples" | awk '{ v[NR] = $1 } END { print v[int((NR + 1) / 2)] }'
+	sort -n "$samples" | awk '{ v[NR] = $1 } END {
+		if (NR % 2) print v[(NR + 1) / 2]
+		else print int((v[NR / 2] + v[NR / 2 + 1]) / 2)
+	}'
 }
 
 # The baseline is meant to select no test: it is the same binary with nothing
