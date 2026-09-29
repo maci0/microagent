@@ -70,8 +70,8 @@ returns the socket after each response is read.
 | a retry wait past the budget | up to 6 min asleep | **refused** | `--budget` was defeated by the `Retry-After` path |
 | turn arena after a ceiling-sized response | 48 MB resident | **4 MB** | the reset retained without bound |
 | MCP server startup, 3 servers | 1.513 s | **0.506 s** | every server is spawned before any is asked to initialize, so their boots overlap: the run waits for the slowest server instead of the sum |
-| a 200 x 100 KB skill library | 21.6 MB resident | **13.1 MB** | the listing read every `SKILL.md` whole and kept the text in the run arena, because the name and description it lists are slices of it; it reads the head of the file now, and a `skill` call reads the body |
-| the same library, to the first request | 27.2 ms | **12.9 ms** | the same change, measured as wall on a loaded machine: 21 MB of reads become about 1.6 MB |
+| a 200 x 100 KB skill library | 24.3 MB resident | **4.6 MB** | the listing read every `SKILL.md` whole and kept the text in the run arena, because the name and description it lists are slices of it; it reads the head of the file now, and a `skill` call reads the body |
+| the same library, system time to the first request | 9.3 ms | **2.0 ms** | the same change: 21 MB of reads become about 1.6 MB, and kernel time is the half that carries it |
 
 The two largest wins are not CPU at all. The request-bytes one is the single most valuable change in
 the file and it is invisible to every counter the harness prints: `cached_tokens` reports what was
@@ -191,10 +191,13 @@ On a machine where `/bin/sh` has no fractional `sleep` the waiter's bounded wait
 sleeping and the guard still works, only faster to give up.
 
 The skill rows are measured with `MICROAGENT_SKILLS` pointed at a directory of generated `SKILL.md`
-files: `hyperfine -w 3 -r 20` for the two wall figures, which moved run to run on a machine with
-other work on it (27.2 and 12.9 ms are medians of twenty, and the system time is the half that tells
-the story: 15.0 ms of reads against 2.9 ms), and peak RSS from `getrusage(RUSAGE_CHILDREN)` for the
-resident figures. The guard is a counter, not either of those: `a large skill is listed from its
+files. The resident figures are peak `VmHWM` from `/proc/<pid>/status`, sampled every 20 ms through a
+400-turn run against the stub, which is the only method that agreed with `smaps`: `getrusage`'s
+`ru_maxrss` answered 10.8 MB for a 5 KB hello-world on this machine -- the same figure it gave the
+harness -- so it is not usable for small processes here. The wall figure is `hyperfine -w 3 -r 20`
+and it moves with the page cache: 11.1 ms against 10.9 ms per run once the files are warm, 27.2
+against 12.9 on a loaded machine with a cold cache. The system time does not move: 9.3 ms against
+2.0 ms, which is the read volume. The guard is a counter again: `a large skill is listed from its
 head, and loads whole` asserts the run arena holds under 64 KB after listing a 200 KB skill, which a
 whole-file read fails by 3x.
 `hyperfine -w 3 -r 20` over an instant-answer server put the whole MCP path — spawn, two round
