@@ -841,7 +841,10 @@ The repository it installs from is the one this binary was built for, named by `
 Each release publishes `microagent-<tag>-<triple>` for `x86_64-linux-musl`, `aarch64-linux-musl`,
 `x86_64-macos` and `aarch64-macos`, each with a `.sha256` sidecar. Linux has one static asset per
 architecture that links no C library (`musl` in the name is only the target triple), so it runs on
-glibc and musl hosts alike and a `-gnu` build updates to it. The download is checked
+glibc and musl hosts alike and a `-gnu` build updates to it. Three of the four are started by CI
+on a runner of their own platform; `aarch64-linux-musl` is the exception, because GitHub publishes
+no arm64 Linux runner, so it is cross-compiled and its object format and rebuild are checked but it
+is never executed there. The download is checked
 against its sidecar, and the running binary is replaced atomically (following a symlink to the real
 file) only when the digest matches. A mismatch, a missing asset, or a release page that is not a
 GitHub https URL leaves the binary untouched. `GITHUB_TOKEN` lifts the anonymous API rate limit.
