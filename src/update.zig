@@ -33,8 +33,9 @@ const install_line_bytes: usize = net.quoted_value_bytes + std.fs.max_path_bytes
 /// A value this program does not spell, as the operator can be shown it: cut on
 /// a codepoint boundary (a partial codepoint in a diagnostic reads as a
 /// replacement character in the middle of the name), with every control
-/// character, DEL and C1 control written as its two-character escape, and every
-/// byte that is not part of a valid UTF-8 sequence written as U+FFFD.
+/// character, DEL and C1 control written as its `\xNN` escape, every invisible
+/// and bidi character as its `\uXXXX` escape, and every byte that is not part of
+/// a valid UTF-8 sequence written as U+FFFD.
 ///
 /// Three kinds of value reach it. A `--repo` is whatever the user typed. A tag,
 /// an asset name and a release page are the release body's own bytes: GitHub
@@ -673,6 +674,10 @@ const Fetched = struct {
     }
 };
 
+/// `fetchBody` without the second copy: the body lands in an allocation the
+/// caller owns, so a release-sized asset is resident once rather than twice.
+/// `max_size` is the cap `fetchInto` refuses to exceed, and the status is
+/// reported back the same way so the caller reads one response either way.
 fn fetchAsset(
     io: std.Io,
     arena: std.mem.Allocator,

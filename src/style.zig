@@ -218,10 +218,11 @@ fn isStyleTable(line: []const u8) bool {
 /// it is otherwise taken as written, because `caveman = ultra` is not valid
 /// TOML but is not worth an error either.
 ///
-/// The `#` is cut before the quote is looked for, not after, so a `#` a quoted
-/// value itself carries is not text the way TOML has it: `caveman = "lite #
-/// off"` arrives here as the unterminated value `"lite ` and is reported as a
-/// level this build does not have.
+/// The closing quote is looked for before any `#` is, so a `#` between the
+/// quotes is text. A quoted value with no closing quote is returned as written
+/// rather than cut at a `#` it may legitimately carry, so `caveman = "lite #
+/// off"` reaches the level parser whole and is reported as a level this build
+/// does not have.
 fn unquote(raw: []const u8) []const u8 {
     if (raw.len < 2) return raw;
     const quote = raw[0];

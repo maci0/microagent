@@ -154,8 +154,8 @@ self-hosted gateway that takes a key from any provider. A variable set to an emp
 string is not a value:
 `MICROAGENT_MODEL`, `MICROAGENT_BASE_URL`, `MICROAGENT_REASONING_EFFORT`,
 `MICROAGENT_BUDGET_SECONDS`, `MICROAGENT_MAX_SPEND_TOKENS`, `MICROAGENT_MAX_TURNS`,
-`MICROAGENT_MAX_TOKENS`, `MICROAGENT_STALL_TIMEOUT` and `MDEBUG` keep their defaults,
-`MICROAGENT_CA_BUNDLE` falls through to
+`MICROAGENT_MAX_TOKENS`, `MICROAGENT_STALL_TIMEOUT` and `MDEBUG` keep their defaults, the four
+api key variables fall through to whatever comes next, `MICROAGENT_CA_BUNDLE` falls through to
 `SSL_CERT_FILE`, and
 `MICROAGENT_CAVEMAN`/`MICROAGENT_PONYTAIL` fall through to the config file.
 Two variables are the exception: `MICROAGENT_CONFIG` and `MICROAGENT_SESSION_DIR`

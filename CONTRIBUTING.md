@@ -101,11 +101,13 @@ and the same `zig build test-sanitize`, the same `make lint-versions` and
 `make lint-lock`, and the same `ReleaseSmall`
 build whose binary it then runs, that
 [.github/workflows/ci.yml](.github/workflows/ci.yml) runs, on the same Zig
-version (`make zig-version` is that first step, so a laptop on a different
-compiler is told rather than assumed). The second test run is the same tests
+version (`make required-zig-version` is what the shared setup-zig action runs
+to install it, and `make zig-version` is the check that a local compiler is the
+one a release would be built with, so a laptop on a different compiler is told
+rather than assumed). The second test run is the same tests
 compiled with the undefined-behavior sanitizer: the plain run says the
 assertions hold, and only the instrumented one says nothing inside them is out
-of its bounds or overflows, which is otherwise silent in the `ReleaseFast`
+of its bounds or overflows, which is otherwise silent in the `ReleaseSmall`
 binary the release assets are made of. Two things `check` does not stand in
 for: the
 release-assets cross-build (`make release-assets` runs that, and

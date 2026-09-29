@@ -185,8 +185,9 @@ pub fn resolveSymlinkTarget(
 
 /// How many links a path may hold before the answer is a cycle rather than a
 /// file. Two links naming each other, or a link into a directory of links, would
-/// otherwise spin here; the kernel refuses a chain this long for the same
-/// reason, so a path that reaches it is not one any of these platforms opens.
+/// otherwise spin here. The bound is this module's own and the pruning and the
+/// tests are written against it; the kernel refuses a chain at its own, longer,
+/// limit, so a path that reaches either is not one any of these platforms opens.
 const max_symlink_depth = 32;
 
 fn copyInto(buf: []u8, bytes: []const u8) error{NameTooLong}![]const u8 {

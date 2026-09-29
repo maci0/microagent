@@ -66,9 +66,10 @@ pub const Tool = enum {
         return std.meta.stringToEnum(Tool, text);
     }
 
-    /// Whether calling the tool changes a file. `ast` is in neither list on
-    /// its own, because a search leaves the tree as it found it and a rewrite
-    /// does not; the caller that dispatched it says which it was.
+    /// Whether calling the tool changes a file. `ast` answers false either
+    /// way, because a search leaves the tree as it found it and a rewrite does
+    /// not; a caller that knows a rewrite happened says so itself, the way
+    /// `credentialRefusal` does with its `writes` parameter.
     pub fn writes(tool: Tool) bool {
         return tool == .write or tool == .edit;
     }

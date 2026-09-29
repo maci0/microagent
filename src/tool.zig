@@ -17,8 +17,9 @@ const net = @import("net.zig");
 /// is captured at four times this, and `clamp` cuts the combined result at a
 /// codepoint boundary and appends a marker naming how much was dropped, so a
 /// model reading a truncated log knows the tail is missing rather than reading
-/// a build failure as the end of the output. `git` is the exception: it is cut
-/// by line count instead, and says so only when the line count is what cut it.
+/// a build failure as the end of the output. `git` is cut by line count first,
+/// and says so only when the line count is what cut it; a capture past this cap
+/// is marked the same way every other tool's is.
 pub const max_tool_output = 24 * 1024;
 
 /// Ceiling on a file `read` returns whole. A source file is kilobytes, so the
@@ -169,6 +170,10 @@ fn onInterrupt(_: std.posix.SIG) callconv(.c) void {
     std.process.exit(130);
 }
 
+/// Publishes the group a tool call just started in, so `onInterrupt` has
+/// something to signal. The group is cleared again by `runCapped` when the
+/// child is reaped, so a signal that arrives between two calls finds zero and
+/// leaves nothing of the previous one behind.
 fn watchToolGroup(pgid: std.posix.pid_t) void {
     tool_group.store(pgid, .monotonic);
 }
@@ -642,7 +647,8 @@ const gutter_line_max = 5 + 40 + 1 + 120 + 1;
 /// A one-line tool gutter on stderr, the shape gauntlet recognizes. The detail
 /// is the provider's own text and may carry a newline or an escape sequence,
 /// either of which breaks the one-line-per-call shape a reader parses, so
-/// control characters are written as their two-character escapes.
+/// control characters are written as their `\xNN` escapes, and an invisible or
+/// bidi character as its `\uXXXX` escape.
 fn noteToolCall(io: Io, arena: std.mem.Allocator, tool: chat.Tool, args: std.json.ObjectMap) void {
     var buf: [gutter_line_max]u8 = undefined;
     net.writeErr(io, toolCallLine(arena, &buf, tool, args) catch return);
@@ -764,25 +770,7 @@ fn requestedTimeoutMs(v: ?std.json.Value) ?u64 {
     return if (n > 0) n else null;
 }
 
-/// The first path in a shell command that names a credential file, or null.
-///
-/// `bash` takes a command rather than a path, so `isCredentialPath` has no
-/// single argument to read. Splitting the command into words and testing each
-/// is the same rule applied per word, and it is deliberately narrow: only a
-/// word that looks like a path is tested, meaning it carries a separator or a
-/// dot in its last component. A bare `identity` or `credentials` is an ordinary
-/// word to grep for, and refusing every command that contains one would break
-/// the searches that use them rather than protect anything. `cat .env`,
-/// `cat ./.env`, `cat "$PWD"/.env and `cat ~/.ssh/id_rsa` are all refused,
-/// because each of those words is a path.
-///
-/// This is a name check, not a shell parse, and it says so: a command that
-/// reaches the same file through indirection (`f=$(printf '.en''v'); cat
-/// "$f"`) is not caught here. Catching that needs a shell parser, and the
-/// guarantee that matters most, that the run's own key never reaches a child's
-/// environment, is structural rather than textual.
-///
-/// The characters a command is split on, spelled once so the walk above and
+/// The characters a command is split on, spelled once so the walk it feeds and
 /// the harness that fuzzes it walk the same words.
 const command_word_separators = " \t\n\"'`$&;<>|()[]{}*?!#\\";
 
@@ -808,6 +796,23 @@ fn componentNamesCredential(path: []const u8) bool {
     }
     return false;
 }
+/// The first path in a shell command that names a credential file, or null.
+///
+/// `bash` takes a command rather than a path, so `isCredentialPath` has no
+/// single argument to read. Splitting the command into words and testing each
+/// is the same rule applied per word, and it is deliberately narrow: only a
+/// word that looks like a path is tested, meaning it carries a separator or a
+/// dot in its last component. A bare `identity` or `credentials` is an ordinary
+/// word to grep for, and refusing every command that contains one would break
+/// the searches that use them rather than protect anything. `cat .env`,
+/// `cat ./.env`, `cat "$PWD"/.env and `cat ~/.ssh/id_rsa` are all refused,
+/// because each of those words is a path.
+///
+/// This is a name check, not a shell parse, and it says so: a command that
+/// reaches the same file through indirection (`f=$(printf '.en''v'); cat
+/// "$f"`) is not caught here. Catching that needs a shell parser, and the
+/// guarantee that matters most, that the run's own key never reaches a child's
+/// environment, is structural rather than textual.
 fn credentialInCommand(command: []const u8) ?[]const u8 {
     var words = std.mem.tokenizeAny(u8, command, command_word_separators);
     while (words.next()) |word| {
@@ -882,6 +887,11 @@ const credential_names = [_][]const u8{
 /// public half, and refusing it would break reading a bundle someone committed.
 const credential_extensions = [_][]const u8{ ".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".ppk", ".kdbx", ".asc" };
 
+/// Whether one path component is on the name list, or ends in one of the
+/// credential extensions. Every tool's refusal is this rule, applied at a
+/// different depth: `read` and `write` to a path, `search` and `ast` to a
+/// result, `git` to a pathspec, and `bash` to each word that looks like a
+/// path. Adding a name here changes all of them at once.
 fn isCredentialName(name: []const u8) bool {
     // Case-insensitively: a macOS or Windows filesystem resolves `.ENV` and
     // `.env` to the same bytes, so a case-sensitive rule is a rule the next
@@ -1066,8 +1076,8 @@ fn credentialRefusal(arena: std.mem.Allocator, tool: chat.Tool, path: []const u8
     // The tools that change a file rather than report one are named too,
     // because the advice a reading tool gets is wrong for them: there is no
     // reading of a key file that should be going on, so the answer is the
-    // operator rather than another tool. `ast` is in neither list on its own,
-    // because a search leaves the tree as it found it and a rewrite does not;
+    // operator rather than another tool. `ast` is neither on its own, because
+    // a search leaves the tree as it found it and a rewrite does not;
     // `writes` is the caller's answer to which one this was.
     // The advice has to be the one that is true for the tool that was refused.
     // The `bash` branch sends the model to the operator because `bash` runs
@@ -2207,6 +2217,11 @@ test "the tool gutter stays one line whatever the model sent" {
 // belongs, deeply nested and empty objects, an array or a scalar instead of an
 // object, a truncated object, escapes and lone bytes inside a string, and the
 // argument names themselves, which is what decides whose key the gutter reads.
+//
+// The names here are the tool's own (`command`, `path`, `pattern`, `cmd`,
+// `content`, `limit`, `offset`, `lang`, `timeout_ms`), because the fuzzer runs
+// them back through `toolCallLine`, which picks a tool's detail key by the name
+// it was given.
 const call_corpus = [_][]const u8{
     "",
     "\n",
@@ -2233,12 +2248,12 @@ const call_corpus = [_][]const u8{
     "{\"path\":\"src/main.zig\",\"offset\":-1,\"limit\":\"12\"}",
     "{\"pattern\":\"fn main\",\"lang\":\"zig\"}",
     "{\"pattern\":\"日本\" ** 40}",
-    "{\"subcommand\":\"log\",\"limit\":400}",
-    "{\"subcommand\":\"log\",\"limit\":0}",
-    "{\"subcommand\":\"log\",\"limit\":-5}",
-    "{\"subcommand\":\"log\",\"limit\":\"all\"}",
-    "{\"subcommand\":\"log\",\"limit\":1e30}",
-    "{\"subcommand\":\"log\",\"limit\":null}",
+    "{\"cmd\":\"log\",\"limit\":400}",
+    "{\"cmd\":\"log\",\"limit\":0}",
+    "{\"cmd\":\"log\",\"limit\":-5}",
+    "{\"cmd\":\"log\",\"limit\":\"all\"}",
+    "{\"cmd\":\"log\",\"limit\":1e30}",
+    "{\"cmd\":\"log\",\"limit\":null}",
     "{\"limit\":18446744073709551615}",
     "{\"path\":\"a\",\"content\":\"\\u0000\\u001b\\u007f\\ud83d\\ude80\"}",
     "{\"content\":7}",

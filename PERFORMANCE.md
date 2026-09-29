@@ -32,7 +32,7 @@ that moves is a gate that moved with it:
 | a streamed tool-argument frame | — | 9,253 |
 | compaction of a 1 MB conversation | 37,153,055 | one call |
 | building the request body (the row measures 40 of them) | 113,946 | 2,849 |
-| a ranged read of a 512 KB line | 7,543,588 | one call |
+| a ranged read of a 512 KB line | 7,543,604 | one call |
 
 Against a 284 s review and roughly 20,000 frames, the streaming path is on the order of ten
 milliseconds of CPU in total. Changing it is not worth risk.

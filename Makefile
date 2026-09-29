@@ -85,6 +85,7 @@ preflight:
 help:
 	@printf '%s\n' \
 	  'help                  this list' \
+	  'default               the ReleaseFast build, the target bare make runs' \
 	  'build                 zig build -Doptimize=$(OPT) -> $(BIN)' \
 	  'small                 ReleaseSmall binary' \
 	  'musl                  static musl binary for integrations/harbor, for this host ($(MUSL_ARCH))' \
@@ -116,6 +117,7 @@ help:
 	  'check-targets         every published target is one `update` asks for' \
 	  'check-assets TAG=...  the assets in dist/ are the ones the tag will publish' \
 	  'check-changelog [VERSION=...]  the changelog entry a tag would publish, its shape, and the 0.y policy on it' \
+	  'check-changelog-sections  the five Keep a Changelog headings, once each, in order' \
 	  'check-unreleased      the [Unreleased] entry has the five sections, once each, in order' \
 	  'check-changelog-sections SECTION=...  the same five-section shape under one named heading' \
 	  'check-release TAG=vX.Y.Z  the tag names build.zig.zon, nothing is stranded unreleased' \

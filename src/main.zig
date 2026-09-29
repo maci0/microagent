@@ -47,9 +47,9 @@ const tool_result_message_bytes = tool_mod.max_tool_output + tool_result_message
 /// tool_call_id, the content key and the braces. An id is a provider-assigned
 /// string of no stated width, so this is headroom rather than a bound.
 const tool_result_message_scaffolding_bytes = 512;
-/// The smallest tool result compaction will replace with a marker. Below it
-/// the marker is not worth the rewrite, so such a result stays whole and the
-/// conversation grows instead.
+/// The smallest tool result compaction will replace with a marker is one byte
+/// longer than this. At or below it the marker is not worth the rewrite, so
+/// such a result stays whole and the conversation grows instead.
 const min_elided_bytes = 4096;
 /// The marker that replaces elided output, so its length is one number rather
 /// than the two that would each have to be edited to agree.
@@ -128,8 +128,8 @@ const max_frame_bytes: usize = 1024 * 1024;
 const max_config_bytes: usize = 64 * 1024;
 /// A provider's error body is a diagnostic, not a payload, so it is bounded
 /// tight: the text goes on stderr and nothing reads it as a tool result. The
-/// `read` tool's own ceiling, `max_read_bytes` in the tool module, is three
-/// orders of magnitude above it.
+/// `read` tool's own ceiling, `max_read_bytes` in the tool module, is two and a
+/// half orders of magnitude above it.
 const max_error_body_bytes: usize = 16 * 1024;
 
 const system_prompt =
@@ -357,18 +357,18 @@ pub fn main(init: std.process.Init) !void {
     if (ended != .answered) std.process.exit(exit_incomplete);
 }
 
-/// Injected when the wall-clock budget runs out: the model has done its
-/// reading, so it is asked for the edit rather than another investigation
-/// (`final_push`, below). Asked once when a run that already edited the tree
-/// stops without having run any test runner. The measured failure mode: a
-/// SWE-bench instance that ended after 20 turns and zero test commands, against
-/// 5-15 test commands in every instance that passed.
+/// Injected once when a run that already edited the tree stops without having
+/// run any test runner. The measured failure mode: a SWE-bench instance that
+/// ended after 20 turns and zero test commands, against 5-15 test commands in
+/// every instance that passed.
 const verify_push =
     "Nothing in this session has run a test, so nothing verifies the change. Run the tests that " ++
     "cover what you changed, using the project's own test command, and fix whatever they report. " ++
     "If the project has no test for this code, run the closest thing that exercises the changed " ++
     "line and say what it proved.";
 
+/// Injected when the wall-clock budget runs out: the model has done its
+/// reading, so it is asked for the edit rather than another investigation.
 const final_push =
     "Your budget is exhausted. Apply the single most important fix now, using what you already " ++
     "know, with one edit or one write. Do not search again. Then stop.";
@@ -784,6 +784,10 @@ fn displayUrl(arena: std.mem.Allocator, url: []const u8) []const u8 {
     return chat_mod.safeTextAll(arena, shown);
 }
 
+/// The url with a password in it removed, for the notes that name the
+/// endpoint. Only a url carrying a scheme is rewritten: the authority a bare
+/// `user:pass@host/v1` holds is not a url this program can parse, and such a
+/// base url is refused before the first request, so it never reaches a note.
 fn redactUserinfo(arena: std.mem.Allocator, url: []const u8) []const u8 {
     const scheme_end = std.mem.indexOf(u8, url, "://") orelse return url;
     const rest = url[scheme_end + "://".len ..];
@@ -1057,6 +1061,13 @@ fn setPrompt(buf: []u8, opts: *Options, value: []const u8) ?[]const u8 {
 /// the file being present is exactly why a reader believes a key is set.
 const Key = struct { value: []const u8, source: []const u8 };
 
+/// The key this run sends, and the name of the source it came from.
+///
+/// `--api-key` wins, then the variables of `key_vars` in the order they are
+/// listed there, then `$HOME/.secrets/openrouter` as a last resort. The order
+/// is the run's security boundary as much as its convenience: `MDEBUG` prints
+/// the source by name, so an operator reading it can tell which of the four
+/// variables a `bash: env` will not see.
 fn resolveKey(io: Io, environ: *std.process.Environ.Map, arena_state: *std.heap.ArenaAllocator, given: []const u8) Key {
     if (given.len > 0) return .{ .value = given, .source = "--api-key" };
     for (key_vars) |n| {
@@ -1895,10 +1906,14 @@ fn runTurn(
 /// Why a response that called no tool is not an answer, in the words the
 /// operator reads. Null when it is one.
 ///
+/// The stderr line for a `content_filter` stop, which is the one shape whose
+/// message does not name a number the run can report.
+const content_filter_notice = "the provider stopped generating this response (finish_reason content_filter); there is no answer to report";
+
 /// The provider is the one saying so, in its own `finish_reason`, and a
 /// response is model output rather than this program's own, so the question
 /// asked here is what the run is about to report, not whether the model was
-/// right. Four shapes end a run that would otherwise exit 0 with nothing on
+/// right. Three shapes end a run that would otherwise exit 0 with nothing on
 /// stdout:
 ///
 ///   * `content_filter`: the provider stopped generating on purpose, and
@@ -1909,8 +1924,6 @@ fn runTurn(
 ///   * `length`: the response was cut at `max_tokens`, so what it said is a
 ///     prefix of the answer. With tool calls in it the loop continues and the
 ///     next turn says more, so only the toolless turn is an unfinished run.
-const content_filter_notice = "the provider stopped generating this response (finish_reason content_filter); there is no answer to report";
-
 fn incompleteAnswer(arena: std.mem.Allocator, result: *const chat_mod.ChatResult, max_tokens: u32) ?[]const u8 {
     const reason = result.finish_reason;
     if (std.mem.eql(u8, reason, "content_filter")) return content_filter_notice;
@@ -1981,9 +1994,6 @@ fn authHeaders(arena: std.mem.Allocator, api_key: []const u8) !std.http.Client.R
     };
 }
 
-/// Streams one completion, printing visible text as it arrives and accumulating
-/// tool calls and token counters. Text on stderr is tool activity; stdout is
-/// the model's own output plus one JSON usage line per response.
 /// Makes a silent response socket fail instead of blocking forever.
 ///
 /// A read on a connection that is open but never speaks does not return, so
@@ -1997,6 +2007,9 @@ fn setStallTimeout(handle: std.posix.socket_t, seconds: u32) void {
     std.posix.setsockopt(handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {};
 }
 
+/// Streams one completion, printing visible text as it arrives and accumulating
+/// tool calls and token counters. Text on stderr is tool activity; stdout is
+/// the model's own output plus one JSON usage line per response.
 fn streamChat(
     client: *std.http.Client,
     io: Io,
@@ -2961,8 +2974,8 @@ fn elideToolResults(
         // nothing, and the subtraction below wraps a usize rather than
         // undercounts when it is longer. The second pass asks for results down
         // to `min_marker_bytes`, which is the marker spelling its own size, so
-        // a result a few bytes over that is replaced by a marker a few bytes
-        // bigger than itself.
+        // a result that marker cannot shorten is left whole and counts as no
+        // saving.
         if (marker.len >= text.len) continue;
         size += text.len - marker.len;
         content.* = .{ .string = marker };
@@ -4996,8 +5009,8 @@ test "a token count that is not a number is counted, not folded in as zero" {
 
 /// The `[` and the first two messages a run starts from, in the bytes the
 /// agent appends. The buffer stays an open array, the shape `buildBody` closes
-/// into a request, and `appendToolResults` follows it with the tool results
-/// that push a conversation past the compaction limit.
+/// into a request, and the test helper `appendToolResults` follows it with the
+/// tool results that push a conversation past the compaction limit.
 ///
 /// Neither this nor `appendToolResults` closes the array. A run's buffer is
 /// open, because `buildBody` is what writes the closing bracket into the
@@ -6262,8 +6275,8 @@ test "a turn that outgrows the retained size gives the memory back" {
     _ = ordinary.reset(.{ .retain_with_limit = turn_arena_retain_bytes });
     for (peak, 0..) |b, i| try std.testing.expectEqual(@as(u8, @truncate(i)), b);
 
-    // A turn at the response ceiling does not: 32 MB in, and what stays behind
-    // is the limit rather than the whole thing.
+    // A turn past the retain size does not: 8 MB in, and what stays behind is
+    // the limit rather than the whole thing.
     var huge = std.heap.ArenaAllocator.init(base);
     defer huge.deinit();
     const big = try huge.allocator().alloc(u8, 2 * turn_arena_retain_bytes);
