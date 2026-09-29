@@ -24,6 +24,18 @@ release, and `microagent update` moves you to it.
   names no subcommand is a usage error, exit 2 with the reason, rather than the
   text that did not answer it.
 
+- A fuzz harness for the path walk `resolveEveryComponent`, the one that settles
+  which file a tool's path names once every symlink on it is followed. A tool's
+  path is the model's, so the separators, the `.` and `..` components and every
+  name in it are untrusted text, and the walk is byte arithmetic over three
+  fixed buffers. The harness builds the links a tree really holds (a chain, a
+  pair that closes on itself, a link written relative to its own directory, an
+  absolute one) and asserts what a crash-only harness cannot: the answer is the
+  walker's own bytes and in one of its buffers, no component of it is a `.` or
+  a `..`, and the same text over the same links answers the same bytes every
+  time. The seed corpus carries the paths whose composed bytes outgrow those
+  buffers, which the walk has to refuse rather than write past.
+
 - `--temperature <n>` and `MICROAGENT_TEMPERATURE` set the sampling the
   provider draws from, 0 to 2, and the field is sent only when one of them is
   given. A run that sends none is a run whose answers the provider varies on

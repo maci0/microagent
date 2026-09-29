@@ -2001,3 +2001,131 @@ test "a path of ordinary components is resolved, however deep" {
         try resolveEveryComponent(std.testing.io, Io.Dir.cwd(), want.items, &name_buf, &cur_buf, &next_buf),
     );
 }
+
+// The path a tool is handed is the model's, and the model picked it out of a
+// tree, so the walk that settles it reads untrusted text: the separators, the
+// `.` and `..` components, the names, and every spelling of a link a
+// repository can commit. It is also the one decision whose failure sends a
+// credential to the provider, and the walk is byte arithmetic over three
+// fixed buffers, so a path that overflows one of them is a write past it rather
+// than a refusal. The harness builds the links a tree really holds and runs
+// the text over them. `std.testing.fuzz` runs this corpus on every
+// `zig build test`, and through the fuzzer's mutations when the test binary is
+// built in fuzz mode.
+const resolve_path_corpus = [_][]const u8{
+    "",
+    ".",
+    "..",
+    "../..",
+    "/",
+    "//",
+    "real",
+    "sub",
+    "sub/real2",
+    "sub/link",
+    "sub/link/leaf",
+    "chain",
+    "chain/leaf",
+    "sub/mid/deep/leaf",
+    "loop_a",
+    "loop_b/leaf",
+    "sub/../real",
+    "../real",
+    "a/../../real",
+    "/../real",
+    "sub/./real2",
+    "sub//link",
+    "sub/link/",
+    "sub/rel",
+    "rel_chain/leaf",
+    "link_to_abs",
+    "a" ** 200,
+    ("sub/" ** 40) ++ "leaf",
+    ("../" ** 40) ++ "real",
+    ("../" ** 40) ++ "loop_a",
+    ("a" ** 4095) ++ "/real",
+    ("a" ** 4096),
+    // A path whose composed bytes outgrow the walk's own buffers. The walk has
+    // to refuse one of these rather than write past the buffer holding it.
+    ("d/" ** 2100) ++ "leaf",
+    ("d/" ** 2100) ++ "chain",
+    ("a" ** 100 ++ "/") ** 45 ++ "leaf",
+    ("a" ** 100 ++ "/") ** 45 ++ "sub/link",
+    ("\u{202e}gnp/.env"),
+    ".env",
+    "sub/../.env",
+};
+
+test "a fuzzed path resolves to a path the walk can name, and names nothing else" {
+    try std.testing.fuzz({}, fuzzResolvePath, .{ .corpus = &resolve_path_corpus });
+}
+
+fn fuzzResolvePath(_: void, smith: *std.testing.Smith) !void {
+    var scratch: [8 * 1024]u8 = undefined;
+    const text: []const u8 = if (smith.in) |seed| seed else scratch[0..smith.slice(&scratch)];
+
+    // The links are the ones a tree holds: a chain of two, a pair that closes
+    // on itself, one written relative to its own directory, another chain
+    // behind that, and one absolute, whose target names a file no filesystem
+    // carries because the walk does arithmetic and not a lookup.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = tmp.dir;
+    try dir.writeFile(std.testing.io, .{ .sub_path = "real", .data = "" });
+    try dir.createDirPath(std.testing.io, "sub");
+    try dir.writeFile(std.testing.io, .{ .sub_path = "sub/real2", .data = "" });
+    try dir.symLink(std.testing.io, "real2", "sub/link", .{});
+    try dir.symLink(std.testing.io, "sub/link", "chain", .{});
+    try dir.symLink(std.testing.io, "loop_b", "loop_a", .{});
+    try dir.symLink(std.testing.io, "loop_a", "loop_b", .{});
+    try dir.symLink(std.testing.io, "../real", "sub/rel", .{});
+    try dir.symLink(std.testing.io, "sub/rel", "rel_chain", .{});
+    // The target need not exist, because the walk reads the link and does
+    // path arithmetic rather than looking the file up.
+    const abs = "/nonexistent/absolute/target";
+    try dir.symLink(std.testing.io, abs, "link_to_abs", .{});
+
+    var name_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var cur_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
+    var next_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
+
+    const answer = resolveEveryComponent(std.testing.io, dir, text, &name_buf, &cur_buf, &next_buf) catch |err| switch (err) {
+        // The two refusals the walk spells out, and nothing else: a name the
+        // platform will not take is a bug in the harness or in the walk, and
+        // a crash-only harness would say nothing about which it was.
+        error.NameTooLong, error.SymlinkLoop => return,
+        else => |e| return e,
+    };
+
+    // The answer is the walker's own bytes, not a slice that outlived the frame
+    // and not one into a buffer the next component overwrites while the caller
+    // still holds it. The empty slice the walk answers a path of only `.` and
+    // `..` components with is the one answer that is in neither buffer.
+    const start = @intFromPtr(answer.ptr);
+    const owned = answer.len == 0 or
+        (start >= @intFromPtr(&cur_buf) and start + answer.len <= @intFromPtr(&cur_buf) + cur_buf.len) or
+        (start >= @intFromPtr(&next_buf) and start + answer.len <= @intFromPtr(&next_buf) + next_buf.len);
+    try std.testing.expect(owned);
+
+    // What the walk is for: no component of the answer is a `.` or a `..`, so
+    // the name the caller goes on to check is the one the kernel opens. An
+    // answer that kept a `..` is a path the credential check read and the write
+    // did not.
+    const rest = if (std.mem.startsWith(u8, answer, &.{path_sep})) answer[1..] else answer;
+    var words = std.mem.splitScalar(u8, rest, path_sep);
+    while (words.next()) |word| {
+        try std.testing.expect(!std.mem.eql(u8, word, "."));
+        try std.testing.expect(!std.mem.eql(u8, word, ".."));
+    }
+
+    // The same text over the same links answers the same bytes: a walk that
+    // depended on what the buffers happened to hold would not.
+    var name_again: [std.fs.max_path_bytes]u8 = undefined;
+    var cur_again: [2 * std.fs.max_path_bytes]u8 = undefined;
+    var next_again: [2 * std.fs.max_path_bytes]u8 = undefined;
+    const again = resolveEveryComponent(std.testing.io, dir, text, &name_again, &cur_again, &next_again) catch |err| switch (err) {
+        error.NameTooLong, error.SymlinkLoop => return,
+        else => |e| return e,
+    };
+    try std.testing.expectEqualStrings(answer, again);
+}
