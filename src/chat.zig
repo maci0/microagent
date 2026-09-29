@@ -973,22 +973,26 @@ test "a special byte at any offset escapes the way std.json escapes it" {
             defer reference.deinit();
             try std.json.Stringify.value(@as([]const u8, &text), .{}, &reference.writer);
 
-            try std.testing.expectEqualStrings(reference.written(), ours.items());
+            std.testing.expectEqualStrings(reference.written(), ours.items()) catch |err| {
+                std.debug.print("byte {x:0>2} at offset {d}\n", .{ special, at });
+                return err;
+            };
         }
     }
 }
 
 test "a string that is not UTF-8 still serializes as valid JSON" {
-    const cases = [_][]const u8{
-        "\xff", // lone lead byte
-        "caf\xe9", // latin-1 e-acute
-        "\xc3", // truncated two-byte sequence
-        "\xe6\x97", // truncated three-byte sequence, the CJK prefix
-        "\xed\xa0\x80", // UTF-8 encoding of a surrogate half
-        "\xc0\x80", // overlong encoding
-        "ok\xff\xe6\x97\xa5ok",
+    const cases = [_]struct { name: []const u8, bytes: []const u8 }{
+        .{ .name = "lone lead byte", .bytes = "\xff" },
+        .{ .name = "latin-1 e-acute", .bytes = "caf\xe9" },
+        .{ .name = "truncated two-byte sequence", .bytes = "\xc3" },
+        .{ .name = "truncated three-byte sequence", .bytes = "\xe6\x97" },
+        .{ .name = "surrogate half", .bytes = "\xed\xa0\x80" },
+        .{ .name = "overlong encoding", .bytes = "\xc0\x80" },
+        .{ .name = "bad bytes between valid text", .bytes = "ok\xff\xe6\x97\xa5ok" },
     };
-    for (cases) |raw| {
+    for (cases) |case| {
+        const raw = case.bytes;
         const gpa = std.testing.allocator;
         var buf = JsonBuf.init(gpa);
         defer buf.list.deinit(gpa);
@@ -996,13 +1000,19 @@ test "a string that is not UTF-8 still serializes as valid JSON" {
 
         var parsed = try std.json.parseFromSlice(std.json.Value, gpa, buf.items(), .{});
         defer parsed.deinit();
-        try std.testing.expect(std.unicode.utf8ValidateSlice(parsed.value.string));
+        std.testing.expect(std.unicode.utf8ValidateSlice(parsed.value.string)) catch |err| {
+            std.debug.print("{s}: the value parsed back is not UTF-8\n", .{case.name});
+            return err;
+        };
         // The valid text either side of a bad byte survives unchanged, and a
         // bad byte becomes the one replacement character it is written as, so
         // the value parses to the input with each undecodable byte named.
         const want = try safeTextInputAsQuoted(gpa, raw);
         defer gpa.free(want);
-        try std.testing.expectEqualStrings(want, parsed.value.string);
+        std.testing.expectEqualStrings(want, parsed.value.string) catch |err| {
+            std.debug.print("{s}\n", .{case.name});
+            return err;
+        };
     }
 }
 

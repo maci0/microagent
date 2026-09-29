@@ -869,7 +869,10 @@ test "the config sets system_prompt_extra and leaves absent or bad keys alone" {
     // A value that is not a string is named and leaves the default.
     for ([_][]const u8{ "system_prompt_extra = 5\n", "system_prompt_extra = bare\n", "system_prompt_extra =\n", "system_prompt_extra = \"open\n", "system_prompt_extra = \"bad \\q escape\"\n" }) |text| {
         const bad = parse(arena, text);
-        try std.testing.expectEqualStrings("system_prompt_extra", bad.problem.?.key);
+        std.testing.expectEqualStrings("system_prompt_extra", bad.problem.?.key) catch |err| {
+            std.debug.print("text {s}", .{text});
+            return err;
+        };
         try std.testing.expectEqual(Problem.Kind.bad_value, bad.problem.?.kind);
         try std.testing.expectEqualStrings("", bad.system_prompt_extra);
     }
@@ -1113,7 +1116,10 @@ test "deny_commands is one top-level list, and no other spelling is read" {
     };
     for (removed) |text| {
         const config = parse(arena, text);
-        try std.testing.expectEqual(Problem.Kind.unknown_key, config.problem.?.kind);
+        std.testing.expectEqual(Problem.Kind.unknown_key, config.problem.?.kind) catch |err| {
+            std.debug.print("text {s}", .{text});
+            return err;
+        };
         try std.testing.expectEqual(@as(usize, 0), config.deny_commands.len);
     }
 

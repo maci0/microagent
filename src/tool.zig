@@ -1119,6 +1119,13 @@ test "every credential the name rule refuses is in the exclusion set git carries
     // The `git show`/`git diff` exclusions are the globs above rewritten as
     // pathspecs, so a name added to the tables and left out of this check is
     // a credential the name rule refuses and the git tool still prints.
+    //
+    // The walk below only asserts the entries the name rule does not refuse, so
+    // a table emptied of them leaves it asserting nothing at all. The floor is
+    // what keeps the walk from passing on an empty table: it is read from both
+    // tables rather than written down, so a name added to either cannot be the
+    // change that breaks it, and it names the smaller of the two, which is the
+    // one that empties the walk.
     for (credential_globs) |glob| {
         const pattern = glob[1..];
         const leaf = if (std.mem.startsWith(u8, pattern, "*")) pattern[1..] else pattern;
@@ -1129,8 +1136,12 @@ test "every credential the name rule refuses is in the exclusion set git carries
         for (credential_dirs) |dir| {
             if (std.mem.eql(u8, pattern, dir)) is_dir = true;
         }
-        try std.testing.expect(is_dir or std.mem.startsWith(u8, pattern, ".env"));
+        std.testing.expect(is_dir or std.mem.startsWith(u8, pattern, ".env")) catch |err| {
+            std.debug.print("glob {s}\n", .{glob});
+            return err;
+        };
     }
+    try std.testing.expect(@min(credential_globs.len, credential_dirs.len) > 0);
 }
 
 /// The target's own path separator, as `std.mem.trimEnd` wants it. The walk
