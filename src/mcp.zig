@@ -252,10 +252,26 @@ pub const Servers = struct {
     /// understood still reaches the model as the server wrote it.
     pub fn toolsJson(self: Servers, arena: std.mem.Allocator) ![]const u8 {
         var buf: std.ArrayList(u8) = .empty;
+        // Every byte an entry needs is one of its own strings or a fixed number
+        // of bytes of punctuation, so the whole is known before the first
+        // write. Reserving it replaces the walk up the doubling ladder, and on
+        // the arena that walk leaves every intermediate block behind: a
+        // server whose `inputSchema` runs to a megabyte made the buffer walk
+        // that ladder twenty times and keep all twenty copies.
+        var size: usize = 0;
+        for (self.items) |server| {
+            for (server.tools) |tool| {
+                size += tool.exposed.len + tool.description.len + tool.schema.len + mcp_tool_entry_bytes;
+            }
+        }
+        try buf.ensureTotalCapacity(arena, size);
         for (self.items) |server| {
             for (server.tools) |tool| {
                 if (buf.items.len != 0) try buf.append(arena, ',');
-                var jb = chat.JsonBuf.init(arena);
+                var jb = chat.JsonBuf.initCapacity(
+                    arena,
+                    tool.exposed.len + tool.description.len + tool.schema.len + mcp_tool_entry_bytes,
+                );
                 const w = jb.writer();
                 try w.writeAll("{\"type\":\"function\",\"function\":{\"name\":");
                 try chat.writeJsonString(w, tool.exposed);
@@ -269,6 +285,14 @@ pub const Servers = struct {
         }
         return buf.items;
     }
+
+    /// Everything in one entry that is not one of the three strings: the
+    /// wrapper, the two member names, the commas, the quotes around the
+    /// escaped name and description, and the closing braces. Escaping can make
+    /// the two strings longer than they arrived, so this is headroom rather
+    /// than a bound, and the buffer still grows when a name or description
+    /// needs it to.
+    const mcp_tool_entry_bytes = 64;
 
     /// One remote call: the model's argument text is sent as the tool's
     /// `arguments`, and the text the server returns becomes the tool result.

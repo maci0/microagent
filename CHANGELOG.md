@@ -24,6 +24,22 @@ release, and `microagent update` moves you to it.
   now, and `check-asset-run` refuses a `TARGET=` that is not the one the host
   publishes.
 
+### Changed
+
+- The constant half of every request, the one that carries the tool schemas, is
+  built once per run rather than once per turn. It is a pure function of the
+  options, and nothing the loop does changes any of them, so each turn was
+  walking the built-in schema again and copying every MCP tool's `inputSchema`
+  into a fresh turn-arena buffer to produce bytes identical to the previous
+  turn's. A run with servers carrying large schemas paid that once per turn, and
+  it grew with the number of servers rather than with the work.
+- A tool call's `id` and `name` are copied once instead of once per streamed
+  frame. Providers repeat both on every argument fragment that follows them, so
+  a call whose arguments arrived in a few hundred frames allocated and released
+  the same two strings a few hundred times on the path that cannot be re-sent
+  cheaply. A value that did change still replaces the one it follows, and a
+  provider that empties a field still clears it.
+
 ### Fixed
 
 - The Harbor README named nine of the ten variables its adapter reads. The one

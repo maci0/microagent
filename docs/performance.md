@@ -72,6 +72,8 @@ run-to-run noise, so there is no build flag to reach for either.
 | | before | after | why |
 | --- | --- | --- | --- |
 | un-cacheable request bytes | 3,775 B/turn | **2 B/turn** | the tool schemas were written after `messages`, so they fell outside the cacheable prefix every turn |
+| the constant half of the request, rebuilt per turn | once per turn | **once per run** | `bodyPrefix` is a pure function of `opts`, and nothing in the loop changes any of it, so every turn walked the tool schema again and copied every MCP tool's `inputSchema` into a fresh turn-arena buffer |
+| a repeated call `id` and `name` in a stream | a `dupe` and a `free` per frame | **once per call** | providers repeat both on every argument fragment, so each frame allocated and released two strings that had not moved; the skip is the rule `recordServed` already follows for `model` |
 | streamed frame parse | 7,204 instr | **4,101 instr** | declared shapes instead of a `std.json.Value` tree, with the generic parse kept behind them |
 | ranged read of a long line | quadratic | **linear** | each 8 KB read copied the whole accumulated buffer onto itself; the self-copy, not the re-scan, was the cost (see below) |
 | a retry wait past the budget | up to 6 min asleep | **refused** | `--budget` was defeated by the `Retry-After` path |
@@ -199,6 +201,8 @@ guard fails, not merely that the guard exists.
 | fix | guard | defeated? |
 | --- | --- | --- |
 | constant request fields ahead of `messages` | `one request body is the previous one`, `the tool schema sits inside the cacheable prefix` | 5 tests fail |
+| the request prefix built once per run | none; the fix is structural, the prefix is a `run` local rather than a per-turn `bodyPrefix` call | not defeated: `runTurn` takes the prefix as an argument, so putting the call back is a signature change rather than a silent regression |
+| an unchanged call `id` and `name` not recopied | `a repeated call id and name are copied once, not once a fragment` | defeated: the arena grows by the per-frame copies and the bound fails |
 | declared frame shapes | `bench/instructions.sh --check`, `stream content frame` row | 4,101 to 7,431, exit 1 |
 | ranged-read cursor and self-copy | `bench/instructions.sh --check`, `ranged read` row | 7,543,604 to 47,965,253, exit 1 |
 | retry waits inside the budget | `a wait the budget cannot cover` | present |

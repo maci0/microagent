@@ -1790,6 +1790,18 @@ fn run(
     const budget = Budget.of(started, opts.budget_s);
     var session: ?session_mod.Session = session_mod.open(io, arena, opts.session_dir, opts.model);
     defer session_mod.close(io, &session);
+    // The constant half of every request, built once from the run arena. It is
+    // a pure function of `opts`, and nothing in the loop below changes any of
+    // what goes into it: the model, the token ceiling, the reasoning field, the
+    // built-in tool schema, the run's skills and the servers' tools are all
+    // settled before the first turn. Rebuilding it per turn walked that whole
+    // schema again and copied every remote tool's `inputSchema` into a fresh
+    // buffer on the turn arena, once per turn, for bytes the previous turn had
+    // already produced identically. On a run with three servers carrying
+    // megabytes of schemas that is the largest allocation the loop makes after
+    // the conversation itself, and it is the one that grows with the server
+    // count rather than with the work.
+    const prefix = try bodyPrefix(arena, opts);
     // What one turn allocates from the wire down -- the request body (a full
     // copy of the conversation), the streamed content, the tool results --
     // is dead once that turn's messages are appended. The run arena is never
@@ -1833,7 +1845,7 @@ fn run(
             // way any other does. A model that answers it finished, and one
             // that asks for more tools was cut off mid-work, which is a
             // different exit status from a finished run.
-            return try runTurn(client, io, turn_arena, gpa, opts, msgs, &session, &usage, budget.withGraceNs(final_push_grace_s), tool_env, &progress, mcp);
+            return try runTurn(client, io, turn_arena, gpa, prefix, opts, msgs, &session, &usage, budget.withGraceNs(final_push_grace_s), tool_env, &progress, mcp);
         }
         // The ceiling is announced on the turn it applies to, before it is
         // spent, so a truncated answer is never the last thing on stdout with no
@@ -1843,7 +1855,7 @@ fn run(
         try compactMessages(io, gpa, msgs, turn_arena, &compaction_floor);
         // `.wants_tools` keeps the loop going, and `.cut_off` is the budget
         // ending the run mid-turn, so neither is a finished run.
-        switch (try runTurn(client, io, turn_arena, gpa, opts, msgs, &session, &usage, budget, tool_env, &progress, mcp)) {
+        switch (try runTurn(client, io, turn_arena, gpa, prefix, opts, msgs, &session, &usage, budget, tool_env, &progress, mcp)) {
             // The tool results are already appended, so the next request
             // carries them and the loop asks again. Returning here ended the
             // run on the first turn that asked for a tool, which is every turn
@@ -2027,6 +2039,7 @@ fn runTurn(
     io: Io,
     arena: std.mem.Allocator,
     gpa: std.mem.Allocator,
+    prefix: []const u8,
     opts: Options,
     msgs: *std.ArrayList(u8),
     session: *?session_mod.Session,
@@ -2036,7 +2049,6 @@ fn runTurn(
     progress: *Progress,
     mcp: *mcp_mod.Servers,
 ) !TurnEnd {
-    const prefix = try bodyPrefix(arena, opts);
     // Stamped on `model_clock`, which `elapsedMs` below is read on: the two
     // ends of one duration on one clock, not the difference between origins.
     const asked = Io.Timestamp.now(io, model_clock).nanoseconds;
@@ -3069,16 +3081,25 @@ fn applyCallDelta(
     // placeholder is not the allocator's to hand back. An id or name the
     // provider emptied is the shared empty slice, so releasing the previous
     // copy is the whole of what that frame has to do.
-    if (id) |v| {
+    //
+    // A value that did not change is not copied at all, for the reason
+    // `chat.recordServed` gives: a provider repeats the id and the name on
+    // every fragment of the arguments that follow them, so a stream that
+    // announces a call once and then streams a few thousand bytes of arguments
+    // arrives here with the same two strings a few thousand times. Copying each
+    // one to hold bytes that did not move is a `dupe` and a `free` per frame
+    // on the run's hottest path, and the id is the very thing the duplicate
+    // check below reads to tell a redelivery from a fragment.
+    if (id) |v| if (!std.mem.eql(u8, call.id, v)) {
         const owned = try chat_mod.ownString(gpa, v);
         if (call.id.len != 0) gpa.free(call.id);
         call.id = owned;
-    }
-    if (name) |v| {
+    };
+    if (name) |v| if (!std.mem.eql(u8, call.name, v)) {
         const owned = try chat_mod.ownString(gpa, v);
         if (call.name.len != 0) gpa.free(call.name);
         call.name = owned;
-    }
+    };
     if (args) |v| {
         const piece = clampToResponseCap(result, v);
         // A relay that reconnects replays the frames it already sent, so one
@@ -5057,6 +5078,66 @@ test "streamed argument fragments cost linear arena bytes" {
     // Geometric growth retains at most about twice the final length; the
     // per-frame re-copy retained a multiple of the square of it.
     try std.testing.expect(run_state.queryCapacity() < 4 * total);
+}
+
+// A provider that repeats a call's `id` and `name` on every argument fragment
+// arrives here once per frame with two strings that did not change. Copying
+// each was a `dupe` and a `free` per fragment, on the path that cannot be
+// re-sent cheaply, and it is the id the duplicate-delivery check below reads
+// to tell a redelivery from a fragment. An unchanged value is left alone, so
+// the run arena pays for the id and the name once rather than once a fragment.
+test "a repeated call id and name are copied once, not once a fragment" {
+    const gpa = std.testing.allocator;
+    var run_state = std.heap.ArenaAllocator.init(gpa);
+    defer run_state.deinit();
+    const arena = run_state.allocator();
+
+    var result: chat_mod.ChatResult = .{};
+    var calls: std.ArrayList(chat_mod.ToolCall) = .empty;
+    defer chat_mod.deinitCalls(arena, &calls);
+
+    try applyCallDelta(arena, .{ .integer = 0 }, "call_1", "read", "", &result, &calls);
+    try std.testing.expectEqualStrings("call_1", calls.items[0].id);
+    try std.testing.expectEqualStrings("read", calls.items[0].name);
+    const after_first = run_state.queryCapacity();
+
+    const fragments: usize = 500;
+    var i: usize = 0;
+    while (i < fragments) : (i += 1) {
+        try applyCallDelta(arena, .{ .integer = 0 }, "call_1", "read", "{\"pa", &result, &calls);
+    }
+
+    // The values are the same strings, held in the same buffers: nothing about
+    // the call changed, so the run arena grew by the argument fragments alone.
+    try std.testing.expectEqualStrings("call_1", calls.items[0].id);
+    try std.testing.expectEqualStrings("read", calls.items[0].name);
+    try std.testing.expectEqual(fragments * 4, calls.items[0].args.items.len);
+    const growth = run_state.queryCapacity() - after_first;
+    // Geometric growth over `fragments * 4` argument bytes, with nothing else
+    // allocated per frame. Copying the id and the name every time would add
+    // roughly `fragments * (7 + 4)` bytes of freed-then-reallocated space on
+    // top, and the freed blocks are the ones the arena cannot hand back.
+    try std.testing.expect(growth < 8 * fragments * 4);
+}
+
+// The guard above is a skip on an unchanged value, and the case it must not
+// skip is a value that did change: a second call announced into the same slot
+// replaces the first one's id and name, and the first copy is handed back
+// rather than left behind.
+test "a changed call id replaces the one it follows" {
+    const gpa = std.testing.allocator;
+    var run_state = std.heap.ArenaAllocator.init(gpa);
+    defer run_state.deinit();
+    const arena = run_state.allocator();
+
+    var result: chat_mod.ChatResult = .{};
+    var calls: std.ArrayList(chat_mod.ToolCall) = .empty;
+    defer chat_mod.deinitCalls(arena, &calls);
+
+    try applyCallDelta(arena, .{ .integer = 0 }, "call_1", "read", "", &result, &calls);
+    try applyCallDelta(arena, .{ .integer = 0 }, "call_2", "write", "", &result, &calls);
+    try std.testing.expectEqualStrings("call_2", calls.items[0].id);
+    try std.testing.expectEqualStrings("write", calls.items[0].name);
 }
 
 test "a response that never stops sending cannot grow the run without bound" {
