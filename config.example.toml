@@ -52,8 +52,8 @@
 # the operator saying no. A file past 16 KB is followed up to the cap. A path
 # named here that is not there is said on stderr, because a setting that did
 # nothing is your own spelling; the default name that is not there is silent.
-agents_files = ["AGENTS.md"]
-#
+# agents_files = ["AGENTS.md"]
+
 # skills = ["./skills", "~/.microagent/skills"]
 
 # One table per MCP server. `name` and one of `command` or `url` are required. A
@@ -139,6 +139,8 @@ agents_files = ["AGENTS.md"]
 # On Linux (kernel 5.13+) Landlock, and on macOS a Seatbelt profile, confine both microagent
 # and all spawned child processes (bash, MCP, subcommands). In-process path checks
 # additionally refuse write and edit tool calls targeting paths outside writable roots.
+# `writable` on its own confines nothing: a file that declares it without
+# `enabled = true` says so on stderr and runs unconfined.
 #
 # [sandbox]
 # enabled = true

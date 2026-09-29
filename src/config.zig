@@ -236,6 +236,16 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8) Config {
                 };
                 open = &servers.items[servers.items.len - 1];
                 section = .mcp;
+            } else if (std.mem.eql(u8, header.name, "mcp")) {
+                // `[mcp]` where the servers are declared as `[[mcp]]`, one
+                // bracket short. Passed over as somebody else's table it takes
+                // every key under it with it, so a file that declares its
+                // servers this way starts a run with none of them and nothing
+                // says so: the tools they contributed are simply absent from
+                // the schema, which is a missing tool rather than a failure.
+                config.note(.{ .key = line, .kind = .unknown_key });
+                section = .other;
+                open = null;
             } else if (std.mem.eql(u8, header.name, "tools") or std.mem.startsWith(u8, header.name, "tools.")) {
                 // Every name here is one the run acts on, so a name this build
                 // does not have stops it rather than leaving a tool as it was.
@@ -1268,6 +1278,15 @@ test "an MCP server is one [[mcp]] table, and a broken one is named and skipped"
     try std.testing.expectEqualStrings("args", bad_args.problem.?.key);
     const bad_env = parseBare(arena, "[[mcp]]\nname = \"a\"\ncommand = \"b\"\nenv = [\"K\"]\n");
     try std.testing.expectEqualStrings("env", bad_env.problem.?.key);
+
+    // `[mcp]`, one bracket short of the header the servers are declared under.
+    // The keys under it are a table nobody else writes, so they are named
+    // rather than passed over: a run whose server never starts is a run whose
+    // tools are missing, and silence reads as a server that had none to give.
+    const one_bracket = parseBare(arena, "[mcp]\nname = \"a\"\ncommand = \"b\"\n");
+    try std.testing.expectEqualStrings("[mcp]", one_bracket.problem.?.key);
+    try std.testing.expectEqual(Problem.Kind.unknown_key, one_bracket.problem.?.kind);
+    try std.testing.expectEqual(@as(usize, 0), one_bracket.mcp.len);
 }
 
 // `config.example.toml` is the only template the project ships, and a key
@@ -1294,9 +1313,15 @@ test "the shipped config template applies" {
     // file gets the stock prompt and nothing that spawns a process, reads a
     // directory they did not write or denies a command they did not name.
     try std.testing.expectEqualStrings("", config.system_prompt_extra);
+    try std.testing.expect(config.agents_files == null);
     try std.testing.expect(config.skills == null);
     try std.testing.expectEqual(@as(usize, 0), config.deny_commands.len);
     try std.testing.expect(!config.sandbox.enabled);
+    try std.testing.expectEqual(@as(usize, 0), config.sandbox.writable.len);
+    try std.testing.expectEqualStrings("", config.model);
+    try std.testing.expectEqualStrings("", config.base_url);
+    try std.testing.expectEqualStrings("", config.api_key);
+    try std.testing.expectEqual(@as(usize, 0), config.disabled_tools.count());
     try std.testing.expectEqual(preset_count, config.mcp.len);
 }
 

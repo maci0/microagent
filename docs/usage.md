@@ -588,6 +588,8 @@ writable = [".", "/tmp"]
 
 The writable roots are always `.` (the working directory), `/tmp`, and the session log directory, plus each `writable` entry.
 
+`writable` on its own confines nothing: a file that declares it without `enabled = true` prints `microagent: config ...: [sandbox] writable names N path(s) the sandbox is not in force for, because enabled is not true` and runs unconfined.
+
 When enabled, writes outside the designated roots are blocked:
 - **Kernel-level Landlock enforcement:** On Linux (kernels 5.13+), Landlock LSM rules are applied to microagent before executing tasks. The root `/` is marked read-only, while designated roots (current working directory, `/tmp`, the session directory, and any configured `writable` paths) remain read-write. Landlock restrictions are inherited across `execve` by all child processes (including `bash`, MCP servers, and child build tools).
 - **Kernel-level Seatbelt enforcement:** On macOS, a Seatbelt profile (`sandbox_init`, the call behind `sandbox-exec`) denies file writes everywhere except the same roots, plus `$TMPDIR` (where macOS keeps per-user scratch space, behind a symlink into `/private`) and the devices `/dev/null`, `/dev/tty` and `/dev/dtracehelper`. Reads, the network and process creation stay allowed. Children inherit the profile as they inherit Landlock's rules. Apple deprecates the call but still uses it, and it is not in the tests that run on Linux: the profile text is, the enforcement on a Mac is not.

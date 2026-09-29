@@ -1765,7 +1765,27 @@ fn loadConfig(io: Io, init: std.process.Init, arena: std.mem.Allocator, config: 
         if (text) |t| parsed = config_mod.parse(arena, t);
     }
     if (parsed.problem) |problem| reportConfigProblem(io, arena, source, problem);
+    if (inertWritableMessage(arena, source, parsed.sandbox)) |msg| net.note(io, arena, "{s}", .{msg});
     return fromConfig(parsed, source.path);
+}
+
+/// The line for a `[sandbox]` list that names roots while the sandbox is off,
+/// or null when there is nothing to say.
+///
+/// The two keys are separate, so a file that declares `writable` and leaves
+/// `enabled` at its default confines nothing, and the run proceeds with `bash`,
+/// the write tools and every MCP server as free as they were before. Nothing
+/// about the run looks different: the tools are all there, the model does the
+/// work, and the only trace of the list is a count in a debug line nobody turns
+/// on. The line is what makes the setting one the operator can see did
+/// nothing, which is the same reason a named `agents_files` path that is not
+/// there is said out loud.
+///
+/// A sandbox that is on has said everything the list has to say, and an empty
+/// list is a key nobody wrote.
+fn inertWritableMessage(arena: std.mem.Allocator, source: ConfigSource, sandbox: config_mod.Sandbox) ?[]const u8 {
+    if (sandbox.enabled or sandbox.writable.len == 0) return null;
+    return std.fmt.allocPrint(arena, "microagent: config {s}: [sandbox] writable names {d} path(s) the sandbox is not in force for, because enabled is not true\n", .{ configPathText(arena, source), sandbox.writable.len }) catch null;
 }
 
 /// One line on stderr for the first thing the config could not use. The kind
@@ -6057,6 +6077,27 @@ test "a config that cannot be read is reported, a missing one is not" {
     try std.testing.expect(configReadWorthReporting(false, error.IsDir));
     try std.testing.expect(configReadWorthReporting(false, error.AccessDenied));
     try std.testing.expect(configReadWorthReporting(false, error.StreamTooLong));
+}
+
+test "a writable list the sandbox is not enforcing is said out loud" {
+    // The keys are separate, so a file that names roots and leaves `enabled`
+    // at its default confines nothing. The run is otherwise indistinguishable
+    // from a confined one, so the line is the only thing that tells the
+    // operator the list is not in force.
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    const source: ConfigSource = .{ .path = "/home/me/.microagent/config.toml", .named = false };
+
+    const inert = inertWritableMessage(arena, source, .{ .writable = &.{ "/srv", "/opt" } }).?;
+    try std.testing.expect(std.mem.indexOf(u8, inert, "/home/me/.microagent/config.toml") != null);
+    try std.testing.expect(std.mem.indexOf(u8, inert, "2 path(s)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, inert, "enabled") != null);
+
+    // A sandbox that is on has said everything the list has to say, and an
+    // empty list is a key nobody wrote.
+    try std.testing.expect(inertWritableMessage(arena, source, .{ .enabled = true, .writable = &.{"/srv"} }) == null);
+    try std.testing.expect(inertWritableMessage(arena, source, .{}) == null);
 }
 
 test "the trace switch is on only for a value that says so" {

@@ -125,6 +125,21 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- A `[mcp]` table is named instead of passed over. The servers are declared as
+  `[[mcp]]`, and a file that writes one bracket took the whole table as somebody
+  else's, so its servers never started and their tools were simply absent from
+  the schema the run sends, with nothing said on stderr.
+- A `[sandbox]` `writable` list with `enabled` at its default is reported and
+  runs unconfined, rather than reading as a set of roots the run is holding to.
+  The two keys are separate, so the list confined nothing while the run looked
+  the same as a confined one, and the only trace of it was a count in a debug
+  line.
+- The shipped config template sets no key at all. The `agents_files` example was
+  the one line of the file that was not a comment, so a first run wrote a
+  config the operator did not write, next to a stray `#`. The test that applies
+  the template now holds every key at its default rather than the five it
+  happened to check.
+
 - `make build` compiles again. The `agents_file` the config parses and the flag saying whether the
   path was named were read from a `LoadedConfig` that had no such fields, so every entry point failed
   to compile while the test suite stayed green: no test reaches `main`, so Zig never analyzed it.
