@@ -340,7 +340,9 @@ fn captureResult(arena: std.mem.Allocator, parts: CaptureParts) ![]const u8 {
     // to say, and a status on its own reads as a fragment of one. A failing one
     // is already a line of its own, so this is the exit that has nothing else.
     if (buf.items.len == 0 and parts.term != null) {
-        try buf.appendSlice(arena, "(no output, exit ");
+        // `appendExitStatus` spells the status out from its tag name, so the
+        // prefix does not say `exit` as well: "exit exited 0" reads as a typo.
+        try buf.appendSlice(arena, "(no output, ");
         try appendExitStatus(arena, &buf, parts.term.?);
         try buf.append(arena, ')');
     }
@@ -474,8 +476,18 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
     const res = runCapped(io, arena, argv, max_tool_output * 4, net.durationMs(boundedMs(tool_timeout_ms, ceiling_ms)), environ_map, &got) catch |err|
         return failedOutput(arena, got, try missingProgram(arena, try std.fmt.allocPrint(arena, "git {s}", .{cmd}), git_install, err));
     const text = if (res.stdout.len > 0) res.stdout else res.stderr;
-    if (text.len == 0) return std.fmt.allocPrint(arena, "(git {s}: no output)", .{cmd});
+    if (text.len == 0) return gitRanNothing(arena, cmd, res, limit);
     return gitResult(arena, res, limit);
+}
+
+/// What a `git` that printed nothing at all answers with. A call that failed
+/// has said what it had to say in its exit status, and the short "no output"
+/// line reads to the model as a command that ran and found nothing, which is
+/// the one answer a failed call must not give. A call that printed nothing and
+/// exited zero is the case the short line is for, and it stops there.
+fn gitRanNothing(arena: std.mem.Allocator, cmd: []const u8, res: Captured, limit: usize) ![]const u8 {
+    if (res.term != .exited or res.term.exited != 0) return gitResult(arena, res, limit);
+    return std.fmt.allocPrint(arena, "(git {s}: no output)", .{cmd});
 }
 
 /// What a finished `git` call assembles, split out of the tool so the shape a
@@ -646,7 +658,7 @@ fn unknownTool(arena: std.mem.Allocator, name: []const u8) error{OutOfMemory}![]
 /// The name is a variant, so its budget is the widest tag rather than a number
 /// a caller could pass past; the detail is the model's own bytes and is what
 /// the second bound is for.
-const gutter_line_max = 5 + 40 + 1 + 120 + 1;
+const max_gutter_line_bytes = 5 + 40 + 1 + 120 + 1;
 
 /// A one-line tool gutter on stderr, the shape gauntlet recognizes. The detail
 /// is the provider's own text and may carry a newline or an escape sequence,
@@ -654,7 +666,7 @@ const gutter_line_max = 5 + 40 + 1 + 120 + 1;
 /// control characters are written as their `\xNN` escapes, and an invisible or
 /// bidi character as its `\uXXXX` escape.
 fn noteToolCall(io: Io, arena: std.mem.Allocator, tool: chat.Tool, args: std.json.ObjectMap) void {
-    var buf: [gutter_line_max]u8 = undefined;
+    var buf: [max_gutter_line_bytes]u8 = undefined;
     net.writeErr(io, toolCallLine(arena, &buf, tool, args) catch return);
 }
 
@@ -858,8 +870,10 @@ fn componentIsCredential(name: []const u8) bool {
 fn credentialInCommand(command: []const u8) ?[]const u8 {
     var words = std.mem.tokenizeAny(u8, command, command_word_separators);
     while (words.next()) |word| {
-        const leaf = std.fs.path.basename(word);
-        if (std.mem.indexOfScalar(u8, word, std.fs.path.sep) == null and std.mem.indexOfScalar(u8, leaf, '.') == null) continue;
+        // The dot test is the one that has to run, so it runs on `word` rather
+        // than on a basename: the guard beside it skips every word that carries
+        // a separator, and `basename` of such a word is not the word.
+        if (std.mem.indexOfScalar(u8, word, std.fs.path.sep) == null and std.mem.indexOfScalar(u8, word, '.') == null) continue;
         if (isCredentialPath(word)) return word;
     }
     return null;
@@ -890,12 +904,18 @@ pub fn deniedInCommand(command: []const u8, deny_list: []const []const u8) ?[]co
         // Tokenize the deny entry into words
         var entry_tokens: [16][]const u8 = undefined;
         var entry_count: usize = 0;
+        // An entry with more words than the buffer holds is matched on the
+        // verbatim substring below and on nothing else. Truncating it and
+        // sliding the truncated words would match a command that shares the
+        // first sixteen words and differs on the rest, so the two halves of
+        // this check would disagree about the entry they are both about.
+        var truncated = false;
         var e_iter = std.mem.tokenizeAny(u8, entry, command_word_separators);
         while (e_iter.next()) |ew| {
             if (entry_count < entry_tokens.len) {
                 entry_tokens[entry_count] = ew;
                 entry_count += 1;
-            }
+            } else truncated = true;
         }
         if (entry_count == 0) continue;
 
@@ -908,6 +928,7 @@ pub fn deniedInCommand(command: []const u8, deny_list: []const []const u8) ?[]co
         } else {
             // Multi-word entry: match against verbatim case-insensitive substring
             if (std.ascii.indexOfIgnoreCase(command, entry) != null) return raw_entry;
+            if (truncated) continue;
 
             // Or match against a sliding sequence of command word tokens
             var words = std.mem.tokenizeAny(u8, command, command_word_separators);
@@ -1335,6 +1356,14 @@ fn readLines(io: Io, arena: std.mem.Allocator, path: []const u8, offset: usize, 
     return buf.items;
 }
 
+/// The answer to a path the sandbox will not let a tool write. The three tools
+/// that can write share one sentence: `multi_edit` only prefixes it with which
+/// entry of the batch it came from, and a reader who has seen one refusal has
+/// seen the rule behind all three.
+fn outsideSandbox(arena: std.mem.Allocator, path: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(arena, "refused: path '{s}' is outside the sandbox writable roots", .{chat.safeText(arena, path, 80)});
+}
+
 fn toolWrite(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, writable_roots: []const []const u8) ![]const u8 {
     const path = chat.str(args.get("path")) orelse return "error: missing path";
     // The same refusal `read` makes. A run that cannot read a key file has no
@@ -1344,7 +1373,7 @@ fn toolWrite(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, writabl
     // next run of the agent cannot authenticate at all.
     if (credentialPath(io, arena, path)) |refused| return try credentialRefusal(arena, .write, refused, true);
     if (!sandbox.isPathWritable(io, arena, path, writable_roots)) {
-        return std.fmt.allocPrint(arena, "refused: path '{s}' is outside the sandbox writable roots", .{chat.safeText(arena, path, 80)});
+        return outsideSandbox(arena, path);
     }
     // A call that names a path and no content is a call the model got cut
     // short on, not one asking for an empty file: a `write` is the one tool
@@ -1421,7 +1450,7 @@ fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, writable
     // asked for.
     if (credentialPath(io, arena, path)) |refused| return try credentialRefusal(arena, .edit, refused, true);
     if (!sandbox.isPathWritable(io, arena, path, writable_roots)) {
-        return std.fmt.allocPrint(arena, "refused: path '{s}' is outside the sandbox writable roots", .{chat.safeText(arena, path, 80)});
+        return outsideSandbox(arena, path);
     }
     const old = chat.str(args.get("old_string")) orelse return "error: missing old_string";
     const new = chat.str(args.get("new_string")) orelse return "error: missing new_string";
@@ -1564,7 +1593,7 @@ fn toolMultiEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, wri
             return refusedAt(arena, n, list.len, try credentialRefusal(arena, .multi_edit, refused, true));
         }
         if (!sandbox.isPathWritable(io, arena, path, writable_roots)) {
-            const message = try std.fmt.allocPrint(arena, "refused: path '{s}' is outside the sandbox writable roots", .{chat.safeText(arena, path, 80)});
+            const message = try outsideSandbox(arena, path);
             return refusedAt(arena, n, list.len, message);
         }
         const old = chat.str(entry.get("old_string")) orelse return refusedAt(arena, n, list.len, "error: missing old_string");
@@ -1956,9 +1985,12 @@ fn waitBounded(
     // No deadline means an unbounded wait is what was asked for, and there is
     // nothing to race it against.
     const opening = deadline.toDurationFromNow(io) orelse return child.wait(io);
-    // A deadline already spent is answered before anything is spawned: the
-    // drain uses the whole of the timeout, so reaching here with none left is
-    // the drain's own timeout, and the child is about to be reaped either way.
+    // A deadline already spent is answered here rather than waited on. The
+    // child is already running: the drain that read its output uses the whole
+    // of the timeout, so reaching this point with none left is the drain's own
+    // timeout, and the caller reaps the child on the way out either way. Racing
+    // a wait of zero length against a signalling task would only report it a
+    // poll interval later.
     if (opening.raw.nanoseconds <= 0) return error.Timeout;
 
     const Waiting = struct {
@@ -2415,7 +2447,7 @@ test "the tool gutter stays one line whatever the model sent" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    var buf: [gutter_line_max]u8 = undefined;
+    var buf: [max_gutter_line_bytes]u8 = undefined;
 
     // The line the gutter writes, marker and newline included, with the
     // control characters a command from the model can carry shown as their
@@ -2463,7 +2495,7 @@ test "the tool gutter stays one line whatever the model sent" {
     for (chat.tools()) |tool| {
         try std.testing.expect(tool.name().len <= 40);
         const long_line = try toolCallLine(arena, &buf, tool, long_args);
-        try std.testing.expect(long_line.len <= gutter_line_max);
+        try std.testing.expect(long_line.len <= max_gutter_line_bytes);
         try std.testing.expect(std.unicode.utf8ValidateSlice(long_line));
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, long_line, "\n"));
     }
@@ -2578,10 +2610,10 @@ fn fuzzToolCall(_: void, smith: *std.testing.Smith) !void {
     // stay one printable line, since it quotes the name back at the model and
     // on stderr.
     const line = if (chat.Tool.fromName(name)) |tool| blk: {
-        var buf: [gutter_line_max]u8 = undefined;
+        var buf: [max_gutter_line_bytes]u8 = undefined;
         break :blk try toolCallLine(arena, &buf, tool, args);
     } else try unknownTool(arena, name);
-    try std.testing.expect(line.len <= gutter_line_max + 32);
+    try std.testing.expect(line.len <= max_gutter_line_bytes + 32);
     try std.testing.expect(std.unicode.utf8ValidateSlice(line));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, line, "\n"));
 
@@ -3637,7 +3669,7 @@ test "a clean one-stream result is the capture itself, and a note still reaches 
     }));
     // Empty output beside a term: the hand-back needs a non-empty stdout, so
     // this one still assembles, and the status takes the place of the output.
-    try std.testing.expectEqualStrings("(no output, exit exited 0)", try captureResult(arena, .{
+    try std.testing.expectEqualStrings("(no output, exited 0)", try captureResult(arena, .{
         .term = .{ .exited = 0 },
     }));
     try std.testing.expectEqualStrings("a\nb\n\nerror: no such path", try captureResult(arena, .{
@@ -3938,6 +3970,35 @@ test "git tool refuses a missing or unknown subcommand" {
             try toolGit(std.testing.io, arena, args, null, null),
         );
     }
+}
+
+// A `git` that fails without writing anything said it in its exit status. The
+// no-output path used to answer "(git <cmd>: no output)" for that case, which
+// reads to the model as a command that ran and found nothing, and is the one
+// answer a failed call must not give.
+test "a git call that failed without output reports its exit status" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const silent = Captured{
+        .stdout = &.{},
+        .stderr = &.{},
+        .dropped = .{ false, false },
+        .term = .{ .exited = 128 },
+    };
+    const failed = try gitRanNothing(arena, "show", silent, 400);
+    try std.testing.expectEqualStrings("(no output, exited 128)", failed);
+
+    // The same capture from a call that succeeded is the case the short line
+    // is for, and it must not gain an exit status it did not have.
+    const clean = try gitRanNothing(arena, "show", .{
+        .stdout = &.{},
+        .stderr = &.{},
+        .dropped = .{ false, false },
+        .term = .{ .exited = 0 },
+    }, 400);
+    try std.testing.expectEqualStrings("(git show: no output)", clean);
 }
 
 // The exclusions the git tool appends are the only thing between a committed
@@ -4918,11 +4979,11 @@ test "a bash command with no output still says which exit it was" {
     const arena = arena_state.allocator();
 
     try std.testing.expectEqualStrings(
-        "(no output, exit exited 3)",
+        "(no output, exited 3)",
         try dispatch(arena, "bash", "{\"command\":\"exit 3\"}"),
     );
     try std.testing.expectEqualStrings(
-        "(no output, exit exited 0)",
+        "(no output, exited 0)",
         try dispatch(arena, "bash", "{\"command\":\"exit 0\"}"),
     );
     // The same number reaches the line when there was output to append it to,
@@ -5136,6 +5197,25 @@ test "bash refuses a command matching the configured command filter" {
         const out = try dispatchWith(arena, "bash", args, &deny_list, &.{});
         try std.testing.expect(std.mem.indexOf(u8, out, "denied by configuration") == null);
     }
+}
+
+// A deny entry with more words than the token buffer holds used to be matched
+// on its first sixteen alone, so a command sharing those sixteen and differing
+// on the rest was refused. The whole entry is what the operator wrote, and the
+// verbatim branch below the sliding one still matches on all of it.
+test "a deny entry longer than the token buffer is matched whole or not at all" {
+    const long_entry = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec";
+    // Seventeen words, one past what the sliding match can hold.
+    const deny_list = [_][]const u8{"alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa"};
+
+    // The full entry, spelled out: the verbatim branch finds it.
+    try std.testing.expect(deniedInCommand(long_entry, &deny_list) != null);
+    // The first sixteen words and a different seventeenth: not the entry.
+    try std.testing.expectEqual(@as(?[]const u8, null), deniedInCommand("alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar romeo", &deny_list));
+    // An entry that fits the buffer is still matched on its sliding tokens, so
+    // the truncation above is not the sliding match being dropped entirely.
+    const short_list = [_][]const u8{"alpha bravo charlie"};
+    try std.testing.expect(deniedInCommand("echo alpha bravo charlie done", &short_list) != null);
 }
 
 // The provider key lives in this process's environment, and a tool subprocess
@@ -5437,7 +5517,7 @@ test "a multi_edit gutter line names the first file it touches" {
     var state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer state.deinit();
     const arena = state.allocator();
-    var buf: [gutter_line_max]u8 = undefined;
+    var buf: [max_gutter_line_bytes]u8 = undefined;
 
     var edit: std.json.ObjectMap = .empty;
     try edit.put(arena, "path", .{ .string = "src/a.zig" });

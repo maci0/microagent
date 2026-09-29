@@ -1623,7 +1623,11 @@ fn writeDefaultConfig(io: Io, arena: std.mem.Allocator, source: ConfigSource) vo
     const shown = configPathText(arena, source);
     if (std.fs.path.dirname(path)) |dir| {
         _ = std.Io.Dir.cwd().createDirPathStatus(io, dir, default_config_dir_mode) catch |err| {
-            net.note(io, arena, "microagent: config {s}: {s} could not be created ({s}), so the template was not written\n", .{ shown, dir, @errorName(err) });
+            // `dir` is the parent of the operator's own `--config` value, and it
+            // reaches the terminal through a note like any other, so it is
+            // escaped like `shown` is: the escape is what keeps a path holding
+            // a control byte from writing over the line that reports it.
+            net.note(io, arena, "microagent: config {s}: {s} could not be created ({s}), so the template was not written\n", .{ shown, chat_mod.safeTextAll(arena, dir), @errorName(err) });
             return;
         };
     }

@@ -79,6 +79,15 @@ pub fn resolveWritableRoots(
     return roots.items;
 }
 
+/// True when `path` is `root` itself or sits under it. The separator test is what keeps a
+/// sibling whose name merely starts with the root's, `/writable-roots-other` against
+/// `/writable-roots`, from reading as inside it.
+fn isUnderRoot(path: []const u8, root: []const u8) bool {
+    if (root.len == 0) return true;
+    if (!std.mem.startsWith(u8, path, root)) return false;
+    return path.len == root.len or path[root.len] == std.fs.path.sep;
+}
+
 /// Checks whether `path` is within any allowed root in `writable_roots`.
 /// An empty `writable_roots` slice means no sandbox restriction is active. A relative `path` is
 /// taken relative to `writable_roots[0]`, which must be the working directory.
@@ -111,11 +120,7 @@ pub fn isPathWritable(io: Io, arena: std.mem.Allocator, path: []const u8, writab
 /// `/tmp` does not cover `/tmpd`.
 fn withinAnyRoot(path: []const u8, writable_roots: []const []const u8) bool {
     for (writable_roots) |raw_root| {
-        const root = std.mem.trimEnd(u8, raw_root, "/\\");
-        if (root.len == 0) return true;
-        if (std.mem.startsWith(u8, path, root)) {
-            if (path.len == root.len or path[root.len] == std.fs.path.sep) return true;
-        }
+        if (isUnderRoot(path, std.mem.trimEnd(u8, raw_root, "/\\"))) return true;
     }
     return false;
 }

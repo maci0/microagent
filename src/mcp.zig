@@ -475,7 +475,13 @@ pub const Server = struct {
             if (status != .accepted) connection.closing = true;
             return null;
         };
-        if (!is_sse and !is_json) return error.UnexpectedContentType;
+        if (!is_sse and !is_json) {
+            // The body is still on the wire, and a connection handed back to
+            // the client with bytes unread behind it hands the next request
+            // this body as its response head.
+            connection.closing = true;
+            return error.UnexpectedContentType;
+        }
 
         var transfer: [http_transfer_bytes]u8 = undefined;
         const reader = response.reader(&transfer);
@@ -500,6 +506,11 @@ pub const Server = struct {
         var event: std.ArrayList(u8) = .empty;
         var scanned: usize = 0;
         var total: usize = 0;
+        // Every way out of this function that is not the answer leaves the
+        // body part-read, and the caller's `closing` flag only carries the
+        // stream that ended early on purpose. An error is the other way to
+        // stop mid-body, so it counts the same way.
+        errdefer stopped_early.* = true;
         while (true) {
             try pending.ensureUnusedCapacity(scratch, http_read_chunk_bytes);
             var vec: [1][]u8 = .{pending.unusedCapacitySlice()};
