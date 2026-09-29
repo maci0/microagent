@@ -14,6 +14,14 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- The Io worker threads are built with a megabyte of stack each and a ceiling of
+  four, instead of std's 16 MB and one per core. Two workers at rest were 32 MB
+  of address space for call paths that read and write files and sockets: a run
+  peaks at 6.7 MB of address space over 300 turns where it peaked at 36.7 MB,
+  and at 46.8 MB over 3000 where it peaked at 91.8 MB, with peak resident on the
+  long run down from 10.9 MB to 9.5 MB. The batches this program issues hold one
+  or two operations, and the smaller stacks were stress-checked against the
+  largest MCP answers the tests carry.
 - A request body is sent as the constant prefix, the conversation and the
   closing bytes, instead of first being built in one buffer. That buffer copied
   the conversation every turn, and on a long run it was the largest single memcpy

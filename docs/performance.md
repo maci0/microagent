@@ -81,6 +81,8 @@ run-to-run noise, so there is no build flag to reach for either.
 | the same library, system time to the first request | 9.3 ms | **2.0 ms** | the same change: 21 MB of reads become about 1.6 MB, and kernel time is the half that carries it |
 | three MCP servers with 1 MB `tools/list` answers | 12.2 MB resident | **4.5 MB** | a `tools/list` answer was parsed into the run arena, tree and line both, and the buffer it arrived in kept its size; the answer is parsed in a scratch arena now, only the schema bytes are copied out, and that buffer has its own allocator and is handed back |
 | one such server | 8.5 MB | **4.5 MB** | the same change |
+| worker stacks, a 300-turn run | 36.7 MB address space | **6.7 MB** | std gives each `Io.Threaded` worker a 16 MB stack and allows one per core; this program's batches hold one or two operations, so it asks for four workers of a megabyte |
+| the same, a 3000-turn run | 91.8 MB address space | **46.8 MB** | the rest is the conversation and the arenas; peak resident on that run fell from 10.9 MB to 9.5 MB |
 | a 3000-turn run's client CPU | 211.9 M instr | **177.8 M instr** | `sendBodyComplete` needs the whole body in one buffer, so the conversation was copied into a fresh one every turn; the prefix and the conversation now go to the wire from where they are |
 | the same run, peak resident | 13.3 MB | **11.0 MB** | with the body buffer gone, the turn arena crosses its retention ceiling less often |
 | an MCP answer read in 8 KB chunks, three servers of 1 MB each | 91.1 M instr | **75.3 M instr** | the newline scan restarted at the front of the buffer on every chunk, so a one megabyte line was searched 128 times over growing prefixes, about 66 MB of the same bytes; it resumes where it stopped now |
@@ -209,6 +211,12 @@ wall figure is `hyperfine -w 3 -r 20` and it moves with the page cache (11.1 ms 
 run warm, 27.2 against 12.9 loaded and cold); the system time does not, 9.3 ms against 2.0 ms, which
 is the read volume. A library of ordinary size pays nothing either way: 2.9 MB against 2.9 MB with
 none, 5.5 against 5.9 for 200 skills of 4 KB.
+
+The worker-stack rows are peak `VmPeak` and `VmHWM` from `/proc/<pid>/status`, sampled every 10 ms
+through a run against the always-calls-a-tool stub at 300 and 3000 turns. The smaller stacks were
+stress-checked against the three servers of 1 MB `tools/list` answers, a server answering
+`tools/call` with 4 MB, and the whole suite, none of which faults: the work a worker does is a read
+or a write for a batch that holds one or two operations.
 
 The request-body rows are `perf stat --no-inherit -e instructions`, median of three, at
 `--max-turns 3000` against a stub that always calls a tool that does not exist, so the conversation

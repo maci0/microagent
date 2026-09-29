@@ -263,6 +263,16 @@ var gpa_state: std.heap.DebugAllocator(if (builtin.mode == .Debug) .{} else .{
 
 /// Builds what std's start code would hand `main`, around `gpa_state` rather
 /// than the allocator start code would choose.
+/// The worker threads behind `Io.Threaded` are the only threads this program
+/// starts. std gives each one a 16 MB stack and allows one per core, which on
+/// this 16-core machine is 240 MB of stacks for call paths that read and write
+/// files and sockets, and two of them at rest was 32 MB of address space. The
+/// batches this program issues hold one or two operations, so four workers is
+/// past what it asks for, and a megabyte is ten times what a read or a write
+/// behind one has ever used.
+const io_worker_stack_bytes = 1024 * 1024;
+const io_worker_limit = 4;
+
 pub fn main(minimal: std.process.Init.Minimal) !void {
     defer if (builtin.mode == .Debug) {
         _ = gpa_state.deinit();
@@ -270,7 +280,12 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
     const gpa = gpa_state.allocator();
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     defer arena.deinit();
-    var threaded: std.Io.Threaded = .init(gpa, .{ .argv0 = .init(minimal.args), .environ = minimal.environ });
+    var threaded: std.Io.Threaded = .init(gpa, .{
+        .argv0 = .init(minimal.args),
+        .environ = minimal.environ,
+        .stack_size = io_worker_stack_bytes,
+        .async_limit = .limited(io_worker_limit),
+    });
     defer threaded.deinit();
     var environ_map = try minimal.environ.createMap(gpa);
     defer environ_map.deinit();
