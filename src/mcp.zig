@@ -1301,10 +1301,18 @@ fn openRemote(
         net.note(io, arena, "microagent: MCP server {s}: the key in ${s} holds a control character; it is skipped\n", .{ shown, chat.safeTextAll(arena, entry.api_key_env) });
         return;
     }
+    // Every way this can leave an entry out says so, the way the two above do:
+    // an entry the operator wrote down and this run drops without a line reads
+    // from outside as a server that was never configured.
     const key_value = if (entry.api_key.len == 0)
         ""
     else if (std.ascii.eqlIgnoreCase(entry.api_key_header, default_key_header))
-        std.fmt.allocPrint(arena, "Bearer {s}", .{entry.api_key}) catch return
+        std.fmt.allocPrint(arena, "Bearer {s}", .{entry.api_key}) catch |err| {
+            net.note(io, arena, "microagent: MCP server {s}: the key in ${s} could not be prepared for the request ({s}); it is skipped\n", .{
+                shown, chat.safeTextAll(arena, entry.api_key_env), @errorName(err),
+            });
+            return;
+        }
     else
         entry.api_key;
     var server: Server = .{
@@ -1321,9 +1329,21 @@ fn openRemote(
     // A keyless preset is offered from the table this binary carries: no
     // request is made for it now, and the first call to one of its tools is
     // where it is asked to initialize. That is what keeps four public servers
-    // off the path between the process and its first provider request.
-    if (entry.api_key.len == 0) _ = fillPresetTools(arena, &server, client_version) catch false;
-    out.append(arena, server) catch {};
+    // off the path between the process and its first provider request. False
+    // is the ordinary answer for a host this binary carries no table for, and
+    // such a server is handshaken before its first use instead; an error is
+    // not ordinary, so it is named rather than read as the same thing.
+    if (entry.api_key.len == 0) {
+        _ = fillPresetTools(arena, &server, client_version) catch |err| blk: {
+            net.note(io, arena, "microagent: MCP server {s}: its tools could not be prepared ({s}); it is connected, and the handshake is made before its first use\n", .{
+                shown, @errorName(err),
+            });
+            break :blk false;
+        };
+    }
+    out.append(arena, server) catch |err| {
+        net.note(io, arena, "microagent: MCP server {s}: it could not be recorded ({s}); it is skipped\n", .{ shown, @errorName(err) });
+    };
 }
 
 /// Starts one server and records it, whether or not it will answer: the
@@ -1338,16 +1358,21 @@ fn spawnOne(
 ) void {
     const shown = chat.safeTextAll(arena, entry.name);
     var argv: std.ArrayList([]const u8) = .empty;
-    argv.append(arena, entry.command) catch return;
-    argv.appendSlice(arena, entry.args) catch return;
+    argv.append(arena, entry.command) catch |err| return skipped(io, arena, shown, "its command line could not be built", err);
+    argv.appendSlice(arena, entry.args) catch |err| return skipped(io, arena, shown, "its command line could not be built", err);
 
     // The server inherits the scrubbed environment the tool children get --
     // the provider key is not in it -- plus whatever the entry names, which is
-    // how a server is handed its own configuration.
+    // how a server is handed its own configuration. A server started with a
+    // partly built environment is one whose own configuration silently is not
+    // the one the config file declared, so an entry that cannot be copied is
+    // named and the server is not started at all.
     var env: std.process.Environ.Map = .init(arena);
     var it = environ_map.iterator();
-    while (it.next()) |pair| env.put(pair.key_ptr.*, pair.value_ptr.*) catch return;
-    for (entry.env) |pair| env.put(pair[0], pair[1]) catch return;
+    while (it.next()) |pair| env.put(pair.key_ptr.*, pair.value_ptr.*) catch |err|
+        return skipped(io, arena, shown, "the environment it would inherit could not be built", err);
+    for (entry.env) |pair| env.put(pair[0], pair[1]) catch |err|
+        return skipped(io, arena, shown, "the environment it names could not be built", err);
 
     const child = std.process.spawn(io, .{
         .argv = argv.items,
@@ -1375,7 +1400,17 @@ fn spawnOne(
         } },
         .tools = &.{},
     };
-    out.append(arena, server) catch server.reap(io);
+    out.append(arena, server) catch |err| {
+        net.note(io, arena, "microagent: MCP server {s}: it could not be recorded ({s}); it is stopped and skipped\n", .{ shown, @errorName(err) });
+        server.reap(io);
+    };
+}
+
+/// Why a server was not started, named the way every other skipped server is:
+/// a line on stderr, so an entry the operator wrote down does not read from
+/// outside as one that was never configured.
+fn skipped(io: Io, arena: std.mem.Allocator, shown: []const u8, what: []const u8, err: anyerror) void {
+    net.note(io, arena, "microagent: MCP server {s}: {s} ({s}); it is skipped\n", .{ shown, what, @errorName(err) });
 }
 
 /// The three frames a usable connection is made of: `initialize`, the

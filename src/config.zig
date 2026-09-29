@@ -176,6 +176,10 @@ pub const Problem = struct {
         /// Two `[[mcp]]` tables with the same name: their tools would collide
         /// on one exposed name.
         duplicate_server,
+        /// A list this file declares more than once, whose values could not be
+        /// joined, so the key holds only the values declared before the one
+        /// that was lost.
+        list_truncated,
     };
 };
 
@@ -392,14 +396,37 @@ fn sandboxOnly(config: *Config, arena: std.mem.Allocator, key: []const u8, value
 
 fn addSandboxWritable(config: *Config, arena: std.mem.Allocator, list: []const []const u8) void {
     if (list.len == 0) return;
-    if (config.sandbox.writable.len == 0) {
-        config.sandbox.writable = list;
-    } else {
-        var merged: std.ArrayList([]const u8) = .empty;
-        merged.appendSlice(arena, config.sandbox.writable) catch return;
-        merged.appendSlice(arena, list) catch return;
-        config.sandbox.writable = merged.items;
-    }
+    config.sandbox.writable = addToList(config, arena, "writable", config.sandbox.writable, list);
+}
+
+/// A list this file may declare more than once, joined rather than replaced.
+///
+/// The join is a copy, so it can fail where the file itself did not, and a
+/// failure here used to leave the key holding the values declared before it
+/// with nothing said. That is the quiet kind of wrong this reader is for
+/// everywhere else: `deny_commands` short by one entry is a command the
+/// operator denied and the run then allows, and a `writable` list short by one
+/// is a directory the run refuses to write to. The earlier values stay, and
+/// the key is named, so the run says which list is short rather than behaving
+/// as if the file had not declared it.
+fn addToList(
+    config: *Config,
+    arena: std.mem.Allocator,
+    key: []const u8,
+    existing: []const []const u8,
+    list: []const []const u8,
+) []const []const u8 {
+    if (existing.len == 0) return list;
+    var merged: std.ArrayList([]const u8) = .empty;
+    merged.appendSlice(arena, existing) catch {
+        config.note(.{ .key = key, .kind = .list_truncated });
+        return existing;
+    };
+    merged.appendSlice(arena, list) catch {
+        config.note(.{ .key = key, .kind = .list_truncated });
+        return existing;
+    };
+    return merged.items;
 }
 
 /// The TOML booleans, `true` and `false`, and nothing else.
@@ -412,14 +439,7 @@ fn parseBool(raw: []const u8) ?bool {
 
 fn addDenyCommands(config: *Config, arena: std.mem.Allocator, list: []const []const u8) void {
     if (list.len == 0) return;
-    if (config.deny_commands.len == 0) {
-        config.deny_commands = list;
-    } else {
-        var merged: std.ArrayList([]const u8) = .empty;
-        merged.appendSlice(arena, config.deny_commands) catch return;
-        merged.appendSlice(arena, list) catch return;
-        config.deny_commands = merged.items;
-    }
+    config.deny_commands = addToList(config, arena, "deny_commands", config.deny_commands, list);
 }
 
 /// One line inside an open `[[mcp]]` table.
@@ -987,6 +1007,43 @@ test "deny_commands is one top-level list, and no other spelling is read" {
     try std.testing.expectEqualStrings("deny_commands", single.problem.?.key);
     try std.testing.expectEqual(Problem.Kind.bad_value, single.problem.?.kind);
     try std.testing.expectEqual(@as(usize, 0), single.deny_commands.len);
+}
+
+// A list declared twice is joined, so a denied command or a writable root from
+// either declaration is in force. The join is a copy, and a copy that could not
+// be made used to leave the key holding the first declaration with nothing
+// said: a denied command the run then allows, read from outside as a run whose
+// deny list was short by one entry. The values already read stay, and the key
+// is named.
+test "a list declared twice is joined, and a join that fails names the key" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    const both = parse(arena,
+        \\[sandbox]
+        \\writable = ["build"]
+        \\writable = ["dist", "out"]
+        \\
+    );
+    try std.testing.expect(both.problem == null);
+    try std.testing.expectEqual(@as(usize, 3), both.sandbox.writable.len);
+    try std.testing.expectEqualStrings("build", both.sandbox.writable[0]);
+    try std.testing.expectEqualStrings("dist", both.sandbox.writable[1]);
+    try std.testing.expectEqualStrings("out", both.sandbox.writable[2]);
+
+    // The join that cannot be made keeps what the file already declared, and
+    // names the key rather than leaving a deny list short by an entry the
+    // operator wrote down. The first allocation is the copy, so failing it is
+    // the whole of that failure.
+    var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    var config = Config{};
+    const first = [_][]const u8{"sudo"};
+    const second = [_][]const u8{"su"};
+    const joined = addToList(&config, failing.allocator(), "deny_commands", &first, &second);
+    try std.testing.expectEqualSlices([]const u8, &first, joined);
+    try std.testing.expectEqual(Problem.Kind.list_truncated, config.problem.?.kind);
+    try std.testing.expectEqualStrings("deny_commands", config.problem.?.key);
 }
 
 test "the sandbox is the [sandbox] table with enabled and writable, and only true or false" {

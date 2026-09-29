@@ -244,8 +244,44 @@ fn statusHint(status: std.http.Status) []const u8 {
     };
 }
 
-/// One GET of `url`, body capped at `limit`, owned by `allocator`. One attempt:
-/// on any failure the reason, naming `what`, is printed and the result is null.
+/// How many times one download is attempted before it is given up on, and the
+/// ceiling on the wait between two of them. The base and the doubling count
+/// are the shared ones in `net`; only the cap is this path's, and it is
+/// shorter than the agent run's because nobody is waiting on a turn here: a
+/// person watching `microagent update` should be asked again while they are
+/// still there.
+const max_attempts: u32 = 3;
+const max_backoff_ms: u64 = 30_000;
+
+/// The shortest a download may take, and the rate a body has to arrive at for
+/// the clock to be consulted at all.
+///
+/// `std.http` takes no deadline of its own, so a host that accepts the
+/// connection and then stops answering holds this process open for as long as
+/// it likes: the release page is a few kilobytes, so a floor is what it is
+/// held to, and the asset's size is known before the request goes out, so the
+/// rest of the budget is an allowance for a slow link. A link that slow is a
+/// long download rather than a dead one, and a dead one is what the floor and
+/// the rate together catch.
+const fetch_timeout_floor_ms: u64 = 30_000;
+const fetch_timeout_bytes_per_s: u64 = 2 * 1024 * 1024;
+
+/// The deadline one download of at most `limit` bytes is given.
+fn fetchTimeoutMs(limit: usize) u64 {
+    const for_the_body = (@as(u64, @intCast(limit)) * std.time.ms_per_s) / fetch_timeout_bytes_per_s;
+    return @max(fetch_timeout_floor_ms, for_the_body);
+}
+
+/// What one attempt made of a download: the body, or null with whether another
+/// attempt could answer differently. Every failure has already been said by
+/// the time this returns, so the loop above only decides and waits.
+const Outcome = struct { body: ?[]u8, retry: bool };
+
+/// One GET of `url`, body capped at `limit`, owned by `allocator`. The attempt
+/// loop: a download whose failure is the network's rather than the request's
+/// is tried again on the shared backoff, up to `max_attempts`, and every reason
+/// is printed as it happens rather than only for the last one, so an operator
+/// watching a slow network sees why each attempt was made.
 fn fetch(
     io: std.Io,
     client: *std.http.Client,
@@ -255,37 +291,118 @@ fn fetch(
     bearer: ?[]const u8,
     limit: usize,
 ) ?[]u8 {
+    var attempt: u32 = 0;
+    while (true) {
+        attempt += 1;
+        const outcome = fetchOnce(io, client, allocator, what, url, bearer, limit);
+        if (outcome.body) |body| return body;
+        if (!outcome.retry or attempt >= max_attempts) return null;
+        const wait = net.retryBackoffMs(attempt, max_backoff_ms);
+        say(io, "could not download {s}, trying again in {d}ms (attempt {d}/{d})", .{
+            what, wait, attempt + 1, max_attempts,
+        });
+        // A wait that could not be taken is not a wait. Answering the same URL
+        // the instant the sleep failed is the one thing the backoff exists to
+        // prevent, and the line above has already promised a delay, so a sleep
+        // that failed ends the download instead.
+        std.Io.sleep(io, .{ .nanoseconds = wait *| std.time.ns_per_ms }, sleep_clock) catch |err| {
+            _ = fail(io, "could not download {s}; the {d}ms wait before another attempt could not be taken ({s}), and it is not tried again at once", .{
+                what, wait, @errorName(err),
+            });
+            return null;
+        };
+    }
+}
+
+/// The clock the waits between attempts are taken on. `.awake` rather than the
+/// run's `.boot`: this path has no budget clock to keep in step with, and a
+/// machine that suspended mid-wait is a machine whose operator is not watching.
+const sleep_clock: std.Io.Clock = .awake;
+
+/// One GET, raced against its own deadline. `client.fetch` has no timeout
+/// option, so the clock is a task of its own and the exchange is the other:
+/// whichever finishes first ends this, and the one that did not is cancelled
+/// and joined before the body is read, so nothing writes into `capped` after
+/// it is deinitialized.
+fn fetchOnce(
+    io: std.Io,
+    client: *std.http.Client,
+    allocator: std.mem.Allocator,
+    what: []const u8,
+    url: []const u8,
+    bearer: ?[]const u8,
+    limit: usize,
+) Outcome {
     var capped: Capped = undefined;
     capped.start(allocator, limit) catch |err| {
         _ = fail(io, "could not download {s} ({s})", .{ what, @errorName(err) });
-        return null;
+        return .{ .body = null, .retry = false };
     };
     defer capped.body.deinit();
 
+    const Timed = union(enum) {
+        answered: anyerror!std.http.Client.FetchResult,
+        expired: std.Io.Cancelable!void,
+    };
+    var slots: [2]Timed = undefined;
+    var select: std.Io.Select(Timed) = .init(io, &slots);
+    defer select.cancelDiscard();
+    const timeout_ms = fetchTimeoutMs(limit);
+    select.concurrent(.answered, exchange, .{ client, &capped, url, bearer }) catch |err| {
+        _ = fail(io, "could not download {s} ({s})", .{ what, @errorName(err) });
+        return .{ .body = null, .retry = false };
+    };
+    select.concurrent(.expired, std.Io.Timeout.sleep, .{ net.durationMs(timeout_ms), io }) catch |err| {
+        _ = fail(io, "could not download {s} ({s})", .{ what, @errorName(err) });
+        return .{ .body = null, .retry = false };
+    };
+    const answer = select.await() catch |err| {
+        _ = fail(io, "could not download {s} ({s})", .{ what, @errorName(err) });
+        return .{ .body = null, .retry = false };
+    };
+    switch (answer) {
+        .answered => |result| {
+            const received = result catch |err| {
+                const reason = if (capped.over) "PayloadTooLarge" else @errorName(err);
+                _ = fail(io, "could not download {s} ({s})", .{ what, reason });
+                return .{ .body = null, .retry = net.transientTransportError(err) };
+            };
+            if (@intFromEnum(received.status) >= 400) {
+                _ = fail(io, "GitHub returned HTTP {d} for {s}{s}", .{ @intFromEnum(received.status), what, statusHint(received.status) });
+                return .{ .body = null, .retry = net.retryableStatus(received.status) };
+            }
+        },
+        .expired => {
+            _ = fail(io, "could not download {s} (no answer within {d}ms)", .{ what, timeout_ms });
+            return .{ .body = null, .retry = true };
+        },
+    }
+    const body = capped.body.toOwnedSlice() catch |err| {
+        _ = fail(io, "could not download {s} ({s})", .{ what, @errorName(err) });
+        return .{ .body = null, .retry = false };
+    };
+    return .{ .body = body, .retry = false };
+}
+
+/// The one request, as a task the clock can race. The key travels in a
+/// privileged header, so a redirect to another host never carries it.
+fn exchange(
+    client: *std.http.Client,
+    capped: *Capped,
+    url: []const u8,
+    bearer: ?[]const u8,
+) anyerror!std.http.Client.FetchResult {
     var auth: [1]std.http.Header = undefined;
     const auth_headers: []const std.http.Header = if (bearerFor(url, bearer)) |b| blk: {
         auth[0] = .{ .name = "Authorization", .value = b };
         break :blk &auth;
     } else &.{};
-
-    const result = client.fetch(.{
+    return client.fetch(.{
         .location = .{ .url = url },
         .headers = .{ .user_agent = .{ .override = "microagent/" ++ version } },
         .privileged_headers = auth_headers,
         .response_writer = &capped.writer,
-    }) catch |err| {
-        const reason = if (capped.over) "PayloadTooLarge" else @errorName(err);
-        _ = fail(io, "could not download {s} ({s})", .{ what, reason });
-        return null;
-    };
-    if (@intFromEnum(result.status) >= 400) {
-        _ = fail(io, "GitHub returned HTTP {d} for {s}{s}", .{ @intFromEnum(result.status), what, statusHint(result.status) });
-        return null;
-    }
-    return capped.body.toOwnedSlice() catch |err| {
-        _ = fail(io, "could not download {s} ({s})", .{ what, @errorName(err) });
-        return null;
-    };
+    });
 }
 
 /// Replaces the file at `exe` with `bytes`, mode 0755, through an atomic
@@ -752,6 +869,48 @@ test "update: a body over the cap is refused while it arrives" {
     capped.over = false;
     try capped.writer.writeAll("abc");
     try std.testing.expectEqualStrings("shortabc", capped.body.written());
+}
+
+// A download has no deadline of its own in `std.http`, so the one this path
+// imposes is the only thing between a host that stops answering and an
+// operator whose terminal never comes back. The floor holds the small requests
+// to it, and the rate is what keeps a slow link a slow download rather than a
+// failed one: the asset is up to `max_asset_bytes`, and cutting that off at the
+// floor would refuse an install over a link that is working.
+test "update: a download's deadline is its floor until the body needs more" {
+    try std.testing.expectEqual(fetch_timeout_floor_ms, fetchTimeoutMs(1024));
+    try std.testing.expectEqual(fetch_timeout_floor_ms, fetchTimeoutMs(max_sidecar_bytes));
+    // The largest published asset is allowed the time its size buys at the
+    // named rate, which is well past the floor.
+    try std.testing.expect(fetchTimeoutMs(max_asset_bytes) > fetch_timeout_floor_ms);
+    // Monotone in the cap, so a bigger download is never given less time than
+    // a smaller one.
+    try std.testing.expect(fetchTimeoutMs(2 * max_asset_bytes) >= fetchTimeoutMs(max_asset_bytes));
+}
+
+// The two waits the loop can take are the shared schedule under this path's
+// own, shorter cap: three attempts means two waits, and neither is longer than
+// what `net` was written to be given here.
+test "update: a retried download waits on the shared backoff under its own cap" {
+    try std.testing.expectEqual(@as(u32, 3), max_attempts);
+    try std.testing.expectEqual(@as(u64, 1000), net.retryBackoffMs(1, max_backoff_ms));
+    try std.testing.expectEqual(@as(u64, 2000), net.retryBackoffMs(2, max_backoff_ms));
+    try std.testing.expectEqual(@as(u64, 4000), net.retryBackoffMs(3, max_backoff_ms));
+    // The cap is this path's and not the run's, which is what `net` says the
+    // two waits are not the same promise about.
+    try std.testing.expect(max_backoff_ms < 60_000);
+}
+
+// Which failures another attempt could answer differently, and which could not.
+// A 404 names something that is not published and asking again changes nothing;
+// a 503 is the server being busy, and the same set the agent run retries on.
+test "update: a download retries the statuses and errors the run retries on" {
+    try std.testing.expect(net.retryableStatus(.service_unavailable));
+    try std.testing.expect(net.retryableStatus(.too_many_requests));
+    try std.testing.expect(!net.retryableStatus(.not_found));
+    try std.testing.expect(!net.retryableStatus(.forbidden));
+    try std.testing.expect(net.transientTransportError(error.ConnectionResetByPeer));
+    try std.testing.expect(!net.transientTransportError(error.InvalidUrl));
 }
 
 /// A tmp-dir file as a path `replaceBinary` opens from the working directory.

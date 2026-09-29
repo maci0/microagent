@@ -1505,6 +1505,7 @@ fn reportConfigProblem(io: Io, arena: std.mem.Allocator, source: ConfigSource, p
         .unknown_key => net.note(io, arena, "microagent: config {s}: '{s}' is not a key this file uses; keeping the default\n", .{ configPathText(arena, source), key }),
         .bad_server => net.note(io, arena, "microagent: config {s}: a [[mcp]] entry with no usable name or command is skipped\n", .{configPathText(arena, source)}),
         .duplicate_server => net.note(io, arena, "microagent: config {s}: the MCP server '{s}' is declared twice; the second entry is skipped\n", .{ configPathText(arena, source), key }),
+        .list_truncated => net.note(io, arena, "microagent: config {s}: '{s}' is declared more than once and its values could not be joined; only the ones declared before the lost one are in force\n", .{ configPathText(arena, source), key }),
     }
 }
 

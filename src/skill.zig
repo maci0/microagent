@@ -202,7 +202,10 @@ pub fn discover(io: Io, arena: std.mem.Allocator, root_list: []const Root) Skill
             break;
         }) |entry| {
             if (entry.kind != .directory) continue;
-            const rel = std.fs.path.join(arena, &.{ entry.name, "SKILL.md" }) catch continue;
+            const rel = std.fs.path.join(arena, &.{ entry.name, "SKILL.md" }) catch |err| {
+                net.note(io, arena, "microagent: skill {s}: the path to its SKILL.md could not be built ({s}); it is skipped\n", .{ chat.safeTextAll(arena, entry.name), @errorName(err) });
+                continue;
+            };
             const stat = dir.statFile(io, rel, .{}) catch |err| {
                 if (err != error.FileNotFound)
                     net.note(io, arena, "microagent: skill {s}: {s}; it is skipped\n", .{ chat.safeTextAll(arena, entry.name), @errorName(err) });
@@ -213,20 +216,38 @@ pub fn discover(io: Io, arena: std.mem.Allocator, root_list: []const Root) Skill
                 continue;
             }
             const text = readHead(io, arena, dir, rel, entry.name, stat.size) orelse continue;
-            const name = skillName(arena, entry.name, text) orelse {
-                net.note(io, arena, "microagent: skill {s} is skipped: a name may hold only letters, digits, dot, dash and underscore\n", .{chat.safeTextAll(arena, entry.name)});
+            const name = skillName(arena, entry.name, text) catch |err| switch (err) {
+                error.InvalidName => {
+                    net.note(io, arena, "microagent: skill {s} is skipped: a name may hold only letters, digits, dot, dash and underscore\n", .{chat.safeTextAll(arena, entry.name)});
+                    continue;
+                },
+                error.OutOfMemory => {
+                    net.note(io, arena, "microagent: skill {s}: its name could not be read (OutOfMemory); it is skipped\n", .{chat.safeTextAll(arena, entry.name)});
+                    continue;
+                },
+            };
+            const path = std.fs.path.join(arena, &.{ root.path, entry.name, "SKILL.md" }) catch |err| {
+                net.note(io, arena, "microagent: skill {s}: the path to its SKILL.md could not be built ({s}); it is skipped\n", .{ chat.safeTextAll(arena, name), @errorName(err) });
                 continue;
             };
-            const path = std.fs.path.join(arena, &.{ root.path, entry.name, "SKILL.md" }) catch continue;
             if ((Skills{ .items = found.items }).get(name)) |_| {
                 net.note(io, arena, "microagent: skill {s} is already loaded from another directory; the first one wins\n", .{chat.safeTextAll(arena, name)});
                 continue;
             }
+            // A listing that stops holding skills is a listing the provider is
+            // never shown, so the run is not told about a skill the operator
+            // installed. The ones already in are kept, since each was read and
+            // judged on its own.
             found.append(arena, .{
                 .name = name,
                 .description = skillDescription(text),
                 .path = path,
-            }) catch return .{ .items = found.items };
+            }) catch |err| {
+                net.note(io, arena, "microagent: skill {s} could not be added to the listing ({s}), and the {d} skill(s) after it are not found\n", .{
+                    chat.safeTextAll(arena, name), @errorName(err), found.items.len,
+                });
+                return .{ .items = found.items };
+            };
         }
     }
     sortByName(found.items);
@@ -250,7 +271,10 @@ fn readHead(
         return null;
     };
     defer file.close(io);
-    const head = arena.alloc(u8, @intCast(@min(size, skill_head_bytes))) catch return null;
+    const head = arena.alloc(u8, @intCast(@min(size, skill_head_bytes))) catch |err| {
+        net.note(io, arena, "microagent: skill {s}: {s}; it is skipped\n", .{ chat.safeTextAll(arena, dir_name), @errorName(err) });
+        return null;
+    };
     var got: usize = 0;
     while (got < head.len) {
         const n = file.readStreaming(io, &.{head[got..]}) catch |err| {
@@ -278,15 +302,20 @@ fn sortByName(items: []Skill) void {
 /// the name is half of the tool call the model makes: a name this run rewrote
 /// is one the model has to spell back exactly, and a name carrying a newline
 /// or a colon would break the one-line listing it is read from.
-fn skillName(arena: std.mem.Allocator, dir_name: []const u8, text: []const u8) ?[]const u8 {
+///
+/// `error.InvalidName` is what the bytes are, and it is an error of its own so
+/// that a run that could not copy the name says so: an optional return reads
+/// both as one thing, and the caller would report a name it could not hold as
+/// a name it could not spell.
+fn skillName(arena: std.mem.Allocator, dir_name: []const u8, text: []const u8) (error{InvalidName} || std.mem.Allocator.Error)![]const u8 {
     const named = field(text, "name") orelse dir_name;
     const raw = if (named.len == 0) dir_name else named;
-    if (raw.len > max_name_bytes) return null;
+    if (raw.len > max_name_bytes) return error.InvalidName;
     for (raw) |c| {
         const ok = std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.';
-        if (!ok) return null;
+        if (!ok) return error.InvalidName;
     }
-    return arena.dupe(u8, raw) catch null;
+    return arena.dupe(u8, raw);
 }
 
 /// A skill's one line: the frontmatter's description, else the first non-empty
@@ -484,7 +513,10 @@ fn fuzzSkillFile(_: void, smith: *std.testing.Smith) !void {
         try std.testing.expect(split.body.len <= text.len);
     }
 
-    const name = skillName(arena, "fuzz", text);
+    const name = skillName(arena, "fuzz", text) catch |err| switch (err) {
+        error.InvalidName => null,
+        error.OutOfMemory => return err,
+    };
     const description = skillDescription(text);
     if (name) |n| {
         // A name is half of a tool call, so it is either absent or spellable:
@@ -523,11 +555,11 @@ test "a skill name comes from the frontmatter, else the directory, and must be a
     defer state.deinit();
     const arena = state.allocator();
 
-    try std.testing.expectEqualStrings("pdf", skillName(arena, "dir", "---\nname: pdf\n---\n").?);
-    try std.testing.expectEqualStrings("dir", skillName(arena, "dir", "---\nname: \"\"\n---\n").?);
-    try std.testing.expectEqualStrings("dir", skillName(arena, "dir", "no frontmatter\n").?);
-    try std.testing.expect(skillName(arena, "dir", "---\nname: two words\n---\n") == null);
-    try std.testing.expect(skillName(arena, "dir", "---\nname: " ++ "x" ** 100 ++ "\n---\n") == null);
+    try std.testing.expectEqualStrings("pdf", try skillName(arena, "dir", "---\nname: pdf\n---\n"));
+    try std.testing.expectEqualStrings("dir", try skillName(arena, "dir", "---\nname: \"\"\n---\n"));
+    try std.testing.expectEqualStrings("dir", try skillName(arena, "dir", "no frontmatter\n"));
+    try std.testing.expectError(error.InvalidName, skillName(arena, "dir", "---\nname: two words\n---\n"));
+    try std.testing.expectError(error.InvalidName, skillName(arena, "dir", "---\nname: " ++ "x" ** 100 ++ "\n---\n"));
 }
 
 test "the description falls back to the body's first line" {
