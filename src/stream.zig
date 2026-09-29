@@ -437,10 +437,16 @@ fn applyUsage(result: *chat_mod.ChatResult, u: UsageFields, unparsable: *usize) 
     if (chat_mod.maybeNum(u.prompt, unparsable)) |v| result.prompt_tokens = v;
     if (chat_mod.maybeNum(u.completion, unparsable)) |v| result.completion_tokens = v;
     if (chat_mod.maybeNum(u.total, unparsable)) |v| {
-        result.total_tokens = v;
         // A zero is not a total the provider stands behind: it is the field
         // left where it started, and the sum below is what stands in for it.
-        if (v != 0) result.total_from_provider = true;
+        // A stream that spells a real total and closes with the counter at its
+        // default keeps the real one, exactly as the cached counter below
+        // does, because the field is only ever written with a count the
+        // provider stood behind.
+        if (v != 0) {
+            result.total_tokens = v;
+            result.total_from_provider = true;
+        }
     }
     if (chat_mod.maybeNum(u.reasoning, unparsable)) |v| result.reasoning_tokens = v;
     // The three spellings are ranked within the frame, not against the folded
@@ -1227,6 +1233,23 @@ test "a token count that is not a number is counted, not folded in as zero" {
     try sink.feed("{\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":\"lots\"}}");
     try std.testing.expectEqual(@as(usize, 2), sink.unparsable);
     try std.testing.expectEqual(@as(u64, 900), sink.result.prompt_tokens);
+}
+
+// A zero is the counter left where it started rather than a count the provider
+// stands behind, which is the rule the cached counter already followed. The
+// total did not: it took the zero, so a stream that spelled a real total and
+// closed with the counter at its default ended up billing the run as free and
+// the spend ceiling never saw it.
+test "a trailing zero total leaves the one the provider sent" {
+    var sink = FrameSink.init(std.testing.allocator);
+    defer sink.deinit();
+
+    try sink.feed("{\"choices\":[{\"delta\":{}}],\"usage\":{\"total_tokens\":999}}");
+    try std.testing.expectEqual(@as(u64, 999), sink.result.total_tokens);
+
+    try sink.feed("{\"choices\":[{\"delta\":{}}],\"usage\":{\"total_tokens\":0}}");
+    try std.testing.expectEqual(@as(u64, 999), sink.result.total_tokens);
+    try std.testing.expect(sink.result.total_from_provider);
 }
 
 // A stream that ends without the provider's terminator is a dropped

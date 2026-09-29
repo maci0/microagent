@@ -82,7 +82,7 @@ const max_session_id_bytes: usize = 512;
 const max_name_bytes: usize = 64;
 /// The longest server description kept. A description is what the model picks
 /// a tool by, and every later turn pays for it.
-const max_description_bytes: usize = 1024;
+const max_mcp_description_bytes: usize = 1024;
 /// The bytes an untrusted name is escaped to before it reaches a gutter line
 /// the operator reads or a note on stderr. Long enough for a name to be
 /// recognized, short enough that a name chosen to be long cannot fill the
@@ -710,7 +710,12 @@ pub const Servers = struct {
         if (server.dead) return std.fmt.allocPrint(arena, "error: MCP server {s} is no longer running ({s})", .{ server.name, server.last_error });
         const args = std.mem.trim(u8, args_text, " \t\r\n");
         if (args.len != 0) {
-            _ = std.json.parseFromSliceLeaky(std.json.Value, arena, args, .{}) catch
+            // The parse is here only to decide whether the request can be sent,
+            // so the tree it builds is dropped before the round trip rather than
+            // kept in the run's arena, for the reason the handshake gives.
+            var args_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+            defer args_state.deinit();
+            _ = std.json.parseFromSliceLeaky(std.json.Value, args_state.allocator(), args, .{}) catch
                 return "error: tool arguments are not valid JSON";
         }
         var pb = chat.JsonBuf.init(arena);
@@ -876,10 +881,10 @@ fn describeError(arena: std.mem.Allocator, value: std.json.Value) ![]const u8 {
     };
     const message = chat.str(object.get("message")) orelse "no message";
     if (object.get("code")) |code| switch (code) {
-        .integer => |n| return std.fmt.allocPrint(arena, "{s} (code {d})", .{ chat.safeText(arena, message, max_description_bytes), n }),
+        .integer => |n| return std.fmt.allocPrint(arena, "{s} (code {d})", .{ chat.safeText(arena, message, max_mcp_description_bytes), n }),
         else => {},
     };
-    return chat.safeText(arena, message, max_description_bytes);
+    return chat.safeText(arena, message, max_mcp_description_bytes);
 }
 
 /// The header a remote server's key is sent in unless the entry names another,
@@ -1575,7 +1580,8 @@ fn buildTools(io: Io, arena: std.mem.Allocator, scratch: std.mem.Allocator, serv
         const kept_name = arena.dupe(u8, name) catch return null;
         const exposed = std.fmt.allocPrint(arena, "{s}{s}__{s}", .{ tool_prefix, server.name, kept_name }) catch return null;
         if (terseForServer(server, name)) |terse| {
-            found.append(arena, .{ .name = kept_name, .exposed = exposed, .description = terse.description, .schema = terse.schema }) catch return null;
+            const terse_description = presetDescription(arena, terse) catch return null;
+            found.append(arena, .{ .name = kept_name, .exposed = exposed, .description = terse_description, .schema = terse.schema }) catch return null;
             continue;
         }
         const description = chat.str(entry.get("description")) orelse "";
@@ -1590,7 +1596,7 @@ fn buildTools(io: Io, arena: std.mem.Allocator, scratch: std.mem.Allocator, serv
             .description = if (description.len == 0)
                 std.fmt.allocPrint(arena, "MCP tool '{s}' from server '{s}'", .{ name, server.name }) catch return null
             else
-                chat.safeText(arena, description, max_description_bytes),
+                chat.safeText(arena, description, max_mcp_description_bytes),
             .schema = schema,
         }) catch return null;
     }
@@ -2111,7 +2117,7 @@ fn fuzzFrame(_: void, smith: *std.testing.Smith) !void {
         // A refusal with a message is bounded at the description ceiling, and
         // the code is added to it rather than displacing it.
         if (value == .object and value.object.get("message") != null)
-            try std.testing.expect(described.len <= max_description_bytes + 32);
+            try std.testing.expect(described.len <= max_mcp_description_bytes + 32);
     }
 
     const result = object.get("result") orelse return;

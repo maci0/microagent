@@ -399,18 +399,24 @@ pub fn appendToolResults(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), count
     var i: usize = 0;
     while (i < count) : (i += 1) {
         if (msgs.items.len > 1) try msgs.append(gpa, ',');
-        var msg = chat_mod.JsonBuf.init(gpa);
-        // The `defer` rather than a free after the append, for the reason
-        // `appendMessage` below uses one: every `try` between the two is a path
+        // The block is what scopes the `defer` to the iteration. Left in the
+        // loop body it runs when the function returns, so every result a turn
+        // builds is still held when the last one is appended, and a run
+        // answering 120 results of 8 KB holds a megabyte it has no use for. The
+        // `defer` rather than a free after the append is still what
+        // `appendMessage` below uses: every `try` between the two is a path
         // that returned without freeing, and a run that fails mid-turn is a
         // run that has just allocated a buffer per result it had built.
-        defer msg.list.deinit(gpa);
-        try msg.writer().writeAll("{\"role\":\"tool\",\"tool_call_id\":\"call_");
-        try msg.writer().print("{d}", .{i});
-        try msg.writer().writeAll("\",\"content\":");
-        try chat_mod.writeJsonString(msg.writer(), blob);
-        try msg.writer().writeAll("}");
-        try msgs.appendSlice(gpa, msg.items());
+        {
+            var msg = chat_mod.JsonBuf.init(gpa);
+            defer msg.list.deinit(gpa);
+            try msg.writer().writeAll("{\"role\":\"tool\",\"tool_call_id\":\"call_");
+            try msg.writer().print("{d}", .{i});
+            try msg.writer().writeAll("\",\"content\":");
+            try chat_mod.writeJsonString(msg.writer(), blob);
+            try msg.writer().writeAll("}");
+            try msgs.appendSlice(gpa, msg.items());
+        }
     }
 }
 

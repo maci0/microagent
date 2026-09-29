@@ -3491,7 +3491,7 @@ fn dispatchCall(
     }
     if (std.mem.startsWith(u8, call.name, mcp_mod.tool_prefix)) {
         const remote = mcp.resolve(call.name) orelse
-            return std.fmt.allocPrint(arena, "error: unknown tool '{s}'", .{chat_mod.safeText(arena, call.name, 40)});
+            return std.fmt.allocPrint(arena, "error: unknown tool '{s}'", .{chat_mod.safeText(arena, call.name, net.quoted_value_bytes)});
         // An MCP call is a subprocess round trip with no other bound, so it
         // answers to the same deadline every other tool does: the run's own
         // remaining budget when it set one, and the read-only ceiling when it
@@ -3528,11 +3528,6 @@ fn finishTurn(
     var capped = false;
     var capped_said = false;
     for (result.calls.items) |call| {
-        // Both flags only ever go false to true, so once one is set nothing
-        // later in the turn can change it, and the check that would record it
-        // is skipped rather than repeated over the remaining calls' arguments.
-        if (!progress.edited and isEdit(call.name, call.args.items)) progress.edited = true;
-        if (!progress.tested and isTestRun(call.name, call.args.items)) progress.tested = true;
         // A call the budget will not pay for still gets a tool message. An
         // assistant turn that names calls the conversation never answers is one
         // the next request rejects, so the loop below would spend a turn on a
@@ -3540,6 +3535,15 @@ fn finishTurn(
         const output = if (budget.expired(io))
             "error: not run, the run's time budget is exhausted"
         else blk: {
+            // Both flags are read from what the run actually did, so they are
+            // set here rather than from the model's request: a call the budget
+            // refused to pay for never ran, and an edit that never ran is
+            // exactly what the verification turn exists to ask about. Both only
+            // ever go false to true, so once one is set nothing later in the
+            // turn can change it, and the check that would record it is skipped
+            // rather than repeated over the remaining calls' arguments.
+            if (!progress.edited and isEdit(call.name, call.args.items)) progress.edited = true;
+            if (!progress.tested and isTestRun(call.name, call.args.items)) progress.tested = true;
             // The ceiling is read here rather than once for the turn, because a
             // turn's calls run in sequence: a reading taken before the first of
             // them is already stale by the time the second starts, and the

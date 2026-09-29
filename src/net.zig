@@ -406,9 +406,12 @@ pub fn resolveEveryComponent(
     const rooted = path.len != 0 and path[0] == path_sep;
     var prefix: []const u8 = if (rooted) try copyInto(cur_buf, path[0..1]) else &.{};
     var rest: []const u8 = if (rooted) path[1..] else path;
-    var steps: usize = 0;
-    while (steps < max_symlink_depth) : (steps += 1) {
-        if (rest.len == 0) break;
+    var links: usize = 0;
+    var components: usize = 0;
+    while (true) {
+        if (rest.len == 0) return prefix;
+        components += 1;
+        if (components > max_path_components) return error.NameTooLong;
         const sep_at = std.mem.indexOfScalar(u8, rest, path_sep) orelse rest.len;
         const part = rest[0..sep_at];
         const after = if (sep_at < rest.len) rest[sep_at + 1 ..] else rest[sep_at..];
@@ -421,7 +424,7 @@ pub fn resolveEveryComponent(
         if (std.mem.eql(u8, part, "..")) {
             // A `..` drops the component under it, and a link still ahead of the
             // path is resolved against what is left.
-            if (std.fs.path.dirname(prefix)) |up| prefix = up;
+            prefix = popComponent(prefix);
             rest = after;
             continue;
         }
@@ -448,7 +451,8 @@ pub fn resolveEveryComponent(
         // only a link is counted: a path of forty ordinary components is a path
         // the kernel opens, and the bound is here for a cycle between two links
         // rather than for depth.
-        steps += 1;
+        links += 1;
+        if (links > max_symlink_depth) return error.SymlinkLoop;
         if (std.fs.path.isAbsolute(target)) {
             prefix = try copyInto(cur_buf, target[0..1]);
             rest = try copyInto(link_store, target[1..]);
@@ -460,14 +464,32 @@ pub fn resolveEveryComponent(
             prefix = &.{};
         }
     }
-    if (rest.len != 0) return error.SymlinkLoop;
-    return prefix;
 }
 
 /// The separator a path is split on. `std.fs.path.sep` is the host's, and a
 /// config path, a tool path and a link target on these platforms all spell it
 /// the host's way, so the walk splits on the same one the join writes.
 const path_sep: u8 = std.fs.path.sep;
+
+/// How many components a path may hold before the walk gives up on it. The
+/// component count is not the link bound: an ordinary path of a hundred names
+/// is one the kernel opens, and it is counted here rather than against
+/// `max_symlink_depth`. Every component spends a byte of the path and a
+/// separator around it, so a path that fits in a buffer cannot outrun this.
+const max_path_components: usize = 2 * std.fs.max_path_bytes;
+
+/// The prefix a `..` leaves behind: the one under it dropped. `dirname` answers
+/// null both for the rooted prefix, which keeps its separator, and for a
+/// relative prefix holding a single name, which the kernel drops rather than
+/// keeps, so the root is told apart here before the lookup. Dropping the root
+/// would read every component after it against the working directory, and
+/// keeping a name that is not there would answer for a file the kernel does not
+/// open.
+fn popComponent(prefix: []const u8) []const u8 {
+    if (prefix.len == 0) return prefix;
+    if (prefix.len == 1 and prefix[0] == path_sep) return prefix;
+    return std.fs.path.dirname(prefix) orelse &.{};
+}
 
 fn copyInto(buf: []u8, bytes: []const u8) error{NameTooLong}![]const u8 {
     if (bytes.len > buf.len) return error.NameTooLong;
@@ -476,11 +498,16 @@ fn copyInto(buf: []u8, bytes: []const u8) error{NameTooLong}![]const u8 {
 }
 
 fn joinOnto(buf: []u8, dir_end: []const u8, link: []const u8) error{NameTooLong}![]const u8 {
-    const n = dir_end.len + 1 + link.len;
+    // A prefix that already ends in the separator is not given a second one.
+    // The rooted prefix is the separator on its own, and a path spelled with a
+    // doubled leading separator names something the answer has to compare
+    // against literally, so `/../b` came back as `//b` rather than `/b`.
+    const sep_bytes: usize = if (dir_end.len != 0 and dir_end[dir_end.len - 1] == path_sep) 0 else 1;
+    const n = dir_end.len + sep_bytes + link.len;
     if (n > buf.len) return error.NameTooLong;
     @memcpy(buf[0..dir_end.len], dir_end);
-    buf[dir_end.len] = std.fs.path.sep;
-    @memcpy(buf[dir_end.len + 1 ..][0..link.len], link);
+    buf[dir_end.len] = path_sep;
+    @memcpy(buf[dir_end.len + sep_bytes ..][0..link.len], link);
     return buf[0..n];
 }
 
@@ -1930,4 +1957,49 @@ test "releaseDeadStack gives back stack pages the caller no longer uses" {
     const live = [_]u8{0xa5} ** 4096;
     releaseDeadStack();
     for (live) |byte| try std.testing.expectEqual(@as(u8, 0xa5), byte);
+}
+
+// A `..` that the walk could not carry out left the component under it in the
+// answer, so `a/../b` resolved to `a/b`: the path the kernel opens and the one
+// the credential check read were two different files. The relative prefix of a
+// single name is the case, because `dirname` answers null for it and for the
+// rooted prefix alike, and only the second of the two has to be kept.
+test "a dot dot drops the component under it, and the root keeps its separator" {
+    var name_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var cur_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
+    var next_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
+    const resolve = struct {
+        fn call(path: []const u8, n: []u8, a: []u8, b: []u8) ![]const u8 {
+            return resolveEveryComponent(std.testing.io, Io.Dir.cwd(), path, n, a, b);
+        }
+    }.call;
+
+    try std.testing.expectEqualStrings("b", try resolve("a/../b", &name_buf, &cur_buf, &next_buf));
+    try std.testing.expectEqualStrings("b", try resolve("a/b/../../b", &name_buf, &cur_buf, &next_buf));
+    // Dropping the root instead of keeping it would read every component after
+    // it against the working directory.
+    try std.testing.expectEqualStrings("/b", try resolve("/../b", &name_buf, &cur_buf, &next_buf));
+    try std.testing.expectEqualStrings("/a/b", try resolve("/a/./b", &name_buf, &cur_buf, &next_buf));
+}
+
+// The bound the walk carries is on links, because only a link makes the walk
+// start over on a path it has not read. Counting ordinary components against it
+// answered a cycle for a deep path the kernel opens, and the caller skipped the
+// credential check the answer was for.
+test "a path of ordinary components is resolved, however deep" {
+    var name_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var cur_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
+    var next_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
+
+    // Four times the link bound, so the count cannot pass under either bound.
+    var want: std.ArrayList(u8) = .empty;
+    defer want.deinit(std.testing.allocator);
+    var i: usize = 0;
+    while (i < 4 * max_symlink_depth) : (i += 1) try want.appendSlice(std.testing.allocator, "d/");
+    try want.appendSlice(std.testing.allocator, "leaf");
+
+    try std.testing.expectEqualStrings(
+        want.items,
+        try resolveEveryComponent(std.testing.io, Io.Dir.cwd(), want.items, &name_buf, &cur_buf, &next_buf),
+    );
 }

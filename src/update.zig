@@ -19,6 +19,10 @@ const max_api_bytes: usize = 10 * 1024 * 1024;
 const max_sidecar_bytes: usize = 64 * 1024;
 const max_asset_bytes: usize = 256 * 1024 * 1024;
 
+/// The room a response buffer is given up front. A body larger than this grows
+/// into it, and one smaller never allocates more than it read.
+const initial_body_capacity: usize = 64 * 1024;
+
 /// The longest DNS name, so the buffer that lowercases a host has a fixed size.
 const max_host_len: usize = 253;
 
@@ -216,7 +220,7 @@ const Capped = struct {
 
     fn start(self: *Capped, allocator: std.mem.Allocator, limit: usize) !void {
         self.* = .{
-            .body = try std.Io.Writer.Allocating.initCapacity(allocator, @min(limit, 64 * 1024)),
+            .body = try std.Io.Writer.Allocating.initCapacity(allocator, @min(limit, initial_body_capacity)),
             .writer = undefined,
             .limit = limit,
         };
@@ -581,7 +585,7 @@ pub fn run(
     }
 
     if (check_only or current or same_version or order == .gt) {
-        if (check_only) writeLine(io, arena, rel.page) catch |err|
+        if (check_only) writeLine(io, arena, quoteUntrusted(arena, rel.page)) catch |err|
             return fail(io, "could not write the release page to stdout ({s})", .{@errorName(err)});
         return 0;
     }

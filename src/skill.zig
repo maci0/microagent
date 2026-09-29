@@ -56,7 +56,7 @@ const max_prompt_bytes: usize = 8 * 1024;
 /// model spells back in a tool call, so it is bounded at discovery; a
 /// description is prose and is cut when the prompt is written.
 const max_name_bytes: usize = 64;
-const max_description_bytes: usize = 200;
+const max_skill_description_bytes: usize = 200;
 /// The longest escaped name a `skill` call writes to the trace.
 const max_shown_name_bytes: usize = 120;
 
@@ -104,7 +104,7 @@ pub const Skills = struct {
         for (self.items, 0..) |skill, i| {
             const line = try std.fmt.allocPrint(arena, "- {s}: {s}\n", .{
                 skill.name,
-                chat.safeText(arena, skill.description, max_description_bytes),
+                chat.safeText(arena, skill.description, max_skill_description_bytes),
             });
             if (buf.items.len + line.len > max_prompt_bytes) {
                 try buf.appendSlice(arena, try std.fmt.allocPrint(arena, "- and {d} more not listed\n", .{self.items.len - i}));
@@ -372,7 +372,12 @@ fn skillName(arena: std.mem.Allocator, dir_name: []const u8, text: []const u8) (
 /// as the description, which is the line its author wrote for a reader first.
 fn skillDescription(text: []const u8) []const u8 {
     const body = splitFrontmatter(text).body;
-    const line = field(text, "description") orelse firstLine(body);
+    // A `description:` with nothing after it reads as absent, the same rule
+    // `skillName` applies to `name:`. Left as the field's own empty value the
+    // listing showed a skill with no line at all, while a file that left the
+    // key out entirely got its heading.
+    const stated = field(text, "description");
+    const line = if (stated == null or stated.?.len == 0) firstLine(body) else stated.?;
     return std.mem.trim(u8, line, " \t\r\n");
 }
 

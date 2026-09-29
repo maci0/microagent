@@ -78,7 +78,7 @@ pub fn resolveWritableRoots(
             try std.fs.path.resolve(arena, &.{expanded})
         else
             try std.fs.path.resolve(arena, &.{ cwd, expanded });
-        try appendRoot(io, arena, &roots, std.mem.trimEnd(u8, resolved, "/\\"));
+        try appendRoot(io, arena, &roots, trimTrailingSep(resolved));
     }
 
     // `$TMPDIR` goes last, so the coverage test below reads every root added
@@ -95,7 +95,7 @@ pub fn resolveWritableRoots(
             const tmpdir = std.mem.trim(u8, raw, net.env_surrounding);
             if (std.fs.path.isAbsolute(tmpdir)) {
                 if (!withinAnyRoot(canonical(io, arena, tmpdir), roots.items)) {
-                    try appendRoot(io, arena, &roots, std.mem.trimEnd(u8, tmpdir, "/\\"));
+                    try appendRoot(io, arena, &roots, trimTrailingSep(tmpdir));
                 }
             }
         }
@@ -106,11 +106,21 @@ pub fn resolveWritableRoots(
 
 /// True when `path` is `root` itself or sits under it. The separator test is what keeps a
 /// sibling whose name merely starts with the root's, `/writable-roots-other` against
-/// `/writable-roots`, from reading as inside it.
+/// `/writable-roots`, from reading as inside it. An empty root names no directory and covers
+/// nothing: only an empty `writable_roots` slice lifts the restriction, and that is read one
+/// level up, so a root trimmed down to nothing refused nothing here.
 fn isUnderRoot(path: []const u8, root: []const u8) bool {
-    if (root.len == 0) return true;
+    if (root.len == 0) return false;
     if (!std.mem.startsWith(u8, path, root)) return false;
     return path.len == root.len or path[root.len] == std.fs.path.sep;
+}
+
+/// A root keeps its trailing separator only when that separator is the whole path. `/` names the
+/// root directory and trimming it away would leave an empty root, which the coverage test reads
+/// as covering nothing while the operator who wrote `writable = ["/"]` meant the whole tree.
+fn trimTrailingSep(path: []const u8) []const u8 {
+    if (path.len == 1 and path[0] == std.fs.path.sep) return path;
+    return std.mem.trimEnd(u8, path, "/\\");
 }
 
 /// Checks whether `path` is within any allowed root in `writable_roots`.
@@ -147,7 +157,7 @@ pub fn isPathWritable(io: Io, arena: std.mem.Allocator, path: []const u8, writab
 /// `/tmp` does not cover `/tmpd`.
 fn withinAnyRoot(path: []const u8, writable_roots: []const []const u8) bool {
     for (writable_roots) |raw_root| {
-        if (isUnderRoot(path, std.mem.trimEnd(u8, raw_root, "/\\"))) return true;
+        if (isUnderRoot(path, trimTrailingSep(raw_root))) return true;
     }
     return false;
 }
