@@ -282,13 +282,12 @@ fn unquote(raw: []const u8) []const u8 {
 /// Elements may be quoted or bare, and a trailing comma is accepted, because
 /// the file is written by hand.
 fn stringArray(arena: std.mem.Allocator, raw: []const u8) ?[]const []const u8 {
-    const text = std.mem.trim(u8, raw, " \t");
+    const text = std.mem.trim(u8, stripComment(raw), " \t");
     if (text.len < 2 or text[0] != '[' or text[text.len - 1] != ']') return null;
-    const inner = text[1 .. text.len - 1];
+    const parts = splitQuoted(arena, text[1 .. text.len - 1], ',') orelse return null;
     var out: std.ArrayList([]const u8) = .empty;
-    var parts = std.mem.splitScalar(u8, inner, ',');
-    while (parts.next()) |part| {
-        const item = unquote(std.mem.trim(u8, part, " \t"));
+    for (parts) |part| {
+        const item = unquote(part);
         if (item.len == 0) continue;
         out.append(arena, item) catch return null;
     }
@@ -298,13 +297,11 @@ fn stringArray(arena: std.mem.Allocator, raw: []const u8) ?[]const []const u8 {
 /// An inline table of strings: `{ K = "v", J = "w" }`. Null when the text is
 /// not one, which is how `env` is refused rather than silently dropped.
 fn inlineTable(arena: std.mem.Allocator, raw: []const u8) ?[]const [2][]const u8 {
-    const text = std.mem.trim(u8, raw, " \t");
+    const text = std.mem.trim(u8, stripComment(raw), " \t");
     if (text.len < 2 or text[0] != '{' or text[text.len - 1] != '}') return null;
-    const inner = text[1 .. text.len - 1];
+    const parts = splitQuoted(arena, text[1 .. text.len - 1], ',') orelse return null;
     var out: std.ArrayList([2][]const u8) = .empty;
-    var parts = std.mem.splitScalar(u8, inner, ',');
-    while (parts.next()) |part| {
-        const pair = std.mem.trim(u8, part, " \t");
+    for (parts) |pair| {
         if (pair.len == 0) continue;
         const eq = std.mem.indexOfScalar(u8, pair, '=') orelse return null;
         const key = std.mem.trim(u8, pair[0..eq], " \t");
@@ -312,6 +309,52 @@ fn inlineTable(arena: std.mem.Allocator, raw: []const u8) ?[]const [2][]const u8
         if (key.len == 0) return null;
         out.append(arena, .{ key, value }) catch return null;
     }
+    return out.items;
+}
+
+/// A line without its trailing `#` comment, for the values that are lists
+/// rather than single strings. `unquote` already does this for one value by
+/// looking for the closing quote first; a list has several, so the cut is made
+/// here, on a `#` that is not inside quotes.
+fn stripComment(raw: []const u8) []const u8 {
+    var quote: u8 = 0;
+    for (raw, 0..) |c, i| {
+        if (quote != 0) {
+            if (c == quote) quote = 0;
+            continue;
+        }
+        if (c == '"' or c == '\'') {
+            quote = c;
+            continue;
+        }
+        if (c == '#') return raw[0..i];
+    }
+    return raw;
+}
+
+/// The pieces of a bracketed value, split on `sep` outside quotes, so a comma
+/// inside a quoted element is text rather than a separator. Null when a quote
+/// is never closed, which is a line that cannot be read whole.
+fn splitQuoted(arena: std.mem.Allocator, inner: []const u8, sep: u8) ?[]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    var start: usize = 0;
+    var quote: u8 = 0;
+    for (inner, 0..) |c, i| {
+        if (quote != 0) {
+            if (c == quote) quote = 0;
+            continue;
+        }
+        if (c == '"' or c == '\'') {
+            quote = c;
+            continue;
+        }
+        if (c == sep) {
+            out.append(arena, std.mem.trim(u8, inner[start..i], " \t")) catch return null;
+            start = i + 1;
+        }
+    }
+    if (quote != 0) return null;
+    out.append(arena, std.mem.trim(u8, inner[start..], " \t")) catch return null;
     return out.items;
 }
 
@@ -481,6 +524,17 @@ test "skills are a list of directories, and absent is not the same as empty" {
     const bad = parse(arena, "skills = \"~/skills\"\n");
     try std.testing.expectEqualStrings("skills", bad.problem.?.key);
     try std.testing.expect(bad.skills == null);
+
+    // A comment trails a list the way it trails a scalar, and a comma inside a
+    // quoted element is text: cutting the line at the first `#` or the first
+    // `,` would read a directory nobody named.
+    const commented = parse(arena, "skills = [\"./one\", \"./two\"] # where they are\n");
+    try std.testing.expect(commented.problem == null);
+    try std.testing.expectEqual(@as(usize, 2), commented.skills.?.len);
+    const comma = parse(arena, "skills = [\"./a,b\", \"./c\"]\n");
+    try std.testing.expectEqual(@as(usize, 2), comma.skills.?.len);
+    try std.testing.expectEqualStrings("./a,b", comma.skills.?[0]);
+    try std.testing.expectEqualStrings("./c", comma.skills.?[1]);
 }
 
 test "an MCP server is one [[mcp]] table, and a broken one is named and skipped" {
@@ -520,6 +574,14 @@ test "an MCP server is one [[mcp]] table, and a broken one is named and skipped"
     try std.testing.expectEqualStrings("git", config.mcp[1].name);
     try std.testing.expectEqual(@as(usize, 0), config.mcp[1].args.len);
     try std.testing.expectEqual(@as(usize, 0), config.mcp[1].env.len);
+
+    // A comment trails `args` and `env` the way it trails any other value.
+    const commented = parse(arena, "[[mcp]]\nname = \"a\"\ncommand = \"b\"\nargs = [\"-y\", \"x\"] # flags\nenv = { K = \"v\" } # one\n");
+    try std.testing.expect(commented.problem == null);
+    try std.testing.expectEqual(@as(usize, 2), commented.mcp[0].args.len);
+    try std.testing.expectEqualStrings("x", commented.mcp[0].args[1]);
+    try std.testing.expectEqual(@as(usize, 1), commented.mcp[0].env.len);
+    try std.testing.expectEqualStrings("v", commented.mcp[0].env[0][1]);
 
     // A key this reader does not have inside a table is a problem like any
     // other, and the entry still applies.
@@ -611,11 +673,15 @@ const config_corpus = [_][]const u8{
     "skills = [a, b]\n",
     "skills = \"a\"\n",
     "skills = [\n",
+    "skills = [\"a\"] # a comment\n",
+    "skills = [\"a,b\", \"c\"]\n",
+    "skills = [\"a\" # a comment inside\n",
     "[[mcp]]\n",
     "[[mcp]]\nname = \"a\"\n",
     "[[mcp]]\nname = \"a\"\ncommand = \"b\"\n",
     "[[mcp]]\nname = \"a\"\ncommand = \"b\"\nargs = [\"-y\"]\nenv = { K = \"v\" }\n",
     "[[mcp]]\nname = \"a\"\ncommand = \"b\"\nargs = []\nenv = {}\n",
+    "[[mcp]]\nname = \"a\"\ncommand = \"b\"\nargs = [\"x\"] # flags\nenv = { K = \"v\" } # one\n",
     "[[mcp]]\nname = \"a\"\ncommand = \"b\"\nargs = \"x\"\n",
     "[[mcp]]\nname = \"a\"\ncommand = \"b\"\nenv = { K = }\n",
     "[mcp]\nname = \"a\"\ncommand = \"b\"\n",
