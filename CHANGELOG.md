@@ -57,19 +57,21 @@ release, and `microagent update` moves you to it.
   turn that reaches the ceiling is the one that finishes. The run announces itself on
   stderr at 80% of the ceiling, once, naming both numbers. Like `--budget`, leaving
   the option out is what says "no ceiling", and a value of zero is refused.
+- `--stall-timeout <s>` (`MICROAGENT_STALL_TIMEOUT`, 120 s by default) fails a
+  read that has gone quiet for that long. `--budget` is checked between reads,
+  and a read that never returns never reaches that check, so a provider that
+  accepted the connection and then said nothing held the run open until the
+  caller killed it: one benchmark trial sat there for twenty-five minutes. The
+  socket carries the deadline now, so a stalled provider is a run that fails
+  rather than a run that hangs, and a value of zero is refused with the other
+  ceilings. The Harbor adapter forwards the caller's value into the container,
+  so a trial bounded from outside is bounded on the wire too.
 - `make check-assets`, `make check-changelog` and `make check-release`, the
   checks release.yml used to spell out in its own shell: the assets in `dist/`
   are the ones the tag will publish, and a tag is refused for the changelog
   rules it used to enforce only on the runner. Both workflows now call these
   targets, so the release note is written against a command rather than
   against a workflow nobody can run before they have pushed a tag.
-- A bare `help` is a request for the usage text, the way `microagent update help`
-  already was. It used to be a coding run whose task was the word "help",
-  billed to the caller, while the one subcommand that accepted the word printed
-  its help. Only a bare word answers: a prompt already set, a value of
-  `--print`, and anything after `--` are still a task, by the rules that were
-  already there, so `microagent -- "help"` and `microagent -p help` run.
-
 - `make lint-versions` also checks that every pin in `lint-requirements.txt`
   carries a `--hash=sha256`. The file is installed with `--require-hashes`, so a
   pin added without one fails the lint job on pip's own message, which names
@@ -104,6 +106,27 @@ release, and `microagent update` moves you to it.
   every applied rewrite clear of all three shapes the refusal exists for.
 
 ### Changed
+
+- A bare `help` is a request for the usage text, the way `microagent update help`
+  already was. `microagent help` used to be a coding run whose task was the word
+  "help", billed to the caller, and printed no usage at all, while the one
+  subcommand that accepted the word printed its help. Only a bare word answers: a
+  prompt already set, a value of `--print`, and anything after `--` are still a
+  task, by the rules that were already there, so `microagent -- "help"` and
+  `microagent -p help` run. A script whose prompt was the word `help` now gets
+  the usage text and no model output.
+- A provider that refuses an optional request field is asked once more without
+  it. `reasoning` is this program's field and not the provider's, and one that
+  answers it with `400 Validation: Unsupported parameter(s): reasoning` ended
+  the run there. A 400 on a run that set `reasoning_effort` is retried once
+  with the field dropped and a note on stderr naming the endpoint; a run that
+  set nothing never sends the field, so it is not retried and its 400 is the
+  one it would have got before.
+- The system prompt names `semcode` in the tool guidance, beside the four tools
+  it already prefers over shelling out. The prompt told the model to use
+  `bash` for anything the others do not cover and said nothing about the
+  semantic queries the tree is indexed for, so callers and callees were
+  answered with `rg` or by a whole-file read.
 
 - `make lint-shell` runs shellcheck with six of its optional checks on, the
   ones that report a masked `set -e` failure, an uppercase variable read on a
