@@ -129,6 +129,12 @@ pub const Server = struct {
     /// A server that exited or timed out is not asked again. The first failure
     /// already cost the call its deadline; the second would cost another.
     dead: bool = false,
+    /// A preset this run has not spoken to: its tools came from the table in
+    /// this binary, so the first request carries them without a handshake, and
+    /// the server is asked for its own list the first time one is called.
+    lazy: bool = false,
+    /// This build's version, kept for a handshake that happens after `connect`.
+    client_version: []const u8 = "",
 
     /// How the server is reached. Both carry the same JSON-RPC frames, and
     /// everything above the transport (ids, the handshake, the tool table,
@@ -575,6 +581,17 @@ fn sessionId(arena: std.mem.Allocator, head: std.http.Client.Response.Head) ![]c
     return "";
 }
 
+/// The tool `exposed` names on this server, or null. A lazy preset's table is
+/// replaced by the server's own answer at its first call, so the tool the model
+/// named is looked up again there rather than trusted from the table it was
+/// advertised out of.
+fn findTool(server: *const Server, exposed: []const u8) ?*const Tool {
+    for (server.tools) |*tool| {
+        if (std.mem.eql(u8, tool.exposed, exposed)) return tool;
+    }
+    return null;
+}
+
 /// The servers one run connected to, in config order.
 pub const Servers = struct {
     items: []Server = &.{},
@@ -654,7 +671,25 @@ pub const Servers = struct {
     /// that streamed a truncated object gets an error string rather than a
     /// server-side parse failure reported as the server's fault.
     pub fn call(io: Io, arena: std.mem.Allocator, call_: Call, args_text: []const u8, timeout: Io.Timeout) ![]const u8 {
-        const server = call_.server;
+        var tool_call = call_;
+        const server = tool_call.server;
+        // A preset's tools were advertised from this binary's table without a
+        // handshake, so this is the first thing it is asked. The tool is looked
+        // up again in what it answers: a server that renamed or dropped it gets
+        // a sentence saying so rather than a `tools/call` for a name it no
+        // longer has.
+        if (server.lazy) {
+            if (!handshake(io, arena, server, server.client_version)) {
+                server.dead = true;
+                return std.fmt.allocPrint(arena, "error: MCP server {s} did not answer ({s})", .{
+                    server.name,
+                    if (server.last_error.len != 0) server.last_error else "no answer",
+                });
+            }
+            server.lazy = false;
+            tool_call.tool = findTool(server, tool_call.tool.exposed) orelse
+                return std.fmt.allocPrint(arena, "error: MCP server {s} no longer offers {s}", .{ server.name, tool_call.tool.exposed });
+        }
         if (server.dead) return std.fmt.allocPrint(arena, "error: MCP server {s} is no longer running ({s})", .{ server.name, server.last_error });
         const args = std.mem.trim(u8, args_text, " \t\r\n");
         if (args.len != 0) {
@@ -663,20 +698,20 @@ pub const Servers = struct {
         }
         var pb = chat.JsonBuf.init(arena);
         try pb.writer().writeAll("{\"name\":");
-        try chat.writeJsonString(pb.writer(), call_.tool.name);
+        try chat.writeJsonString(pb.writer(), tool_call.tool.name);
         try pb.writer().writeAll(",\"arguments\":");
         try pb.writer().writeAll(if (args.len == 0) "{}" else args);
         try pb.writer().writeAll("}");
 
-        net.writeErr(io, try std.fmt.allocPrint(arena, "\u{23fa} {s}\n", .{chat.safeText(arena, call_.tool.exposed, 120)}));
+        net.writeErr(io, try std.fmt.allocPrint(arena, "\u{23fa} {s}\n", .{chat.safeText(arena, tool_call.tool.exposed, 120)}));
         // The answer is parsed in a scratch arena and only the text built from
         // it is kept, for the reason the handshake gives.
         var scratch_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer scratch_state.deinit();
         const result = server.request(io, arena, scratch_state.allocator(), "tools/call", pb.items(), timeout) catch |err| {
             if (err == error.ServerRefused or err == error.HttpStatus)
-                return std.fmt.allocPrint(arena, "error: MCP server {s} refused {s}: {s}", .{ server.name, call_.tool.exposed, server.last_error });
-            return std.fmt.allocPrint(arena, "error: MCP server {s} did not answer {s} ({s})", .{ server.name, call_.tool.exposed, @errorName(err) });
+                return std.fmt.allocPrint(arena, "error: MCP server {s} refused {s}: {s}", .{ server.name, tool_call.tool.exposed, server.last_error });
+            return std.fmt.allocPrint(arena, "error: MCP server {s} did not answer {s} ({s})", .{ server.name, tool_call.tool.exposed, @errorName(err) });
         };
         return resultText(arena, server.name, result);
     }
@@ -913,6 +948,30 @@ const terse_tools = [_]Terse{
         \\{"type":"object","properties":{"query":{"type":"string","description":"Literal code as it would appear in a file"},"matchCase":{"type":"boolean"},"matchWholeWords":{"type":"boolean"},"useRegexp":{"type":"boolean","description":"Treat the query as a regular expression"},"repo":{"type":"string","description":"Repository filter, partial match: 'vercel/' for an org"},"path":{"type":"string","description":"File path filter, partial match: '/route.ts'"},"language":{"type":"array","items":{"type":"string"},"description":"Languages, e.g. ['TypeScript','TSX']"}},"required":["query"]}
         ,
     },
+    .{
+        .host = "mcp.deepwiki.com",
+        .tool = "read_wiki_structure",
+        .description = "List the documentation topics DeepWiki holds for a GitHub repository. Use it to see what a repository's wiki covers before reading one page or asking a question.",
+        .schema =
+        \\{"type":"object","properties":{"repoName":{"type":"string","description":"GitHub repository in owner/repo format, e.g. facebook/react"}},"required":["repoName"]}
+        ,
+    },
+    .{
+        .host = "mcp.deepwiki.com",
+        .tool = "read_wiki_contents",
+        .description = "Read a GitHub repository's DeepWiki documentation whole. Use read_wiki_structure first when only one topic is wanted, or ask_wiki_question for one answer.",
+        .schema =
+        \\{"type":"object","properties":{"repoName":{"type":"string","description":"GitHub repository in owner/repo format, e.g. facebook/react"}},"required":["repoName"]}
+        ,
+    },
+    .{
+        .host = "mcp.deepwiki.com",
+        .tool = "ask_wiki_question",
+        .description = "Ask a question about a GitHub repository and get an answer grounded in its DeepWiki. Ask one question per call; repoName may name up to ten repositories.",
+        .schema =
+        \\{"type":"object","properties":{"repoName":{"anyOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"A GitHub repository in owner/repo format, or a list of up to 10 of them"},"question":{"type":"string","description":"The question about the repository"}},"required":["repoName","question"]}
+        ,
+    },
 };
 
 /// The compact form of `tool` on `host`, or null when this table does not know the pair.
@@ -939,7 +998,7 @@ test "the compact preset tools are valid schemas for exactly the tools they name
     var state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer state.deinit();
     const arena = state.allocator();
-    try std.testing.expectEqual(@as(usize, 5), terse_tools.len);
+    try std.testing.expectEqual(@as(usize, 8), terse_tools.len);
     for (terse_tools) |t| {
         try std.testing.expect(t.description.len > 0 and t.description.len < 400);
         const schema = try std.json.parseFromSliceLeaky(std.json.Value, arena, t.schema, .{});
@@ -957,6 +1016,84 @@ test "the compact preset tools are valid schemas for exactly the tools they name
     try std.testing.expect(terseFor("mcp.grep.app", "somethingNew") == null);
     try std.testing.expect(terseFor("127.0.0.1", "searchGitHub") == null);
     try std.testing.expect(terseFor("mcp.exa.ai", "query-docs") == null);
+    try std.testing.expect(terseFor("mcp.deepwiki.com", "ask_wiki_question") != null);
+}
+
+test "a preset with no key is offered without a handshake, and one with a key is not" {
+    const gpa = std.testing.allocator;
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const arena = state.allocator();
+    const io = std.testing.io;
+    var client: std.http.Client = .{ .allocator = gpa, .io = io };
+    defer client.deinit();
+
+    // No key: the tools come from the table in this binary and the endpoint is
+    // not spoken to. Defeating this -- handshaking at start-up -- sends a real
+    // request here, and a machine with no route to the server answers with no
+    // servers at all, which is the failure this asserts against.
+    var env: std.process.Environ.Map = .init(arena);
+    var servers = connect(io, arena, &env, &client, &.{
+        .{ .name = "docs", .url = "https://mcp.context7.com/mcp" },
+    }, "test");
+    defer servers.shutdown(io);
+    try std.testing.expectEqual(@as(usize, 1), servers.items.len);
+    try std.testing.expect(servers.items[0].lazy);
+    try std.testing.expectEqual(@as(usize, 2), servers.items[0].tools.len);
+    const resolved = servers.resolve("mcp__docs__query-docs") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("query-docs", resolved.tool.name);
+
+    // A key unlocks tools this table has never seen, so a keyed preset is
+    // still handshaken. `openRemote` alone records it, without a request.
+    var keyed: std.ArrayList(Server) = .empty;
+    openRemote(io, arena, &client, .{
+        .name = "docs",
+        .url = "https://mcp.context7.com/mcp",
+        .api_key = "s3cret",
+        .api_key_env = "K",
+    }, "test", &keyed);
+    try std.testing.expectEqual(@as(usize, 1), keyed.items.len);
+    try std.testing.expect(!keyed.items[0].lazy);
+    try std.testing.expectEqual(@as(usize, 0), keyed.items[0].tools.len);
+}
+
+/// Fills a preset's tool table from the table above, so its tools can be
+/// offered without the run talking to it. True when the host is one the table
+/// knows, which is the four presets and nothing a config wrote: a `[[mcp]]` url
+/// is a server whose tools only its own `tools/list` can name.
+///
+/// A preset with a key is not filled here. A key unlocks tools this binary has
+/// never seen -- exa's company and people search, deepwiki's private mode -- and
+/// a table that named only the public ones would hide them from the model until
+/// one of them was called, which it cannot do if it cannot see one.
+fn fillPresetTools(arena: std.mem.Allocator, server: *Server, client_version: []const u8) !bool {
+    const http = switch (server.transport) {
+        .http => |h| h,
+        .stdio => return false,
+    };
+    const host = switch (http.uri.host orelse return false) {
+        .raw, .percent_encoded => |text| text,
+    };
+    var count: usize = 0;
+    for (terse_tools) |entry| {
+        if (std.ascii.eqlIgnoreCase(entry.host, host)) count += 1;
+    }
+    if (count == 0) return false;
+    var tools: std.ArrayList(Tool) = .empty;
+    try tools.ensureTotalCapacity(arena, count);
+    for (terse_tools) |entry| {
+        if (!std.ascii.eqlIgnoreCase(entry.host, host)) continue;
+        tools.appendAssumeCapacity(.{
+            .name = entry.tool,
+            .exposed = try std.fmt.allocPrint(arena, "{s}{s}__{s}", .{ tool_prefix, server.name, entry.tool }),
+            .description = entry.description,
+            .schema = entry.schema,
+        });
+    }
+    server.tools = tools.items;
+    server.lazy = true;
+    server.client_version = client_version;
+    return true;
 }
 
 /// Whether a remote url is one this run will POST to: https, or http to this
@@ -1037,7 +1174,7 @@ pub fn connect(
     // can send its first request; started together, they cost the slowest one.
     var spawned: std.ArrayList(Server) = .empty;
     for (entries) |entry| {
-        if (entry.url.len != 0) openRemote(io, arena, client, entry, &spawned) else spawnOne(io, arena, environ_map, entry, &spawned);
+        if (entry.url.len != 0) openRemote(io, arena, client, entry, client_version, &spawned) else spawnOne(io, arena, environ_map, entry, &spawned);
     }
 
     // The remote handshakes are round trips over the network, so each runs as
@@ -1055,6 +1192,14 @@ pub fn connect(
     defer remote.cancel(io);
     for (spawned.items, ready) |*server, *ok| {
         if (server.transport != .http) continue;
+        // A preset with no key was already given its tools from the table in
+        // this binary, so there is nothing to ask it yet: the first call to one
+        // of them runs the handshake. Every other remote server is unknown
+        // until it answers.
+        if (server.lazy) {
+            ok.* = true;
+            continue;
+        }
         // Without a thread to run it on, the handshake runs here instead.
         remote.concurrent(io, handshakeInto, .{ io, arena, server, client_version, ok }) catch handshakeInto(io, arena, server, client_version, ok);
     }
@@ -1095,6 +1240,7 @@ fn openRemote(
     arena: std.mem.Allocator,
     client: *std.http.Client,
     entry: Entry,
+    client_version: []const u8,
     out: *std.ArrayList(Server),
 ) void {
     const shown = chat.safeTextAll(arena, entry.name);
@@ -1116,7 +1262,7 @@ fn openRemote(
         std.fmt.allocPrint(arena, "Bearer {s}", .{entry.api_key}) catch return
     else
         entry.api_key;
-    out.append(arena, .{
+    var server: Server = .{
         .name = entry.name,
         .transport = .{ .http = .{
             .client = client,
@@ -1126,7 +1272,13 @@ fn openRemote(
             .timeout_ms = @as(u64, entry.timeout_s) * std.time.ms_per_s,
         } },
         .tools = &.{},
-    }) catch {};
+    };
+    // A keyless preset is offered from the table this binary carries: no
+    // request is made for it now, and the first call to one of its tools is
+    // where it is asked to initialize. That is what keeps four public servers
+    // off the path between the process and its first provider request.
+    if (entry.api_key.len == 0) _ = fillPresetTools(arena, &server, client_version) catch false;
+    out.append(arena, server) catch {};
 }
 
 /// Starts one server and records it, whether or not it will answer: the
@@ -2071,6 +2223,54 @@ test "a streamable-HTTP server is connected, listed and called over loopback" {
     }
     try std.testing.expect(std.mem.indexOf(u8, fake.seen.items[1], "\"method\":\"notifications/initialized\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, fake.seen.items[1], "\"id\"") == null);
+}
+
+// A preset's shape against a real socket: the tool table exists before
+// anything is sent, so the server is asked for nothing until the model calls a
+// tool, and the handshake rides along with that call. The tool the model named
+// is looked up again in the answer, which is what makes a server that renamed
+// it a sentence rather than a `tools/call` for a name it does not have.
+test "a lazy server is handshaken by its first call, not before it" {
+    const gpa = std.testing.allocator;
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const arena = state.allocator();
+    const io = std.testing.io;
+
+    const fake = try FakeMcp.start(gpa, io, .normal);
+    defer fake.finish();
+    var client: std.http.Client = .{ .allocator = gpa, .io = io };
+    defer client.deinit();
+
+    const advertised = [_]Tool{.{
+        .name = "echo",
+        .exposed = "mcp__fake__echo",
+        .description = "from the table in this binary",
+        .schema = "{\"type\":\"object\"}",
+    }};
+    var storage: [1]Server = .{.{
+        .name = "fake",
+        .transport = .{ .http = .{
+            .client = &client,
+            .uri = try std.Uri.parse(try fake.url(arena)),
+            .timeout_ms = 10_000,
+        } },
+        .tools = &advertised,
+        .lazy = true,
+        .client_version = "test",
+    }};
+    var servers: Servers = .{ .items = &storage };
+    defer servers.shutdown(io);
+
+    // Nothing has been sent: the schema the model sees came from this binary.
+    try std.testing.expectEqual(@as(usize, 0), fake.seen.items.len);
+    const resolved = servers.resolve("mcp__fake__echo") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("pong", try Servers.call(io, arena, resolved, "{\"text\":\"hi\"}", net.durationMs(10_000)));
+    try std.testing.expect(!storage[0].lazy);
+    // initialize, the notification, tools/list, tools/call.
+    try std.testing.expectEqual(@as(usize, 4), fake.seen.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, fake.seen.items[2], "\"method\":\"tools/list\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fake.seen.items[3], "\"method\":\"tools/call\"") != null);
 }
 
 test "the key is sent as a bearer token in Authorization and raw in any other header" {

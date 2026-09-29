@@ -16,8 +16,10 @@ release, and `microagent update` moves you to it.
 
 ### Added
 
-- `deepwiki` preset (`https://mcp.deepwiki.com/mcp`): `read_wiki_structure`, `read_wiki_contents`, `ask_question`.
-- The four presets are on by default, with or without a config file. The start-up handshake doubles as the health check: an unreachable endpoint is named on stderr and skipped. `enabled = false` in `[tools.<name>]` turns one off.
+- `deepwiki` preset (`https://mcp.deepwiki.com/mcp`): `read_wiki_structure`, `read_wiki_contents`, `ask_wiki_question`.
+- The four presets are on by default, with or without a config file. Their tools and schemas come from
+  this binary, so a run with no key for one makes no request to it until the model calls one of its
+  tools. `enabled = false` in `[tools.<name>]` turns one off.
 
 - `[tools.<name>]` config tables switch the nine built-in tools on or off (`enabled = false` removes a tool
   from the schema and refuses its calls; an unknown tool name stops the run with exit 2) and enable three
@@ -68,6 +70,13 @@ release, and `microagent update` moves you to it.
 
 ### Changed
 
+- A preset with no key is no longer handshaken when the run starts. Its tool list and schemas are in
+  this binary (`ask_wiki_question` and the other deepwiki tools were added to that table), so the model
+  sees them with no request made; the first call to one of those tools is what connects and initializes,
+  and a tool the server no longer offers is reported then. Time to the first request with the default
+  config drops from about 2.8 s to under a millisecond on the test machine. A preset with a key, and any
+  `url` server the config wrote, are still connected at start: a key can unlock tools the table cannot
+  name, and only a server's own `tools/list` can say what a `[[mcp]]` url offers.
 - The release binary is not position-independent and carries no unwind tables. `--version` retires 52,181 instructions instead of about 11,000 more, the binary is 850,936 bytes instead of 912,992, and a plain run is 592 kB resident instead of 636 kB.
 - The main thread's stack pages below the frame are returned to the kernel once the TLS handshake is done (`net.releaseDeadStack`, Linux). A streaming HTTPS run holds 1,324 kB instead of about 1,530 kB for the rest of its life; the peak is unchanged.
 

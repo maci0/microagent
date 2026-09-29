@@ -271,12 +271,14 @@ switched on, is an HTTPS endpoint somebody else runs. A call sends it the same t
 arguments, and the handshake sends the client name and version (`microagent`, this build's
 version); the operator of the endpoint sees this machine's IP address, the query the model built and
 the key the entry names, when it names one. Nothing else of the run is sent. The sandbox does not
-confine this traffic. The presets are on by default, so a run with no config connects to all four at start; set
-`enabled = false` in a `[tools.<name>]` table to make no request to one. The start-up handshake is the
-health check: an endpoint that cannot be reached is named on stderr
-(`microagent: MCP server web_search: NameServerFailure; it is skipped`) and its tools are left out of
-the run. With no network that costs one warning line a preset, in the time the failure takes to
-report, and at most 20 s a preset when packets are dropped without an answer.
+confine this traffic. The presets are on by default, and their tools come from a table in this
+binary, so a run with no config reaches no endpoint until the model calls one of those tools: the
+first call is what connects, initializes and asks for the server's own tool list, and a tool the
+server no longer offers is reported then. Set `enabled = false` in a `[tools.<name>]` table to make
+no request at all, and give a preset an `api_key_env` to have it connected at start instead, because
+a key can unlock tools the table does not name. A `url` server the config wrote is always connected
+at start: only its own `tools/list` can say what it offers. An endpoint that cannot be reached is
+named on stderr and its tools are left out of that call.
 
 **On disk.** The [session log](#session-log) is the only file a run keeps of itself, apart from the
 files its tools were asked to write. It holds counters and the working directory, never prompt or
@@ -447,17 +449,18 @@ built-in is left out of the tool schema sent to the model, its calls are answere
 for byte, as one with no `[tools]` table, so the provider's prompt cache is unaffected. At least one
 built-in must stay on.
 
-**Presets** are public MCP servers, and are on until `enabled = false`; one that cannot be reached is
-warned about and skipped, so a run with no network works. Each is served by the same
-transport as a `url` table of the same name, so its tools reach the model as
-`mcp__<preset>__<tool>`:
+**Presets** are public MCP servers, and are on until `enabled = false`. Their tools and schemas are in
+this binary, so a run with no key for one reaches it only when the model calls a tool from it; a call
+to a server that cannot be reached is answered with an error naming it, so a run with no network still
+works. Each is served by the same transport as a `url` table of the same name, so its tools reach the
+model as `mcp__<preset>__<tool>`:
 
 | preset | endpoint | tools |
 | --- | --- | --- |
 | `web_search` | `https://mcp.exa.ai/mcp` | `mcp__web_search__web_search_exa`, `mcp__web_search__web_fetch_exa` |
 | `context7` | `https://mcp.context7.com/mcp` | `mcp__context7__resolve-library-id`, `mcp__context7__query-docs` |
 | `grep_app` | `https://mcp.grep.app` | `mcp__grep_app__searchGitHub` |
-| `deepwiki` | `https://mcp.deepwiki.com/mcp` | `mcp__deepwiki__read_wiki_structure`, `mcp__deepwiki__read_wiki_contents`, `mcp__deepwiki__ask_question` |
+| `deepwiki` | `https://mcp.deepwiki.com/mcp` | `mcp__deepwiki__read_wiki_structure`, `mcp__deepwiki__read_wiki_contents`, `mcp__deepwiki__ask_wiki_question` |
 
 The tools are the ones each server lists, so a server that changes its list changes this one. A
 preset takes the same `url`, `api_key_env`, `api_key_header` and `timeout` as a `url` table (see

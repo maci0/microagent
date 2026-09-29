@@ -73,8 +73,9 @@
 # [tools.git]
 # enabled = false
 
-# Four public remote MCP servers, on by default. Each is checked when the run starts, and one that
-# cannot be reached is named on stderr and skipped. `enabled = false` makes no request to it. Their tools are offered as mcp__<name>__<tool>
+# Four public remote MCP servers, on by default. Their tools and schemas are in the binary, so a run
+# with no key for one does not contact it until one of its tools is called; a server that cannot be
+# reached is named on stderr then. `enabled = false` makes no request to it at all. Their tools are offered as mcp__<name>__<tool>
 # (mcp__context7__query-docs, mcp__grep_app__searchGitHub, ...). None needs a
 # key today. Each takes the same optional keys as a `url` server above: url
 # (another endpoint), api_key_env, api_key_header and timeout.

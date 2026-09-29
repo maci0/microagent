@@ -115,6 +115,7 @@ run-to-run noise, so there is no build flag to reach for either.
 | a JSON string's plain runs | one table lookup per byte | **a word at a time** | after a plain byte, eight bytes are tested at once; compaction of a 1 MB conversation fell 37.2 M to 31.0 M instr, and the byte loop is unchanged for text that is mostly escapes or non-ASCII |
 | the sandbox path check | a `realpath` of `.` per `write` and `edit` | **none** | the working directory is `writable_roots[0]`, taken at startup; a `realpath` is an `openat`, a `readlink` and a `close` |
 | a connection to a host with several addresses, default config | 4,607 ms before the first request | **2,820 ms** | `std.net.HostName.connect` dials every address a name resolves to as its own async task and keeps the first, and `Io.Threaded` runs a task inline when every async slot is busy -- four slots for four handshakes and their fan-out, so a connection cost the sum of the host's addresses instead of the fastest and the handshakes queued behind each other. Sixteen slots is the measured knee; the wait is per connection and a run opens several |
+| the four presets at run start, default config | 2,820 ms before the first request | **0.6 ms** | none of them is handshaken: their tools and schemas are in this binary, so the model sees them with no request, and the first call to one of their tools is what connects. The row above still governs that call, and every keyed preset, `url` server and provider connection |
 
 Four of the rows above are one body of work on one run, and they compound. Between `v0.4.0` and the
 tree that carries them, client instructions for 3000 turns of the always-calls-a-tool loop fall from
@@ -361,6 +362,12 @@ against 19.8 MB and `VmHWM` 3.4 MB against 3.9 MB, and `bench/maxrss.py --versio
 788 kB, because a worker exists only while an operation is on it. There is no counter row for this
 one: the cost is a wait, which no instruction count carries, so the guard is a test that fails if
 the limit drops under the measured knee.
+
+The preset row is the same command and stub, default config, after the four presets stopped being
+handshaken at start: median 0.6 ms over fifteen runs (0.7 ms with every preset disabled, so the
+table itself costs nothing at start). That is the whole of the run's wait before its provider
+request on this machine. A `tools/call` to a preset is where its connection is opened, and that
+call pays the fan-out row above.
 
 The instruction gate needs `perf` and exits 1 when a row leaves its band, 2 when a row cannot be
 measured. It is not in `make check` because a shared runner may have performance counters switched
