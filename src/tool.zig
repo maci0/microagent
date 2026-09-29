@@ -820,23 +820,36 @@ const command_word_separators = " \t\n\"'`$&;<>|()[]{}*?!#\\";
 /// is what `isCredentialPath` answers after its own walk has trimmed the
 /// trailing separators and skipped `.` and `..`.
 ///
-/// The components are cut off the front and the rules are applied to each, not
-/// walked back from the leaf, so the two agree only if the rule really is "any
-/// component at any depth". Spelled as a copy of the walk it checks, this
-/// function would return whatever `isCredentialPath` returns for the same input
-/// and the fuzz below would compare a function against itself.
+/// The components are cut off the front and walked forward, where
+/// `isCredentialPath` walks back from the leaf with `dirname` and `basename`:
+/// the two agree only if "any component at any depth" is really what both
+/// answer, and a trailing or doubled separator is handled the same way by a
+/// split as by a walk. Spelled as a copy of that walk, this function would
+/// return whatever `isCredentialPath` returns for the same input and the fuzz
+/// below would compare a function against itself. The rule each component is
+/// tested by is shared with it (`componentIsCredential`), because that half is
+/// one question in both, and a second spelling of it is a rule that drifts.
 fn componentNamesCredential(path: []const u8) bool {
     var parts = std.mem.splitScalar(u8, path, std.fs.path.sep);
     while (parts.next()) |name| {
         // The empty component a trailing or doubled separator leaves, and the
         // two the walk skips, are not names of anything.
         if (name.len == 0 or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
-        for (credential_dirs) |dir| {
-            if (name.len == dir.len and std.ascii.eqlIgnoreCase(name, dir)) return true;
-        }
-        if (isCredentialName(name)) return true;
+        if (componentIsCredential(name)) return true;
     }
     return false;
+}
+
+/// Whether one path component is a credential: a directory whose every file
+/// is one, or a name the rules match. Two walks ask this -- the separator
+/// split `bash`'s word check uses, and the dirname walk `isCredentialPath`
+/// uses -- and the rule is stated once here rather than in both, so a
+/// directory added to the table above reaches both halves of the check.
+fn componentIsCredential(name: []const u8) bool {
+    for (credential_dirs) |dir| {
+        if (name.len == dir.len and std.ascii.eqlIgnoreCase(name, dir)) return true;
+    }
+    return isCredentialName(name);
 }
 /// The first path in a shell command that names a credential file, or null.
 ///
@@ -1060,10 +1073,7 @@ fn isCredentialPath(path: []const u8) bool {
     while (component) |c| {
         const name = std.fs.path.basename(c);
         if (name.len != 0 and !std.mem.eql(u8, name, ".") and !std.mem.eql(u8, name, "..")) {
-            for (credential_dirs) |dir| {
-                if (name.len == dir.len and std.ascii.eqlIgnoreCase(name, dir)) return true;
-            }
-            if (isCredentialName(name)) return true;
+            if (componentIsCredential(name)) return true;
         }
         component = std.fs.path.dirname(c);
     }
