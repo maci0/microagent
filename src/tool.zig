@@ -4067,6 +4067,7 @@ test "git tool refuses a rev that names a file through a tree-ish" {
     try head.put(arena, "cmd", .{ .string = "diff" });
     try head.put(arena, "rev", .{ .string = "HEAD" });
     const shown = try toolGit(std.testing.io, arena, head, null, null);
+    try skipWithoutDelegatedProgram(shown);
     try std.testing.expect(!std.mem.startsWith(u8, shown, "error:"));
     try std.testing.expect(!std.mem.startsWith(u8, shown, "fatal:"));
     try std.testing.expect(!std.mem.startsWith(u8, shown, "refused:"));
@@ -4107,6 +4108,10 @@ test "git tool refuses a rev that is a bare credentials filename" {
     try head.put(arena, "cmd", .{ .string = "diff" });
     try head.put(arena, "rev", .{ .string = "HEAD" });
     const shown = try toolGit(std.testing.io, arena, head, null, null);
+    // The control reads the working tree this test binary was started in, so a
+    // host with no git on PATH answers the call with the tool's own missing
+    // program line and the assertions below would report that as a fault.
+    try skipWithoutDelegatedProgram(shown);
     try std.testing.expect(!std.mem.startsWith(u8, shown, "refused:"));
     try std.testing.expect(!std.mem.startsWith(u8, shown, "error:"));
     try std.testing.expect(!std.mem.startsWith(u8, shown, "fatal:"));
@@ -4154,7 +4159,16 @@ test "a scoped git call still leaves the committed credentials out" {
         &.{ "git", "-C", root, "add", "-A" },
         &.{ "git", "-C", root, "commit", "-qm", "x" },
     }) |argv| {
-        const res = try runCapped(io, arena, argv, 1 << 20, net.durationMs(30_000), null, null);
+        const res = runCapped(io, arena, argv, 1 << 20, net.durationMs(30_000), null, null) catch |err| switch (err) {
+            // A host with no git on PATH. This test drives the real program the
+            // same way the ripgrep and ast-grep tests do, so it skips the same
+            // way instead of reporting a missing program as a fault in the tool.
+            error.FileNotFound => {
+                std.debug.print("\nskipped: git is not on PATH, so this test ran nothing\n", .{});
+                return error.SkipZigTest;
+            },
+            else => return err,
+        };
         if (res.term != .exited or res.term.exited != 0) {
             std.debug.print("git setup failed: {s}\n", .{res.stderr});
             return error.TestUnexpectedResult;
@@ -4912,7 +4926,14 @@ const CwdFixture = struct {
     }
 
     fn deinit(self: *CwdFixture) void {
-        std.process.setCurrentPath(std.testing.io, self.previous) catch {};
+        // The working directory is the one piece of process-global state this
+        // suite changes, and a restore that failed quietly would leave every
+        // later test resolving a relative path under a directory the cleanup
+        // below has just deleted. It is restored before the cleanup for that
+        // reason, and a failure is loud rather than swallowed.
+        std.process.setCurrentPath(std.testing.io, self.previous) catch |err| {
+            std.debug.panic("could not restore the working directory: {s}", .{@errorName(err)});
+        };
         self.tmp.cleanup();
         self.state.deinit();
     }
@@ -5269,7 +5290,17 @@ test "an ast rewrite outside the sandbox roots is refused before ast-grep runs" 
 /// ripgrep reports a suite that never ran the search or the ast tool, and the
 /// green says so about code it did not execute.
 fn skipWithoutDelegatedProgram(result: []const u8) error{SkipZigTest}!void {
-    if (std.mem.indexOf(u8, result, "is not on PATH") == null) return;
+    // The answer is a whole line of the tool's own, `error: <program> is not on
+    // PATH, so this tool cannot run`, so the check is on that line and not on
+    // the phrase appearing anywhere in the result. A result that carries the
+    // phrase somewhere else is output the tool read off the disk rather than an
+    // answer it wrote: a `git diff` over a tree whose own sources spell the
+    // phrase out skips the test it ran, which is the one host a suite is always
+    // read on.
+    const marker = " is not on PATH, so this tool cannot run";
+    const first_line = result[0 .. std.mem.indexOfScalar(u8, result, '\n') orelse result.len];
+    if (!std.mem.startsWith(u8, first_line, "error: ")) return;
+    if (std.mem.indexOf(u8, first_line, marker) == null) return;
     std.debug.print("\nskipped: the program this test delegates to is not on PATH, so it ran nothing\n", .{});
     return error.SkipZigTest;
 }
@@ -5314,6 +5345,16 @@ fn expectNoProcessSurvived() !void {
     return error.GrandchildSurvived;
 }
 
+/// How long the call in the interrupt test is given to reach `runCapped` and
+/// publish its process group, and how often it is looked for. The span is the
+/// budget that call runs with: it can only publish while it is inside
+/// `runCapped`, so a shorter wait would report a group missing on a host that
+/// was merely slow to fork, and a longer one would outlive the call the wait is
+/// for.
+const interrupt_publish_budget_ms: u64 = 3_000;
+const interrupt_publish_poll_ms: u64 = 5;
+const interrupt_publish_attempts: usize = @intCast(interrupt_publish_budget_ms / interrupt_publish_poll_ms);
+
 test "an interrupt during a tool call is forwarded to that call's process group" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -5351,10 +5392,15 @@ test "an interrupt during a tool call is forwarded to that call's process group"
         }
     };
     const thread = try Thread.spawn(.{}, Call.go, .{ arena, io });
+    // An assertion that returns early leaves the call running on the arena and
+    // the Io the two defers above are about to free, and leaves its group
+    // published behind it for the next test to read. The join is therefore on
+    // the error path as well, not after the assertion.
+    errdefer thread.join();
     // Published for as long as the call runs, which is what the handler reads.
     var attempt: usize = 0;
-    while (liveChildGroups() == 0 and attempt < 200) : (attempt += 1)
-        try io.sleep(.{ .nanoseconds = 5 * std.time.ns_per_ms }, .awake);
+    while (liveChildGroups() == 0 and attempt < interrupt_publish_attempts) : (attempt += 1)
+        try io.sleep(.{ .nanoseconds = interrupt_publish_poll_ms * std.time.ns_per_ms }, .awake);
     try std.testing.expectEqual(@as(usize, 1), liveChildGroups());
     thread.join();
     try std.testing.expectEqual(@as(usize, 0), liveChildGroups());

@@ -304,17 +304,33 @@ var gpa_state: std.heap.DebugAllocator(if (builtin.mode == .Debug) .{} else .{
 const io_worker_stack_bytes = 1024 * 1024;
 const io_worker_limit = 16;
 
-test "the async limit covers the handshakes and their address fan-out" {
-    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{
+/// The options a run builds its `Io` from. Both the run and the test below read
+/// them here, so a limit that comes back smaller fails the test that reads this
+/// rather than a test that sets its own copy and asserts on that.
+fn ioOptions(init: std.process.Init.Minimal) std.Io.Threaded.InitOptions {
+    return .{
+        .argv0 = .init(init.args),
+        .environ = init.environ,
         .stack_size = io_worker_stack_bytes,
         .async_limit = .limited(io_worker_limit),
-    });
+    };
+}
+
+/// A `Minimal` for the tests that only read the options built from one: an
+/// empty argument list and an empty environment, which none of the options above
+/// is derived from.
+fn testMinimal() std.process.Init.Minimal {
+    return .{ .args = .{ .vector = &.{} }, .environ = .empty };
+}
+
+test "the async limit covers the handshakes and their address fan-out" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, ioOptions(testMinimal()));
     defer threaded.deinit();
     // Sixteen is the measured knee, and a limit under it is the regression
     // that put four back. No row of bench/instructions.sh moves either way
     // when it comes back: the regression is a wait, not work, so the guard is
     // the configuration rather than a counter, and the only way to fail it is
-    // to configure a smaller limit.
+    // for the run to configure a smaller limit.
     try std.testing.expectEqual(io_worker_limit, @intFromEnum(threaded.async_limit));
 }
 
@@ -370,12 +386,7 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
     const gpa = gpa_state.allocator();
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     defer arena.deinit();
-    var threaded: std.Io.Threaded = .init(gpa, .{
-        .argv0 = .init(minimal.args),
-        .environ = minimal.environ,
-        .stack_size = io_worker_stack_bytes,
-        .async_limit = .limited(io_worker_limit),
-    });
+    var threaded: std.Io.Threaded = .init(gpa, ioOptions(minimal));
     defer threaded.deinit();
     // In the run arena: the map lives as long as the process, so its ~100 strings are bumps that
     // one `arena.deinit` releases, not an allocation and a free apiece.

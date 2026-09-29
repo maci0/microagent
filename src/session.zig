@@ -815,6 +815,18 @@ test "a repeated session log writes beside the first and never over it" {
     try std.testing.expectEqualStrings("first\n", survived);
 }
 
+/// The directory a store is named in, spelled the way a run is given one:
+/// relative to the working directory. `std.testing.tmpDir` puts its directory
+/// under a scratch root whose name belongs to the standard library, so
+/// spelling that root here would tie these tests to a layout they do not own and
+/// to the directory the test binary happened to be started in. The path is asked
+/// for and made relative instead.
+fn storeRelative(arena: std.mem.Allocator, io: Io, tmp: std.testing.TmpDir) ![]const u8 {
+    const cwd = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", arena);
+    const absolute = try tmp.dir.realPathFileAlloc(io, ".", arena);
+    return std.fs.path.relative(arena, cwd, null, cwd, absolute);
+}
+
 // A directory the caller named and that no log lands in is a store a monitor
 // reads that stays empty for the whole run, and the run is the only place that
 // can say so. Every one of these is a null, and every one of them names itself.
@@ -824,10 +836,9 @@ test "a session directory that cannot be used is named, and keeps no log" {
     defer f.deinit();
     const io = f.io();
     const arena = f.arena();
-    // The store sits under the test's own temporary directory, which is under
-    // the working directory, so the relative spelling a run is given reaches it
-    // and the cleanup takes it with the rest.
-    const store = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{f.tmp.sub_path});
+    // The store sits under the test's own temporary directory, so the relative
+    // spelling a run is given reaches it and the cleanup takes it with the rest.
+    const store = try storeRelative(arena, io, f.tmp);
 
     // Off is not a failure and says nothing: the caller asked for no log.
     try std.testing.expect(open(io, arena, "", "test/model") == null);
@@ -1116,10 +1127,10 @@ test "a store named relative to the working directory is pruned where it is" {
     const io = store.io();
     const arena = store.arena();
 
-    // The store sits under the test's own temporary directory, which is under
-    // the working directory, so the same relative spelling a run would be given
-    // reaches it, and the cleanup takes it with the rest.
-    const relative = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}/store", .{store.tmp.sub_path});
+    // The store sits under the test's own temporary directory, so the same
+    // relative spelling a run would be given reaches it, and the cleanup takes
+    // it with the rest.
+    const relative = try std.fs.path.join(arena, &.{ try storeRelative(arena, io, store.tmp), "store" });
     try store.tmp.dir.createDirPath(io, "store");
     var i: usize = 0;
     while (i < max_session_logs + 1) : (i += 1) {
@@ -1143,7 +1154,7 @@ test "a session log is readable by its owner alone" {
     defer store.deinit();
     const io = store.io();
     const arena = store.arena();
-    const relative = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}/modes", .{store.tmp.sub_path});
+    const relative = try std.fs.path.join(arena, &.{ try storeRelative(arena, io, store.tmp), "modes" });
 
     var session = open(io, arena, relative, "test/model") orelse return error.TestUnexpectedResult;
     session.file.close(io);
