@@ -4,7 +4,7 @@
 
 | path | what lives there |
 | --- | --- |
-| `src/` | the agent, one Zig file per concern, each with its tests and fuzz corpora beside the code: `main.zig` (command line, config resolution, the turn loop and the request), `stream.zig` (folding response frames into a turn), `conversation.zig` (the system prompt, message array and compaction), `chat.zig` (value types and the JSON writer), `net.zig`, `tool.zig`, `sandbox.zig`, `session.zig`, `skill.zig`, `style.zig`, `config.zig`, `mcp.zig`, `update.zig` |
+| `src/` | the agent, one Zig file per concern, each with its tests and fuzz corpora beside the code: `main.zig` (command line, config resolution, the turn loop and the request), `stream.zig` (folding response frames into a turn), `conversation.zig` (the system prompt, message array and compaction), `chat.zig` (value types and the JSON writer), `net.zig`, `tool.zig`, `sandbox.zig`, `session.zig`, `skill.zig`, `copy.zig`, `config.zig`, `mcp.zig`, `update.zig` |
 | `bench/` | the benchmark and gauntlet scripts, a loopback stub provider for profiling the harness alone (`stub_provider.py`), the peak-memory probe (`maxrss.py`), the task fixtures under `bench/tasks/`, the fixed stride-sample task lists (`tb4-sample.txt`, `polyglot-sample.txt`, `deepswe-sample.txt`, `tb2-sample.txt`, `swe-sample.txt`), the instruction gate's baseline, and the committed results (`results.jsonl`, `gauntlet-results.jsonl`) |
 | `integrations/harbor/` | the adapter that runs microagent on [Harbor](integrations/harbor/README.md) benchmarks, and its pinned Python requirements |
 | `docs/` | reference and design docs: [usage](docs/usage.md), [benchmark](docs/benchmark.md), [performance](docs/performance.md), [threat model](docs/threat-model.md), the [to-do list](docs/todo.md), and the logo |
@@ -101,9 +101,9 @@ make check-unreleased       # the [Unreleased] entry has the five sections, once
 yamllint), `zig build test`,
 `zig build test-sanitize`, and `check-binary` (a `ReleaseSmall` build whose
 binary it then starts). These are the checks
-[.github/workflows/ci.yml](.github/workflows/ci.yml) runs, on the same Zig
-version: the shared setup-zig action installs the version `make
-required-zig-version` prints, and `make zig-version` tells a laptop on a
+[.github/workflows/ci.yml](.github/workflows/ci.yml) runs in its test and lint
+jobs, on the same Zig version: the shared setup-zig action installs the version
+`make required-zig-version` prints, and `make zig-version` tells a laptop on a
 different compiler so rather than assuming. The workflow calls the same targets
 rather than repeating their commands, so a step added to `check` is a step CI
 runs.
