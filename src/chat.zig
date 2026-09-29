@@ -225,7 +225,7 @@ pub const ChatResult = struct {
     /// Releases `served_model` and `fingerprint` on the rule
     /// `deinitFinish` follows: a field with no bytes is the shared empty slice,
     /// which is not this run's to free.
-    pub fn deinitServed(self: *ChatResult, gpa: std.mem.Allocator) void {
+    fn deinitServed(self: *ChatResult, gpa: std.mem.Allocator) void {
         if (self.served_model.len != 0) gpa.free(self.served_model);
         if (self.fingerprint.len != 0) gpa.free(self.fingerprint);
         self.served_model = &.{};
@@ -235,7 +235,7 @@ pub const ChatResult = struct {
     /// Releases `stream_error` on the same rule, and the note it carries is
     /// this run's own copy for the same reason: the frame it was read from is
     /// gone by the time the caller prints it.
-    pub fn deinitStreamError(self: *ChatResult, gpa: std.mem.Allocator) void {
+    fn deinitStreamError(self: *ChatResult, gpa: std.mem.Allocator) void {
         if (self.stream_error.len != 0) gpa.free(self.stream_error);
         self.stream_error = &.{};
     }
