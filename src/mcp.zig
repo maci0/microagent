@@ -897,16 +897,18 @@ pub const Preset = enum {
     }
 };
 
-/// What a preset's server sends about one of its tools, replaced by a compact form. The servers' own
-/// descriptions run to a kilobyte of examples and emphasis, and every request carries them: the five
-/// tools together were 8.4 KB. These say what the tool does and what each argument is. They apply to
-/// the preset's own host and to a tool named here, so a server that changes its tools, or another
-/// server that happens to share a name, is shown as it sent them.
-const Terse = struct { host: []const u8, tool: []const u8, description: []const u8, schema: []const u8 };
+/// What a preset's server sends about one of its tools, replaced by a compact
+/// form. The servers' own descriptions and schemas run to a kilobyte or more
+/// each of examples and emphasis, and every request carries them. These say
+/// what the tool does and what each argument is. An entry applies to the
+/// preset's own url and to a tool named here, so a server that changes its
+/// tools, or another server that happens to share a name, is shown as it sent
+/// them.
+const Terse = struct { preset: Preset, tool: []const u8, description: []const u8, schema: []const u8 };
 
 const terse_tools = [_]Terse{
     .{
-        .host = "mcp.exa.ai",
+        .preset = .web_search,
         .tool = "web_search_exa",
         .description = "Search the web; returns clean text from the top results. Describe the ideal page instead of using keywords. " ++
             "Put category:people or category:company in the query to search profiles. If highlights are not enough, read the best URLs with web_fetch_exa.",
@@ -915,7 +917,7 @@ const terse_tools = [_]Terse{
         ,
     },
     .{
-        .host = "mcp.exa.ai",
+        .preset = .web_search,
         .tool = "web_fetch_exa",
         .description = "Read webpages as clean markdown. Use after web_search_exa when highlights are not enough, or for any URL; batch URLs in one call.",
         .schema =
@@ -923,7 +925,7 @@ const terse_tools = [_]Terse{
         ,
     },
     .{
-        .host = "mcp.context7.com",
+        .preset = .context7,
         .tool = "resolve-library-id",
         .description = "Resolve a library name to a Context7 library ID (/org/project or /org/project/version), with each match's reputation, benchmark score, snippet count and versions. " ++
             "Call it before query-docs unless the user gave an ID. Choose by name match, reputation and snippet coverage.",
@@ -932,7 +934,7 @@ const terse_tools = [_]Terse{
         ,
     },
     .{
-        .host = "mcp.context7.com",
+        .preset = .context7,
         .tool = "query-docs",
         .description = "Fetch current documentation and code examples for a library by its Context7 ID from resolve-library-id, or one the user gave. At most 3 calls per question.",
         .schema =
@@ -940,7 +942,7 @@ const terse_tools = [_]Terse{
         ,
     },
     .{
-        .host = "mcp.grep.app",
+        .preset = .grep_app,
         .tool = "searchGitHub",
         .description = "Search public GitHub code for literal patterns, like grep, not keywords: 'useState(' or '(?s)try {.*await', not 'react tutorial'. " ++
             "Use it to see real usage of an unfamiliar API, syntax or configuration.",
@@ -949,7 +951,7 @@ const terse_tools = [_]Terse{
         ,
     },
     .{
-        .host = "mcp.deepwiki.com",
+        .preset = .deepwiki,
         .tool = "read_wiki_structure",
         .description = "List the documentation topics DeepWiki holds for a GitHub repository. Use it to see what a repository's wiki covers before reading one page or asking a question.",
         .schema =
@@ -957,7 +959,7 @@ const terse_tools = [_]Terse{
         ,
     },
     .{
-        .host = "mcp.deepwiki.com",
+        .preset = .deepwiki,
         .tool = "read_wiki_contents",
         .description = "Read a GitHub repository's DeepWiki documentation whole. Use read_wiki_structure first when only one topic is wanted, or ask_wiki_question for one answer.",
         .schema =
@@ -965,7 +967,7 @@ const terse_tools = [_]Terse{
         ,
     },
     .{
-        .host = "mcp.deepwiki.com",
+        .preset = .deepwiki,
         .tool = "ask_wiki_question",
         .description = "Ask a question about a GitHub repository and get an answer grounded in its DeepWiki. Ask one question per call; repoName may name up to ten repositories.",
         .schema =
@@ -974,10 +976,29 @@ const terse_tools = [_]Terse{
     },
 };
 
-/// The compact form of `tool` on `host`, or null when this table does not know the pair.
+/// The host a preset's url names: the authority between the scheme and the
+/// first path separator. These urls are this binary's own, so that is all the
+/// grammar needed.
+fn presetHost(url: []const u8) []const u8 {
+    const after_scheme = (std.mem.indexOf(u8, url, "://") orelse return "") + 3;
+    const rest = url[after_scheme..];
+    return rest[0..(std.mem.indexOfScalar(u8, rest, '/') orelse rest.len)];
+}
+
+/// The preset a host belongs to, or null for an endpoint a config wrote.
+fn presetForHost(host: []const u8) ?Preset {
+    for (std.enums.values(Preset)) |preset| {
+        if (std.ascii.eqlIgnoreCase(presetHost(preset.url()), host)) return preset;
+    }
+    return null;
+}
+
+/// The compact form of `tool` on the host of `preset`, or null when the table
+/// does not know the pair.
 fn terseFor(host: []const u8, tool: []const u8) ?Terse {
+    const preset = presetForHost(host) orelse return null;
     for (terse_tools) |t| {
-        if (std.ascii.eqlIgnoreCase(t.host, host) and std.mem.eql(u8, t.tool, tool)) return t;
+        if (t.preset == preset and std.mem.eql(u8, t.tool, tool)) return t;
     }
     return null;
 }
@@ -998,7 +1019,18 @@ test "the compact preset tools are valid schemas for exactly the tools they name
     var state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer state.deinit();
     const arena = state.allocator();
+    // Every preset has at least one tool and `url` knows every member, so a
+    // preset added to the enum without a table entry is caught here rather
+    // than offered to the model with no tools.
     try std.testing.expectEqual(@as(usize, 8), terse_tools.len);
+    for (std.enums.values(Preset)) |preset| {
+        try std.testing.expect(presetHost(preset.url()).len > 0);
+        var offered: usize = 0;
+        for (terse_tools) |t| {
+            if (t.preset == preset) offered += 1;
+        }
+        try std.testing.expect(offered > 0);
+    }
     for (terse_tools) |t| {
         try std.testing.expect(t.description.len > 0 and t.description.len < 400);
         const schema = try std.json.parseFromSliceLeaky(std.json.Value, arena, t.schema, .{});
@@ -1074,21 +1106,16 @@ fn fillPresetTools(arena: std.mem.Allocator, server: *Server, client_version: []
     const host = switch (http.uri.host orelse return false) {
         .raw, .percent_encoded => |text| text,
     };
-    var count: usize = 0;
-    for (terse_tools) |entry| {
-        if (std.ascii.eqlIgnoreCase(entry.host, host)) count += 1;
-    }
-    if (count == 0) return false;
+    const preset = presetForHost(host) orelse return false;
     var tools: std.ArrayList(Tool) = .empty;
-    try tools.ensureTotalCapacity(arena, count);
     for (terse_tools) |entry| {
-        if (!std.ascii.eqlIgnoreCase(entry.host, host)) continue;
-        tools.appendAssumeCapacity(.{
+        if (entry.preset != preset) continue;
+        tools.append(arena, .{
             .name = entry.tool,
             .exposed = try std.fmt.allocPrint(arena, "{s}{s}__{s}", .{ tool_prefix, server.name, entry.tool }),
             .description = entry.description,
             .schema = entry.schema,
-        });
+        }) catch return false;
     }
     server.tools = tools.items;
     server.lazy = true;
