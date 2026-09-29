@@ -393,15 +393,42 @@ zig-version:
 # gate should not ask for. add-default-case (SC2249) stays off for the same
 # reason: it wants a `*)` arm on a `case` that is already exhaustive, and the
 # one finding it raises is on a `case` in portable.sh that matches every value
-# it is given. Enable either per file with a `# shellcheck disable=` carrying
-# the reason when one is worth taking.
+# it is given. Enable either per file with a `# shellcheck disable=`, preceded
+# by the `# because:` line lint-shell below asks for.
 SHELLCHECK_CHECKS := check-set-e-suppressed,check-unassigned-uppercase,deprecate-which,avoid-nullary-conditions,check-extra-masked-returns,quote-safe-variables
 SHELLCHECK_OPTS := -x --enable=$(SHELLCHECK_CHECKS)
+
+# A `# because:` line is what stands between a suppression and a finding nobody
+# can judge later: it says what the silenced check was protecting, and both
+# `lint-shell` and `lint-python` refuse a `# shellcheck disable=` or a `# noqa`
+# that no `# because:` line above it covers. Neither linter's directive syntax
+# takes a trailing reason (shellcheck parses the rest of the line as more
+# checks and fails the directive), and an unmarked comment above a suppression
+# is indistinguishable from the comment that explains the code, so the marker
+# is what makes the two tellable apart. The tree carries four suppressions
+# today, each silencing a finding that is still there, so this asks a new one
+# to say the same thing the existing four do.
+#
+# awk, not grep, because the question spans the comment block above a line and
+# grep reads a file a line at a time. The marker is matched as three whole
+# words after the indentation, so a mention of it in prose does not satisfy it,
+# and the scan stops at the first line that is not a comment.
 
 lint-shell:
 	@set -eu; \
 	files="$$(git ls-files '*.sh')"; \
 	test -n "$$files" || { echo "no tracked .sh file to lint" >&2; exit 1; }; \
+	tmp="$$(mktemp)"; \
+	trap 'rm -f "$$tmp"' EXIT; \
+	awk 'function why(line,   words) { sub(/^[[:space:]]+/, "", line); return split(line, words, /[[:space:]]+/) >= 3 && words[1] == "#" && words[2] == "because:" && length(words[3]) > 0 } \
+	  /^[[:space:]]*#[[:space:]]*shellcheck[= ]disable=/ { if (!marked) print FILENAME ":" FNR ": " $$0; marked = 0; next } \
+	  /^[[:space:]]*#/ { if (why($$0)) marked = 1; next } \
+	  { marked = 0 }' $$files > "$$tmp"; \
+	test ! -s "$$tmp" || { cat "$$tmp" >&2; \
+	  echo "every shellcheck disable is preceded by a '# because:' line saying what it silences:" >&2; \
+	  echo "  # because: the include flags hold two words per task and have to arrive as two" >&2; \
+	  echo "  # shellcheck disable=SC2086" >&2; \
+	  exit 1; }; \
 	known="$$(shellcheck --list-optional | sed -n 's/^name:  *//p')"; \
 	test -n "$$known" || { echo "shellcheck --list-optional printed nothing, so SHELLCHECK_CHECKS cannot be checked against it" >&2; exit 1; }; \
 	for name in $$(printf '%s' '$(SHELLCHECK_CHECKS)' | tr ',' ' '); do \
@@ -416,6 +443,18 @@ lint-shell:
 
 lint-python:
 	@test -n "$(PY_SOURCES)" || { echo "no tracked .py file to lint" >&2; exit 1; }
+	@set -eu; \
+	tmp="$$(mktemp)"; \
+	trap 'rm -f "$$tmp"' EXIT; \
+	awk 'function why(line,   words) { sub(/^[[:space:]]+/, "", line); return split(line, words, /[[:space:]]+/) >= 3 && words[1] == "#" && words[2] == "because:" && length(words[3]) > 0 } \
+	  /# noqa/ { if (!marked) print FILENAME ":" FNR ": " $$0; marked = 0; next } \
+	  /^[[:space:]]*#/ { if (why($$0)) marked = 1; next } \
+	  { marked = 0 }' $(PY_SOURCES) > "$$tmp"; \
+	test ! -s "$$tmp" || { cat "$$tmp" >&2; \
+	  echo "every noqa is covered by a '# because:' line saying what it silences:" >&2; \
+	  echo "  # because: the name is the one BaseHTTPRequestHandler.log_message declares" >&2; \
+	  echo "  def log_message(self, format: str) -> None:  # noqa: A002" >&2; \
+	  exit 1; }
 	ruff check --config ruff.toml $(PY_SOURCES)
 	ruff format --check --config ruff.toml $(PY_SOURCES)
 

@@ -76,6 +76,12 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- The four analyzer suppressions in the tree said what rule they silenced and
+  nothing else, so nothing recorded why each was there. `lint-shell` and
+  `lint-python` now refuse a `# shellcheck disable=` or a `# noqa` that no
+  `# because:` comment above it covers, so a suppression that outlives its
+  reason, or arrives without one, fails the gate rather than the next reader.
+
 - The Harbor README named nine of the ten variables its adapter reads. The one
   it left out, `MICROAGENT_STALL_TIMEOUT`, is the one a slow provider needs: the
   adapter checked it, forwarded it and never wrote it down, so an operator

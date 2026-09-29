@@ -72,6 +72,8 @@ for agent in $agents; do
 		rm -rf "$work"
 		continue
 	fi
+	# because: $words is the name and subcommand harness_argv prints, and
+	# quoted it arrives as one argument and runs the name alone
 	# shellcheck disable=SC2086
 	run_limited 180 "$work" $words "$prompt" >"$work/out" 2>&1
 	# Both ends of the clock are checked, not just the first. An empty reading

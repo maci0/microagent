@@ -122,6 +122,8 @@ for harness in $harnesses; do
 	fi
 	case "$harness" in
 	microagent)
+		# because: $include is " -i task" per task, built above, and has to
+		# reach harbor as that many words rather than as one argument
 		# shellcheck disable=SC2086
 		PYTHONPATH="$root/integrations/harbor" \
 			MICROAGENT_AGENT_TIMEOUT_SEC=$agent_timeout \
@@ -137,6 +139,7 @@ for harness in $harnesses; do
 			set -- "$@" --ak "opencode_config=$nvidia_config" --ae "OPENAI_API_KEY=$key"
 		fi
 		set -- "$@" --jobs-dir "$jobs_dir" -n "$jobs" --job-name "$job"
+		# because: the same $include as the microagent arm above, split the same way
 		# shellcheck disable=SC2086
 		$harbor run -d "$dataset" $include "$@" 2>&1 | tail -6
 		;;

@@ -65,6 +65,7 @@ class Handler(BaseHTTPRequestHandler):
     def write_chunk(self, payload: bytes) -> None:
         self.wfile.write(b"%x\r\n" % len(payload) + payload + b"\r\n")
 
+    # because: the name is the one BaseHTTPRequestHandler.log_message declares
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002
         """Silence the per-request access log; stderr stays for errors."""
 
