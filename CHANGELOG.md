@@ -19,6 +19,19 @@ release, and `microagent update` moves you to it.
 - A first run with no config file writes the commented template to the default path,
   `~/.microagent/config.toml`, at mode 0600 and names the path on stderr. A path named by `--config`
   or `MICROAGENT_CONFIG` is never created, and an existing file is never touched.
+- `MDEBUG=1` names the sandbox, the number of writable roots, the number of tools the config turned
+  off and the number of denied commands, so the settings that decide what a run may touch are on the
+  same line as the ones that decide where it sends them.
+
+### Fixed
+
+- A `[[mcp]]` `env` key is held to the same rule as `api_key_env`: a name carrying a `=`, a NUL or a
+  control character drops the server, where it reached the child's environment block and took the run
+  down. A quoted key is unquoted, so `env = { "LOG" = "debug" }` sets `LOG` and not a variable named
+  `"LOG"`, and a bare value may no longer carry the `=` that separates it from its name.
+- A key holding a control character is refused before the first request, from every source. The key
+  goes into an `Authorization` header, and a CR or an LF in it ends that line; a remote MCP server's
+  key was already refused for this, and the provider's was not.
 
 ### Changed
 

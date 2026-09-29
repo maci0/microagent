@@ -25,6 +25,25 @@ const chat = @import("chat.zig");
 /// reader.
 pub const env_surrounding = " \t\r\n";
 
+/// The bytes that cannot appear in a header value: every C0 control and DEL.
+/// A CR or an LF ends the header line, so a value carrying one is not a value
+/// the request writer can carry, and the rest of the line becomes headers the
+/// caller did not ask for. A credential is the value that matters, and there
+/// are now three places a run reads one: the provider key, and a remote MCP
+/// server's `api_key_env` name and its value.
+pub const header_control_bytes = blk: {
+    var b: [0x21]u8 = undefined;
+    for (b[0..0x20], 0..) |*x, c| x.* = @intCast(c);
+    b[0x20] = 0x7f;
+    break :blk b;
+};
+
+/// Whether a value carries a byte that cannot go in a header: every C0
+/// control and DEL.
+pub fn hasHeaderControlBytes(value: []const u8) bool {
+    return std.mem.indexOfAny(u8, value, &header_control_bytes) != null;
+}
+
 /// How much of a value a message quotes back, bounded on the bytes that come
 /// out rather than the bytes that went in, so a value of control characters
 /// cannot cost a line several times its length. The agent run and `update` both
@@ -580,6 +599,27 @@ fn daysFromCivil(year: i64, month: u32, day: u32) i64 {
     const day_of_year = @divTrunc(153 * month_of_era + 2, 5) + @as(i64, day) - 1; // 0 through 365
     const day_of_era = year_of_era * 365 + @divTrunc(year_of_era, 4) - @divTrunc(year_of_era, 100) + day_of_year;
     return era * 146097 + day_of_era - 719468;
+}
+
+test "a header value is refused for every control byte and accepted for the rest" {
+    try std.testing.expect(!hasHeaderControlBytes("sk-a-key"));
+    try std.testing.expect(!hasHeaderControlBytes(""));
+    // A space is a header value byte, and 0x20 is the first one the set stops
+    // at, so the boundary is checked from both sides.
+    try std.testing.expect(!hasHeaderControlBytes("a b"));
+    try std.testing.expect(hasHeaderControlBytes("a\x1fb"));
+    try std.testing.expect(hasHeaderControlBytes("a\x7fb"));
+    try std.testing.expect(hasHeaderControlBytes("a\rb"));
+    try std.testing.expect(hasHeaderControlBytes("a\nb"));
+    try std.testing.expect(hasHeaderControlBytes("a\x00b"));
+    // The set is exactly the 32 C0 controls plus DEL: 0x1e and 0x21 bracket the
+    // range it claims, and a 0x80 leads nothing is mistaken for a control.
+    for (0..0x20) |c| try std.testing.expect(hasHeaderControlBytes(&.{@intCast(c)}));
+    try std.testing.expect(!hasHeaderControlBytes(&.{0x20}));
+    try std.testing.expect(!hasHeaderControlBytes(&.{0x21}));
+    try std.testing.expect(!hasHeaderControlBytes(&.{0x7e}));
+    try std.testing.expect(!hasHeaderControlBytes(&.{0x80}));
+    try std.testing.expect(!hasHeaderControlBytes(&.{0xff}));
 }
 
 test "the CA bundle comes from the project's variable first, then the system one" {

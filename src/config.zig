@@ -460,8 +460,15 @@ fn serverKey(config: *Config, arena: std.mem.Allocator, server: *Server, key: []
     }
     if (std.mem.eql(u8, key, "env")) {
         server.local_key_set = true;
-        server.env = inlineTable(arena, value_text) orelse
+        // A table the reader cannot turn into an environment the child process
+        // can hold drops the server, the way a remote option it cannot use
+        // does: a spawn carrying a name with a `=` or a NUL in it either
+        // asserts the run down or hands the server a variable it never asked
+        // for, and neither is a server this configuration declared.
+        server.env = inlineTable(arena, value_text) orelse {
+            server.invalid = true;
             return config.note(.{ .key = key, .kind = .bad_value });
+        };
         return;
     }
     if (std.mem.eql(u8, key, "url")) {
@@ -666,6 +673,13 @@ fn stringArray(arena: std.mem.Allocator, raw: []const u8) ?[]const []const u8 {
 
 /// An inline table of strings: `{ K = "v", J = "w" }`. Null when the text is
 /// not one, which is how `env` is refused rather than silently dropped.
+///
+/// A key is unquoted like a value, because a file may spell one `"LOG"` and
+/// the quotes are the file's, not the name of the variable. It is then held to
+/// `validEnvName`, the same rule `api_key_env` is held to: a name carrying a
+/// `=`, a NUL or a control character is a name the child process's environment
+/// block cannot carry, so passing it on reaches `Environ.Map.put`, which
+/// asserts on exactly those bytes and takes the whole run down with it.
 fn inlineTable(arena: std.mem.Allocator, raw: []const u8) ?[]const [2][]const u8 {
     const text = std.mem.trim(u8, stripComment(raw), " \t");
     if (text.len < 2 or text[0] != '{' or text[text.len - 1] != '}') return null;
@@ -673,13 +687,40 @@ fn inlineTable(arena: std.mem.Allocator, raw: []const u8) ?[]const [2][]const u8
     var out: std.ArrayList([2][]const u8) = .empty;
     for (parts) |pair| {
         if (pair.len == 0) continue;
-        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse return null;
-        const key = std.mem.trim(u8, pair[0..eq], " \t");
-        const value = unquote(std.mem.trim(u8, pair[eq + 1 ..], " \t"));
-        if (key.len == 0) return null;
+        const eq = indexOutsideQuotes(pair, '=') orelse return null;
+        const key = unquote(std.mem.trim(u8, pair[0..eq], " \t"));
+        const value_text = std.mem.trim(u8, pair[eq + 1 ..], " \t");
+        const value = unquote(value_text);
+        // A bare value may not carry the separator: `{ A = B = "v" }` is one
+        // pair written three times over, and reading the first `=` as the
+        // separator would hand the child `A` and the value `B = "v"`, which is
+        // a table nobody wrote. A quoted value may, because the separator is
+        // inside the quotes and `indexOutsideQuotes` already stepped over it.
+        if (value.len == value_text.len and std.mem.indexOfScalar(u8, value_text, '=') != null) return null;
+        if (!mcp_mod.validEnvName(key)) return null;
+        if (std.mem.indexOfScalar(u8, value, 0) != null) return null;
         out.append(arena, .{ key, value }) catch return null;
     }
     return out.items;
+}
+
+/// The first `sep` that is not inside a quote, so a separator inside a quoted
+/// value is text. Null when the text holds an unclosed quote, which is a pair
+/// that cannot be read whole.
+fn indexOutsideQuotes(raw: []const u8, sep: u8) ?usize {
+    var quote: u8 = 0;
+    for (raw, 0..) |c, i| {
+        if (quote != 0) {
+            if (c == quote) quote = 0;
+            continue;
+        }
+        if (c == '"' or c == '\'') {
+            quote = c;
+            continue;
+        }
+        if (c == sep) return i;
+    }
+    return null;
 }
 
 /// A line without its trailing `#` comment, for the values that are lists
@@ -1147,6 +1188,15 @@ test "an MCP server is one [[mcp]] table, and a broken one is named and skipped"
     try std.testing.expectEqual(@as(usize, 1), commented.mcp[0].env.len);
     try std.testing.expectEqualStrings("v", commented.mcp[0].env[0][1]);
 
+    // A quoted key is the same name as a bare one: the quotes are how the file
+    // spells it, not part of what the variable is called. Before this the
+    // quotes reached the child, and the server saw a variable named `"LOG"`.
+    const quoted_key = parseBare(arena, "[[mcp]]\nname = \"a\"\ncommand = \"b\"\nenv = { \"LOG\" = \"debug\" }\n");
+    try std.testing.expect(quoted_key.problem == null);
+    try std.testing.expectEqual(@as(usize, 1), quoted_key.mcp[0].env.len);
+    try std.testing.expectEqualStrings("LOG", quoted_key.mcp[0].env[0][0]);
+    try std.testing.expectEqualStrings("debug", quoted_key.mcp[0].env[0][1]);
+
     // A key this reader does not have inside a table is a problem like any
     // other, and the entry still applies.
     const extra = parseBare(arena, "[[mcp]]\nname = \"a\"\ncommand = \"b\"\ncwd = \"/tmp\"\n");
@@ -1261,6 +1311,12 @@ const config_corpus = [_][]const u8{
     "[[mcp]]\nname = \"a\"\ncommand = \"b\"\nargs = [\"x\"] # flags\nenv = { K = \"v\" } # one\n",
     "[[mcp]]\nname = \"a\"\ncommand = \"b\"\nargs = \"x\"\n",
     "[[mcp]]\nname = \"a\"\ncommand = \"b\"\nenv = { K = }\n",
+    "[[mcp]]\nname = \"a\"\ncommand = \"b\"\nenv = { \"LOG\" = \"d\" }\n",
+    "[[mcp]]\nname = \"a\"\ncommand = \"b\"\nenv = { A=B = \"v\" }\n",
+    "[[mcp]]\nname = \"a\"\ncommand = \"b\"\nenv = { A\x00B = \"v\" }\n",
+    "[[mcp]]\nname = \"a\"\ncommand = \"b\"\nenv = { K = \"a\x00b\" }\n",
+    "[[mcp]]\nname = \"a\"\ncommand = \"b\"\nenv = { K\r = \"v\" }\n",
+    "[[mcp]]\nname = \"a\"\ncommand = \"b\"\nenv = { K = \"v\rInjected: x\" }\n",
     "[mcp]\nname = \"a\"\ncommand = \"b\"\n",
     "[[mcp]\nname = \"a\"\n",
     "[[  mcp  ]]\nname = \"a\"\ncommand = \"b\"\n",
@@ -1314,6 +1370,10 @@ fn fuzzConfig(_: void, smith: *std.testing.Smith) !void {
         try std.testing.expect(entry.timeout_s >= 1 and entry.timeout_s <= mcp_mod.max_timeout_s);
         try std.testing.expect(entry.api_key_env.len == 0 or mcp_mod.validEnvName(entry.api_key_env));
         try std.testing.expect(mcp_mod.validHeaderName(entry.api_key_header));
+        // Every name here goes into the child process's environment block, and
+        // `Environ.Map.put` asserts on a name carrying a NUL or a `=`: a config
+        // the reader accepts must be one the spawn can carry.
+        for (entry.env) |pair| try std.testing.expect(mcp_mod.validEnvName(pair[0]));
     }
     if (config.tool_problem) |p| try std.testing.expect(p.kind != .bad_value or p.key.len > 0);
 
@@ -1558,6 +1618,9 @@ test "an [[mcp]] table is a command or a url, and a url server takes the remote 
         "name = \"a\"\nurl = \"https://x.example/mcp\"\ntimeout = 0\n",
         "name = \"a\"\nurl = \"https://x.example/mcp\"\napi_key_env = \"not a name\"\n",
         "name = \"a\"\nurl = \"https://x.example/mcp\"\napi_key_header = \"bad header\"\n",
+        "name = \"a\"\ncommand = \"c\"\nenv = { A=B = \"v\" }\n",
+        "name = \"a\"\ncommand = \"c\"\nenv = { A\x00B = \"v\" }\n",
+        "name = \"a\"\ncommand = \"c\"\nenv = { K = \"a\x00b\" }\n",
     };
     for (broken) |body| {
         const parsed = parseBare(arena, try std.fmt.allocPrint(arena, "[[mcp]]\n{s}", .{body}));

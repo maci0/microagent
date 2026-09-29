@@ -160,7 +160,8 @@ answer and the token counters.
 MDEBUG=1                 trace a stuck stream on stderr, and print the
                          configuration this run resolved: model, base
                          url, ceilings, the config file that was
-                         read, the skill roots, and the
+                         read, the skill roots, the sandbox and
+                         the tools it turned off, and the
                          name of the source the api key came from, never
                          the key.
                          0, off, no, false and an empty value all leave
@@ -208,11 +209,14 @@ monitor looks in, and a `HOME` ending in a newline moves every default path
 empty `HOME` is no home rather than a path off the root.
 
 `MDEBUG=1` prints the configuration the run resolved: model, base url (credentials in it redacted),
-the ceilings, the config file that was read and the size of its prompt addendum, the skill roots, and the
-name of the variable or file the api key came from. The key itself is never printed. Each option has
+the ceilings, the config file that was read and the size of its prompt addendum, the skill roots, whether
+the sandbox is on and how many roots it has, how many tools are off and how many commands are denied, and
+the name of the variable or file the api key came from. The key itself is never printed. Each option has
 up to three sources, and this is how you tell which one answered. The skill roots are named because
 `skills=0` on its own is the same line for a machine with no skills installed and one reading the
-wrong directories.
+wrong directories, and the sandbox line is the only place a run says whether `[sandbox] enabled` was in
+force: a machine refusing a write the config said was allowed is otherwise indistinguishable from one
+where it was refused for its own reasons.
 
 ## Providers and keys
 
@@ -324,7 +328,11 @@ api_key  = "sk-..."   # in the clear: chmod 600, and keep it out of a workspace
 `model` defaults to `deepseek/deepseek-v4-flash` when no source names one. `base_url` and `api_key`
 have no default: a run that names neither is refused before the first request, with the message
 naming the flag, the variable and the config key. `base_url` is checked the way the flag is, so a
-value that is not a url, or a plain `http://` url that is not loopback, is refused.
+value that is not a url, or a plain `http://` url that is not loopback, is refused. `api_key` is
+checked the same way from whichever of the three sources it came from: the key is written into an
+`Authorization` header, so one carrying a control character (a newline a wrapper exported from a file,
+a carriage return in a hand-edited config) is refused before the first request rather than splitting
+the header line.
 `api_key` is a secret written in the clear, and the `read` tool can open the file: a variable or
 `--api-key` keeps it out of a file a model can read.
 
@@ -413,7 +421,10 @@ serialized it, capped at the same 24 KB a built-in tool's output is, with the no
 it was cut from.
 
 A server that cannot start, exits during the handshake, or refuses a call is reported on stderr and
-skipped: one broken entry costs that entry, not the run. The server's stderr is inherited, since
+skipped: one broken entry costs that entry, not the run. An `env` key is a variable name, letters,
+digits and underscores, quoted or not; a key or a value carrying a `=`, a NUL or a control character
+is one the child's environment block cannot hold, so that server is skipped and the line named rather
+than spawned. The server's stderr is inherited, since
 that is where MCP servers write diagnostics. Its environment is the scrubbed one tool subprocesses
 get plus the entry's `env`, so it never sees a provider key. Nor does it see the conversation: a
 call carries the tool name and the model's arguments for it and nothing else. [What leaves the

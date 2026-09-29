@@ -48,7 +48,10 @@
 # `command` server is started over stdio before the first request; `args` is a
 # list of strings and `env` is an inline table. Its tools are offered to the
 # model as mcp__<server>__<tool>. A server that cannot start, be reached or
-# answer is reported on stderr and skipped.
+# answer is reported on stderr and skipped. An `env` key is a variable name:
+# letters, digits and underscores, quoted or not, and a key or a value carrying
+# a `=`, a NUL or a control character is one the child's environment cannot
+# hold, so that server is skipped rather than spawned.
 #
 # [[mcp]]
 # name = "fs"

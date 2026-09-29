@@ -1296,8 +1296,7 @@ fn openRemote(
     }
     // The key is written into a header line, so a byte that ends the line would
     // split the request.
-    for (entry.api_key) |c| {
-        if (c >= 0x20 and c != 0x7f) continue;
+    if (net.hasHeaderControlBytes(entry.api_key)) {
         net.note(io, arena, "microagent: MCP server {s}: the key in ${s} holds a control character; it is skipped\n", .{ shown, chat.safeTextAll(arena, entry.api_key_env) });
         return;
     }

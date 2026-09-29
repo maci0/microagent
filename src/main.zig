@@ -449,6 +449,13 @@ fn runMain(init: std.process.Init) !u8 {
     // The message names every source a key may come from, because the one the
     // user wrote is the one they are looking at.
     if (opts.api_key.len == 0) return configError(io, "no API key: pass --api-key, set {s}, or set api_key in the config file", .{key_var});
+    // The key is written into an `Authorization` header line, so a byte below
+    // 0x20 or DEL ends that line and everything after it is a header of the
+    // caller's own making. A file edited by hand or an `export` fed a stray
+    // newline is the ordinary way one arrives, and the rule is the one a remote
+    // MCP key is already held to.
+    if (net.hasHeaderControlBytes(opts.api_key))
+        return configError(io, "the API key from {s} holds a control character, which cannot go in a header", .{key.source});
     if (opts.base_url.len == 0) return configError(io, "no base url: pass --base-url, set MICROAGENT_BASE_URL, or set base_url in the config file", .{});
     // Refused as a url before it is refused as a leak, because that is what it
     // is: a caller who left the scheme off is told their key was about to go
@@ -716,7 +723,8 @@ const help_text =
     \\MDEBUG=1                 trace a stuck stream on stderr, and print the
     \\                         configuration this run resolved: model, base
     \\                         url, ceilings, the config file that was
-    \\                         read, the skill roots, and the
+    \\                         read, the skill roots, the sandbox and
+    \\                         the tools it turned off, and the
     \\                         name of the source the api key came from, never
     \\                         the key.
     \\                         0, off, no, false and an empty value all leave
@@ -1333,6 +1341,38 @@ fn resolveKey(environ: *std.process.Environ.Map, given: []const u8, from_config:
 /// The one variable the API key is read from.
 const key_var = "MICROAGENT_API_KEY";
 
+test "a key carrying a control character is refused, from every source" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    var env: std.process.Environ.Map = .init(arena);
+    // The ordinary way one arrives: a wrapper exporting a value it read out of
+    // a file carries the newline that file ended with, and a config file
+    // edited by hand can hold a CR. Both are the key the run would put in an
+    // `Authorization` header, so both are refused before the first request.
+    try env.put(key_var, "sk-a-key\r\nInjected: x");
+    const from_env = resolveKey(&env, "", "");
+    try std.testing.expectEqualStrings(key_var, from_env.source);
+    try std.testing.expect(net.hasHeaderControlBytes(from_env.value));
+
+    const from_flag = resolveKey(&env, "sk-a\nkey", "");
+    try std.testing.expectEqualStrings("--api-key", from_flag.source);
+    try std.testing.expect(net.hasHeaderControlBytes(from_flag.value));
+
+    // A separate map, so the variable above does not answer first: the file is
+    // the weakest of the three, and a control character there is the case a
+    // hand-edited config file produces.
+    var bare: std.process.Environ.Map = .init(arena);
+    const from_file = resolveKey(&bare, "", "sk-a\x7fkey");
+    try std.testing.expectEqualStrings("config file", from_file.source);
+    try std.testing.expect(net.hasHeaderControlBytes(from_file.value));
+
+    // A key that is only whitespace-bearing in the ordinary sense is a key.
+    const clean = resolveKey(&bare, "sk-a key", "");
+    try std.testing.expect(!net.hasHeaderControlBytes(clean.value));
+}
+
 /// Every environment variable the program reads, which is what a user has to
 /// know to configure it. The resolution order each one is read in is spelled by
 /// the reader that reads it; this list is the documentation check and nothing
@@ -1552,6 +1592,7 @@ fn traceConfig(
         \\[mdebug] config={s} system_prompt_extra_bytes={d}
         \\[mdebug] skills={d} skill_roots={s}
         \\[mdebug] mcp_servers={d} mcp_tools={d}
+        \\[mdebug] sandbox={s} writable_roots={d} disabled_tools={d} deny_commands={d}
         \\[mdebug] api key from {s}
         \\
     , .{
@@ -1570,6 +1611,16 @@ fn traceConfig(
         skillRootsText(arena, skill_roots),
         opts.mcp.items.len,
         opts.mcp.toolCount(),
+        // The three settings that decide what the run is allowed to touch, and
+        // the ones a trace is the only place to look when a machine behaves as
+        // though the sandbox were on and it is not. The roots are counted
+        // rather than listed: they are already in `sandbox.writable` in the
+        // file the line above names, and a count is what tells a reader that
+        // the config was read at all.
+        if (opts.sandbox.enabled) "enabled" else "off",
+        opts.writable_roots.len,
+        opts.disabled_tools.count(),
+        opts.deny_commands.len,
         chat_mod.safeTextAll(arena, key_source),
     });
 }
