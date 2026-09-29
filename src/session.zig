@@ -110,8 +110,15 @@ const max_session_suffix_bytes = std.fmt.count("{d}", .{session_name_attempts - 
 /// the run creates out of nothing on a fresh account. Neither mode is applied
 /// to a directory that already exists, so an operator who pointed
 /// MICROAGENT_SESSION_DIR at a shared store keeps the mode they gave it.
-const log_file_mode: Io.File.Permissions = @enumFromInt(@as(std.posix.mode_t, 0o600));
-const log_dir_mode: Io.File.Permissions = @enumFromInt(@as(std.posix.mode_t, 0o700));
+///
+/// `pub` because the sandbox module makes the same directory earlier than this
+/// one does, on a run with `enabled = true`: the store is opened after the
+/// writable roots are resolved, and a mode applied to a directory that already
+/// exists is not applied at all. A second creator that spelled its own mode
+/// therefore decided this one, and the default directory mode is a 0o755 the
+/// first paragraph above is written against.
+pub const log_file_mode: Io.File.Permissions = @enumFromInt(@as(std.posix.mode_t, 0o600));
+pub const log_dir_mode: Io.File.Permissions = @enumFromInt(@as(std.posix.mode_t, 0o700));
 
 /// This run's log, under a name nothing already holds.
 ///

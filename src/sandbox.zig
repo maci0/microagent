@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const net = @import("net.zig");
 const chat = @import("chat.zig");
+const session = @import("session.zig");
 
 const Io = std.Io;
 
@@ -65,7 +66,20 @@ pub fn resolveWritableRoots(
                 try std.fs.path.resolve(arena, &.{sdir_exp})
             else
                 try std.fs.path.resolve(arena, &.{ cwd, sdir_exp });
-            _ = std.Io.Dir.cwd().createDirPath(io, resolved_sdir) catch {};
+            _ = std.Io.Dir.cwd().createDirPathStatus(io, resolved_sdir, session.log_dir_mode) catch |err| {
+                // The store is opened after this, and a mode is not applied to
+                // a directory that already exists, so a failure here is not one
+                // the store's own create can come back from: it decides, and
+                // the run that made no directory leaves a root the sandbox
+                // permits and nothing under it to write. The store names this
+                // directory when it cannot be made either, so the line is a
+                // repeat of one the operator gets rather than the only one,
+                // and a sandbox-enabled run on a store it cannot create says
+                // so before any tool call is refused.
+                net.note(io, arena, "microagent: sandbox: the session directory {s} could not be created ({s}); it is still a writable root, and a tool call that writes under it will fail on its own\n", .{
+                    chat.safeTextAll(arena, resolved_sdir), @errorName(err),
+                });
+            };
             try appendRoot(io, arena, &roots, std.mem.trimEnd(u8, resolved_sdir, "/\\"));
         }
     }
@@ -471,6 +485,30 @@ test "resolveWritableRoots resolves cwd, tmp, session_dir, and custom roots" {
         } else false;
         try std.testing.expect(found);
     }
+}
+
+// The store is opened after the roots are resolved, and a mode is not applied
+// to a directory that already exists, so the mode this creates it with is the
+// mode the store gets. A run with `enabled = true` made it a 0o755, and the
+// names of the last 200 runs were readable by every other account on the
+// machine on a store whose logs are 0o600.
+test "the session directory this creates carries the store's own mode" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const parent = buf[0..try tmp.dir.realPath(io, &buf)];
+    const sdir = try std.fs.path.join(arena, &.{ parent, "store", "sessions" });
+
+    _ = try resolveWritableRoots(io, arena, null, &.{}, sdir);
+
+    const stat = try std.Io.Dir.cwd().statFile(io, sdir, .{});
+    try std.testing.expectEqual(@as(std.posix.mode_t, 0o700), stat.permissions.toMode() & 0o777);
 }
 
 // The sandbox grants a directory, and a directory on macOS is reached through
