@@ -142,7 +142,7 @@ pub fn roots(
         var out: std.ArrayList(Root) = .empty;
         var parts = std.mem.splitScalar(u8, list, ':');
         while (parts.next()) |part| {
-            const path = std.mem.trim(u8, part, " \t");
+            const path = std.mem.trim(u8, part, net.env_surrounding);
             if (path.len == 0) continue;
             out.append(arena, resolvedRoot(arena, path)) catch return out.items;
         }

@@ -30,6 +30,13 @@ const max_asset_bytes: usize = 256 * 1024 * 1024;
 // hold one rather than to look tidy.
 const install_line_bytes: usize = net.quoted_value_bytes + std.fs.max_path_bytes + 32;
 
+/// The widest line an error message here prints: a whole install path, which is
+/// not quoted, beside a sentence. A buffer an untrusted path could overrun
+/// replaced the reason with "failed", the one line that does not name the path
+/// that failed, and the same bound holds for every argument the other messages
+/// pass because `quoteUntrusted` cuts those to `net.quoted_value_bytes`.
+const error_line_bytes: usize = std.fs.max_path_bytes + 256;
+
 /// A value this program does not spell, as the operator can be shown it: cut on
 /// a codepoint boundary (a partial codepoint in a diagnostic reads as a
 /// replacement character in the middle of the name), with every control
@@ -377,8 +384,8 @@ fn parseRelease(arena: std.mem.Allocator, body: []const u8) !Release {
         .object => |o| o,
         else => return error.MalformedRelease,
     };
-    const tag = stringMember(obj, "tag_name") orelse return error.MalformedRelease;
-    const page = stringMember(obj, "html_url") orelse return error.MalformedRelease;
+    const tag = chat.str(obj.get("tag_name")) orelse return error.MalformedRelease;
+    const page = chat.str(obj.get("html_url")) orelse return error.MalformedRelease;
     const arr = switch (obj.get("assets") orelse return error.MalformedRelease) {
         .array => |a| a,
         else => return error.MalformedRelease,
@@ -389,25 +396,14 @@ fn parseRelease(arena: std.mem.Allocator, body: []const u8) !Release {
             .object => |o| o,
             else => continue,
         };
-        const name = stringMember(asset_obj, "name") orelse continue;
-        const url = stringMember(asset_obj, "browser_download_url") orelse continue;
+        const name = chat.str(asset_obj.get("name")) orelse continue;
+        const url = chat.str(asset_obj.get("browser_download_url")) orelse continue;
         try list.append(arena, .{ .name = name, .url = url });
     }
     return .{
         .tag = tag,
         .page = page,
         .assets = try list.toOwnedSlice(arena),
-    };
-}
-
-/// A member of a decoded object, or null when it is absent or is not a string.
-/// A member of any other type is a payload GitHub did not write, and every
-/// caller treats one exactly as it treats a member that is not there.
-fn stringMember(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
-    const value = obj.get(key) orelse return null;
-    return switch (value) {
-        .string => |s| s,
-        else => null,
     };
 }
 
@@ -511,7 +507,7 @@ test "a zero splat writes no copy of the pattern" {
 }
 
 fn fail(io: std.Io, comptime fmt: []const u8, args: anytype) u8 {
-    var buf: [512]u8 = undefined;
+    var buf: [error_line_bytes]u8 = undefined;
     const line = std.fmt.bufPrint(&buf, "microagent update: " ++ fmt ++ "\n", args) catch
         "microagent update: failed\n";
     net.writeErr(io, line);
@@ -1066,7 +1062,7 @@ fn runChecked(
 /// A command line that does not parse. The message and the usage text both go
 /// to stderr, so a failed invocation leaves stdout empty for whatever reads it.
 fn updateUsageError(io: std.Io, comptime fmt: []const u8, args: anytype) u8 {
-    var buf: [512]u8 = undefined;
+    var buf: [error_line_bytes]u8 = undefined;
     const line = std.fmt.bufPrint(&buf, "microagent update: " ++ fmt ++ "\n", args) catch
         "microagent update: bad arguments\n";
     net.writeErr(io, line);
