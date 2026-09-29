@@ -1233,6 +1233,23 @@ pub fn withKeys(arena: std.mem.Allocator, environ_map: *const std.process.Enviro
     return out;
 }
 
+/// The line for a key variable the environment holds no value for, or null
+/// when the entry names no variable or carries a key. An unset, an empty and a
+/// whitespace-only variable are the same case here, because `withKeys` trims
+/// and leaves all three as no key.
+///
+/// The line is a note rather than a refusal: the server may be one that
+/// answers without a key, and dropping it would cost the run tools the model
+/// could have called. What it buys is that a server connected with less than
+/// its table asked for says so at startup, where a reader is looking, rather
+/// than at the first call a turn later.
+fn missingKeyNote(arena: std.mem.Allocator, entry: Entry) ?[]const u8 {
+    if (entry.api_key.len != 0 or entry.api_key_env.len == 0) return null;
+    return std.fmt.allocPrint(arena, "microagent: MCP server {s}: {s} is not set in the environment, so the server is connected without the key it names\n", .{
+        chat.safeTextAll(arena, entry.name), chat.safeTextAll(arena, entry.api_key_env),
+    }) catch null;
+}
+
 /// Whether a name can be half of an exposed tool name: the letters, digits,
 /// dot, dash and underscore a tool name may hold, with no `__` in it, because
 /// that pair is what separates the three parts of an exposed name. The config
@@ -1375,6 +1392,15 @@ fn openRemote(
         net.note(io, arena, "microagent: MCP server {s}: the key in {s} holds a control character; it is skipped\n", .{ shown, chat.safeTextAll(arena, entry.api_key_env) });
         return;
     }
+    // A `api_key_env` the environment does not answer is the one way this entry
+    // is connected with less than the file asked for, and nothing else names
+    // it: a server whose tools are not in the table is connected without a
+    // handshake, so the request that would be refused comes at the first tool
+    // call, a turn into the run, as a 401 from a server the model was offered
+    // by name. The variable is the operator's own spelling of where the key
+    // comes from, so it is named here, at the only place a reader of the
+    // startup output is still looking.
+    if (missingKeyNote(arena, entry)) |msg| net.note(io, arena, "{s}", .{msg});
     // Every way this can leave an entry out says so, the way the two above do:
     // an entry the operator wrote down and this run drops without a line reads
     // from outside as a server that was never configured.
@@ -2386,6 +2412,37 @@ test "a key is read from the environment by the name the entry gives" {
     try std.testing.expectEqualStrings("", keyed[2].api_key);
     try std.testing.expectEqualStrings("", keyed[3].api_key);
     try std.testing.expectEqualStrings("SET_KEY", keyed[0].api_key_env);
+}
+
+// A server whose key variable is not in the environment is the one entry the
+// run connects with less than its table asked for, and the note is what says so.
+test "a key variable the environment does not answer is named, and a key that arrived is not" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("SET_KEY", " sk-live\n");
+    try env.put("EMPTY_KEY", "  ");
+    const entries = [_]Entry{
+        .{ .name = "a", .url = "https://a.example/mcp", .api_key_env = "SET_KEY" },
+        .{ .name = "b", .url = "https://b.example/mcp", .api_key_env = "EMPTY_KEY" },
+        .{ .name = "c", .url = "https://c.example/mcp", .api_key_env = "UNSET_KEY" },
+        .{ .name = "d", .url = "https://d.example/mcp" },
+    };
+    const keyed = try withKeys(arena, &env, &entries);
+
+    // A key arrived, so there is nothing to say about the variable it came from.
+    try std.testing.expect(missingKeyNote(arena, keyed[0]) == null);
+    // Whitespace-only and unset are both no key, and both name the variable the
+    // operator wrote in the file rather than a general statement about keys.
+    for ([_]usize{ 1, 2 }) |i| {
+        const note = missingKeyNote(arena, keyed[i]) orelse return error.TestUnexpectedResult;
+        try std.testing.expect(std.mem.indexOf(u8, note, keyed[i].api_key_env) != null);
+        try std.testing.expect(std.mem.indexOf(u8, note, keyed[i].name) != null);
+    }
+    // An entry that named no variable is a server meant to be keyless.
+    try std.testing.expect(missingKeyNote(arena, keyed[3]) == null);
 }
 
 // A streamable-HTTP MCP server on 127.0.0.1, answering from a thread. Every

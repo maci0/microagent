@@ -330,6 +330,22 @@ release, and `microagent update` moves you to it.
   one of them still ran the other. Every test artifact the build makes now
   takes the same `-Dtest-filter`.
 
+- A config list written over several lines was refused, and the key kept its
+  default, which for `deny_commands` and `[sandbox] writable` is the empty list:
+  a file denying `sudo` one element per line ran without the denial, and said
+  only that the value was not one the key takes. An array or an inline table is
+  now read across lines, one element per line, with a `#` comment on any of
+  them. A list that is never closed is still refused by name, and stops at the
+  line that opens a table, so one missing bracket costs the run the key and not
+  the rest of the file.
+
+- A remote MCP server whose `api_key_env` is not in the environment is connected
+  without the key its table named, and nothing said so. A server with no key of
+  its own is handshaken before its first use, so the request that would be
+  refused came at the first tool call, a turn into the run, as a 401 from a
+  server the model had been offered by name. The variable is now named on
+  stderr where the rest of that server's problems are named.
+
 - The gate reads a file the contributor has not committed yet. Every linter's
   file list came from `git ls-files`, which names the tracked tree and nothing
   else, so a `.zig`, `.py`, `.sh`, `.yml` or `.md` file that existed on disk but

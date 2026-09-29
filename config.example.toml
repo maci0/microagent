@@ -10,6 +10,10 @@
 # MICROAGENT_SKILLS sets the skills for one run and overrides this file, since a
 # value named in the environment is the more explicit statement.
 
+# A list may be written over as many lines as it takes, one element per line, and
+# a `#` comment may trail any of them. The closing bracket has to be there: a
+# list left open is refused by name, and the tables under it still apply.
+
 # Where the run talks and with what key. Each is the weakest of the three
 # sources: --flag beats the environment variable, which beats this file.
 #
@@ -83,6 +87,8 @@
 # the key itself; unset or empty sends no header), api_key_header is where the
 # key goes (default Authorization, sent as "Bearer <key>"; any other header gets
 # the key as it is), and timeout is seconds per request, 1 to 600, default 30.
+# A variable that is unset or empty sends no header, and the server is named on
+# stderr, since a keyless server is a run that finds out a turn later.
 # The variable is removed from the environment tool subprocesses inherit.
 #
 # [[mcp]]

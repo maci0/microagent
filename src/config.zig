@@ -32,7 +32,9 @@
 //! Only the subset of TOML those need is read: `key = value`, a quoted or bare
 //! string, `true` or `false`, an integer for a timeout, an array of strings, a
 //! `[[mcp]]` array of tables, `[tools.<name>]` tables, and an inline table of
-//! strings for `env`. `system_prompt_extra` alone also takes a multi-line string.
+//! strings for `env`. `system_prompt_extra` alone also takes a multi-line string,
+//! and an array or an inline table may run over as many lines as it takes, the
+//! way TOML allows it.
 //! Dates, floats, nested tables and other dotted keys have nowhere to go, so
 //! they are not parsed and not missed.
 //!
@@ -60,7 +62,36 @@ pub const agents_files_default = [_][]const u8{"AGENTS.md"};
 /// The longest path `agents_files` may name. A path past this is not a path.
 pub const max_agents_path_bytes: usize = 1024;
 
-const Lines = std.mem.SplitIterator(u8, .scalar);
+/// The longest a value running over several lines may be, joined. A list is a
+/// handful of names, and one longer than this is a file pasted where a list was
+/// meant.
+const max_value_bytes: usize = 64 * 1024;
+
+/// The lines of the document left to read, with a look at the next one that
+/// takes none of it. A value that runs over several lines has to see the line
+/// after the one it holds before taking it: a line opening a table ends the
+/// value rather than being read into it, and a list that was never closed must
+/// not cost the run the tables under it.
+const Lines = struct {
+    rest: []const u8,
+
+    fn next(self: *Lines) ?[]const u8 {
+        const at = std.mem.indexOfScalar(u8, self.rest, '\n') orelse {
+            if (self.rest.len == 0) return null;
+            const line = self.rest;
+            self.rest = "";
+            return line;
+        };
+        const line = self.rest[0..at];
+        self.rest = self.rest[at + 1 ..];
+        return line;
+    }
+
+    fn peek(self: *const Lines) ?[]const u8 {
+        const at = std.mem.indexOfScalar(u8, self.rest, '\n') orelse return if (self.rest.len == 0) null else self.rest;
+        return self.rest[0..at];
+    }
+};
 
 /// One MCP server as the file declares it: the entry this run will start, built
 /// up a line at a time while a `[[mcp]]` table is open, beside the three
@@ -208,7 +239,7 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8) Config {
     var presets: std.EnumArray(mcp_mod.Preset, PresetSetting) = .initFill(.{});
     var open_tool: ?ToolTarget = null;
 
-    var lines = std.mem.splitScalar(u8, chat.stripBom(text), '\n');
+    var lines: Lines = .{ .rest = chat.stripBom(text) };
     while (lines.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \t\r");
         if (line.len == 0 or line[0] == '#') continue;
@@ -288,12 +319,16 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8) Config {
         const key = std.mem.trim(u8, line[0..eq], " \t");
         if (key.len == 0) continue;
         const value_text = std.mem.trim(u8, line[eq + 1 ..], " \t");
+        const value = completedValue(arena, &lines, value_text) orelse {
+            config.note(.{ .key = key, .kind = .bad_value });
+            continue;
+        };
 
         switch (section) {
-            .top => topKey(&config, arena, &lines, key, value_text),
-            .sandbox => sandboxOnly(&config, arena, key, value_text),
-            .mcp => if (open) |server| serverKey(&config, arena, server, key, value_text),
-            .tool => if (open_tool) |target| toolKey(arena, &config, target, &presets, key, value_text),
+            .top => topKey(&config, arena, &lines, key, value),
+            .sandbox => sandboxOnly(&config, arena, key, value),
+            .mcp => if (open) |server| serverKey(&config, arena, server, key, value),
+            .tool => if (open_tool) |target| toolKey(arena, &config, target, &presets, key, value),
             .other => {},
         }
     }
@@ -763,12 +798,70 @@ fn unescape(arena: std.mem.Allocator, body: []const u8) ?[]const u8 {
     return out.items;
 }
 
+/// The value of a key, whole: an array or an inline table whose closing bracket
+/// is on a later line, joined back into the one line the readers above take.
+///
+/// A list written over several lines is what TOML allows and what a hand-written
+/// file does once a deny list or a set of writable roots grows past one line.
+/// Read one line at a time it was a value this reader could not use, so the key
+/// was refused and the run went on with the default: for `deny_commands` and
+/// `writable` that default is the empty list, so a file denying `sudo` ran
+/// without the denial and a sandbox list short by a root refused a write the
+/// file allowed. The line naming the refusal cannot say which commands were
+/// dropped, because the reader stopped at the first one.
+///
+/// Brackets are counted outside quotes, so a `]` inside a string is text, and a
+/// `#` comment is not counted at all: a trailing comment that opens a bracket
+/// would send the reader looking for the one that closes it and take the tables
+/// under it with the value. A line that opens a table ends the value instead of
+/// being read into it: a file whose list is never closed must not swallow the
+/// tables under it, or one unclosed bracket costs the run the whole rest of the
+/// file. A value with no closing bracket, or one past the cap, is null and the
+/// key is named.
+fn completedValue(arena: std.mem.Allocator, lines: *Lines, first: []const u8) ?[]const u8 {
+    if (bracketBalance(stripComment(first)) <= 0) return first;
+    var joined: std.ArrayList(u8) = .empty;
+    joined.appendSlice(arena, first) catch return null;
+    while (true) {
+        const next = std.mem.trimEnd(u8, lines.peek() orelse return null, "\r");
+        if (next.len == 0 or next[0] == '[') return null;
+        _ = lines.next();
+        joined.append(arena, '\n') catch return null;
+        joined.appendSlice(arena, next) catch return null;
+        if (joined.items.len > max_value_bytes) return null;
+        const whole = stripComments(arena, joined.items) orelse return null;
+        if (bracketBalance(whole) <= 0) return joined.items;
+    }
+}
+
+/// How far the brackets of a value open, counted outside quotes so a bracket in
+/// a string is text. Zero is a value that closes on the line it started on.
+fn bracketBalance(text: []const u8) i32 {
+    var depth: i32 = 0;
+    var quote: u8 = 0;
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        const c = text[i];
+        if (quote != 0) {
+            if (quote == '"' and c == '\\') i += 1 else if (c == quote) quote = 0;
+            continue;
+        }
+        switch (c) {
+            '"', '\'' => quote = c,
+            '[', '{' => depth += 1,
+            ']', '}' => depth -= 1,
+            else => {},
+        }
+    }
+    return depth;
+}
+
 /// An array of strings, or null when the text is not one. A bare `[]` is an
 /// empty list, which is a statement the caller can tell from a missing key.
 /// Elements may be quoted or bare, and a trailing comma is accepted, because
 /// the file is written by hand.
 fn stringArray(arena: std.mem.Allocator, raw: []const u8) ?[]const []const u8 {
-    const text = std.mem.trim(u8, stripComment(raw), " \t");
+    const text = std.mem.trim(u8, stripComments(arena, raw) orelse return null, " \t");
     if (text.len < 2 or text[0] != '[' or text[text.len - 1] != ']') return null;
     const parts = splitQuoted(arena, text[1 .. text.len - 1], ',') orelse return null;
     var out: std.ArrayList([]const u8) = .empty;
@@ -790,7 +883,7 @@ fn stringArray(arena: std.mem.Allocator, raw: []const u8) ?[]const []const u8 {
 /// block cannot carry, so passing it on reaches `Environ.Map.put`, which
 /// asserts on exactly those bytes and takes the whole run down with it.
 fn inlineTable(arena: std.mem.Allocator, raw: []const u8) ?[]const [2][]const u8 {
-    const text = std.mem.trim(u8, stripComment(raw), " \t");
+    const text = std.mem.trim(u8, stripComments(arena, raw) orelse return null, " \t");
     if (text.len < 2 or text[0] != '{' or text[text.len - 1] != '}') return null;
     const parts = splitQuoted(arena, text[1 .. text.len - 1], ',') orelse return null;
     var out: std.ArrayList([2][]const u8) = .empty;
@@ -847,6 +940,47 @@ fn stripComment(raw: []const u8) []const u8 {
     return raw[0..at];
 }
 
+/// A value with every `#` comment outside quotes taken off, one line at a time.
+/// The single-line reader above cuts at the first `#` outside quotes, which is
+/// the whole text for a value written on one line; a value joined over several
+/// lines carries its comment on the line the operator wrote it on, and cutting
+/// the text there took the rest of the list with it: the elements after a
+/// commented line were not read, and the key was refused over a comment.
+///
+/// The newlines the comments sat on go with them, so an element carries no
+/// line break of its own. Text with no comment is returned as written.
+fn stripComments(arena: std.mem.Allocator, raw: []const u8) ?[]const u8 {
+    if (indexOutsideQuotes(raw, '#') == null) return raw;
+    var out: std.ArrayList(u8) = .empty;
+    var quote: u8 = 0;
+    var i: usize = 0;
+    while (i < raw.len) : (i += 1) {
+        const c = raw[i];
+        if (quote != 0) {
+            if (quote == '"' and c == '\\') {
+                out.append(arena, c) catch return null;
+                i += 1;
+                if (i < raw.len) out.append(arena, raw[i]) catch return null;
+                continue;
+            }
+            if (c == quote) quote = 0;
+            out.append(arena, c) catch return null;
+            continue;
+        }
+        if (c == '"' or c == '\'') {
+            quote = c;
+            out.append(arena, c) catch return null;
+            continue;
+        }
+        if (c == '#') {
+            while (i < raw.len and raw[i] != '\n') i += 1;
+            continue;
+        }
+        out.append(arena, c) catch return null;
+    }
+    return out.items;
+}
+
 /// The pieces of a bracketed value, split on `sep` outside quotes, so a comma
 /// inside a quoted element is text rather than a separator. Null when a quote
 /// is never closed, which is a line that cannot be read whole.
@@ -870,12 +1004,15 @@ fn splitQuoted(arena: std.mem.Allocator, inner: []const u8, sep: u8) ?[]const []
             continue;
         }
         if (c == sep) {
-            out.append(arena, std.mem.trim(u8, inner[start..i], " \t")) catch return null;
+            // A line break is trimmed like a space: an element of a list that
+            // runs over several lines begins on its own line, and the newline
+            // in front of it would leave the value starting with one.
+            out.append(arena, std.mem.trim(u8, inner[start..i], " \t\r\n")) catch return null;
             start = i + 1;
         }
     }
     if (quote != 0) return null;
-    out.append(arena, std.mem.trim(u8, inner[start..], " \t")) catch return null;
+    out.append(arena, std.mem.trim(u8, inner[start..], " \t\r\n")) catch return null;
     return out.items;
 }
 
@@ -1262,6 +1399,102 @@ test "skills are a list of directories, and absent is not the same as empty" {
     try std.testing.expectEqual(@as(usize, 2), comma.skills.?.len);
     try std.testing.expectEqualStrings("./a,b", comma.skills.?[0]);
     try std.testing.expectEqualStrings("./c", comma.skills.?[1]);
+}
+
+// A list written over several lines is TOML and a hand-written file's ordinary
+// shape once it grows. Read one line at a time it left the key at its default,
+// which for a deny list is the empty one: a file denying sudo ran without the
+// denial, and the line naming the refusal could not say what was dropped.
+test "a list or a table that runs over several lines is read whole" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    const denied = parse(arena,
+        \\deny_commands = [
+        \\  "sudo",
+        \\  "su",   # and the rest of the list
+        \\  "shutdown",
+        \\]
+        \\
+    );
+    try std.testing.expect(denied.problem == null);
+    try std.testing.expectEqual(@as(usize, 3), denied.deny_commands.len);
+    try std.testing.expectEqualStrings("shutdown", denied.deny_commands[2]);
+
+    const writable = parse(arena,
+        \\[sandbox]
+        \\enabled = true
+        \\writable = [
+        \\  "build",
+        \\  "dist",
+        \\]
+        \\
+    );
+    try std.testing.expect(writable.problem == null);
+    try std.testing.expectEqual(@as(usize, 2), writable.sandbox.writable.len);
+    try std.testing.expectEqualStrings("dist", writable.sandbox.writable[1]);
+
+    // A bracket inside a string is text, so the value is not closed early and
+    // the element that carries it is read whole.
+    const bracket = parse(arena,
+        \\deny_commands = [
+        \\  "echo [a]",
+        \\  "tail -f",
+        \\]
+        \\
+    );
+    try std.testing.expect(bracket.problem == null);
+    try std.testing.expectEqual(@as(usize, 2), bracket.deny_commands.len);
+    try std.testing.expectEqualStrings("echo [a]", bracket.deny_commands[0]);
+
+    const env = parse(arena,
+        \\[[mcp]]
+        \\name = "fs"
+        \\command = "npx"
+        \\env = {
+        \\  LOG = "debug",
+        \\  LEVEL = "1",
+        \\}
+        \\
+    );
+    // The four presets are on by default and are servers too, so this is the
+    // one table the file wrote rather than the only server in the run.
+    var found: ?mcp_mod.Entry = null;
+    for (env.mcp) |entry| {
+        if (std.mem.eql(u8, entry.name, "fs")) found = entry;
+    }
+    const fs = found orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 2), fs.env.len);
+    try std.testing.expectEqualStrings("LEVEL", fs.env[1][0]);
+
+    // A comment is not part of the value, so a bracket in one neither closes it
+    // nor sends the reader looking for the line that would: the table under a
+    // commented list is still read.
+    const commented = parse(arena,
+        \\deny_commands = ["sudo"]   # deny [a] and [b] too
+        \\[sandbox]
+        \\enabled = true
+        \\
+    );
+    try std.testing.expect(commented.problem == null);
+    try std.testing.expectEqual(@as(usize, 1), commented.deny_commands.len);
+    try std.testing.expect(commented.sandbox.enabled);
+
+    // A list that is never closed is named, and the table under it is still
+    // read: one missing bracket must not cost the run the rest of the file.
+    const unclosed = parse(arena,
+        \\deny_commands = [
+        \\  "sudo",
+        \\[sandbox]
+        \\enabled = true
+        \\writable = ["build"]
+        \\
+    );
+    try std.testing.expectEqual(Problem.Kind.bad_value, unclosed.problem.?.kind);
+    try std.testing.expectEqual(@as(usize, 0), unclosed.deny_commands.len);
+    try std.testing.expect(unclosed.sandbox.enabled);
+    try std.testing.expectEqual(@as(usize, 1), unclosed.sandbox.writable.len);
 }
 
 test "deny_commands is one top-level list, and no other spelling is read" {
