@@ -35,6 +35,10 @@ release, and `microagent update` moves you to it.
 
 ### Changed
 
+- The tool gutter names the tool with a colon (⏺ bash: echo hi) and draws that name bold when
+  stderr is a terminal. A captured run, which is every gauntlet review and every log file, gets the
+  same line and no escape bytes.
+
 - The run says where it is. Every `bash` call starts in the current directory and no shell carries
   over, but the prompt never named that directory, so on a fresh context the model guessed one and
   prefixed commands with `cd <guess> || cd .`. The prompt and the bash tool now say the call starts
