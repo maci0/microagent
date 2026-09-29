@@ -64,7 +64,7 @@ are on the [releases page](https://github.com/maci0/microagent/releases), each w
 sidecar:
 
 ```sh
-v=v0.2.0 t=x86_64-linux-musl
+v=v0.3.0 t=x86_64-linux-musl
 curl -fLO https://github.com/maci0/microagent/releases/download/$v/microagent-$v-$t
 curl -fLO https://github.com/maci0/microagent/releases/download/$v/microagent-$v-$t.sha256
 sha256sum -c microagent-$v-$t.sha256 && install -m 755 microagent-$v-$t ~/.local/bin/microagent
@@ -97,7 +97,7 @@ self-update.
 
 ## Status
 
-Version 0.2.0. What works: the tool loop against OpenRouter, DeepSeek, OpenAI and any other
+Version 0.3.0. What works: the tool loop against OpenRouter, DeepSeek, OpenAI and any other
 OpenAI-compatible endpoint; skills; MCP servers over stdio; the session log; verified self-update;
 reproducible release builds for Linux and macOS.
 
