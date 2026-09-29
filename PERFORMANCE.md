@@ -69,6 +69,13 @@ Kept out on the numbers, not on taste:
   run concurrently.
 - **A byte-level compaction rewrite.** Compaction is 4.7 ms per megabyte, about 0.02% of a run, and
   the replacement would hand-rewrite the exact bytes the prompt cache depends on.
+- **A prefix read for skill discovery.** The listing reads each `SKILL.md` whole and keeps it in the
+  run arena, because the name and description it lists are slices of that text. Measured with
+  `hyperfine -w 3 -r 15` against the stub provider: 20 skills of 4 KB are inside the noise of no
+  skills at all (p50 1.28 against 1.36 ms), 200 of them add 0.7 ms, and 200 of 100 KB add 5 ms and
+  about 20 MB resident. A head-only read helps only the last case, since a file smaller than the cap
+  is read whole either way, so it is not worth the open-and-read-to-a-limit loop it needs. Revisit if
+  a skill library that size turns up.
 
 The escaper tests that came out of the second attempt were kept, because they cover a real edge:
 the escaper takes a byte's width from its lead byte, and an escapable byte or a multi-byte character
@@ -168,6 +175,12 @@ not the sum. Its guard is a test, not a clock: the waiter server refuses to answ
 server has run, so a sequential connect drops it and the test sees one server where it expects two.
 On a machine where `/bin/sh` has no fractional `sleep` the waiter's bounded wait spins instead of
 sleeping and the guard still works, only faster to give up.
+
+The skill-discovery row is the same shape of measurement: `MICROAGENT_SKILLS` pointed at a directory
+of N generated `SKILL.md` files, `hyperfine -w 3 -r 15`, and the numbers above are the medians.
+`hyperfine -w 3 -r 20` over an instant-answer server put the whole MCP path — spawn, two round
+trips, and the reap at the end — at 0.7 ms for one server, 1.2 ms for three and 3.2 ms for ten,
+against 1.5 ms for a run with none, which is why nothing after the boot overlap was worth touching.
 
 The instruction gate needs `perf` and exits 1 when a row leaves its band, 2 when a row cannot be
 measured at all. It is not in `make check` because a shared runner may have performance counters
