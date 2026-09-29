@@ -1543,6 +1543,10 @@ fn scrubSecrets(env: *std.process.Environ.Map, remote: []const mcp_mod.Entry) vo
 const LoadedConfig = struct {
     /// Text appended to the system prompt, empty for none.
     system_prompt_extra: []const u8,
+    /// The repository instruction files the config named, or null when it
+    /// named none, which is how the caller tells "read AGENTS.md" from "the
+    /// file turned the read off".
+    agents_files: ?[]const []const u8,
     /// The provider settings the file named, empty when it named none.
     model: []const u8,
     base_url: []const u8,
@@ -1570,6 +1574,7 @@ const LoadedConfig = struct {
 fn fromConfig(parsed: config_mod.Config, source: ?[]const u8) LoadedConfig {
     return .{
         .system_prompt_extra = parsed.system_prompt_extra,
+        .agents_files = parsed.agents_files,
         .model = parsed.model,
         .base_url = parsed.base_url,
         .api_key = parsed.api_key,
