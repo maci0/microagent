@@ -343,32 +343,61 @@ zig-version:
 # deeper is linted by nothing and the gate still passes. xargs splits the list
 # if it grows past one command's argument limit, and exits non-zero either way.
 #
-# --enable names the optional checks, which are off unless asked for. These six
-# are the ones that find a defect rather than a spelling, and the tree passes
-# all six today, so turning them on costs nothing and covers two real classes
-# the default set leaves open:
+# --enable names the optional checks, which are off unless asked for. Every
+# one of these finds a defect rather than a spelling, and the tree passes all
+# of them today, so turning them on costs nothing and covers real classes the
+# default set leaves open:
 # check-set-e-suppressed, a `set -e` whose failure is swallowed by a `||` or
-# `&&` and never reaches the shell; check-unassigned-upper, an uppercase
+# `&&` and never reaches the shell; check-unassigned-uppercase, an uppercase
 # variable used on a path that never assigned it; deprecate-which, `which`
 # where the script runs under a shell or a PATH that may not carry it;
-# avoid-null-test-override, a `[ -n $x ]` that tests a literal "null" the
-# script just assigned; check-extra-masked-returns, a command substitution
-# whose failure is discarded, which is how an empty command line reached
-# `sh -c` and was recorded as a pass; and quote-safe-variables, a bare `return`
-# whose value changes meaning if it ever carries one. The names are the ones
-# shellcheck 0.9, the version the ubuntu-24.04 image carries, already accepts,
-# so this runs on the runner as it runs here. require-variable-braces (SC2250)
-# stays off: it is a spelling rule, and asking thirteen benchmark scripts to
-# write `${root}` where `$root` is the same word is a change the gate should
-# not ask for. Enable it per file with a `# shellcheck disable=` carrying the
-# reason when one is worth taking.
-SHELLCHECK_OPTS := -x \
-	--enable=check-set-e-suppressed,check-unassigned-upper,deprecate-which,avoid-null-test-override,check-extra-masked-returns,quote-safe-variables
+# avoid-nullary-conditions, a `[ $x ]` that tests a literal "null" the script
+# just assigned; check-extra-masked-returns, a command substitution whose
+# failure is discarded, which is how an empty command line reached `sh -c` and
+# was recorded as a pass; and quote-safe-variables, a bare `return` whose
+# value changes meaning if it ever carries one.
+#
+# The names are spelled exactly as `shellcheck --list-optional` prints them,
+# and lint-shell asks that list before it lints, because shellcheck accepts an
+# --enable name it does not have and runs the rest without a word. Two names
+# here were wrong that way for as long as this list existed:
+# `check-unassigned-upper` and `avoid-null-test-override` are not checks in
+# any shellcheck, so the uppercase-variable and null-literal classes the
+# comment claimed were covered were never evaluated, and the gate was green
+# on them. lint-shell now fails on a name the installed shellcheck does not
+# list, which is what a rename upstream turns this into otherwise.
+#
+# Every name here is one shellcheck 0.9, the version the ubuntu-24.04 image
+# carries, already has, so this runs on the runner as it runs here. That is
+# also the ceiling: avoid-negated-conditions and useless-use-of-cat are
+# optional checks a later shellcheck adds and the tree passes, and they are
+# left off until the runner carries a shellcheck that has them, because a name
+# the installed shellcheck does not know now fails this target rather than
+# quietly enabling nothing. require-variable-braces (SC2250) stays off for a
+# different reason: it is a spelling rule, and asking thirteen benchmark
+# scripts to write `${root}` where `$root` is the same word is a change the
+# gate should not ask for. add-default-case (SC2249) stays off for the same
+# reason: it wants a `*)` arm on a `case` that is already exhaustive, and the
+# one finding it raises is on a `case` in portable.sh that matches every value
+# it is given. Enable either per file with a `# shellcheck disable=` carrying
+# the reason when one is worth taking.
+SHELLCHECK_CHECKS := check-set-e-suppressed,check-unassigned-uppercase,deprecate-which,avoid-nullary-conditions,check-extra-masked-returns,quote-safe-variables
+SHELLCHECK_OPTS := -x --enable=$(SHELLCHECK_CHECKS)
 
 lint-shell:
 	@set -eu; \
 	files="$$(git ls-files '*.sh')"; \
 	test -n "$$files" || { echo "no tracked .sh file to lint" >&2; exit 1; }; \
+	known="$$(shellcheck --list-optional | sed -n 's/^name:  *//p')"; \
+	test -n "$$known" || { echo "shellcheck --list-optional printed nothing, so SHELLCHECK_CHECKS cannot be checked against it" >&2; exit 1; }; \
+	for name in $$(printf '%s' '$(SHELLCHECK_CHECKS)' | tr ',' ' '); do \
+	  printf '%s\n' "$$known" | grep -qx "$$name" || { \
+	    echo "SHELLCHECK_CHECKS enables $$name, which this shellcheck ($$(shellcheck --version | awk '/version:/{print $$2}')) does not list:" >&2; \
+	    echo "shellcheck accepts an --enable name it does not have and runs the rest in silence, so the check is never evaluated and the gate still passes" >&2; \
+	    echo "the checks this shellcheck has are named by 'shellcheck --list-optional'" >&2; \
+	    exit 1; \
+	  }; \
+	done; \
 	git ls-files -z '*.sh' | xargs -0 shellcheck $(SHELLCHECK_OPTS)
 
 lint-python:

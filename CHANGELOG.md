@@ -87,10 +87,18 @@ release, and `microagent update` moves you to it.
 
 ### Changed
 
-- `make lint-shell` runs shellcheck with four of its optional checks on, the
+- `make lint-shell` runs shellcheck with six of its optional checks on, the
   ones that report a masked `set -e` failure, an uppercase variable read on a
-  path that never assigned it, a `which` the shell may not carry, and a null
-  test against a literal the script just wrote. The tree passes all four.
+  path that never assigned it, a `which` the shell may not carry, a null test
+  against a literal the script just wrote, a discarded command substitution
+  and an unquoted `return` value. The tree passes all six. Two of the names
+  were misspelled and named no check in any shellcheck, so the uppercase
+  variable and null literal checks the list claimed to cover were never
+  evaluated and the gate passed on them: shellcheck accepts an `--enable` name
+  it does not have and runs the rest in silence. `lint-shell` now asks
+  `shellcheck --list-optional` first and fails on a name the installed
+  shellcheck does not list, which is what a rename upstream would otherwise
+  turn this into again.
 
 - The Harbor adapter keeps `BaseEnvironment` and `AgentContext` in a
   type-checking block, so importing it does not import Harbor's environment and
