@@ -179,6 +179,12 @@ release, and `microagent update` moves you to it.
   config the operator did not write, next to a stray `#`. The test that applies
   the template now holds every key at its default rather than the five it
   happened to check.
+- An unclosed ``` fence is reported in the file that has it. The Markdown gate
+  carried the fence state from one file into the next, so a file whose last
+  fence is never closed was cancelled by the first fence of the file after it,
+  and two such files passed with the gate silent while the rest of each rendered
+  as a code block. Each file is now read with its own state, and a file that
+  ends inside a fence is named.
 
 - `make build` compiles again. The `agents_file` the config parses and the flag saying whether the
   path was named were read from a `LoadedConfig` that had no such fields, so every entry point failed

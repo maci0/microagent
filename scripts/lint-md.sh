@@ -33,6 +33,14 @@ trap 'rm -f "$tmp"' EXIT
 # nobody asked for.
 awk '
   function say(what) { printf "%s:%d: %s\n", FILENAME, FNR, what }
+  function unbalanced(name) { printf "%s: an odd number of ``` lines, so the last fence is never closed and the rest of the file renders as code\n", name }
+  # The fence state belongs to one file. Left to run from the file before, an
+  # unclosed fence in one file is cancelled by the first fence in the next, and
+  # a tree where two files each have one passes with both of them unbalanced:
+  # the rest of each file renders as a code block and the gate says nothing.
+  # So the file that is ending is named, and the one starting is reset. The
+  # last file is the one END still has, and the same line closes it.
+  FNR == 1 { if (NR > 1 && infence) unbalanced(name); name = FILENAME; infence = 0; blanks = 0 }
   {
     if (/\r$/) say("a CRLF line ending; .gitattributes writes LF, and git hands a script one that dies on set -u")
     is_fence = $0 ~ /^[[:space:]]*```/
@@ -53,7 +61,7 @@ awk '
     }
   }
   END {
-    if (infence) printf "%s: an odd number of ``` lines, so the last fence is never closed and the rest of the file renders as code\n", FILENAME
+    if (infence) unbalanced(FILENAME)
   }
 ' "$@" > "$tmp"
 
