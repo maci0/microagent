@@ -1,5 +1,6 @@
 # microagent configuration: the provider settings, the system prompt addendum,
-# the skills, the MCP servers, the command filter, the sandbox and the tool set.
+# the repository instructions, the skills, the MCP servers, the command filter,
+# the sandbox and the tool set.
 # Copy to ~/.microagent/config.toml, or point MICROAGENT_CONFIG or --config at
 # it. Every key is optional. A missing key, a bad value or a missing file keeps
 # the built-in default, and the first line this file gets wrong is named on
@@ -32,6 +33,19 @@
 # Keep replies short.
 # Name the file and the line when you cite code.
 # '''
+
+# The file the run reads the repository's own instructions from, relative to
+# the working directory, appended to the system prompt under a line naming it.
+# AGENTS.md is the name every other coding agent reads, so it is the default
+# and most repositories have none: a file that is not there is silent. A path
+# named here that is not there is said on stderr, because a setting that did
+# nothing is your own spelling. An empty string turns the read off. The text is
+# at most 16 KB and a larger file is followed up to the cap.
+#
+# Repository text is not yours, so it never becomes the whole prompt: it rides
+# after system_prompt_extra, inside the same system message.
+#
+# agents_file = "AGENTS.md"
 
 # Where skills are read from: one directory per root, each holding one
 # directory per skill, each with a SKILL.md in it. A relative path is resolved

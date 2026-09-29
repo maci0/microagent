@@ -6,7 +6,7 @@ Everything a run reads and everything it writes. The [README](../README.md) is t
 - [Flags and environment](#flags-and-environment)
 - [How values resolve](#how-values-resolve)
 - [Providers and keys](#providers-and-keys)
-- [Config file](#config-file): [provider settings](#provider-settings), [system prompt addendum](#system-prompt-addendum), [skills](#skills), [MCP servers](#mcp-servers), [tool set](#tool-set), [command filter](#command-filter)
+- [Config file](#config-file): [provider settings](#provider-settings), [system prompt addendum](#system-prompt-addendum), [repository instructions](#repository-instructions), [skills](#skills), [MCP servers](#mcp-servers), [tool set](#tool-set), [command filter](#command-filter)
 - [Tools](#tools)
 - [Output](#output): [stdout](#stdout), [exit status](#exit-status), [session log](#session-log)
 - [Failure handling](#failure-handling)
@@ -374,6 +374,29 @@ Name the file and the line when you cite code.
 The value is a TOML string: `"..."` with the escapes `\n`, `\t`, `\r`, `\"` and `\\`, a literal
 `'...'` with none, or either kind as a multi-line string. It is at most 16 KB, because it is re-sent
 on every turn; a longer value is reported as a bad value and the prompt stays the built-in one.
+
+### Repository instructions
+
+`agents_file` names the file a run reads the repository's own instructions from, relative to the
+working directory, and appends it to the system prompt under a line saying where it came from.
+
+```toml
+agents_file = "AGENTS.md"   # the default; "" turns the read off
+```
+
+The default is `AGENTS.md`, the name every other coding agent reads, so a repository that carries one
+carries it for this run. A file that is not there is silent, because most repositories have none; a
+path this key names that is not there is named on stderr, because a setting that did nothing is the
+operator's own spelling. A file that is there and cannot be read is named either way.
+
+The text is at most 16 KB. A larger file is followed up to the cap, cut at a character boundary, and
+the note on stderr says what it was cut from. The path is at most 1024 bytes, and a longer one is
+reported as a bad value.
+
+Repository text is not the operator's, so it is never the whole prompt: it rides after
+`system_prompt_extra` and before the skill listing, inside the same system message, under a header
+naming the file it came from. The [threat model](threat-model.md) ranks what a file in a repository
+under review can reach.
 
 ### Skills
 

@@ -562,12 +562,7 @@ fn readAgentsFile(io: Io, arena: std.mem.Allocator, dir: std.Io.Dir, path: []con
         // setting that did nothing, and the run says so. The default name is
         // silent there, because most repositories have no such file; a file
         // that is there and unreadable is said either way, because it exists.
-        if (named or err != error.FileNotFound) {
-            net.note(io, arena, "microagent: the repository instructions {s} could not be read ({s}); this run follows the system prompt alone\n", .{
-                chat_mod.safeTextAll(arena, path),
-                @errorName(err),
-            });
-        }
+        if (named or err != error.FileNotFound) reportAgentsUnreadable(io, arena, path, err);
         return null;
     };
     defer file.close(io);
@@ -581,10 +576,7 @@ fn readAgentsFile(io: Io, arena: std.mem.Allocator, dir: std.Io.Dir, path: []con
             // End of file is the end of the read, not a fault.
             error.EndOfStream => break,
             else => {
-                net.note(io, arena, "microagent: the repository instructions {s} could not be read ({s}); this run follows the system prompt alone\n", .{
-                    chat_mod.safeTextAll(arena, path),
-                    @errorName(err),
-                });
+                reportAgentsUnreadable(io, arena, path, err);
                 return null;
             },
         };
@@ -600,6 +592,19 @@ fn readAgentsFile(io: Io, arena: std.mem.Allocator, dir: std.Io.Dir, path: []con
         whole.len,
     });
     return whole;
+}
+
+/// Why the repository instructions are not in this run's prompt, for the four
+/// ways there are none. A path the config named that is not there is the
+/// operator's own spelling of a setting that did nothing, and the run says so;
+/// the default name is silent there, because most repositories have no such
+/// file. Anything else, a file that is there and cannot be read included, is
+/// said either way, because it exists.
+fn reportAgentsUnreadable(io: Io, arena: std.mem.Allocator, path: []const u8, err: anyerror) void {
+    net.note(io, arena, "microagent: the repository instructions {s} could not be read ({s}); this run follows the system prompt alone\n", .{
+        chat_mod.safeTextAll(arena, path),
+        @errorName(err),
+    });
 }
 
 /// The system prompt: one string, so a run with no addendum, no repository
@@ -5893,6 +5898,21 @@ test "the first run writes the tracked template where the config is looked for" 
     // the config written above it is the one it does not touch.
     try std.testing.expectEqualStrings("", try tmp.dir.readFileAlloc(io, "blocked", arena, .limited(max_config_bytes)));
     try std.testing.expectEqualStrings("model = \"mine\"\n", try std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_config_bytes)));
+}
+
+// The block the read produced rides between the addendum and the skills, so a
+// repository's own rules come after the operator's and before the tools, and a
+// run with none of the three sends the built-in prompt byte for byte.
+test "the repository instructions ride between the addendum and the skills" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    const block = "\n\nThe repository's own instructions, from AGENTS.md:\nrun the tests";
+    const text = try systemText(arena, "be brief", block, "\n\nSkills: x", .initEmpty());
+    try std.testing.expect(std.mem.startsWith(u8, text, conversation_mod.system_prompt ++ "\n\nbe brief"));
+    try std.testing.expect(std.mem.indexOf(u8, text, "be brief").? < std.mem.indexOf(u8, text, "run the tests").?);
+    try std.testing.expect(std.mem.indexOf(u8, text, "run the tests").? < std.mem.indexOf(u8, text, "Skills: x").?);
 }
 
 /// The template the release embeds and writes on a first run.

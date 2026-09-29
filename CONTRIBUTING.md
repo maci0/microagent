@@ -104,9 +104,12 @@ yamllint), `zig build test`,
 `zig build test-sanitize`, and `check-binary` (a `ReleaseSmall` build whose
 binary it then starts). These are the checks
 [.github/workflows/ci.yml](.github/workflows/ci.yml) runs in its test and lint
-jobs, on the same Zig version: the shared setup-zig action installs the version
-`make required-zig-version` prints, and `make zig-version` tells a laptop on a
-different compiler so rather than assuming. The workflow calls the same targets
+jobs, on the same Zig version, less `preflight` and `zig-version`, which ask a
+laptop what is missing and what a runner's setup actions already installed, and
+more the one step the test job adds, `check-asset-run`, below. The shared
+setup-zig action installs the version `make required-zig-version` prints, and
+`make zig-version` tells a laptop on a different compiler so rather than
+assuming. The workflow calls the same targets
 rather than repeating their commands, so a step added to `check` is a step CI
 runs.
 
