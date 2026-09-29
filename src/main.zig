@@ -7101,6 +7101,50 @@ test "an atomic write keeps the mode the destination already had" {
     try std.testing.expectEqualStrings("content", try f.tmp.dir.readFileAlloc(io, "fresh", arena, .limited(64)));
 }
 
+// The mode the destination had is carried onto the file the run wrote, and the
+// setuid, setgid and sticky bits are not part of what is carried. A rewrite
+// over a setuid helper would otherwise leave a setuid file holding whatever
+// text the model supplied, which the umask cannot prevent and no reader of the
+// tree would notice.
+test "an atomic write does not carry the setuid, setgid or sticky bit over" {
+    var f = WriteFixture.init();
+    defer f.deinit();
+    const io = f.io();
+
+    // The three bits a mode can hold beyond the nine, one file each so a write
+    // that cleared one of them is not masked by another.
+    const carried = [_]struct { name: []const u8, mode: std.posix.mode_t }{
+        .{ .name = "setuid", .mode = 0o4755 },
+        .{ .name = "setgid", .mode = 0o2755 },
+        .{ .name = "sticky", .mode = 0o1755 },
+    };
+    for (carried) |entry| {
+        try f.tmp.dir.writeFile(io, .{ .sub_path = entry.name, .data = "old" });
+        try f.tmp.dir.setFilePermissions(io, entry.name, Io.File.Permissions.fromMode(entry.mode), .{});
+
+        try tool_mod.writeFileAtomic(io, f.tmp.dir, entry.name, "new");
+
+        const stat = try f.tmp.dir.statFile(io, entry.name, .{});
+        const mode = stat.permissions.toMode();
+        // The nine `rwx` bits came across unchanged, so the write still leaves a
+        // 0o755 file a 0o755 file and this is not a change to what a rewrite
+        // preserves.
+        try std.testing.expectEqual(@as(std.posix.mode_t, 0o755), mode & tool_mod.permission_bits);
+        // And the bit this is about is gone: the file the run wrote is not
+        // executable as whoever owns it. The type bits are not part of the
+        // comparison, because a stat reads them back above the permission bits
+        // and `S_IFMT` is the mask a type is compared with rather than one that
+        // clears it.
+        try std.testing.expectEqual(@as(std.posix.mode_t, 0o100000), mode & posix_mode_type_mask);
+        try std.testing.expectEqual(@as(std.posix.mode_t, 0), mode & special_mode_bits);
+    }
+}
+
+/// The three bits a mode carries above the nine: setuid, setgid and sticky.
+const special_mode_bits: std.posix.mode_t = 0o7000;
+/// The file type, as a stat reports it beside the permission bits.
+const posix_mode_type_mask: std.posix.mode_t = 0o170000;
+
 // A rename replaces the name it is given, so writing over a symlink without
 // following it leaves a regular file where the link was and the file the link
 // named exactly as it was.

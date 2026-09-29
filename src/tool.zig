@@ -1235,10 +1235,20 @@ fn toolWrite(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]cons
     return std.fmt.allocPrint(arena, "wrote {d} bytes to {s}", .{ content.len, path });
 }
 
-/// The permission bits of a mode: the setuid, setgid and sticky bits with the
-/// nine `rwx` ones. A rename carries the temporary file's mode to the
-/// destination, so this is what decides what a rewritten file comes back as.
-pub const permission_bits: std.posix.mode_t = 0o7777;
+/// The permission bits of a mode: the nine `rwx` ones, and nothing else. A
+/// rename carries the temporary file's mode to the destination, so this is what
+/// decides what a rewritten file comes back as.
+///
+/// The setuid, setgid and sticky bits are not carried. A destination that has
+/// one is a file whose owner the run may not be, and a rewrite hands the
+/// destination's mode to bytes the model wrote: `write` over a 0o4755 helper
+/// installed in a system directory leaves a setuid file holding the model's
+/// text, which is a local privilege escalation out of a tool whose job is
+/// editing a file. The kernel's umask does not clear those bits (it never has),
+/// so the only place they are dropped is here. The sticky bit is dropped for
+/// the same reason and means nothing on a regular file, so nothing is lost by
+/// leaving it out.
+pub const permission_bits: std.posix.mode_t = 0o777;
 
 /// Writes `bytes` over `path` so a write that does not finish cannot leave half
 /// a file where a whole one was.
