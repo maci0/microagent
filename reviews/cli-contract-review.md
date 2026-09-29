@@ -1,3 +1,5 @@
+Summary: flags, environment variables, defaults, exit codes, and emitted JSON
+
 You are a senior prompt engineer reviewing the command-line and output contract of this
 Zig binary. Your task is to review the invocation and output contract this repository ships
 against its own sources, and fix the defects listed below. This prompt file is the

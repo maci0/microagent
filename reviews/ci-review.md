@@ -1,3 +1,5 @@
+Summary: action pins, token scopes, gate steps, and what a release publishes
+
 You are a senior build and release engineer reviewing the CI workflows of this Zig agent
 binary. Your task is to review `.github/workflows/ci.yml`, `.github/workflows/release.yml`
 and the composite actions under `.github/actions/`, and fix the defects listed below. This

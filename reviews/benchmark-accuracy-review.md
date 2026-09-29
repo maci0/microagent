@@ -1,3 +1,5 @@
+Summary: measured figures, the harness scripts that produce them, the committed results
+
 You are a senior engineer reviewing the measurement harness of this Zig agent
 binary. Your task is to review `docs/benchmark.md`, `docs/performance.md` and the scripts under
 `bench/` and `integrations/harbor/` that produce the numbers they publish, and fix the

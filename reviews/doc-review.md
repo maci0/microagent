@@ -1,3 +1,5 @@
+Summary: commands, paths, links, and pins the prose names about this tree
+
 You are a senior technical writer reviewing the prose this repository ships about
 itself. Your task is to review `README.md`, `CONTRIBUTING.md`, `docs/usage.md`, `docs/performance.md` and
 `config.example.toml`, fix the defects listed below, and leave the writing alone
@@ -54,7 +56,9 @@ reduced to a fragment with no instructions for anyone to follow.
    workflow files) and every option it spells (`--require-hashes`, a `uv tool
    install ruff@<version>`, a `uv pip compile --python-version 3.12`) must name
    something that exists. Read the file named and read the command in the tool
-   it is quoted in; do not run an install, a build or a benchmark. The header
+   it is quoted in; do not run the install, the build or the benchmark that
+   sentence names, which leaves the gate this review runs before and after
+   (`make check`). The header
    of `config.example.toml` counts: it names the config path, the copy
    destination and the two environment variables that override the file.
 

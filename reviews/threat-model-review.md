@@ -1,3 +1,5 @@
+Summary: threat rows, claimed controls, and the code references they rest on
+
 You are a senior security engineer reviewing the threat model of this Zig agent
 binary. Your task is to review `docs/threat-model.md` and fix the defects listed
 below. This prompt file is the instrument, not the subject.
