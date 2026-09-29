@@ -184,6 +184,17 @@ release, and `microagent update` moves you to it.
 
 ### Changed
 
+- `mcp__grep_app__searchGitHub` is offered `query` and its matching flags, and
+  not the `repo` and `path` filters the server's own schema carries. Each of the
+  two exists to name a repository or a place inside one, and a call carrying one
+  puts the name of the tree the run is working on, which the operator did not
+  offer to publish, into a third party's log. grep.app indexes public code, so
+  neither narrows the answer the tool is here for, and the note appended to every
+  preset description already told the model to keep those names out of an
+  argument. This is the drop Exa's `category:people` already made, for the same
+  reason. A task that is about one repository's own code says so in the task
+  text.
+
 - The four public remote presets (`web_search`, `context7`, `grep_app`,
   `deepwiki`) are off until a `[tools.<name>]` table sets `enabled = true`,
   where they were on until a table set `enabled = false`. A call to one carries

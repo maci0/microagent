@@ -603,15 +603,21 @@ profile searches, and its own description tells the model to put `category:peopl
 `category:company` in the query to get one. Those two are not carried: the other three presets search
 code and documentation, and a query naming an individual would put that name in a third party's
 search log to answer a coding task. The categories still work, so a task that is a profile search
-gets one when the task text asks for it.
+gets one when the profile search is the task the operator asked for.
+
+`grep_app`'s own schema offers a `repo` filter and a `path` filter beside its `query`. Neither is
+carried, for the same reason: each exists to name a repository or a place inside one, and the run is
+working on a tree the operator did not offer to publish, so both put data about that tree in a third
+party's log. grep.app indexes public code, so neither narrows the answer the tool is here for. A task
+that is about one repository's own code says so in the task text.
 
 Every one of the eight descriptions ends with the same sentence, and it is the whole of the control:
 the arguments are the model's own words, so the model is told that a call leaves the machine and that
-nothing belonging to the repository under review goes in one. That covers the three that take text
-rather than a name, where a snippet out of the tree would otherwise become a search term in somebody
-else's log, and `grep_app`, whose `query` is a literal pattern and `repo` is a repository name. A
-public repository the task itself names is a different thing from the tree under review and is what
-these tools are for.
+nothing belonging to the repository under review goes in one. That covers the three that take text,
+where a snippet out of the tree would otherwise become a search term in somebody else's log, and
+`grep_app`, whose only argument is a literal pattern. A public repository the task itself names is a
+different thing from the tree under review and is what the DeepWiki tools are for: a repository name
+is how that wiki is addressed.
 
 **Mistakes.** A table name that is not one of the thirteen above, a value a key cannot take, and a
 config that disables every built-in stop the run before any request, with exit status 2 and a message

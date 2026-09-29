@@ -1033,9 +1033,18 @@ const terse_tools = [_]Terse{
         .preset = .grep_app,
         .tool = "searchGitHub",
         .description = "Search public GitHub code for literal patterns, like grep, not keywords: 'useState(' or '(?s)try {.*await', not 'react tutorial'. " ++
-            "Use it to see real usage of an unfamiliar API, syntax or configuration.",
+            "Use it to see real usage of an unfamiliar API, syntax or configuration. The search covers public code, not one repository.",
         .schema =
-        \\{"type":"object","properties":{"query":{"type":"string","description":"Literal code as it would appear in a file"},"matchCase":{"type":"boolean"},"matchWholeWords":{"type":"boolean"},"useRegexp":{"type":"boolean","description":"Treat the query as a regular expression"},"repo":{"type":"string","description":"Repository filter, partial match: 'vercel/' for an org"},"path":{"type":"string","description":"File path filter, partial match: '/route.ts'"},"language":{"type":"array","items":{"type":"string"},"description":"Languages, e.g. ['TypeScript','TSX']"}},"required":["query"]}
+        // The server's own schema also offers `repo` and `path`, a repository
+        // filter and a file path filter. Neither is carried, for the reason
+        // Exa's `category:people` is not: each is a field whose only use is to
+        // name the thing the run is working on, and the run is working on a tree
+        // the operator did not offer to publish. A private repository's name and
+        // the paths inside a public one are both data about the operator rather
+        // than about the API being looked up, and grep.app indexes public code
+        // only, so neither narrows the answer the tool is here for. A task that
+        // wants one repository's own code says so in the task text.
+        \\{"type":"object","properties":{"query":{"type":"string","description":"Literal code as it would appear in a file"},"matchCase":{"type":"boolean"},"matchWholeWords":{"type":"boolean"},"useRegexp":{"type":"boolean","description":"Treat the query as a regular expression"},"language":{"type":"array","items":{"type":"string"},"description":"Languages, e.g. ['TypeScript','TSX']"}},"required":["query"]}
         ,
     },
     .{
@@ -1140,6 +1149,38 @@ test "the compact preset tools are valid schemas for exactly the tools they name
     try std.testing.expect(terseFor("127.0.0.1", "searchGitHub") == null);
     try std.testing.expect(terseFor("mcp.exa.ai", "query-docs") == null);
     try std.testing.expect(terseFor("mcp.deepwiki.com", "ask_wiki_question") != null);
+}
+
+test "grep_app is offered no argument that names a repository or a path inside one" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    // `off_host_note` tells the model to keep the tree's names out of a call,
+    // and a note is only as good as the fields around it: an argument whose
+    // purpose is to carry a repository name or a path has the name one step
+    // from the wire whatever the model was told. DeepWiki is the exception and
+    // is not covered here, because a repository name is how its wiki is
+    // addressed and the wiki holds nothing but documentation.
+    for (terse_tools) |t| {
+        if (t.preset != .grep_app) continue;
+        const schema = try std.json.parseFromSliceLeaky(std.json.Value, arena, t.schema, .{});
+        const properties = schema.object.get("properties").?.object;
+        for (properties.keys()) |name| {
+            try std.testing.expect(!isRepositoryOrPathArgument(name));
+        }
+    }
+    const search = terseFor("mcp.grep.app", "searchGitHub").?;
+    const schema = try std.json.parseFromSliceLeaky(std.json.Value, arena, search.schema, .{});
+    const properties = schema.object.get("properties").?.object;
+    try std.testing.expect(properties.contains("query"));
+}
+
+/// An argument that exists to name the repository or a path inside it, so a
+/// call carrying one puts data about the operator's tree in a third party's log.
+fn isRepositoryOrPathArgument(name: []const u8) bool {
+    const names = [_][]const u8{ "repo", "repoName", "repos", "owner", "org", "path", "filePath", "filename", "directory" };
+    for (names) |n| if (std.ascii.eqlIgnoreCase(name, n)) return true;
+    return false;
 }
 
 test "a preset with no key is offered without a handshake, and one with a key is not" {
