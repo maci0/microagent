@@ -49,6 +49,7 @@ path, and nothing per turn beyond one session-log write and one stdout write per
 | ranged read of a long line | quadratic | **linear** | each 8 KB read copied the whole accumulated buffer onto itself; the self-copy, not the re-scan, was the cost (see below) |
 | a retry wait past the budget | up to 6 min asleep | **refused** | `--budget` was defeated by the `Retry-After` path |
 | turn arena after a ceiling-sized response | 48 MB resident | **4 MB** | the reset retained without bound |
+| MCP server startup, 3 servers | 1.513 s | **0.506 s** | every server is spawned before any is asked to initialize, so their boots overlap: the run waits for the slowest server instead of the sum |
 
 The two largest wins are not CPU at all. The request-bytes one is the single most valuable change in
 the file and it is invisible to every counter the harness prints: `cached_tokens` reports what was
@@ -99,7 +100,7 @@ categories generalise past this repository:
 | class | why a profiler misses it | example |
 | --- | --- | --- |
 | wire bytes | no instruction is spent on them | 3.8 KB of tool schema re-read every turn |
-| waiting | the cost is sleep | a 429 sat the run out for six minutes inside `--budget` |
+| waiting | the cost is sleep | a 429 sat the run out for six minutes inside `--budget`, and three MCP servers were handshaken one at a time, so a run paid their boot times in series |
 | resident memory | instruction counts do not carry it | 48 MB retained after one large response |
 | fallback paths | the primary path works | `date +%s` standing in for a monotonic clock |
 
@@ -131,6 +132,7 @@ the guard's existence.
 | bounded turn-arena retention | `a turn that outgrows the retained size` | present |
 | session pruning by path | `a log in a subdirectory is pruned` | present |
 | escaper correctness | `a fuzzed byte string leaves a JSON string that reads back as itself` | fuzzer |
+| MCP servers started before any handshake | `every server is started before any of them is asked to initialize` | defeated: two servers connected to one, test fails |
 
 Re-checking one of these takes a minute and is worth doing after any refactor
 that touches a test file, because guards move. Three things have to be told
@@ -157,6 +159,15 @@ make instructions CHECK=--check     # the table above, gated
 make overhead                       # startup and first-request cost per harness
 zig build test -Dtest-filter="a long run keeps the conversation bounded"
 ```
+
+The MCP startup row is a wall-clock figure, so it was measured the way a product number is, with
+`hyperfine -w 2 -r 10` against a stub provider on loopback and three servers whose command sleeps
+0.5 s before it starts answering: mean 1.513 s before, 0.506 s after, with the same numbers for six
+servers after the change (0.505 s), which is the point of it — the run waits for the slowest boot,
+not the sum. Its guard is a test, not a clock: the waiter server refuses to answer until the starter
+server has run, so a sequential connect drops it and the test sees one server where it expects two.
+On a machine where `/bin/sh` has no fractional `sleep` the waiter's bounded wait spins instead of
+sleeping and the guard still works, only faster to give up.
 
 The instruction gate needs `perf` and exits 1 when a row leaves its band, 2 when a row cannot be
 measured at all. It is not in `make check` because a shared runner may have performance counters

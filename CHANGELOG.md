@@ -12,6 +12,17 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+### Fixed
+
+- MCP servers are started before any of them is asked to initialize, so their
+  own boot times overlap instead of adding up. A server's handshake mostly waits
+  for that boot -- `npx` resolving a package, a node or python interpreter
+  coming up -- and a run with `[[mcp]]` tables paid for each one in series
+  before it could send its first request. Measured against a stub provider with
+  three servers that each take 0.5 s to answer: 1.51 s before, 0.51 s after.
+  With six servers it is still 0.51 s, because the run now waits for the
+  slowest server rather than the sum of them.
+
 ## [0.2.0] - 2026-09-29
 
 ### Added
