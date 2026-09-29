@@ -26,6 +26,17 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- The Harbor README named nine of the ten variables its adapter reads. The one
+  it left out, `MICROAGENT_STALL_TIMEOUT`, is the one a slow provider needs: the
+  adapter checked it, forwarded it and never wrote it down, so an operator
+  setting it was working from the source. A test now holds the README to the
+  names the adapter quotes, the way the other two tests hold `--help` and
+  `docs/usage.md` to the names this binary reads.
+- `--help` and the usage reference said a key on the command line goes to the
+  base url and stop there. It is in the process table for the length of the
+  run, where any user of the machine can read it, which is the reason a
+  variable or the key file is the source to reach for.
+
 - The session store kept its 200 newest logs and nothing else, which is a size
   and not a period. On a machine that runs a few times a week, two hundred
   logs is four years, and every record names the directory the run worked in,

@@ -472,7 +472,10 @@ const help_text =
     \\                         the same provider as the key: the default is
     \\                         openrouter.ai, and a run that leaves it there
     \\                         sends an OPENAI_API_KEY or DEEPSEEK_API_KEY to
-    \\                         openrouter and says so on stderr
+    \\                         openrouter and says so on stderr. A key on the
+    \\                         command line is in the process table, where any
+    \\                         user of this machine can read it; a variable or
+    \\                         the key file is not
     \\      --max-turns <n>    tool-loop turn ceiling, at least 1
 ++ (std.fmt.comptimePrint("\n                         (env MICROAGENT_MAX_TURNS, default {d})\n", .{max_turns_default})) ++
     \\      --stall-timeout <s>  seconds the response socket may stay silent
@@ -7882,6 +7885,90 @@ test "the harbor adapter mirrors this binary's configuration schema" {
 const harbor_adapter_path = "integrations/harbor/microagent_agent.py";
 /// The adapter is a few hundred lines; a bigger file is not the one tracked.
 const max_harbor_adapter_bytes: usize = 128 * 1024;
+const harbor_readme_path = "integrations/harbor/README.md";
+/// The adapter's README is prose and a table; a bigger file is not the one tracked.
+const max_harbor_readme_bytes: usize = 128 * 1024;
+
+// The other half of what the adapter duplicates, and the half nothing else
+// holds: the variables it reads are named in its own README, and nowhere else.
+// The test above holds the values, which a change to either side can silently
+// disagree about; this one holds the names, which a new knob reaches by being
+// added to a reader and to no document. An operator who sets one the README does
+// not list gets a run that behaved as it always has, and no way to tell that the
+// variable was read at all.
+//
+// `MICROAGENT_STALL_TIMEOUT` is the one that was missing: the adapter read it,
+// checked it, and forwarded it to the container, and the table above it named
+// nine other variables and not this one.
+test "the harbor README names every variable the adapter reads" {
+    const gpa = std.testing.allocator;
+    // Both files are read with the build root as the working directory, which
+    // is where they are tracked.
+    const adapter = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, harbor_adapter_path, gpa, .limited(max_harbor_adapter_bytes));
+    defer gpa.free(adapter);
+    const readme = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, harbor_readme_path, gpa, .limited(max_harbor_readme_bytes));
+    defer gpa.free(readme);
+
+    var names: std.ArrayList([]const u8) = .empty;
+    defer names.deinit(gpa);
+    try adapterEnvNames(adapter, &names, gpa);
+    try std.testing.expect(names.items.len > 0);
+    for (names.items) |name| {
+        if (!namesWholeToken(readme, name)) {
+            std.debug.print("\n" ++ harbor_readme_path ++ ": does not name {s}, so the adapter reads a variable the operator has to find in its source\n", .{name});
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+/// The names of the variables the adapter reads, in the order it reads them.
+/// A name reaches the adapter as a quoted literal: in a `trimmed_env` or
+/// `int_env` call, in the tuple `api_key` walks, or in the message it refuses
+/// with. A quoted run is what separates those from the module's own constants,
+/// which are bare uppercase identifiers and are named by their own comments
+/// rather than by a table in a README.
+///
+/// A run of digits is not a name but a default spelled as a string, and a
+/// lower-case word is a path or a message rather than a name, so a run has to
+/// hold a letter to be one. Each is reported once: a name read in two places is
+/// one variable, and the README carries it once.
+fn adapterEnvNames(adapter: []const u8, out: *std.ArrayList([]const u8), gpa: std.mem.Allocator) !void {
+    var i: usize = 0;
+    while (i < adapter.len) {
+        // A name is at least two characters: the first byte after the quote
+        // opens it and the second is the first of the name, so a quote followed
+        // by anything else is prose and not a name at all.
+        if (adapter[i] != '"' or
+            i + 2 >= adapter.len or
+            !isEnvNameByte(adapter[i + 1]) or
+            !isEnvNameByte(adapter[i + 2]))
+        {
+            i += 1;
+            continue;
+        }
+        const start = i + 1;
+        var end = start;
+        while (end < adapter.len and isEnvNameByte(adapter[end])) end += 1;
+        var letter = false;
+        for (adapter[start..end]) |c| if (c >= 'A' and c <= 'Z') {
+            letter = true;
+            break;
+        };
+        var already = false;
+        if (letter) for (out.items) |kept| {
+            if (std.mem.eql(u8, kept, adapter[start..end])) {
+                already = true;
+                break;
+            }
+        };
+        if (letter and !already) try out.append(gpa, adapter[start..end]);
+        i = end;
+    }
+}
+
+fn isEnvNameByte(c: u8) bool {
+    return (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_';
+}
 
 // Every variable the program reads is named by `--help` and by docs/usage.md,
 // and the two documents state the empty-value rule for the same subset.

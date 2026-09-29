@@ -49,7 +49,10 @@ usage: microagent [options] "<prompt>"
                          the same provider as the key: the default is
                          openrouter.ai, and a run that leaves it there
                          sends an OPENAI_API_KEY or DEEPSEEK_API_KEY to
-                         openrouter and says so on stderr
+                         openrouter and says so on stderr. A key on the
+                         command line is in the process table, where any
+                         user of this machine can read it; a variable or
+                         the key file is not
       --max-turns <n>    tool-loop turn ceiling, at least 1
                          (env MICROAGENT_MAX_TURNS, default 100)
       --stall-timeout <s>  seconds the response socket may stay silent
@@ -207,6 +210,10 @@ to end; see [benchmark.md](benchmark.md).
 The key is looked up in `--api-key`, then `MICROAGENT_API_KEY`, `OPENAI_API_KEY`,
 `OPENROUTER_API_KEY` and `DEEPSEEK_API_KEY`. With none of them set, `~/.secrets/openrouter` is read
 as a last resort; an empty file there is named on stderr rather than passed off as no key.
+
+`--api-key` is the one source that is not private to this process: the whole command line is in the
+process table for as long as the run lasts, so any user on the machine can read the key out of it
+there. A variable or the key file is not, which is why those are the sources to reach for.
 
 The key goes to the base url in an `Authorization` header on every request. Two consequences:
 
