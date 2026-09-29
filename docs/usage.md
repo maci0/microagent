@@ -94,8 +94,8 @@ variable for the same option, and wins over one the run could not use:
 MICROAGENT_MAX_TURNS=0 with --max-turns 5 is a run with five turns, and the
 variable is named on stderr rather than stopping it. A bare -- ends the
 flags, so a task that begins with a dash is passed after it. A bare "help"
-asks for this text when the prompt is still empty, the way "microagent
-update help" does; any other bare word, or a value of --print, is a task. A
+asks for this text while the prompt is still empty; any other bare word, or
+a value of --print, is a task. A
 second bare word is the one thing this does not read as a task: two prompts
 are a usage error.
 

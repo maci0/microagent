@@ -650,8 +650,8 @@ const help_text =
     \\MICROAGENT_MAX_TURNS=0 with --max-turns 5 is a run with five turns, and the
     \\variable is named on stderr rather than stopping it. A bare -- ends the
     \\flags, so a task that begins with a dash is passed after it. A bare "help"
-    \\asks for this text when the prompt is still empty, the way "microagent
-    \\update help" does; any other bare word, or a value of --print, is a task. A
+    \\asks for this text while the prompt is still empty; any other bare word, or
+    \\a value of --print, is a task. A
     \\second bare word is the one thing this does not read as a task: two prompts
     \\are a usage error.
     \\
@@ -1235,8 +1235,8 @@ fn parseArgs(buf: []u8, argv: []const []const u8, opts: *Options) ?[]const u8 {
             // "microagent -p {prompt}" would hand the model flag to -p;
             // taking the prompt positionally makes the order irrelevant.
             // The one bare word that is a request rather than a task is the
-            // same word `microagent update help` already answers to, and it
-            // only answers while the prompt is still empty, so
+            // word `help_word` names, and it only answers while the prompt is
+            // still empty, so
             // `microagent "help me find the leak"` is a task and
             // `microagent -p help` is a task, both by the existing rules.
             if (opts.prompt.len == 0 and std.mem.eql(u8, arg, help_word)) {
@@ -1295,8 +1295,8 @@ fn earlyAction(argv: []const []const u8) ?Action {
     return null;
 }
 
-/// The one bare word that asks for the help text rather than naming a task,
-/// spelled the same way `microagent update help` already spells it.
+/// The one bare word that asks for the help text rather than naming a task.
+/// `update` answers to `--help` and `-h` only, so the word is spelled here.
 const help_word = "help";
 
 fn isFlag(name: []const u8, short: []const u8, long: []const u8) bool {
@@ -3778,11 +3778,10 @@ test "help and version win wherever they appear" {
     try std.testing.expectEqual(Action.version, v.action);
 }
 
-// `microagent help` is a request, not a task: `microagent update help` prints
-// that subcommand's help, and a bare word on the agent's own command line must
-// not be billed to the caller as a coding run. Only a bare word, though: a
-// prompt already set, a value of --print, and anything after `--` are all still
-// a task, by the rules that were already there.
+// `microagent help` is a request, not a task: a bare word on the agent's own
+// command line must not be billed to the caller as a coding run. Only a bare
+// word, though: a prompt already set, a value of --print, and anything after
+// `--` are all still a task, by the rules that were already there.
 test "a bare help is a request, and only a bare one" {
     var buf: [512]u8 = undefined;
 
