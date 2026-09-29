@@ -506,7 +506,7 @@ fn runMain(init: std.process.Init) !u8 {
             // Not enforced: Landlock needs Linux 5.13 or newer and Seatbelt refused the profile. Saying so is
             // what keeps `enabled = true` from reading as protection `bash` and the MCP servers
             // do not have.
-            net.note(io, arena, "microagent: sandbox: the kernel sandbox could not be applied (Linux needs 5.13 or newer for Landlock, macOS uses Seatbelt); only `write` and `edit` are confined, not `bash` or MCP servers\n", .{});
+            net.note(io, arena, "microagent: sandbox: the kernel sandbox could not be applied (Linux needs 5.13 or newer for Landlock, macOS uses Seatbelt); only the tools that write (`write`, `edit`, `multi_edit`, and `ast` with a `rewrite`) are confined, not `bash` or MCP servers\n", .{});
         }
     }
     // Built before the skills and the servers, because a tool subprocess and

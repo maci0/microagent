@@ -660,7 +660,7 @@ pub fn runTool(
         .edit => toolEdit(io, arena, args, writable_roots),
         .multi_edit => toolMultiEdit(io, arena, args, writable_roots),
         .search => toolSearch(io, arena, args, ceiling_ms, environ_map),
-        .ast => toolAst(io, arena, args, ceiling_ms, environ_map),
+        .ast => toolAst(io, arena, args, ceiling_ms, environ_map, writable_roots),
         .git => toolGit(io, arena, args, ceiling_ms, environ_map),
         .todo => toolTodo(arena, args),
     };
@@ -1779,7 +1779,7 @@ fn toolSearch(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceilin
 /// Structural search/rewrite through ast-grep. `rewrite` set means the change
 /// is applied to every match (`--update-all`), so the next turn reads the
 /// result back rather than trusting the tool's summary.
-fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map) ![]const u8 {
+fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map, writable_roots: []const []const u8) ![]const u8 {
     const pattern = chat.str(args.get("pattern")) orelse return "error: missing pattern";
     const lang = chat.str(args.get("lang")) orelse return "error: missing lang";
     const path = chat.str(args.get("path")) orelse ".";
@@ -1793,6 +1793,16 @@ fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
     if (credentialPath(io, arena, path)) |refused| return try credentialRefusal(arena, .ast, refused, rewrite != null);
     if (rewrite) |r| {
         if (try astRewriteRefusal(arena, pattern, r)) |why| return why;
+        // A rewrite is a write, and the three tools that write are the ones
+        // `sandbox.isPathWritable` guards. `--update-all` rewrites every match
+        // under `path`, so without this the sandbox confined `write` and `edit`
+        // while a fourth way around them went unchecked: on a host whose kernel
+        // sandbox could not be applied, `ast --rewrite` reached any file the
+        // process could open. The check is on `path` rather than on each match,
+        // which is the same granularity `write` and `edit` judge it at.
+        if (!sandbox.isPathWritable(io, arena, path, writable_roots)) {
+            return outsideSandbox(arena, path);
+        }
     }
 
     var argv: std.ArrayList([]const u8) = .empty;
@@ -4950,6 +4960,53 @@ test "ast refuses the rewrite through the tool, not after it ran" {
     try std.testing.expectEqualStrings("def f():\n    raise 1\n", once);
     _ = try dispatch(arena, "ast", rename);
     try std.testing.expectEqualStrings(once, try tmp.dir.readFileAlloc(io, "a.py", arena, .limited(256)));
+}
+
+// The same refusal the three tools that write make, reached through the fourth
+// way a model can write a file. `ast --rewrite` passes its path to
+// `--update-all`, so a sandbox that confined `write`, `edit` and `multi_edit`
+// and not this one confined nothing the model could reach. The refused half
+// needs no backend: the call is turned down before ast-grep is spawned, so the
+// file is unchanged either because nothing ran or because nothing could.
+test "an ast rewrite outside the sandbox roots is refused before ast-grep runs" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const source = "def f():\n    return 1\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.py", .data = source });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+
+    // The tree under review is the only writable root, and the file to rewrite
+    // is one directory above it: the shape a model reaches for by naming an
+    // absolute path.
+    const roots = [_][]const u8{try std.fs.path.join(arena, &.{ root, "project" })};
+    const refused = try dispatchWith(arena, "ast", try std.fmt.allocPrint(
+        arena,
+        "{{\"pattern\":\"return $X\",\"lang\":\"python\",\"path\":\"{s}\",\"rewrite\":\"raise $X\"}}",
+        .{root},
+    ), &.{}, &roots);
+    try std.testing.expect(std.mem.startsWith(u8, refused, "refused: path '"));
+    try std.testing.expect(std.mem.endsWith(u8, refused, "is outside the sandbox writable roots"));
+    // Nothing ran, so the file is the bytes the test wrote.
+    try std.testing.expectEqualStrings(source, try tmp.dir.readFileAlloc(io, "a.py", arena, .limited(256)));
+
+    // The same call with the root covering it is not refused for that reason,
+    // so a sandbox that does allow the write still lets it through to the
+    // backend (which names itself missing when ast-grep is not installed).
+    const allowed = try dispatchWith(arena, "ast", try std.fmt.allocPrint(
+        arena,
+        "{{\"pattern\":\"return $X\",\"lang\":\"python\",\"path\":\"{s}\",\"rewrite\":\"raise $X\"}}",
+        .{root},
+    ), &.{}, &.{root});
+    try skipWithoutDelegatedProgram(allowed);
+    try std.testing.expectEqualStrings("def f():\n    raise 1\n", try tmp.dir.readFileAlloc(io, "a.py", arena, .limited(256)));
 }
 
 /// Skips the calling test when the tool it delegates to is not installed, which
