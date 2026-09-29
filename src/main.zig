@@ -142,7 +142,8 @@ const system_prompt =
     "still misbehaves the task is not finished, whatever the change looks like; (5) check " ++
     "`git diff` and stop with a short summary.\n" ++
     "Prefer these deterministic tools over shelling out: `search` for text, `ast` for syntax, " ++
-    "`read` for files, `git` for status/diff/log/show/blame. Use `bash` for running tests, builds " ++
+    "`read` for files, `git` for status/diff/log/show/blame, and `semcode` (callers, " ++
+    "callees, types) through `bash` on an indexed C/C++/Rust tree. Use `bash` for running tests, builds " ++
     "and anything the other tools do not cover. Never invent APIs: read the definition first. " ++
     "Do not audit unrelated code and do not read library or standard-library sources to answer a " ++
     "question about this repository. Do not ask questions.\n" ++
