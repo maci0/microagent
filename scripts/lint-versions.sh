@@ -6,13 +6,20 @@
 # with, or a pin that names one version in one file and another in the next.
 #
 # The versions are passed in rather than read from the Makefile, so the Makefile
-# stays the one place a version is written down. A version mismatch is reported
-# by name rather than surfacing later as a formatting diff no one can explain,
-# so the message says what to install.
+# stays the one place a version is written down. The Harbor manifest arrives as
+# an argument for the same reason scripts/lint-lock.sh takes one: the directory
+# is written down in the Makefile, and a second spelling of it in a script is a
+# path that goes on disagreeing with the one the rest of the gate passes. A
+# version mismatch is reported by name rather than surfacing later as a
+# formatting diff no one can explain, so the message says what to install.
 set -eu
 
+: "${1:?usage: lint-versions.sh <path to the Harbor requirements.txt>}"
 : "${RUFF_VERSION:?RUFF_VERSION is required}"
 : "${YAMLLINT_VERSION:?YAMLLINT_VERSION is required}"
+
+manifest="$1"
+test -f "$manifest" || { echo "no $manifest, so the interpreter the Harbor lock resolves for cannot be checked" >&2; exit 1; }
 
 have_ruff="$(ruff --version | awk '{print $2}')"
 have_yamllint="$(yamllint --version | awk '{print $NF}')"
@@ -30,9 +37,9 @@ ruff_required="$(sed -n 's/^required-version = "\(.*\)"/\1/p' ruff.toml)"
   echo "ruff.toml requires ruff $ruff_required, not $RUFF_VERSION: a contributor running 'ruff check --config ruff.toml' directly is told nothing by the gate, and 'required-version' is the one pin ruff reads there" >&2;
   echo "a bump to RUFF_VERSION has to bump required-version, and lint-requirements.txt, in the same change" >&2; bad=1; }
 ruff_target="$(sed -n 's/^target-version = "\(py[0-9]*\)"/\1/p' ruff.toml)"
-lock_target="$(sed -n 's/.*uv pip compile.*--python-version \([0-9][0-9.]*\).*/\1/p' integrations/harbor/requirements.txt)"
+lock_target="$(sed -n 's/.*uv pip compile.*--python-version \([0-9][0-9.]*\).*/\1/p' "$manifest")"
 lock_py="$(printf '%s' "$lock_target" | tr -d .)"
 { [ -n "$ruff_target" ] && [ -n "$lock_target" ] && [ "$ruff_target" = "py$lock_py" ]; } || {
-  echo "ruff.toml checks against $ruff_target and integrations/harbor/requirements.txt resolves its lock for $lock_target: a py target raised here without the floor raised there lints against an interpreter the lock does not resolve for" >&2;
+  echo "ruff.toml checks against $ruff_target and $manifest resolves its lock for $lock_target: a py target raised here without the floor raised there lints against an interpreter the lock does not resolve for" >&2;
   echo "a bump to either has to bump the other, and the 'uv pip compile' at the top of that manifest with it" >&2; bad=1; }
 test "$bad" -eq 0

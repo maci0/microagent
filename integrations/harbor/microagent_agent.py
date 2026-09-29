@@ -347,10 +347,15 @@ class Microagent(BaseAgent):
         validate_env()
         source = binary_path()
         if not source.is_file():
+            # `make musl` first, and the raw `zig build` second: the build alone
+            # leaves the binary at zig-out/bin/microagent, not at the name
+            # binary_path() looks for, so naming it first sent whoever read the
+            # message back to the same error they had already been given.
             raise RuntimeError(
-                f"microagent binary not found at {source}; build it with "
-                f"`zig build -Dtarget={HOST_ARCH}-linux-musl -Doptimize=ReleaseSmall` "
-                "(or `make musl`), or set MICROAGENT_BINARY"
+                f"microagent binary not found at {source}; build it with `make musl` "
+                f"(which runs `zig build -Dtarget={HOST_ARCH}-linux-musl "
+                "-Doptimize=ReleaseSmall` and copies it here), "
+                "or set MICROAGENT_BINARY"
             )
         await environment.upload_file(source_path=source, target_path=REMOTE_PATH)
         config = self.logs_dir / "microagent-config.toml"

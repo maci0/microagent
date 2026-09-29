@@ -15,7 +15,12 @@ BIN := zig-out/bin/microagent
 export LC_ALL := C
 export TZ := UTC
 
-.PHONY: default help preflight version build musl test test-sanitize fmt fmt-check fmt-python lint lint-versions lint-lock zig-version required-zig-version release-targets check-assets check-asset-run check-binary check-changelog check-changelog-links check-changelog-sections check-unreleased check-readme check-man check-release check-reproducible lint-shell lint-python lint-yaml check bench gauntlet instructions overhead install release-assets checksums clean
+.PHONY: default help preflight version build musl test test-sanitize fmt fmt-check fmt-python lint lint-versions lint-lock zig-version required-zig-version release-targets check-assets check-asset-run check-binary check-changelog check-changelog-links check-changelog-sections check-unreleased check-readme check-man check-release check-reproducible lint-shell lint-python lint-yaml check bench gauntlet instructions overhead install release-assets checksums sha256-of clean
+
+# The Harbor adapter's directory, the one place that path is written down.
+# lint-lock.sh and lint-versions.sh both take it as an argument rather than
+# spelling it out in a script, so a move is a change here and nowhere else.
+HARBOR_DIR := integrations/harbor
 
 # The targets `microagent update` asks for, in the names release.yml publishes.
 # ci.yml rehearses the same list on every push and release.yml publishes it, so
@@ -74,13 +79,19 @@ default: build
 # that is absent, with the command that installs it, before any of that runs.
 # The versions are the ones the rest of this file pins, so a tool that is
 # present but wrong is still `lint-versions` to catch.
+#
+# The `case` reads the basename rather than the word as written, because ZIG is
+# an override: `make ZIG=/opt/zig-0.16.0/zig check` is how a contributor runs
+# the gate against a compiler that is not on PATH, and a case matching the whole
+# word fell through to the bare `*)` arm for it, printing a dead end where the
+# one remedy the message exists to give was a line above.
 PREFLIGHT_TOOLS := $(ZIG) shellcheck ruff yamllint git python3
 preflight:
 	@set -eu; bad=0; \
 	for tool in $(PREFLIGHT_TOOLS); do \
 	  command -v "$$tool" >/dev/null 2>&1 && continue; \
 	  bad=1; \
-	  case "$$tool" in \
+	  case "$$(basename "$$tool")" in \
 	    zig) \
 	      echo "$$tool is not on PATH: install the version build.zig.zon names as .minimum_zig_version, from https://ziglang.org/download/" >&2 ;; \
 	    shellcheck) \
@@ -142,6 +153,7 @@ help:
 	  'check-release TAG=vX.Y.Z  the tag names build.zig.zon, nothing is stranded unreleased' \
 	  'check-reproducible    every published target rebuilds byte-identical' \
 	  'checksums             sha256 sidecars for dist/ (after a tagged build)' \
+	  'sha256-of FILE=<path> the sha256 of one file, through the command checksums wrote with' \
 	  'required-zig-version  the zig version build.zig.zon declares' \
 	  'clean                 remove zig-out, .zig-cache, dist and the Harbor musl binary'
 
@@ -291,15 +303,16 @@ fmt-python:
 # what opens a bump for these.
 lint: lint-versions lint-lock lint-shell lint-python lint-yaml
 
-HARBOR_DIR := integrations/harbor
-
 # The gate's own checks live in scripts/, not in recipes here, so shellcheck
 # reads them: a recipe is shell nothing lints, and these are the code that
 # decides whether the linters are the versions the gate means. The versions and
 # the Harbor directory stay here, so this file is still the one place each is
-# written down; the scripts take them as arguments.
+# written down; the scripts take them as arguments. lint-versions.sh is handed
+# the manifest as well as the two versions, because it reads the interpreter the
+# manifest resolves its lock for, and that path is written down in the one place
+# named above rather than a second time inside the script.
 lint-versions:
-	@RUFF_VERSION='$(RUFF_VERSION)' YAMLLINT_VERSION='$(YAMLLINT_VERSION)' sh scripts/lint-versions.sh
+	@RUFF_VERSION='$(RUFF_VERSION)' YAMLLINT_VERSION='$(YAMLLINT_VERSION)' sh scripts/lint-versions.sh $(HARBOR_DIR)/requirements.txt
 
 # The Harbor lock is compared against its manifest; what the three checks are
 # is scripts/lint-lock.sh's to say.
@@ -957,6 +970,30 @@ checksums:
 		exit 2; \
 	}; \
 	echo "wrote $$written sidecars in dist/"
+
+# The digest of one file, hex only, through the same SHA256_CMD `checksums`
+# and `check-reproducible` write their lines with. release.yml read back the
+# published assets and compared each against the sidecar beside it, and spelled
+# `sha256sum` there rather than asking here, which is the second decision about
+# which hashing command this host has: on a runner without GNU coreutils the
+# sidecars were written by `shasum -a 256` and the comparison beside them by a
+# command that does not exist. One line, and the reason SHA256_CMD exists at
+# all, applies to the step that checks the sidecars as well as the one that
+# writes them.
+#
+# FILE=, like every other value this Makefile takes (`make check-changelog
+# VERSION=`, `make check-asset-run TARGET=`), rather than a bare trailing word:
+# a word after the target is a goal to make, so `make sha256-of dist/microagent`
+# built a second target and read no file at all.
+sha256-of:
+	@test -n "$(FILE)" || { printf 'usage: make sha256-of FILE=<path>\n' >&2; exit 2; }; \
+	test -f "$(FILE)" || { printf 'no %s, so there is nothing to hash\n' "$(FILE)" >&2; exit 2; }; \
+	sum=$$($(SHA256_CMD)); \
+	test -n "$$sum" || { \
+	  echo "neither sha256sum nor shasum is on PATH, so no digest can be read" >&2; \
+	  exit 2; \
+	}; \
+	$$sum "$(FILE)" | cut -d' ' -f1
 
 # Two independent builds of the same source must be byte-identical, or a
 # released checksum describes one binary and a rebuild produces another. Every
