@@ -907,13 +907,20 @@ pub const Preset = enum {
 const Terse = struct { preset: Preset, tool: []const u8, description: []const u8, schema: []const u8 };
 
 const terse_tools = [_]Terse{
+    // Exa's own description for this tool also carries `category:people` and
+    // `category:company`, which turn a query into a search of a person's or a
+    // company's profiles, and neither is carried here. Nothing in this run
+    // needs a profile index: the tool is here to find documentation and code,
+    // and a query naming an individual would put that name in a third party's
+    // search log to answer a coding task. The categories stay usable, an
+    // operator whose task is a profile search can say so in the task text.
     .{
         .preset = .web_search,
         .tool = "web_search_exa",
         .description = "Search the web; returns clean text from the top results. Describe the ideal page instead of using keywords. " ++
-            "Put category:people or category:company in the query to search profiles. If highlights are not enough, read the best URLs with web_fetch_exa.",
+            "If highlights are not enough, read the best URLs with web_fetch_exa.",
         .schema =
-        \\{"type":"object","properties":{"query":{"type":"string","description":"The ideal page, described in natural language; may include category:people or category:company"},"numResults":{"type":"number","description":"Results to return, default 10"},"objective":{"type":"string","description":"What this search is for: which documents should rank first or be excluded, and which facts to pull out"}},"required":["query","objective"]}
+        \\{"type":"object","properties":{"query":{"type":"string","description":"The ideal page, described in natural language"},"numResults":{"type":"number","description":"Results to return, default 10"},"objective":{"type":"string","description":"What this search is for: which documents should rank first or be excluded, and which facts to pull out"}},"required":["query","objective"]}
         ,
     },
     .{

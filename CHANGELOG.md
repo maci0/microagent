@@ -20,6 +20,20 @@ release, and `microagent update` moves you to it.
   `~/.microagent/config.toml`, at mode 0600 and names the path on stderr. A path named by `--config`
   or `MICROAGENT_CONFIG` is never created, and an existing file is never touched.
 
+### Changed
+
+- The `web_search` preset's `web_search_exa` is described to the model without exa's
+  `category:people` and `category:company` hints. Nothing in a run needs a profile index, and a query
+  naming an individual puts that name in a third party's search log to answer a coding task. Both
+  categories still work, so a task that asks for a profile search gets one.
+
+### Fixed
+
+- The harbor adapter's run logs, and the work trees and transcripts under `.scratch/` that
+  `bench/run.sh` and `bench/gauntlet.sh` leave, are created at mode 0600 and 0700 rather than at the
+  default 0666 less the umask, which on a shared host left a run's whole account of the tree it was
+  pointed at readable by every other account.
+
 ## [0.7.0] - 2026-09-30
 
 ### Added

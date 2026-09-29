@@ -15,6 +15,14 @@
 # and docs/benchmark.md.
 set -u
 
+# The clone is this repository and .gauntlet.log is the whole review: the
+# findings, the patches and every file the reviewer read. The default mode is
+# 0o666 less the umask, so on the 0o022 a host carries, a run's clone and log
+# under .scratch/ land readable by every other account on a shared machine.
+# Git records 644 for a non-executable file whatever the umask, so the rows
+# appended to the committed results file are unaffected.
+umask 077
+
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bench/monotonic.sh"
 source_repo="${GAUNTLET_REPO:-$root}"

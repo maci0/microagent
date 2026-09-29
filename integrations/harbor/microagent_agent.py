@@ -427,10 +427,23 @@ class Microagent(BaseAgent):
         directory that is not there is the ordinary way this fails on a fresh
         harbor version, and the run that would have recorded it is the one that
         has to keep going.
+
+        The mode is 0o600 because the transcript is the run's whole account of
+        the tree it was pointed at: the model's answer, every tool result, and
+        whatever the task's files happened to hold. `write_text` opens with
+        0o666 less the umask, so on the 0o022 a host carries the logs land
+        readable by every account on a shared benchmark machine, and harbor
+        collects logs per trial for whoever reads the job directory afterwards.
         """
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text, encoding="utf-8")
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                # A log a previous run left keeps the mode it was created with,
+                # and O_TRUNC does not change it, so the mode is set on the open
+                # descriptor rather than left to the create.
+                os.fchmod(handle.fileno(), 0o600)
+                handle.write(text)
         except OSError as error:
             self.logger.warning("could not write %s (%s)", path, error)
 

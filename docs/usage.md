@@ -496,6 +496,14 @@ preset takes the same `url`, `api_key_env`, `api_key_header` and `timeout` as a 
 is for a plan that has one. A preset and an `[[mcp]]` table of the same name would collide on tool
 names, so the second is skipped and named on stderr.
 
+A tool is described to the model by the compact form in this binary, not by the server's own
+description, so what the model is told to send is decided here. Exa's `web_search_exa` also answers
+profile searches, and its own description tells the model to put `category:people` or
+`category:company` in the query to get one. Those two are not carried: the other three presets search
+code and documentation, and a query naming an individual would put that name in a third party's
+search log to answer a coding task. The categories still work, so a task that is a profile search
+gets one when the task text asks for it.
+
 **Mistakes.** A table name that is not one of the twelve above, a value a key cannot take, and a
 config that disables every built-in stop the run before any request, with exit status 2 and a message
 naming the config path and the bad name or key; the message for a bad name lists the valid ones. A

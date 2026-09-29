@@ -13,6 +13,15 @@
 # from reading each other's tree.
 set -u
 
+# Everything below is one run's account of a tree: the work directory is a
+# checkout of the task, and .out/.err hold the harness's whole stdout and
+# stderr, so whatever those files hold of the tree is in them. The default mode
+# is 0o666 less the umask, so on the 0o022 a host carries, a run's transcript
+# under .scratch/ lands readable by every other account on a shared machine.
+# Git records 644 for a non-executable file whatever the umask, so the rows
+# appended to the committed results file are unaffected.
+umask 077
+
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bench/monotonic.sh"
 # shellcheck source=bench/portable.sh
