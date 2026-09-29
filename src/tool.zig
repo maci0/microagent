@@ -1506,6 +1506,99 @@ const credential_names = [_][]const u8{
 /// public half, and refusing it would break reading a bundle someone committed.
 const credential_extensions = [_][]const u8{ ".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".ppk", ".kdbx", ".asc" };
 
+/// The only code points outside ASCII whose Unicode simple case fold is an
+/// ASCII letter, which is the whole difference between `std.ascii.eqlIgnoreCase`
+/// and what a caseless filesystem compares with. Everything else that reads as
+/// one of these letters is a homoglyph rather than a case variant, and what to
+/// do about those is a different question from what to do about case.
+const folded_to_ascii = [_]struct { cp: u21, ascii: u8 }{
+    .{ .cp = 0x017f, .ascii = 's' }, // LATIN SMALL LETTER LONG S
+    .{ .cp = 0x212a, .ascii = 'k' }, // KELVIN SIGN
+};
+
+/// Past every code point, so it cannot be mistaken for one: a byte that starts
+/// no valid sequence is a byte, not a character, and folds to nothing that
+/// spells anything.
+const invalid_byte_fold: u21 = 0x110000;
+
+fn foldCodepoint(cp: u21) u21 {
+    if (cp < 0x80) return std.ascii.toLower(@intCast(cp));
+    for (folded_to_ascii) |f| if (cp == f.cp) return f.ascii;
+    return cp;
+}
+
+/// The next code point of `s`, folded, advancing `i` past the bytes it took. A
+/// byte that is not the start of a valid sequence is its own unit, so a name
+/// the filesystem allowed and the model spelled is walked through rather than
+/// refused as unreadable.
+fn nextFolded(s: []const u8, i: *usize) u21 {
+    const len = chat.utf8SequenceLen(s, i.*);
+    if (len == 0) {
+        const byte = s[i.*];
+        i.* += 1;
+        return invalid_byte_fold +| byte;
+    }
+    const cp = std.unicode.utf8Decode(s[i.*..][0..len]) catch {
+        i.* += 1;
+        return invalid_byte_fold;
+    };
+    i.* += len;
+    return foldCodepoint(cp);
+}
+
+/// The comparison the rule above is documented in terms of, which
+/// `std.ascii.eqlIgnoreCase` is not: a macOS or Windows filesystem resolves
+/// `id_rſa` to the same bytes `id_rsa` is, so an ASCII-only fold refuses
+/// neither name and the private key is read and re-sent to the provider.
+fn eqlIgnoreCase(a: []const u8, b: []const u8) bool {
+    var ai: usize = 0;
+    var bi: usize = 0;
+    while (ai < a.len and bi < b.len) {
+        if (nextFolded(a, &ai) != nextFolded(b, &bi)) return false;
+    }
+    return ai == a.len and bi == b.len;
+}
+
+/// The code point at `i`, or 1 when the byte there starts no valid sequence.
+fn charLenAt(s: []const u8, i: usize) usize {
+    const len = chat.utf8SequenceLen(s, i);
+    return if (len == 0) 1 else len;
+}
+
+fn startsWithIgnoreCase(s: []const u8, prefix: []const u8) bool {
+    if (prefix.len == 0) return true;
+    var i: usize = 0;
+    var xi: usize = 0;
+    while (i < s.len and xi < prefix.len) {
+        if (nextFolded(s, &i) != nextFolded(prefix, &xi)) return false;
+    }
+    return xi == prefix.len;
+}
+
+/// Whether the rest of `s` from `from` is the whole of `suffix`, folded.
+fn suffixMatchesAt(s: []const u8, suffix: []const u8, from: usize) bool {
+    var i = from;
+    var xi: usize = 0;
+    while (xi < suffix.len) {
+        if (i >= s.len) return false;
+        if (nextFolded(s, &i) != nextFolded(suffix, &xi)) return false;
+    }
+    return i == s.len;
+}
+
+/// Every boundary in `s` is tried rather than a running match kept, because a
+/// suffix is one of the fixed table entries above and a full retry at each
+/// boundary costs a few comparisons and needs no failure table.
+fn endsWithIgnoreCase(s: []const u8, suffix: []const u8) bool {
+    if (suffix.len == 0) return true;
+    var i: usize = 0;
+    while (true) {
+        if (suffixMatchesAt(s, suffix, i)) return true;
+        if (i >= s.len) return false;
+        i += charLenAt(s, i);
+    }
+}
+
 /// Whether one path component is on the name list, or ends in one of the
 /// credential extensions. Every tool's refusal is this rule, applied at a
 /// different depth: `read` and `write` to a path, `search` and `ast` to a
@@ -1514,19 +1607,20 @@ const credential_extensions = [_][]const u8{ ".pem", ".key", ".p12", ".pfx", ".j
 fn isCredentialName(name: []const u8) bool {
     // Case-insensitively: a macOS or Windows filesystem resolves `.ENV` and
     // `.env` to the same bytes, so a case-sensitive rule is a rule the next
-    // platform does not enforce.
+    // platform does not enforce. Unicode case folding, not ASCII lowercasing,
+    // because that is the comparison such a filesystem makes.
     for (credential_names) |c| {
-        if (name.len == c.len and std.ascii.eqlIgnoreCase(name, c)) return true;
+        if (eqlIgnoreCase(name, c)) return true;
     }
     for (credential_extensions) |ext| {
-        if (std.ascii.endsWithIgnoreCase(name, ext)) return true;
+        if (endsWithIgnoreCase(name, ext)) return true;
     }
     // `.env`, `.env.local`, `.envrc` and `production.env` are the spellings the
     // same file ships under. `.env.example` and `.env.sample` are refused with
     // them: a template that was committed with a real value in it is exactly
     // the file a name-based rule must not wave through.
-    if (name.len >= 4 and std.ascii.eqlIgnoreCase(name[0..4], ".env")) return true;
-    if (name.len > 4 and std.ascii.endsWithIgnoreCase(name, ".env")) return true;
+    if (startsWithIgnoreCase(name, ".env")) return true;
+    if (endsWithIgnoreCase(name, ".env")) return true;
     return false;
 }
 
@@ -1705,7 +1799,7 @@ fn isProcfsCredential(path: []const u8) bool {
     // Case-insensitively, as `isCredentialName` is: a name the rule is about
     // to refuse must not become readable by being spelled another way.
     for (procfs_credential_leaves) |name| {
-        if (!std.ascii.eqlIgnoreCase(std.fs.path.basename(trimmed), name)) continue;
+        if (!eqlIgnoreCase(std.fs.path.basename(trimmed), name)) continue;
         // `/proc/<pid>/environ`, `/proc/self/environ` and
         // `/proc/thread-self/environ` are the three spellings; all of them
         // carry the prefix, and nothing outside `/proc` is refused.
@@ -4004,10 +4098,44 @@ const credential_path_corpus = [_][]const u8{
     "echo '\u{202e}gnp.exe'",
     "\u{ff0e}env",
     ".env\u{0301}",
+    "id_r\u{017f}a",
+    "certs/server.\u{212a}ey",
     "a" ** 200,
     ("dir/" ** 32) ++ ".env",
     ("../" ** 32) ++ "x",
 };
+
+test "a name rule folds Unicode case, not only ASCII, and still reads a bad byte" {
+    // `U+017F` folds to `s` and `U+212A` folds to `k`. A macOS or Windows
+    // filesystem hands both spellings to whatever opens either name, so the
+    // rule that protects the file has to read them as the same name.
+    for ([_][]const u8{
+        "id_r\u{017f}a",
+        "ID_R\u{017f}A",
+        "server.\u{212a}ey",
+        "server.KEY",
+        "private.\u{212a}ey",
+        ".ENV\u{212a}",
+    }) |name| {
+        try std.testing.expect(isCredentialName(name));
+    }
+    // `isCredentialName` reads one path component, so a path is refused by
+    // whichever of its components is the credential name, not by the last
+    // few bytes of the whole string.
+    try std.testing.expect(isCredentialPath("certs/server.\u{212a}ey"));
+    try std.testing.expect(isCredentialPath("home/u/.ssh/ID_R\u{017f}A"));
+    // The folds go one way: `U+017F` is not an `s` to a filesystem that spells
+    // it the long way, so a name that is only a long-s is still a name of its
+    // own and is not a credential.
+    try std.testing.expect(!isCredentialName("id_r\u{017f}b"));
+    try std.testing.expect(!isCredentialName("credential\u{017f}db"));
+    // A byte the filesystem allowed and no code point spells is walked as its
+    // own unit rather than refusing the name unreadable.
+    try std.testing.expect(!isCredentialName("id_r\xffa"));
+    try std.testing.expect(isCredentialName("id_rsa"));
+    try std.testing.expect(isProcfsCredential("/proc/self/environ"));
+    try std.testing.expect(!isProcfsCredential("/proc/self/environ2"));
+}
 
 test "a fuzzed path is refused exactly when one of its components names a credential" {
     try std.testing.fuzz({}, fuzzCredentialPath, .{ .corpus = &credential_path_corpus });
