@@ -12,133 +12,141 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-29
+
 ### Added
 
-- MCP servers, declared in the config file as one `[[mcp]]` table per server
-  (`name` and `command` required, `args` a list of strings, `env` an inline
-  table). Every server is started over stdio before the first request and asked
-  for its tool list; its tools are offered to the model as
-  `mcp__<server>__<tool>`, with the server's own `inputSchema` copied into the
-  request verbatim; a call is a `tools/call` on the same deadline as any other
-  tool, and the text the server returns is the tool result. A server that
-  cannot be started, exits during the handshake, or refuses a call is reported
-  on stderr and skipped, so one broken entry costs the run that entry rather
-  than the run: the seven built-in tools still work, and a run with no `[[mcp]]`
-  table sends exactly the schema it sent before this existed. The server inherits the scrubbed
-  environment tool subprocesses get -- never the provider key -- plus whatever
-  its own `env` block adds, and its stderr is inherited rather than captured,
-  because that is where an MCP server writes its diagnostics and a pipe nobody
-  drains is a server that blocks.
-- Skills, declared in the config file as `skills = ["dir", ...]` (an empty
-  list turns them off; an absent key means `$HOME/.microagent/skills`). A run
-  reads a `SKILL.md` from each directory under those roots, or under the
-  `:`-separated directories `MICROAGENT_SKILLS` names, which win over the file,
-  lists what it found in the system prompt, and advertises a `skill` tool the
-  model calls to load one body. The split is the
-  point: a body is kilobytes and the conversation re-sends every turn, so a
-  skill the task never needs costs the one line it is listed as. A skill is a
-  directory with an optional frontmatter block naming it and saying when it
-  applies; the name defaults to the directory name, the description to the
-  body's first non-empty line, and a name may hold only letters, digits, dot,
-  dash and underscore, because it is what the model spells back in a tool
-  call. A name the run rewrote would be one the model has to guess. The working
-  directory is deliberately not a source: a `SKILL.md` in a repository under
-  review was written by whoever wrote that repository, and a skill body is
-  prompt text the model is told to follow, so naming a repository's directory
-  in `MICROAGENT_SKILLS` is the operator saying those bytes are instructions. A
-  run that finds no skills advertises exactly the schema and sends exactly the
-  system prompt it sent before this existed, which keeps the request prefix a
-  provider caches unchanged.
-- A session record carries the model that answered, beside the one the run asked
-  for. `model` is what the request named, and a gateway routes a name like
-  `deepseek/deepseek-v4-flash` to whichever snapshot it holds this week, so two
-  runs of the same command compared as equal when the weights behind them were
-  not, and the log that outlives both runs could not say which produced a
-  response. The new `served_model` and `fingerprint` are the provider's own
-  answer to that, read off the frames the run already parses; both are empty
-  strings when the stream named neither, and neither is prompt or output text.
-- Two more `std.testing.fuzz` harnesses, over the two untrusted inputs whose
-  handling decides where a secret goes: the base url, which chooses whether the
-  api key travels over plaintext and is printed on every failure, and the git
-  command line, which is composed out of a model's subcommand, revision and
-  path and carries the credential exclusion pathspecs.
-- The retryable-status test now covers every status the run's own set names,
-  including the two it did not (a 409 and a 425), and the 4xx either side of
-  the ones it does. The rule is `408, 409, 425, 429, or >= 500`, and neither
-  boundary was asserted, so a set that dropped 409 or that started at 501 read
-  the same.
-- `make test-sanitize` runs the unit tests a second time with the
-  undefined-behavior sanitizer, and `make check` and both workflows run it. The
-  plain suite says the assertions hold, not that nothing inside them is out of
-  its bounds or overflows, and an overflow that survives to `ReleaseFast` is a
-  miscompiled release asset rather than a failed test. It is a module of its
-  own, so the instrumented code reaches the tests and not the published binary.
-  There is no address-sanitizer run: Zig's needs a libc for its interceptors and
-  nothing here links one.
-- `make check-unreleased` asks that the `## [Unreleased]` entry uses the five
-  Keep a Changelog sections, each at most once, in the order CONTRIBUTING.md
-  states. The check that reads a changelog section is `check-changelog`, and it
-  reads the section a tag names, so a misspelled heading, a second `### Fixed`
-  or a `### Security` above a `### Fixed` was first found as a release note
-  rendering wrong. It is in `make check` and in the push workflow, and it does
-  not ask whether a change is worth an entry.
-- `--max-spend-tokens <n>` (`MICROAGENT_MAX_SPEND_TOKENS`) stops a run once it has
-  billed that many tokens, prompt and completion together. Neither of the ceilings
-  already there bounds what a run spends: `--max-turns` counts turns, and a turn
-  re-sends the whole conversation, so a run that appends tool results and compacts
-  late bills more with fewer turns than one that does, while `--max-tokens` is the
-  same figure for every response. The check is made before a turn is started, so the
-  provider never sees a request the run has already priced itself out of, and the
-  turn that reaches the ceiling is the one that finishes. The run announces itself on
-  stderr at 80% of the ceiling, once, naming both numbers. Like `--budget`, leaving
-  the option out is what says "no ceiling", and a value of zero is refused.
-- `--stall-timeout <s>` (`MICROAGENT_STALL_TIMEOUT`, 120 s by default) fails a
-  read that has gone quiet for that long. `--budget` is checked between reads,
-  and a read that never returns never reaches that check, so a provider that
-  accepted the connection and then said nothing held the run open until the
-  caller killed it: one benchmark trial sat there for twenty-five minutes. The
-  socket carries the deadline now, so a stalled provider is a run that fails
-  rather than a run that hangs, and a value of zero is refused with the other
-  ceilings. The Harbor adapter forwards the caller's value into the container,
-  so a trial bounded from outside is bounded on the wire too.
-- `make check-assets`, `make check-changelog` and `make check-release`, the
-  checks release.yml used to spell out in its own shell: the assets in `dist/`
-  are the ones the tag will publish, and a tag is refused for the changelog
-  rules it used to enforce only on the runner. Both workflows now call these
-  targets, so the release note is written against a command rather than
-  against a workflow nobody can run before they have pushed a tag.
-- `make lint-versions` also checks that every pin in `lint-requirements.txt`
-  carries a `--hash=sha256`. The file is installed with `--require-hashes`, so a
-  pin added without one fails the lint job on pip's own message, which names
-  neither the pin nor the linter that asked for it, and only in CI.
-- A fuzz harness for the `Retry-After` response head, over the whole head rather
-  than only the date its value can spell. The framing rules decide what a
-  deadline is set from, and nothing asserted them: a header read out of a body
-  past the blank line, a second `Retry-After` overriding the first, and a wait
-  past the cap all reach the same call. The harness reads the head a second way
-  and holds the two to each other, so a framing rule either gets wrong is a
-  disagreement rather than a value that is wrong in both halves at once.
-- A fuzz harness for the runner search over a `bash` call's arguments. The
-  arguments are the raw text the provider streamed, and the window the search
-  slides over them had a whole-string reference in the tree that only nineteen
-  hand-picked examples ever asked. A window answering differently from that
-  reference is a verification turn gained or lost on a run that edited the tree
-  and named no runner, so the two now run against the same bytes.
-- A fuzz harness for the credentials name rules, over a model's own path and
-  command arguments. `isCredentialPath` walks every component of a path the
-  model wrote and `credentialInCommand` splits a `bash` command into words, and
-  both decide the one thing whose failure sends a key to the provider. The
-  harness holds the walk to a component the name rules refuse, so a path with
-  no credential component in it is never turned down, and reads the same path
-  with trailing separators and in another case, which are the two spellings
-  the walk is documented to treat as one file. The word a refusal names is the
-  command's first, not one later in the line.
-- A fuzz harness for an ast-grep rewrite's own re-run check, over the pattern
-  and the replacement the model wrote together. The refusal reads a pattern for
-  the literal text a match is anchored on, and a rewrite that still carries it
-  is applied again on the next run, one wrapper deeper each time, to every match
-  in the tree. The harness holds the literal text to a fixed point, and holds
-  every applied rewrite clear of all three shapes the refusal exists for.
+- `make check-reproducible` builds the first published target a third time, from a copy of the
+  source at another path, and refuses a release when those bytes differ. The other two builds vary
+  the clock, the locale, the timezone and the cache but share the checkout's path, so a build
+  directory reaching a binary (a panic message naming it, an embedded file read by absolute name)
+  passed a check that was looking for timestamps.
+- An MIT `LICENSE`, listed in the README and in the package `build.zig.zon`
+  ships. A consumer reading the README or fetching the package had no file that
+  said what the grant was.
+- `make instructions`, wrapping `bench/instructions.sh`, so the retired-instructions
+  gate CONTRIBUTING.md documents is a target rather than a line in the prose:
+  `make instructions` prints the table and `make instructions CHECK=--check`
+  compares each row against `bench/instructions.baseline`. It runs the test suite
+  first, since the script reads that build's `options.zig` and stops with a
+  reminder when there is none.
+- The release workflow reads the published release back after publishing it and
+  compares it with `dist/`: the release is no longer a draft, it carries exactly
+  the assets this tag built and nothing else, each one byte-identical to the file
+  that was uploaded, and each `.sha256` sidecar names the digest of the asset
+  beside it. `gh release upload` reporting success said the call was accepted,
+  not that a consumer's `update` would find the asset it asks for; a skipped
+  asset or a stale one left on a resumed draft published green and failed on the
+  machine that downloaded it.
+- `.github/dependabot.yml` for the actions ecosystem. Every action in the
+  workflows and the shared toolchain action is pinned to a commit sha, so a new
+  upstream release cannot turn a green run red on its own, and a sha that stops
+  naming a supported runner is found on a push rather than in review. The linter
+  pins in `lint-requirements.txt` are deliberately left out: `make lint-versions`
+  refuses a bump to that file that forgets the version named in the Makefile, so
+  a bot opening that pull request would produce a red pipeline by construction.
+- `make watch` reruns the unit test suite on every source change, and
+  `make watch FILTER=...` narrows it to the tests whose name contains the
+  substring, the way `make test-one` narrows one run. It wraps
+  `zig build test --watch`, the build system's own mode, so the edit loop is a
+  declared command rather than something a contributor has to know. A `FILTER`
+  that matches no declared test name is refused before the watch starts,
+  because the build system reports success for a filter that ran nothing.
+- The bench shell, the Harbor adapter and the workflows are linted. `make check` now runs
+  `shellcheck` over `bench/*.sh` and `bench/tasks/*/*.sh`, `ruff check` over
+  `integrations/harbor` (rules in `ruff.toml`) and `yamllint` over `.github`
+  (rules in `.yamllint`), and CI runs all three as their own blocking job. A defect in
+  the bench scripts or the adapter is a wrong benchmark result rather than a failing
+  test, so nothing caught it before.
+- The Harbor adapter is formatter-checked: `make lint-python` and CI now run
+  `ruff format --check` beside `ruff check`, and the two files are formatted to match.
+  `ruff` also runs the security, naming, builtin-shadowing, logging and import
+  convention groups, which the tree already passed. `yamllint` covers
+  `.github/actions/setup-zig/action.yml` as well as the workflows.
+- `ruff` also runs the annotation and boolean-argument groups, so a new Harbor
+  function without annotations or a boolean positional argument is caught rather than
+  shipped, and `C901` is measured against a `max-complexity` written down in `ruff.toml`
+  instead of the default. The adapter already passed all three.
+- The lint job runs `make lint-versions`, the check that keeps the version pinned in
+  `lint-requirements.txt` and the one named in the Makefile from drifting. It was in
+  `make check` but not in CI, so a bump that forgot one of the two files only failed for
+  whoever ran the gate locally.
+- `make check-targets`: the check that every published target is one `microagent update` asks
+  for. `ci.yml` claimed its release rehearsal caught an asset name drifting from the ones
+  `update.zig` asks for, and it did not: the job built the list and ran `ls`. The unit tests pin
+  the naming in `src/update.zig` against literals, and this pins it against the Makefile's
+  `RELEASE_TARGETS`, so a target cannot be added to one and not the other. It runs in `make check`
+  and in that CI job.
+- `make required-zig-version` and `make release-targets`. `setup-zig` and ci.yml's reproducibility
+  step each `sed`-parsed the Makefile and `build.zig.zon` themselves, so the toolchain pin and the
+  published target list were each spelled twice, and a rename had to land in both to be a rename.
+  Both read the Makefile now.
+- `THREAT_MODEL.md`: the attack surface as a whole, entry points, trust boundaries, assets,
+  the threats on each boundary, the controls the code implements and the gaps it does not
+  cover, each with a file reference.
+- Every request now carries `max_tokens`, and `--max-tokens` / `MICROAGENT_MAX_TOKENS` set it
+  (default 65536, at least 1). Without it the provider's own limit was the only bound on what one
+  turn could generate, so a model that failed to stop was billed until something else stopped it;
+  `--max-turns` counts turns, not tokens.
+- `MICROAGENT_MAX_TURNS` is read by the binary itself, so the variable works for a plain container
+  run and not only through the harbor adapter. The flag still wins where both are given.
+- `MDEBUG` is documented in `--help` and in the README, with the values that count as on.
+- Fuzz harnesses for the two parsers that take untrusted bytes: the provider's streamed response, frame
+  by frame, and the GitHub release body the updater acts on. Both run their seed corpus on every
+  `zig build test` through `std.testing.fuzz`, and both assert the invariants a crash-only harness
+  misses: the turn a stream produces still serializes as a valid request body, and a release body only
+  reaches `.replaced` when both download URLs are trusted and the published checksum matches the bytes.
+- Fuzz harnesses for the two other untrusted parsers: the reply-style config file and the command
+  line. The config harness asserts that a line the file cannot use is named by a key that is in the
+  file, that every level in force is one the parser can name back, and that the prompt block built
+  from a fuzzed config names the level it turned on. The command-line harness asserts that no option
+  holds a value no argument carried, that `--help` and `--version` stop the parse, that a ceiling is
+  never zero and a reasoning level is always one the provider knows, and that the same line parsed
+  twice says the same thing. A bad `--max-turns`, `--max-tokens` or `--reasoning-effort` value is a
+  message the parser returns rather than a call that exits the process, which is what let the
+  command line be read at all outside a subprocess.
+- Fuzz harnesses for the two untrusted inputs that had none: a model tool call and the `update`
+  subcommand's own command line. The tool-call harness parses a fuzzed argument object and
+  asserts the gutter line stays one line inside its fixed buffer with no byte a terminal acts
+  on, and that every count the model wrote (`limit`, `timeout_ms`) lands inside its ceiling
+  before a subprocess is started. The `update` harness asserts a `--repo` is always bytes some
+  argument carried, that a repo `validRepo` refuses never becomes a request, and that one it
+  accepts only ever names `api.github.com`. Both run their corpus on every `zig build test`
+  through `std.testing.fuzz`.
+- Fuzz harnesses for the two terminal-facing escapers, which had unit tests but no corpus: the
+  quoted value every diagnostic prints (`chat.safeText`) and the provider error body
+  (`tool.terminalSafe`). The first asserts that a fuzzed value quoted under a fuzzed budget
+  carries no C0, DEL or C1 byte, stays valid UTF-8 inside its budget, and is a prefix of the same
+  value quoted with more room, so a cut cannot land inside a character or inside an escape. The
+  second asserts that a fuzzed body leaves the same length, keeps every byte that was already
+  printable, and is its own fixed point. Both run their corpus on every `zig build test` through
+  `std.testing.fuzz`.
+- Stale `path:line` references in `THREAT_MODEL.md` now point at the functions they name; the
+  gutter and `terminalSafe` rows had been citing the dispatcher above them.
+- `MDEBUG=1` prints the configuration the run resolved: model, base url, the ceilings, the level
+  each style key took, and the name of the variable or file the API key came from. The key is never
+  printed and a base url is the redacted spelling. Precedence spans three sources per option, and
+  there was no way to see which one answered.
+- `config.example.toml` is a commented template for the reply-style file, with both keys, their
+  levels and their defaults.
+- `PERFORMANCE.md`: what a turn costs inside the harness itself, the four changes that bought
+  what they bought, and the four that were measured and left out, so the next round reads the
+  refusals rather than re-running the experiment. `BENCHMARK.md` still says what the harness
+  measures against other harnesses.
+
+- `git` tool: read-only `status`, `diff`, `log`, `show` and `blame` with a fixed subcommand list and a
+  400-line cap, so git state no longer has to be assembled by the model through `bash`.
+- Reply styles. `caveman` sets how terse the agent's own prose is (`off`, `lite`, `full`, `ultra`, and the
+  three `wenyan-*` levels) and `ponytail` sets how lazy the code is (`off`, `lite`, `full`, `ultra`). Both
+  are read from `$MICROAGENT_CONFIG`, else `~/.microagent/config.toml`, and both have an env override
+  (`MICROAGENT_CAVEMAN`, `MICROAGENT_PONYTAIL`). Neither touches the tools, the request shape or the
+  conversation: each appends text to the system prompt, and with `caveman = "off"` and
+  `ponytail = "off"` it appends nothing at all, so a run that turns both off sends the system prompt
+  this release writes, unlengthened.
+- `cached_tokens` on the stdout usage line and in each session-log record: the part of the prompt the
+  provider served from its prompt cache, read from `prompt_tokens_details.cached_tokens`,
+  `prompt_cache_hit_tokens` or `cache_read_input_tokens`. Both are additive JSON keys, so a reader that
+  looks up the counters it already knows is unaffected.
 
 ### Changed
 
@@ -246,6 +254,151 @@ release, and `microagent update` moves you to it.
   count. The run still continues on the container's own trust store, which a bare image
   does not have, so the first request dies as `TlsInitializationFailed` with nothing in
   the log to connect it to the host that had a bundle to give.
+
+- A bare `--` ends the flags. A task is model output and starts with a dash as
+  often as not ("-Werror", "--fix"), and `microagent -- "..."` was an unknown
+  argument and exit 2 before a request was sent; the only spelling that took
+  one was `--print`. `microagent -- --help` is a run whose task is the words
+  `--help`, which is what `-p --help` already was, and `microagent update`
+  reads the same marker.
+- The reproducibility gate isolates the compiler's global cache as well as the project one.
+  `--cache-dir` moves the project's artifacts, but the compiled toolchain stayed in the
+  runner's `$HOME/.cache/zig`, so a warm cache left by a previous build on the same machine
+  fed the next one and the check was not measuring the cold build it claimed to. Each
+  build now sets `ZIG_GLOBAL_CACHE_DIR` to a scratch of its own, and the scratch is removed
+  by a trap, so a target that fails the comparison leaves nothing behind either.
+- The push workflow runs the `x86_64-macos` asset instead of only building it. The two
+  macOS runners are an Apple silicon one and, now, an x86_64 one, so three of the four
+  published binaries are started on a push rather than cross-compiled and left. The fourth,
+  `aarch64-linux-musl`, still needs a machine of its own and is covered by the build alone.
+
+- `make gauntlet AGENTS=...` wraps `bench/gauntlet.sh`, the usefulness
+  benchmark whose results BENCHMARK.md publishes, beside the `make bench` and
+  `make overhead` targets that already wrap its two siblings, and the
+  `Reproducing` block names the command. Each of the three scripts invoked the
+  harnesses by bare name and skipped the ones missing from PATH, so running one
+  without the target on it recorded a skipped row rather than a measured one.
+
+- CONTRIBUTING.md no longer sends a contributor to `zig build test --fuzz` as if
+  it ran. It does not build on the pinned 0.16.0: the toolchain's own test
+  runner fails to compile under `-ffuzz`, so the command ends in eight
+  compiler errors before a harness is reached. The corpus is still asserted on
+  by every `zig build test`, which is where a new seed has to be written down.
+
+- A run that stops at a ceiling exits 3 instead of 0. `--max-turns`, and a budget
+  that ended the last turn, both leave a prefix of an answer on stdout while
+  reporting success, so a script reading the text read a truncated review as a
+  finished one. 0 is now only a run the model finished: 1 is a failure, 2 a bad
+  command line, 3 a run stopped at a ceiling. A script that wants the prefix
+  regardless of the status reads stdout as it did; one that acts on the status
+  now has the fact it needed. `microagent --help` and the README carry the code.
+
+- A `read` with `offset` or `limit` streams the file instead of reading all of it and
+  copying the lines out. Reading fifty lines of a 3.9 MB file took 0.90 ms and left the
+  whole file in the turn's memory beside the response it shared that memory with; it takes
+  0.48 ms and leaves about one read's worth. The cap is unchanged, and still a property of
+  the file rather than of the range, so a file that reaches 4 MB is refused either way.
+
+  Two consequences the old reader had as bugs. The newline ending a file's last line
+  terminates it rather than starting another one, so `read` of a whole file and `read` of
+  the same file line by line no longer disagree about whether it ends in a blank line, and
+  an empty file no longer reads back as a single blank line.
+
+- The agent loop, the tools and the shared value types are three modules instead of one file.
+  `main.zig` held the command line, the config, the session log, the provider request, the frame
+  parser, the tools and every subprocess it started, which is a 4 400-line file where a change to
+  the tool runner cannot be read without reading the retry policy. `tool.zig` now owns the tools
+  and the capped process runner, `chat.zig` the value types a turn is made of and the JSON writer,
+  and `net.zig` the deadline the two of them share. No behavior changes.
+
+- A turn whose response never arrives is not sent again. A connection that died while the
+  response head was being read left the request whole on the wire, so the provider may have
+  generated and billed the completion with no response to show for it, and the retry bought a
+  second billable completion for one turn. That failure now ends the run with the connection
+  error named on stderr. A 429, a 5xx and a connection that dies before the request reached the
+  provider are still retried twice.
+- The linters CI installs come from `lint-requirements.txt`, which pins `ruff`, `yamllint` and
+  the two packages `yamllint` imports to one sha256 per published artifact, and the lint job
+  installs it with `--require-hashes`. A version range was a resolved-at-install-time choice of
+  whatever the index served that day; a hash is the file a person looked at. `make lint-versions`
+  fails when a version there and the one in the Makefile drift apart.
+- The Harbor adapter's own dependency is declared. `integrations/harbor/requirements.txt` pins
+  `harbor` exactly, because the adapter subclasses its agent API and a benchmark score is only
+  the same score against the Harbor release that produced it.
+- The benchmark venv installs from `integrations/harbor/requirements.lock`, which pins Harbor's
+  whole dependency tree to one sha256 per published artifact, and is `uv pip compile` output
+  from `requirements.txt`. A pinned `harbor` alone still left 89 packages resolved at install
+  time, so the pair that produced a number in `BENCHMARK.md` was not the pair the next run
+  installed.
+- A style config that is present but unreadable, is a directory, or is over the 64 KB cap says so on
+  stderr, not only one a flag or `MICROAGENT_CONFIG` named. A file that is simply absent stays quiet.
+- `GITHUB_TOKEN` is trimmed before it becomes an `Authorization` header, like the provider key file
+  is. A token a wrapper read from a file arrived carrying that file's trailing newline, and GitHub
+  refused it as an invalid credential rather than as a whitespace mistake. `microagent update --help`
+  now names the two CA-bundle variables it already read.
+- The Harbor adapter validates every knob it hands the binary in `setup`, so a mistyped
+  `MICROAGENT_MAX_TURNS`, `MICROAGENT_BUDGET_SECONDS`, `MICROAGENT_AGENT_TIMEOUT_SEC` or
+  `MICROAGENT_REASONING_EFFORT` is named before the binary is looked for and uploaded, rather than
+  after a container start and an upload have already been paid for.
+- The Harbor adapter validates `MICROAGENT_BUDGET_SECONDS` before the container starts, and refuses
+  a zero value for every ceiling it reads, which is what its README already promised.
+- CI restores the Zig build caches between runs, from the shared toolchain action, so a push no
+  longer pays for compiling the compiler cache and `std` from scratch on a cold runner. The
+  global cache is moved under `RUNNER_TEMP`, whose default path differs per runner OS.
+- The published targets and their asset names are spelled once, in the Makefile, as
+  `make release-assets TAG=v0.2.0`. `ci.yml` rehearses the release with that target and
+  `release.yml` publishes what it builds, so a release can be built on a laptop the way the tag
+  builds it, and a renamed target no longer has to be renamed in two workflows.
+- The Harbor adapter's budget follows the timeout it is given, and a run that still reaches it is
+  scored on the tree it left. `MICROAGENT_BUDGET_SECONDS` went to the container as sent, so a budget
+  at or above harbor's per-task timeout had its last turn killed by the caller mid-write: the binary
+  allows its forced final push 300 s past the budget, and a 780 s budget inside a 900 s timeout lost
+  Terminal-Bench 2's `adaptive-rejection-sampler` that way. The budget is now the smaller of
+  `MICROAGENT_BUDGET_SECONDS` and `MICROAGENT_AGENT_TIMEOUT_SEC` less 360 s, the grace plus a minute
+  for teardown, floored at 60 s. At the defaults, 600 against a 1500 s timeout, the budget is
+  unchanged; a caller that names both gets the cap, so a 900 s task timeout runs a 540 s budget where
+  it ran 600. A timeout the room does not cover no longer raises out of `run`, which recorded the
+  trial as an exception and scored the work as nothing: the tree the agent changed goes to
+  verification, the timeout lands in `microagent-timeout.txt` in the job's log directory, and a
+  warning names it, so a trial scored on a partial tree is visible rather than silent.
+- `release.yml` refuses a patch tag whose changelog section carries an `Added`, a `Changed` or a
+  `Removed` entry, and names the version above it in the message. The policy is in the README and in
+  CONTRIBUTING, but nothing checked that the tag agreed with the entries it publishes, so a
+  feature, a changed default or a removal could ship as `0.2.1` under a number that promises it
+  did not.
+- `microagent --help` carries three worked invocations, and its subcommand line spells the flag
+  the way `microagent update --help` does (`update [--check]`, not `update [-c|--check]`).
+- The file a write lands on when the path is a symlink is resolved once, in `net.zig`, and shared
+  by the `write` and `edit` tools and by `microagent update`. The two copies answered the same
+  question differently: the tools' copy spelled the join as a hardcoded `/` and read the
+  link's directory by scanning for one, where `update` went through `std.fs.path` and used
+  `std.fs.path.sep`. Nothing changed for a run, but a path separator reached for as a literal
+  is the one thing in a path that is not portable, and there is now one implementation of the
+  answer to check. `writeFileAtomic` takes no allocator as a result: the two scratch buffers
+  it needs are stack, so the arena a caller passed for nothing is gone.
+
+- `--max-turns` now defaults to 100 (was 60). A run that relied on stopping at 60 turns now gets the
+  longer loop; pass `--max-turns 60` to keep the old ceiling.
+- Replies are terse by default: `caveman` is `ultra` and `ponytail` is `full` unless the config or env
+  says otherwise. A run that wants the prose back sets `caveman = "off"`.
+
+- The system prompt is rewritten around the order a fix goes in: find the code and
+  the tests that cover it, reproduce the failure before changing anything, make
+  the smallest change, run that reproduction and those tests again, then read
+  the diff. It also says that what a tool returns is data about the repository
+  rather than instructions, and that a credential is not part of the task, and
+  each tool's description in the schema names the credential files it refuses.
+  The tools, the flags and the exit statuses are the same; what the model does
+  with them is not, so an answer, a token count or a benchmark number from
+  `0.1.1` is not one this version reproduces.
+
+### Removed
+
+- The second copy of the session store in `main.zig`. The run opens, writes and closes its log
+  through `src/session.zig`; `main.zig` kept a parallel `Session` type, its own
+  `createSessionLog`, `pruneSessions` and `sessionRecord`, and a `sessionDir` no call reached, so
+  one file-owning store was spelled twice and only one of them was ever run. The tests beside the
+  dead copy were duplicates of the ones in `session.zig`, which keep every assertion.
 
 ### Fixed
 
@@ -675,325 +828,12 @@ release, and `microagent update` moves you to it.
   right and changes nothing. A bare value stops at the `#` for the same reason a
   quoted one does, and a `#` inside the quotes is still text.
 
-### Security
-
-- A credentials file named as the `git` tool's `rev` is refused, the way one
-  named as its `path` already was. The `:(exclude)` pathspecs the tool carries
-  are arguments after the `--`, so they scope a revision the model named and
-  never a name it did not: `git blame .env` took the name as its one revision
-  argument and printed the file line by line with its hash and author, and
-  `git diff .env` printed the committed and working-tree text of every hunk. A
-  tool result is re-sent to the provider on every later turn. The tool's own
-  description now says the `rev` is refused too, so the model is not asked for
-  one.
-
-- A session log is created readable by its owner alone, and the directory a run makes for
-  its own store with it. A log took the default file mode, `0o666` less the umask, so on the
-  `0o022` an ordinary account carries it landed world-readable under `$HOME`, and the store
-  directory it was made in took `0o755` and exposed the names of the logs even where the logs
-  themselves could not be read. A log is the run's transcript: the prompts, the tool
-  arguments, and every byte a tool read out of the tree, which is the material the tools
-  themselves refuse to hand the provider. The modes are now `0o600` and `0o700`, and only on
-  what this run creates: an operator who pointed `MICROAGENT_SESSION_DIR` at a store that
-  already exists keeps the mode they gave it. `THREAT_MODEL.md` records the two modes as
-  controls, and its `src/session.zig` references point at the declarations they name again.
-
-- A path whose symlink lands on a credentials file is refused, by the same rule and
-  the same message as one named outright. The name rule reads the bytes the model sent,
-  and a repository can commit a link whose own name is ordinary and whose target is a
-  credential: `docs/setup.md -> /home/someone/.aws/credentials` passed every check
-  `read`, `write`, `edit`, `search` and `ast` make, and each of them follows the link
-  when it opens the path. So the key came back as a tool result that is re-sent to the
-  provider on every later turn, and a `write` through the same link replaced the
-  operator's key with the model's guess. `read`, `write`, `edit`, `search` and `ast` now
-  ask the name rule of the path the link resolves to as well, and name that file in the
-  refusal. A link to an ordinary file is still followed and still read, so the cost is
-  one readlink per call and the tools are otherwise unchanged.
-
-## [0.2.0] - 2026-09-29
-
-### Added
-
-- `make check-reproducible` builds the first published target a third time, from a copy of the
-  source at another path, and refuses a release when those bytes differ. The other two builds vary
-  the clock, the locale, the timezone and the cache but share the checkout's path, so a build
-  directory reaching a binary (a panic message naming it, an embedded file read by absolute name)
-  passed a check that was looking for timestamps.
-- An MIT `LICENSE`, listed in the README and in the package `build.zig.zon`
-  ships. A consumer reading the README or fetching the package had no file that
-  said what the grant was.
-- `make instructions`, wrapping `bench/instructions.sh`, so the retired-instructions
-  gate CONTRIBUTING.md documents is a target rather than a line in the prose:
-  `make instructions` prints the table and `make instructions CHECK=--check`
-  compares each row against `bench/instructions.baseline`. It runs the test suite
-  first, since the script reads that build's `options.zig` and stops with a
-  reminder when there is none.
-- The release workflow reads the published release back after publishing it and
-  compares it with `dist/`: the release is no longer a draft, it carries exactly
-  the assets this tag built and nothing else, each one byte-identical to the file
-  that was uploaded, and each `.sha256` sidecar names the digest of the asset
-  beside it. `gh release upload` reporting success said the call was accepted,
-  not that a consumer's `update` would find the asset it asks for; a skipped
-  asset or a stale one left on a resumed draft published green and failed on the
-  machine that downloaded it.
-- `.github/dependabot.yml` for the actions ecosystem. Every action in the
-  workflows and the shared toolchain action is pinned to a commit sha, so a new
-  upstream release cannot turn a green run red on its own, and a sha that stops
-  naming a supported runner is found on a push rather than in review. The linter
-  pins in `lint-requirements.txt` are deliberately left out: `make lint-versions`
-  refuses a bump to that file that forgets the version named in the Makefile, so
-  a bot opening that pull request would produce a red pipeline by construction.
-- `make watch` reruns the unit test suite on every source change, and
-  `make watch FILTER=...` narrows it to the tests whose name contains the
-  substring, the way `make test-one` narrows one run. It wraps
-  `zig build test --watch`, the build system's own mode, so the edit loop is a
-  declared command rather than something a contributor has to know. A `FILTER`
-  that matches no declared test name is refused before the watch starts,
-  because the build system reports success for a filter that ran nothing.
-- The bench shell, the Harbor adapter and the workflows are linted. `make check` now runs
-  `shellcheck` over `bench/*.sh` and `bench/tasks/*/*.sh`, `ruff check` over
-  `integrations/harbor` (rules in `ruff.toml`) and `yamllint` over `.github`
-  (rules in `.yamllint`), and CI runs all three as their own blocking job. A defect in
-  the bench scripts or the adapter is a wrong benchmark result rather than a failing
-  test, so nothing caught it before.
-- The Harbor adapter is formatter-checked: `make lint-python` and CI now run
-  `ruff format --check` beside `ruff check`, and the two files are formatted to match.
-  `ruff` also runs the security, naming, builtin-shadowing, logging and import
-  convention groups, which the tree already passed. `yamllint` covers
-  `.github/actions/setup-zig/action.yml` as well as the workflows.
-- `ruff` also runs the annotation and boolean-argument groups, so a new Harbor
-  function without annotations or a boolean positional argument is caught rather than
-  shipped, and `C901` is measured against a `max-complexity` written down in `ruff.toml`
-  instead of the default. The adapter already passed all three.
-- The lint job runs `make lint-versions`, the check that keeps the version pinned in
-  `lint-requirements.txt` and the one named in the Makefile from drifting. It was in
-  `make check` but not in CI, so a bump that forgot one of the two files only failed for
-  whoever ran the gate locally.
-- `make check-targets`: the check that every published target is one `microagent update` asks
-  for. `ci.yml` claimed its release rehearsal caught an asset name drifting from the ones
-  `update.zig` asks for, and it did not: the job built the list and ran `ls`. The unit tests pin
-  the naming in `src/update.zig` against literals, and this pins it against the Makefile's
-  `RELEASE_TARGETS`, so a target cannot be added to one and not the other. It runs in `make check`
-  and in that CI job.
-- `make required-zig-version` and `make release-targets`. `setup-zig` and ci.yml's reproducibility
-  step each `sed`-parsed the Makefile and `build.zig.zon` themselves, so the toolchain pin and the
-  published target list were each spelled twice, and a rename had to land in both to be a rename.
-  Both read the Makefile now.
-- `THREAT_MODEL.md`: the attack surface as a whole, entry points, trust boundaries, assets,
-  the threats on each boundary, the controls the code implements and the gaps it does not
-  cover, each with a file reference.
-- Every request now carries `max_tokens`, and `--max-tokens` / `MICROAGENT_MAX_TOKENS` set it
-  (default 65536, at least 1). Without it the provider's own limit was the only bound on what one
-  turn could generate, so a model that failed to stop was billed until something else stopped it;
-  `--max-turns` counts turns, not tokens.
-- `MICROAGENT_MAX_TURNS` is read by the binary itself, so the variable works for a plain container
-  run and not only through the harbor adapter. The flag still wins where both are given.
-- `MDEBUG` is documented in `--help` and in the README, with the values that count as on.
-- Fuzz harnesses for the two parsers that take untrusted bytes: the provider's streamed response, frame
-  by frame, and the GitHub release body the updater acts on. Both run their seed corpus on every
-  `zig build test` through `std.testing.fuzz`, and both assert the invariants a crash-only harness
-  misses: the turn a stream produces still serializes as a valid request body, and a release body only
-  reaches `.replaced` when both download URLs are trusted and the published checksum matches the bytes.
-- Fuzz harnesses for the two other untrusted parsers: the reply-style config file and the command
-  line. The config harness asserts that a line the file cannot use is named by a key that is in the
-  file, that every level in force is one the parser can name back, and that the prompt block built
-  from a fuzzed config names the level it turned on. The command-line harness asserts that no option
-  holds a value no argument carried, that `--help` and `--version` stop the parse, that a ceiling is
-  never zero and a reasoning level is always one the provider knows, and that the same line parsed
-  twice says the same thing. A bad `--max-turns`, `--max-tokens` or `--reasoning-effort` value is a
-  message the parser returns rather than a call that exits the process, which is what let the
-  command line be read at all outside a subprocess.
-- Fuzz harnesses for the two untrusted inputs that had none: a model tool call and the `update`
-  subcommand's own command line. The tool-call harness parses a fuzzed argument object and
-  asserts the gutter line stays one line inside its fixed buffer with no byte a terminal acts
-  on, and that every count the model wrote (`limit`, `timeout_ms`) lands inside its ceiling
-  before a subprocess is started. The `update` harness asserts a `--repo` is always bytes some
-  argument carried, that a repo `validRepo` refuses never becomes a request, and that one it
-  accepts only ever names `api.github.com`. Both run their corpus on every `zig build test`
-  through `std.testing.fuzz`.
-- Fuzz harnesses for the two terminal-facing escapers, which had unit tests but no corpus: the
-  quoted value every diagnostic prints (`chat.safeText`) and the provider error body
-  (`tool.terminalSafe`). The first asserts that a fuzzed value quoted under a fuzzed budget
-  carries no C0, DEL or C1 byte, stays valid UTF-8 inside its budget, and is a prefix of the same
-  value quoted with more room, so a cut cannot land inside a character or inside an escape. The
-  second asserts that a fuzzed body leaves the same length, keeps every byte that was already
-  printable, and is its own fixed point. Both run their corpus on every `zig build test` through
-  `std.testing.fuzz`.
-- Stale `path:line` references in `THREAT_MODEL.md` now point at the functions they name; the
-  gutter and `terminalSafe` rows had been citing the dispatcher above them.
-- `MDEBUG=1` prints the configuration the run resolved: model, base url, the ceilings, the level
-  each style key took, and the name of the variable or file the API key came from. The key is never
-  printed and a base url is the redacted spelling. Precedence spans three sources per option, and
-  there was no way to see which one answered.
-- `config.example.toml` is a commented template for the reply-style file, with both keys, their
-  levels and their defaults.
-- `PERFORMANCE.md`: what a turn costs inside the harness itself, the four changes that bought
-  what they bought, and the four that were measured and left out, so the next round reads the
-  refusals rather than re-running the experiment. `BENCHMARK.md` still says what the harness
-  measures against other harnesses.
-
-- `git` tool: read-only `status`, `diff`, `log`, `show` and `blame` with a fixed subcommand list and a
-  400-line cap, so git state no longer has to be assembled by the model through `bash`.
-- Reply styles. `caveman` sets how terse the agent's own prose is (`off`, `lite`, `full`, `ultra`, and the
-  three `wenyan-*` levels) and `ponytail` sets how lazy the code is (`off`, `lite`, `full`, `ultra`). Both
-  are read from `$MICROAGENT_CONFIG`, else `~/.microagent/config.toml`, and both have an env override
-  (`MICROAGENT_CAVEMAN`, `MICROAGENT_PONYTAIL`). Neither touches the tools, the request shape or the
-  conversation: each appends text to the system prompt, and with `caveman = "off"` and
-  `ponytail = "off"` it appends nothing at all, so a run that turns both off sends the system prompt
-  this release writes, unlengthened.
-- `cached_tokens` on the stdout usage line and in each session-log record: the part of the prompt the
-  provider served from its prompt cache, read from `prompt_tokens_details.cached_tokens`,
-  `prompt_cache_hit_tokens` or `cache_read_input_tokens`. Both are additive JSON keys, so a reader that
-  looks up the counters it already knows is unaffected.
-
-### Changed
-
-- A bare `--` ends the flags. A task is model output and starts with a dash as
-  often as not ("-Werror", "--fix"), and `microagent -- "..."` was an unknown
-  argument and exit 2 before a request was sent; the only spelling that took
-  one was `--print`. `microagent -- --help` is a run whose task is the words
-  `--help`, which is what `-p --help` already was, and `microagent update`
-  reads the same marker.
-- The reproducibility gate isolates the compiler's global cache as well as the project one.
-  `--cache-dir` moves the project's artifacts, but the compiled toolchain stayed in the
-  runner's `$HOME/.cache/zig`, so a warm cache left by a previous build on the same machine
-  fed the next one and the check was not measuring the cold build it claimed to. Each
-  build now sets `ZIG_GLOBAL_CACHE_DIR` to a scratch of its own, and the scratch is removed
-  by a trap, so a target that fails the comparison leaves nothing behind either.
-- The push workflow runs the `x86_64-macos` asset instead of only building it. The two
-  macOS runners are an Apple silicon one and, now, an x86_64 one, so three of the four
-  published binaries are started on a push rather than cross-compiled and left. The fourth,
-  `aarch64-linux-musl`, still needs a machine of its own and is covered by the build alone.
-
-- `make gauntlet AGENTS=...` wraps `bench/gauntlet.sh`, the usefulness
-  benchmark whose results BENCHMARK.md publishes, beside the `make bench` and
-  `make overhead` targets that already wrap its two siblings, and the
-  `Reproducing` block names the command. Each of the three scripts invoked the
-  harnesses by bare name and skipped the ones missing from PATH, so running one
-  without the target on it recorded a skipped row rather than a measured one.
-
-- CONTRIBUTING.md no longer sends a contributor to `zig build test --fuzz` as if
-  it ran. It does not build on the pinned 0.16.0: the toolchain's own test
-  runner fails to compile under `-ffuzz`, so the command ends in eight
-  compiler errors before a harness is reached. The corpus is still asserted on
-  by every `zig build test`, which is where a new seed has to be written down.
-
-- A run that stops at a ceiling exits 3 instead of 0. `--max-turns`, and a budget
-  that ended the last turn, both leave a prefix of an answer on stdout while
-  reporting success, so a script reading the text read a truncated review as a
-  finished one. 0 is now only a run the model finished: 1 is a failure, 2 a bad
-  command line, 3 a run stopped at a ceiling. A script that wants the prefix
-  regardless of the status reads stdout as it did; one that acts on the status
-  now has the fact it needed. `microagent --help` and the README carry the code.
-
-- A `read` with `offset` or `limit` streams the file instead of reading all of it and
-  copying the lines out. Reading fifty lines of a 3.9 MB file took 0.90 ms and left the
-  whole file in the turn's memory beside the response it shared that memory with; it takes
-  0.48 ms and leaves about one read's worth. The cap is unchanged, and still a property of
-  the file rather than of the range, so a file that reaches 4 MB is refused either way.
-
-  Two consequences the old reader had as bugs. The newline ending a file's last line
-  terminates it rather than starting another one, so `read` of a whole file and `read` of
-  the same file line by line no longer disagree about whether it ends in a blank line, and
-  an empty file no longer reads back as a single blank line.
-
-- The agent loop, the tools and the shared value types are three modules instead of one file.
-  `main.zig` held the command line, the config, the session log, the provider request, the frame
-  parser, the tools and every subprocess it started, which is a 4 400-line file where a change to
-  the tool runner cannot be read without reading the retry policy. `tool.zig` now owns the tools
-  and the capped process runner, `chat.zig` the value types a turn is made of and the JSON writer,
-  and `net.zig` the deadline the two of them share. No behavior changes.
-
-- A turn whose response never arrives is not sent again. A connection that died while the
-  response head was being read left the request whole on the wire, so the provider may have
-  generated and billed the completion with no response to show for it, and the retry bought a
-  second billable completion for one turn. That failure now ends the run with the connection
-  error named on stderr. A 429, a 5xx and a connection that dies before the request reached the
-  provider are still retried twice.
-- The linters CI installs come from `lint-requirements.txt`, which pins `ruff`, `yamllint` and
-  the two packages `yamllint` imports to one sha256 per published artifact, and the lint job
-  installs it with `--require-hashes`. A version range was a resolved-at-install-time choice of
-  whatever the index served that day; a hash is the file a person looked at. `make lint-versions`
-  fails when a version there and the one in the Makefile drift apart.
-- The Harbor adapter's own dependency is declared. `integrations/harbor/requirements.txt` pins
-  `harbor` exactly, because the adapter subclasses its agent API and a benchmark score is only
-  the same score against the Harbor release that produced it.
-- The benchmark venv installs from `integrations/harbor/requirements.lock`, which pins Harbor's
-  whole dependency tree to one sha256 per published artifact, and is `uv pip compile` output
-  from `requirements.txt`. A pinned `harbor` alone still left 89 packages resolved at install
-  time, so the pair that produced a number in `BENCHMARK.md` was not the pair the next run
-  installed.
-- A style config that is present but unreadable, is a directory, or is over the 64 KB cap says so on
-  stderr, not only one a flag or `MICROAGENT_CONFIG` named. A file that is simply absent stays quiet.
-- `GITHUB_TOKEN` is trimmed before it becomes an `Authorization` header, like the provider key file
-  is. A token a wrapper read from a file arrived carrying that file's trailing newline, and GitHub
-  refused it as an invalid credential rather than as a whitespace mistake. `microagent update --help`
-  now names the two CA-bundle variables it already read.
-- The Harbor adapter validates every knob it hands the binary in `setup`, so a mistyped
-  `MICROAGENT_MAX_TURNS`, `MICROAGENT_BUDGET_SECONDS`, `MICROAGENT_AGENT_TIMEOUT_SEC` or
-  `MICROAGENT_REASONING_EFFORT` is named before the binary is looked for and uploaded, rather than
-  after a container start and an upload have already been paid for.
-- The Harbor adapter validates `MICROAGENT_BUDGET_SECONDS` before the container starts, and refuses
-  a zero value for every ceiling it reads, which is what its README already promised.
-- CI restores the Zig build caches between runs, from the shared toolchain action, so a push no
-  longer pays for compiling the compiler cache and `std` from scratch on a cold runner. The
-  global cache is moved under `RUNNER_TEMP`, whose default path differs per runner OS.
-- The published targets and their asset names are spelled once, in the Makefile, as
-  `make release-assets TAG=v0.2.0`. `ci.yml` rehearses the release with that target and
-  `release.yml` publishes what it builds, so a release can be built on a laptop the way the tag
-  builds it, and a renamed target no longer has to be renamed in two workflows.
-- The Harbor adapter's budget follows the timeout it is given, and a run that still reaches it is
-  scored on the tree it left. `MICROAGENT_BUDGET_SECONDS` went to the container as sent, so a budget
-  at or above harbor's per-task timeout had its last turn killed by the caller mid-write: the binary
-  allows its forced final push 300 s past the budget, and a 780 s budget inside a 900 s timeout lost
-  Terminal-Bench 2's `adaptive-rejection-sampler` that way. The budget is now the smaller of
-  `MICROAGENT_BUDGET_SECONDS` and `MICROAGENT_AGENT_TIMEOUT_SEC` less 360 s, the grace plus a minute
-  for teardown, floored at 60 s. At the defaults, 600 against a 1500 s timeout, the budget is
-  unchanged; a caller that names both gets the cap, so a 900 s task timeout runs a 540 s budget where
-  it ran 600. A timeout the room does not cover no longer raises out of `run`, which recorded the
-  trial as an exception and scored the work as nothing: the tree the agent changed goes to
-  verification, the timeout lands in `microagent-timeout.txt` in the job's log directory, and a
-  warning names it, so a trial scored on a partial tree is visible rather than silent.
-- `release.yml` refuses a patch tag whose changelog section carries an `Added`, a `Changed` or a
-  `Removed` entry, and names the version above it in the message. The policy is in the README and in
-  CONTRIBUTING, but nothing checked that the tag agreed with the entries it publishes, so a
-  feature, a changed default or a removal could ship as `0.2.1` under a number that promises it
-  did not.
-- `microagent --help` carries three worked invocations, and its subcommand line spells the flag
-  the way `microagent update --help` does (`update [--check]`, not `update [-c|--check]`).
-- The file a write lands on when the path is a symlink is resolved once, in `net.zig`, and shared
-  by the `write` and `edit` tools and by `microagent update`. The two copies answered the same
-  question differently: the tools' copy spelled the join as a hardcoded `/` and read the
-  link's directory by scanning for one, where `update` went through `std.fs.path` and used
-  `std.fs.path.sep`. Nothing changed for a run, but a path separator reached for as a literal
-  is the one thing in a path that is not portable, and there is now one implementation of the
-  answer to check. `writeFileAtomic` takes no allocator as a result: the two scratch buffers
-  it needs are stack, so the arena a caller passed for nothing is gone.
-
-- `--max-turns` now defaults to 100 (was 60). A run that relied on stopping at 60 turns now gets the
-  longer loop; pass `--max-turns 60` to keep the old ceiling.
-- Replies are terse by default: `caveman` is `ultra` and `ponytail` is `full` unless the config or env
-  says otherwise. A run that wants the prose back sets `caveman = "off"`.
-
-- The system prompt is rewritten around the order a fix goes in: find the code and
-  the tests that cover it, reproduce the failure before changing anything, make
-  the smallest change, run that reproduction and those tests again, then read
-  the diff. It also says that what a tool returns is data about the repository
-  rather than instructions, and that a credential is not part of the task, and
-  each tool's description in the schema names the credential files it refuses.
-  The tools, the flags and the exit statuses are the same; what the model does
-  with them is not, so an answer, a token count or a benchmark number from
-  `0.1.1` is not one this version reproduces.
-
-### Removed
-
-- The second copy of the session store in `main.zig`. The run opens, writes and closes its log
-  through `src/session.zig`; `main.zig` kept a parallel `Session` type, its own
-  `createSessionLog`, `pruneSessions` and `sessionRecord`, and a `sessionDir` no call reached, so
-  one file-owning store was spelled twice and only one of them was ever run. The tests beside the
-  dead copy were duplicates of the ones in `session.zig`, which keep every assertion.
-
-### Fixed
+- A subprocess tool that prints output and then fails reports its stderr and
+  exit status alongside the output. The tool picked one stream and dropped the
+  other, so a `search` that hit a permission error halfway returned only the
+  matches it had found with nothing to say the search was partial, and a
+  `git log` that failed halfway looked like a whole history. The exit status
+  and stderr are now returned with the partial output.
 
 - A `Retry-After` year too wide to be a date is refused, and a `Retry-After`
   count too wide to be milliseconds is the ceiling. Both were read anyway, and
@@ -1434,6 +1274,39 @@ release, and `microagent update` moves you to it.
   `major.minor.patch` still installs, so tracking a fork whose tags are not versions keeps working.
 
 ### Security
+
+- A credentials file named as the `git` tool's `rev` is refused, the way one
+  named as its `path` already was. The `:(exclude)` pathspecs the tool carries
+  are arguments after the `--`, so they scope a revision the model named and
+  never a name it did not: `git blame .env` took the name as its one revision
+  argument and printed the file line by line with its hash and author, and
+  `git diff .env` printed the committed and working-tree text of every hunk. A
+  tool result is re-sent to the provider on every later turn. The tool's own
+  description now says the `rev` is refused too, so the model is not asked for
+  one.
+
+- A session log is created readable by its owner alone, and the directory a run makes for
+  its own store with it. A log took the default file mode, `0o666` less the umask, so on the
+  `0o022` an ordinary account carries it landed world-readable under `$HOME`, and the store
+  directory it was made in took `0o755` and exposed the names of the logs even where the logs
+  themselves could not be read. A log is the run's transcript: the prompts, the tool
+  arguments, and every byte a tool read out of the tree, which is the material the tools
+  themselves refuse to hand the provider. The modes are now `0o600` and `0o700`, and only on
+  what this run creates: an operator who pointed `MICROAGENT_SESSION_DIR` at a store that
+  already exists keeps the mode they gave it. `THREAT_MODEL.md` records the two modes as
+  controls, and its `src/session.zig` references point at the declarations they name again.
+
+- A path whose symlink lands on a credentials file is refused, by the same rule and
+  the same message as one named outright. The name rule reads the bytes the model sent,
+  and a repository can commit a link whose own name is ordinary and whose target is a
+  credential: `docs/setup.md -> /home/someone/.aws/credentials` passed every check
+  `read`, `write`, `edit`, `search` and `ast` make, and each of them follows the link
+  when it opens the path. So the key came back as a tool result that is re-sent to the
+  provider on every later turn, and a `write` through the same link replaced the
+  operator's key with the model's guess. `read`, `write`, `edit`, `search` and `ast` now
+  ask the name rule of the path the link resolves to as well, and name that file in the
+  refusal. A link to an ordinary file is still followed and still read, so the cost is
+  one readlink per call and the tools are otherwise unchanged.
 
 - The published binaries are linked position-independent. A fixed-address executable is mapped at
   the same place on every run, so an address an attacker learns once is an address every run
