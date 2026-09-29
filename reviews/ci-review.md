@@ -135,8 +135,8 @@ provider, or if the tree has been reduced to a fragment with nothing to gate or 
     directory placed under `RUNNER_TEMP` whose path one job assumes and another does
     not, or a `GITHUB_PATH` entry that shadows the runner's own `python3` or `ruff`, is
     a finding. The install itself must stay `--require-hashes`; an unpinned or
-    hash-free install step is a finding the `lint` ecosystem in dependabot's absence
-    cannot catch for you.
+    hash-free install step is a finding dependabot cannot catch for you: only the
+    `github-actions` ecosystem is declared, so nothing moves a pip pin.
 
 12. **A claim in a workflow comment that the file no longer carries.** These files are
     commented at length, and the comments name the reason for a step, a key component

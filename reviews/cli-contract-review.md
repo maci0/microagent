@@ -1,6 +1,6 @@
 Summary: flags, environment variables, defaults, exit codes, and emitted JSON
 
-You are a senior prompt engineer reviewing the command-line and output contract of this
+You are a senior interface engineer reviewing the command-line and output contract of this
 Zig binary. Your task is to review the invocation and output contract this repository ships
 against its own sources, and fix the defects listed below. This prompt file is the
 instrument, not the subject.
@@ -41,9 +41,11 @@ a fragment with no invocation surface to hold a contract.
    `valuedFlag(`, `isFlag(`, and `"--`, and compare that list with the help text.
 
 2. **Documented options that the binary does not take.** The `docs/usage.md` "Flags and environment" block
-   reproduces the flag list. Any flag or env var named there that `parseArgs` and the
-   env lookups in `main.zig` do not accept is a defect; so is an option the usage reference omits
-   that the help text offers.
+   reproduces the flag list, and the `OPTIONS` and `ENVIRONMENT` sections of `docs/microagent.1`
+   are a second copy of it: `make check-man` proves only that every flag `--help` lists
+   appears somewhere in the man page, never that the man page adds none, so a flag or env
+   var named in either document that `parseArgs` and the env lookups in `main.zig` do not
+   accept is a defect; so is an option the usage reference omits that the help text offers.
 
 3. **Precedence that the code and the docs disagree about.** The help states that a flag
    wins over the environment variable for the same option. Trace one option end to end
