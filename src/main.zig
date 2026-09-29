@@ -304,8 +304,15 @@ pub fn main(init: std.process.Init) !void {
     const key = resolveKey(io, init.environ_map, init.arena, opts.api_key);
     opts.api_key = key.value;
     // The message names every source, including the file, because a user who
-    // wrote a key there is not looking for the four variables.
-    if (opts.api_key.len == 0) return configError(io, "no API key: pass --api-key, set {s}, or put one in {s}/.secrets/openrouter", .{ key_var_names, net.homeDir(init.environ_map) orelse "$HOME" });
+    // wrote a key there is not looking for the four variables. `$HOME` is
+    // escaped the way `resolveKey` escapes it below, and for the reason that
+    // function gives: a home carrying ESC or a byte that is not text is a value
+    // the shell or a container image put there, and this line is the one a run
+    // with no key at all reaches.
+    if (opts.api_key.len == 0) return configError(io, "no API key: pass --api-key, set {s}, or put one in {s}/.secrets/openrouter", .{
+        key_var_names,
+        clip(net.homeDir(init.environ_map) orelse "$HOME"),
+    });
     // Refused as a url before it is refused as a leak, because that is what it
     // is: a caller who left the scheme off is told their key was about to go
     // out in the clear, which is a security warning about a value that never
@@ -1928,8 +1935,16 @@ fn incompleteAnswer(arena: std.mem.Allocator, result: *const chat_mod.ChatResult
     const reason = result.finish_reason;
     if (std.mem.eql(u8, reason, "content_filter")) return content_filter_notice;
     if (result.content.items.len == 0) {
+        // The reason is the provider's own bytes, and this notice is the last
+        // line the run prints, so it goes out through the escaping every other
+        // diagnostic quoting a value uses: a gateway answering
+        // `"finish_reason":"\u001b[2J"` reached the operator's terminal as an
+        // escape sequence, and a lone `0xff` reached it as mojibake. The
+        // comparison above reads the raw value and the sentence below quotes
+        // it, the same split the release tag makes in `update`.
+        const shown = if (reason.len == 0) "none sent" else chat_mod.safeText(arena, reason, net.quoted_value_bytes);
         return std.fmt.allocPrint(arena, "the last response carried no text and no tool call (finish_reason: {s}), so the run ends with nothing to report", .{
-            if (reason.len == 0) "none sent" else reason,
+            shown,
         }) catch "the last response carried no text and no tool call, so the run ends with nothing to report";
     }
     if (std.mem.eql(u8, reason, "length")) {
@@ -3511,6 +3526,38 @@ test "a base url that carries credentials does not print them" {
         "https://openrouter.ai/\u{fffd}",
         displayUrl(arena, "https://openrouter.ai/\xff"),
     );
+}
+
+// `$HOME` is the operator's own environment, and it is named on the one line a
+// run with no key at all reaches: the message saying where to put one. A home
+// a wrapper, a container image or a shell set with a control byte or a byte
+// that is not text reached the terminal through it, while every sibling
+// diagnostic quoting a path escaped the same value through `safeTextAll`.
+// `clip` is that escaping for the `die` paths, and this is what it does to the
+// shapes an environment actually carries.
+test "a home directory quoted into a diagnostic is escaped" {
+    for ([_][]const u8{
+        "/home/me",
+        // ESC and the clear-screen sequence behind it.
+        "/home/\x1b[2J",
+        // A latin-1 e-acute: not UTF-8, so it reaches the screen as mojibake
+        // written through rather than as the character the operator set.
+        "/home/caf\xe9",
+        // The truncation tail of a two-byte sequence.
+        "/home/\xe6\x97",
+        // Bidi override: the path reads as a different directory from the one
+        // named.
+        "/home/\u{202e}sj.nigulp",
+        // Zero-width space inside a component.
+        "/home/me\u{200b}/.secrets",
+    }) |home| {
+        const shown = clip(home);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(shown));
+        for (shown) |c| try std.testing.expect(c >= 0x20 and c != 0x7f);
+    }
+    // An ordinary home comes back as it went in, so the message still names a
+    // path the operator can copy.
+    try std.testing.expectEqualStrings("/home/me/.secrets", clip("/home/me/.secrets"));
 }
 
 // The base url is the one value that decides where the api key goes, and it
@@ -5846,6 +5893,55 @@ test "a toolless response that is not an answer does not finish the run" {
     const cut_notice = incompleteAnswer(arena, &cut, default_max_tokens).?;
     try std.testing.expect(std.mem.indexOf(u8, cut_notice, "max_tokens 65536") != null);
     try std.testing.expect(std.mem.indexOf(u8, cut_notice, "prefix") != null);
+}
+
+// The reason this notice quotes is the provider's own field, and the notice is
+// the last line a run prints before it exits, so a provider (or a gateway in
+// front of one) that spells it with a control byte or a byte that is not text
+// would otherwise be acting on the operator's terminal through it. Both reach
+// this notice on the one path that produces it: a response with no content and
+// no tool call.
+test "the finish reason in an incomplete-answer notice is escaped" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    for ([_][]const u8{
+        // ESC and the CSI that follows it: what a terminal acts on.
+        "blocked\x1b[2J",
+        // A lone lead byte and a truncated sequence: what reaches the screen as
+        // mojibake.
+        "caf\xe9",
+        "trimmed\xe6\x97",
+        // Bidi override: it reorders the sentence around it, so a reader sees
+        // a reason other than the one the provider sent.
+        "deploy/\u{202e}gnp.exe",
+        // A zero-width space inside a word the operator is meant to compare.
+        "slo\u{200b}w",
+        // Long enough to be cut, so the cut lands on a character boundary
+        // rather than in the middle of one.
+        "\u{65e5}" ** 40,
+    }) |reason| {
+        var result: chat_mod.ChatResult = .{ .finish_reason = try arena.dupe(u8, reason) };
+        const notice = incompleteAnswer(arena, &result, default_max_tokens).?;
+
+        try std.testing.expect(std.unicode.utf8ValidateSlice(notice));
+        for (notice) |c| {
+            // DEL is escaped too, and so is every C0 control; what is left is
+            // printable ASCII and whole characters above it.
+            try std.testing.expect(c >= 0x20 and c != 0x7f);
+        }
+        // And none of the invisible set, which is valid text a byte test passes.
+        var i: usize = 0;
+        while (i < notice.len) {
+            const len = chat_mod.utf8SequenceLen(notice, i);
+            try std.testing.expect(len > 0);
+            try std.testing.expect(!chat_mod.isInvisibleFormat(
+                std.unicode.utf8Decode(notice[i..][0..len]) catch unreachable,
+            ));
+            i += len;
+        }
+    }
 }
 
 // A frame the parser cannot read holds text and tool-call arguments the turn
