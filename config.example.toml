@@ -42,6 +42,15 @@
 # instructions the model follows. Name a directory here, or in
 # MICROAGENT_SKILLS, to say its bytes are instructions.
 #
+# The repository's own instructions: read from the working directory when the run
+# starts and appended to the system prompt. `AGENTS.md` is the name every other
+# coding agent reads, so it is what a run reads when this key is absent.
+# `agents_files = []` turns the read off; a list names other paths, in order.
+# Unlike a skill, this is repository content the run follows as instructions,
+# which is why the key exists: naming it is the operator saying yes, and `[]` is
+# the operator saying no. A file past 16 KB is followed up to the cap.
+agents_files = ["AGENTS.md"]
+#
 # skills = ["./skills", "~/.microagent/skills"]
 
 # One table per MCP server. `name` and one of `command` or `url` are required. A

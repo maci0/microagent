@@ -336,6 +336,24 @@ the header line.
 `api_key` is a secret written in the clear, and the `read` tool can open the file: a variable or
 `--api-key` keeps it out of a file a model can read.
 
+### Repository instructions
+
+`AGENTS.md` in the working directory is read when the run starts and appended to the system prompt,
+after anything `system_prompt_extra` adds and before the skills listing, under a line saying where it
+came from. It is the convention every other coding agent reads, so a repository that carries one
+carries it for this run too: a run whose operator wants none sets `agents_files = []`, and a list
+names other paths, in order.
+
+```toml
+agents_files = ["AGENTS.md", "docs/HOUSE.md"]
+```
+
+A file past 16 KB is followed up to the cap and the note names the size it was cut from; a path that
+is not there is named on stderr, because the operator wrote it and got nothing for it. Unlike a
+skill, whose roots the operator names, this file is repository content the run treats as
+instructions. It is read once, before the first request, so a file changed during the run reaches
+the next run and not this one.
+
 ### System prompt addendum
 
 `system_prompt_extra` is text appended to the system prompt after a blank line, for a house rule such

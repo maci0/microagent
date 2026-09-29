@@ -47,6 +47,13 @@ release, and `microagent update` moves you to it.
 
 ### Changed
 
+- The run reads `AGENTS.md` from the working directory when it starts and appends it to the system
+  prompt, after the operator's own addendum. `agents_files` names other paths, in order, and an
+  empty list turns the read off. Repository content the run follows as instructions is the
+  operator's call, which is what the key is for; a file past 16 KB is cut to the cap with the size
+  named, and a path that is not there is named too.
+
+
 - The tool gutter names the tool with a colon (⏺ bash: echo hi) and draws that name bold when
   stderr is a terminal. A captured run, which is every gauntlet review and every log file, gets the
   same line and no escape bytes.
