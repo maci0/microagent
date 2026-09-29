@@ -920,8 +920,9 @@ fn wordMatches(word: []const u8, entry: []const u8) bool {
     return false;
 }
 
-/// Checks whether a command contains or executes a command in `deny_list`.
-/// Returns the matched filter string, or null if allowed.
+/// Checks whether a command contains or executes a command in `deny_list`. An
+/// entry of one word is matched against each word of the command, and one of
+/// several against the command as a substring or as a run of its words.
 pub fn deniedInCommand(command: []const u8, deny_list: []const []const u8) ?[]const u8 {
     if (deny_list.len == 0) return null;
     const trimmed_cmd = std.mem.trim(u8, command, " \t\r\n");
@@ -931,7 +932,6 @@ pub fn deniedInCommand(command: []const u8, deny_list: []const []const u8) ?[]co
         const entry = std.mem.trim(u8, raw_entry, " \t\r\n");
         if (entry.len == 0) continue;
 
-        // Tokenize the deny entry into words
         var entry_tokens: [16][]const u8 = undefined;
         var entry_count: usize = 0;
         // An entry with more words than the buffer holds is matched on the
@@ -950,17 +950,14 @@ pub fn deniedInCommand(command: []const u8, deny_list: []const []const u8) ?[]co
         if (entry_count == 0) continue;
 
         if (entry_count == 1) {
-            // Single word entry: match against any command word token or its basename
             var words = std.mem.tokenizeAny(u8, command, command_word_separators);
             while (words.next()) |word| {
                 if (wordMatches(word, entry_tokens[0])) return raw_entry;
             }
         } else {
-            // Multi-word entry: match against verbatim case-insensitive substring
             if (std.ascii.indexOfIgnoreCase(command, entry) != null) return raw_entry;
             if (truncated) continue;
 
-            // Or match against a sliding sequence of command word tokens
             var words = std.mem.tokenizeAny(u8, command, command_word_separators);
             var match_idx: usize = 0;
             while (words.next()) |word| {

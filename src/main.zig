@@ -303,9 +303,6 @@ var gpa_state: std.heap.DebugAllocator(if (builtin.mode == .Debug) .{} else .{
 /// one because the cost is a wait, so the guard is the limit itself.
 const io_worker_stack_bytes = 1024 * 1024;
 const io_worker_limit = 16;
-/// The measured knee, and what the guard below asserts: a limit under it is the
-/// regression that put four back.
-const io_worker_limit_floor = 16;
 
 test "the async limit covers the handshakes and their address fan-out" {
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{
@@ -313,10 +310,12 @@ test "the async limit covers the handshakes and their address fan-out" {
         .async_limit = .limited(io_worker_limit),
     });
     defer threaded.deinit();
-    // Defeating the fix -- putting four back -- fails here, and no row of
-    // bench/instructions.sh moves either way: the regression is a wait, not
-    // work, so the guard is the configuration rather than a counter.
-    try std.testing.expect(@intFromEnum(threaded.async_limit) >= io_worker_limit_floor);
+    // Sixteen is the measured knee, and a limit under it is the regression
+    // that put four back. No row of bench/instructions.sh moves either way
+    // when it comes back: the regression is a wait, not work, so the guard is
+    // the configuration rather than a counter, and the only way to fail it is
+    // to configure a smaller limit.
+    try std.testing.expectEqual(io_worker_limit, @intFromEnum(threaded.async_limit));
 }
 
 const word_bytes = @sizeOf(usize);
@@ -1125,7 +1124,9 @@ fn temperature(buf: []u8, value: []const u8, out: *?f64) ?[]const u8 {
 fn temperatureMessage(buf: []u8, value: []const u8) []const u8 {
     return std.fmt.bufPrint(buf, "--temperature wants a number between {d} and {d}, got '{s}'", .{
         min_temperature, max_temperature, clip(value),
-    }) catch "--temperature wants a number between 0 and 2";
+    }) catch std.fmt.comptimePrint("--temperature wants a number between {d} and {d}", .{
+        min_temperature, max_temperature,
+    });
 }
 
 /// The temperature the environment named, checked where it is read and

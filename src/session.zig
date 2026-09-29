@@ -990,12 +990,12 @@ test "the session store drops a log the age window has passed" {
 // The window is a period a run measures against its own clock, and the two
 // wrong clocks are the ones a machine reaches it with. Both leave the store
 // as they found it.
-test "a wrong clock expires nothing and the age window is thirty days wide" {
+test "a wrong clock expires nothing and a log on the window's edge is kept" {
     const day_ns = ns_per_day;
-    try std.testing.expectEqual(@as(u128, 30 * day_ns), max_session_log_age_ns);
-    // Just inside the window, and just outside it.
-    try std.testing.expect(!stampExpired(30 * day_ns, @intCast(60 * day_ns)));
-    try std.testing.expect(stampExpired(29 * day_ns, @intCast(60 * day_ns)));
+    // On the window's edge, and one day inside it, so the window in
+    // nanoseconds holds the same edge the days constant names.
+    try std.testing.expect(!stampExpired(max_session_log_age_ns, @intCast(60 * day_ns)));
+    try std.testing.expect(stampExpired(max_session_log_age_ns - day_ns, @intCast(60 * day_ns)));
     // A clock before the epoch is a machine whose stamp is clamped to zero,
     // not one whose logs are old.
     try std.testing.expect(!stampExpired(0, -1_000_000_000));

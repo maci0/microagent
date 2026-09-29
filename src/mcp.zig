@@ -1658,8 +1658,7 @@ fn fuzzTools(_: void, smith: *std.testing.Smith) !void {
     // that drops an entry it should keep loses a tool the server has. A name
     // the answer listed twice is one tool, so it is counted once, as
     // `buildTools` keeps it once.
-    var offered: usize = 0;
-    var offered_names: std.ArrayList([]const u8) = .empty;
+    var offered_names: std.StringHashMap(void) = .init(arena);
     if (parsed == .object) {
         if (parsed.object.get("tools")) |value| {
             if (value == .array) {
@@ -1670,21 +1669,12 @@ fn fuzzTools(_: void, smith: *std.testing.Smith) !void {
                     };
                     const name = chat.str(entry.get("name")) orelse continue;
                     if (!validName(name)) continue;
-                    var already = false;
-                    for (offered_names.items) |seen| {
-                        if (std.mem.eql(u8, seen, name)) {
-                            already = true;
-                            break;
-                        }
-                    }
-                    if (already) continue;
-                    try offered_names.append(arena, name);
+                    try offered_names.put(name, {});
                 }
             }
         }
     }
-    offered = offered_names.items.len;
-    try std.testing.expectEqual(offered, built.len);
+    try std.testing.expectEqual(offered_names.count(), built.len);
 
     for (built, 0..) |tool, i| {
         // The half of the exposed name the model calls with, so a `tools/call`
