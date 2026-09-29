@@ -203,7 +203,19 @@ pub fn discover(io: Io, arena: std.mem.Allocator, root_list: []const Root) Skill
             net.note(io, arena, "microagent: skills directory {s} could not be listed ({s}); the skills after this point are not found\n", .{ chat.safeTextAll(arena, root.path), @errorName(err) });
             break;
         }) |entry| {
-            if (entry.kind != .directory) continue;
+            // `Dir.iterate` reports a symlinked directory as a link, so an
+            // operator who linked a skill into the root had it dropped in
+            // silence: a skill installed and never offered. The link is
+            // followed here, and one that leads nowhere is said rather than
+            // skipped the way a file with no skills in it is.
+            if (entry.kind != .directory) {
+                if (entry.kind != .sym_link) continue;
+                const linked = dir.statFile(io, entry.name, .{}) catch |err| {
+                    net.note(io, arena, "microagent: skill {s}: {s}; it is skipped\n", .{ chat.safeTextAll(arena, entry.name), @errorName(err) });
+                    continue;
+                };
+                if (linked.kind != .directory) continue;
+            }
             const rel = std.fs.path.join(arena, &.{ entry.name, "SKILL.md" }) catch |err| {
                 net.note(io, arena, "microagent: skill {s}: the path to its SKILL.md could not be built ({s}); it is skipped\n", .{ chat.safeTextAll(arena, entry.name), @errorName(err) });
                 continue;
@@ -645,6 +657,34 @@ test "a large skill is listed from its head, and loads whole" {
     const loaded = try load(io, arena, set.get("big").?);
     try std.testing.expect(loaded.len > 200 * 1024);
     try std.testing.expect(std.mem.startsWith(u8, loaded, "# Heading\n"));
+}
+
+// An operator who linked a skill into a root installed it, so the listing has
+// to hold it: the iterator reports the link itself, and the skill is one hop
+// past it.
+test "a skill directory reached through a symlink is offered, and a broken one is named" {
+    const gpa = std.testing.allocator;
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const arena = state.allocator();
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+
+    try tmp.dir.createDirPath(io, "elsewhere/pdf");
+    try tmp.dir.writeFile(io, .{ .sub_path = "elsewhere/pdf/SKILL.md", .data = "---\nname: pdf\ndescription: linked\n---\npdf body\n" });
+    try tmp.dir.symLink(io, "elsewhere/pdf", "linked", .{});
+    try tmp.dir.symLink(io, "elsewhere/absent", "broken", .{});
+
+    const root_list = [_]Root{.{ .path = root, .named = true }};
+    const set = discover(io, arena, &root_list);
+    try std.testing.expectEqual(@as(usize, 1), set.items.len);
+    try std.testing.expectEqualStrings("pdf", set.items[0].name);
+    try std.testing.expectEqualStrings("linked", set.items[0].description);
+    try std.testing.expectEqualStrings("pdf body\n", try load(io, arena, set.get("pdf").?));
 }
 
 test "the prompt lists every skill and is empty when there is none" {

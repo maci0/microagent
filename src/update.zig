@@ -22,8 +22,13 @@ const max_asset_bytes: usize = 256 * 1024 * 1024;
 /// The longest DNS name, so the buffer that lowercases a host has a fixed size.
 const max_host_len: usize = 253;
 
-/// One printed line: a whole install path (unquoted) beside a sentence.
-const line_bytes: usize = std.fs.max_path_bytes + 256;
+/// One printed line: a whole install path (unquoted) beside a sentence. The
+/// path is quoted by `safeTextAll`, which spends up to `chat.safe_text_widening`
+/// bytes on an input byte, so a path of every possible length still fits beside
+/// the sentence naming it: a buffer sized for the raw path turned every
+/// diagnostic about a long one into "message too long", which is the one line
+/// that says nothing about what went wrong.
+const line_bytes: usize = std.fs.max_path_bytes * chat.safe_text_widening + 256;
 
 /// Release-body text (tag, asset name, argument) as safe to print: cut on a
 /// codepoint boundary, control and invisible characters escaped, invalid UTF-8
@@ -238,9 +243,14 @@ fn fail(io: std.Io, comptime fmt: []const u8, args: anytype) u8 {
     return 1;
 }
 
+/// The reason a status is worth reading past the number. `not_found` is
+/// answered differently for each of the three downloads, so the sentence names
+/// what is not there rather than the release, which the caller already named:
+/// a release that does not exist, an asset a release forgot, and a sidecar an
+/// asset came without are three different mistakes.
 fn statusHint(status: std.http.Status) []const u8 {
     return switch (status) {
-        .not_found => " (no published release)",
+        .not_found => " (nothing published at that url)",
         .forbidden, .too_many_requests => " (rate limited; set GITHUB_TOKEN)",
         else => "",
     };
@@ -522,16 +532,24 @@ pub fn run(
     // unversioned asset published under such a tag is not a release, and a run
     // that replaced the binary with it said the running build was older.
     const tag_is_version = parseVersion(rel.tag) != null;
+    // `compareVersions` reads a missing component as 0, so `0.1` and `v0.1.0`
+    // are the same release spelled two ways and a build suffix a tag does not
+    // carry compares equal to the triple. Installing over either would download
+    // the bytes already running, so those end here with the equal spelling does.
+    // It is separate from `current` because that one compares the two names
+    // themselves, and a name `parseVersion` cannot read reaches `.eq` without
+    // anything to say about the release but that it could not be compared.
+    const same_version = order == .eq and parseVersion(version) != null and parseVersion(rel.tag) != null;
     switch (order) {
-        .eq => if (current)
+        .eq => if (current or same_version)
             say(io, "{s} {s} is current (latest release: {s})", .{ tool_name, version, tag })
         else
-            say(io, "{s} {s} is not the latest release ({s}), which is not a version triple to compare against", .{ tool_name, version, tag }),
+            say(io, "{s} {s} is not the latest release ({s}), which is not a version this run can compare against", .{ tool_name, version, tag }),
         .gt => say(io, "{s} is newer than the latest release ({s}); nothing to install", .{ version, tag }),
         .lt => say(io, "New release: {s} (running {s})", .{ tag, version }),
     }
 
-    if (check_only or current or order == .gt) {
+    if (check_only or current or same_version or order == .gt) {
         if (check_only) writeLine(io, arena, rel.page) catch |err|
             return fail(io, "could not write the release page to stdout ({s})", .{@errorName(err)});
         return 0;

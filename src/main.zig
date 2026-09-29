@@ -607,6 +607,44 @@ fn reportAgentsUnreadable(io: Io, arena: std.mem.Allocator, path: []const u8, er
     });
 }
 
+test "the repository instructions are followed to the cap, not dropped past it" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Under the cap: every byte, and no note on stderr.
+    try tmp.dir.writeFile(io, .{ .sub_path = "small.md", .data = "house rules\n" });
+    try std.testing.expectEqualStrings("house rules\n", readAgentsFile(io, arena, tmp.dir, "small.md", true).?);
+
+    // Over the cap: the first `max_agents_bytes` bytes, which is the whole
+    // text rather than the tail the size check found half a character in.
+    var big: std.ArrayList(u8) = .empty;
+    defer big.deinit(arena);
+    try big.appendNTimes(arena, 'a', max_agents_bytes + 4096);
+    try tmp.dir.writeFile(io, .{ .sub_path = "big.md", .data = big.items });
+    const got = readAgentsFile(io, arena, tmp.dir, "big.md", true).?;
+    try std.testing.expectEqual(max_agents_bytes, got.len);
+    try std.testing.expect(std.mem.allEqual(u8, got, 'a'));
+
+    // A file whose last followed byte is the middle of a multi-byte character
+    // is cut at the character before it, so the prompt carries whole text.
+    big.clearRetainingCapacity();
+    try big.appendNTimes(arena, 'a', max_agents_bytes - 1);
+    try big.appendSlice(arena, "\u{65e5}");
+    try tmp.dir.writeFile(io, .{ .sub_path = "cut.md", .data = big.items });
+    const cut = readAgentsFile(io, arena, tmp.dir, "cut.md", true).?;
+    try std.testing.expectEqual(max_agents_bytes - 1, cut.len);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(cut));
+
+    // Turned off by an empty value, and a named path that is not there.
+    try std.testing.expectEqual(@as(?[]const u8, null), readAgentsFile(io, arena, tmp.dir, "", true));
+    try std.testing.expectEqual(@as(?[]const u8, null), readAgentsFile(io, arena, tmp.dir, "none.md", true));
+}
+
 /// The system prompt: one string, so a run with no addendum, no repository
 /// instructions, no skills and every tool on sends exactly the prompt it sent
 /// before any of them existed. A run
