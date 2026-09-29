@@ -339,7 +339,7 @@ the header line.
 ### System prompt addendum
 
 `system_prompt_extra` is text appended to the system prompt after a blank line, for a house rule such
-as the reply length or the language. It is the only prompt-level setting: the tools and the request
+as the reply length or the language. It adds a paragraph and nothing else: the tools and the request
 shape are untouched, and the conversation stays the plain OpenAI message array. With the key absent
 or empty the system prompt is the built-in one, byte for byte.
 
@@ -356,6 +356,27 @@ Name the file and the line when you cite code.
 The value is a TOML string: `"..."` with the escapes `\n`, `\t`, `\r`, `\"` and `\\`, a literal
 `'...'` with none, or either kind as a multi-line string. It is at most 16 KB, because it is re-sent
 on every turn; a longer value is reported as a bad value and the prompt stays the built-in one.
+
+### Repository instructions
+
+A run reads `AGENTS.md` from the working directory when it starts and appends it to the system prompt,
+after the addendum and before the skills listing, under a header naming the file it came from. The
+name is the one every other coding agent reads, so a repository that carries one carries it for this
+run. The file is read once, at start-up, not per turn.
+
+`agents_file` names another path, relative to the working directory, and an empty value turns the read
+off, which is the way to work in a repository whose own file is not instructions this run should
+follow:
+
+```toml
+agents_file = "docs/house-style.md"
+agents_file = ""   # follow no repository file
+```
+
+A file past 16 KB is followed up to the cap, cut on a character boundary, and the size it was cut from
+is said on stderr. A path named here that cannot be read is said on stderr; the default name is not,
+because most repositories have no `AGENTS.md` and a note per run about one would be noise. A named
+path that is not there is said either way, since the operator spelled it.
 
 ### Skills
 

@@ -550,21 +550,33 @@ fn runMain(init: std.process.Init) !u8 {
 /// it was cut from.
 fn readAgentsFile(io: Io, arena: std.mem.Allocator, path: []const u8, named: bool) ?[]const u8 {
     if (path.len == 0) return null;
-    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_agents_bytes + 1)) catch |err| {
-        // A named file that is not there is the operator's own spelling of a
-        // setting that did nothing, and the run says so. The default name is
-        // silent there, because most repositories have no such file; a file
-        // that is there and unreadable is said either way, because it exists.
-        if (named or err != error.FileNotFound) {
-            net.note(io, arena, "microagent: the repository instructions {s} could not be read ({s}); this run follows the system prompt alone\n", .{
-                chat_mod.safeTextAll(arena, path),
-                @errorName(err),
-            });
-        }
+    var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| {
+        noteAgentsUnread(io, arena, path, named, err);
         return null;
     };
-    if (bytes.len <= max_agents_bytes) return bytes;
-    const whole = bytes[0..chat_mod.partialTailLen(bytes[0..max_agents_bytes])];
+    defer file.close(io);
+    // One byte past the cap, so a file that is over it is known to be over it.
+    // `readFileAlloc` refuses at the cap rather than past it, and refusing a
+    // file past it is the wrong answer here: the first 16 KB of a long file is
+    // the part a run can follow, and the rest is what the note names.
+    const bytes = arena.alloc(u8, max_agents_bytes + 1) catch return null;
+    var read_buffer: [stream_read_chunk]u8 = undefined;
+    var file_reader = file.reader(io, &read_buffer);
+    const r = &file_reader.interface;
+    var filled: usize = 0;
+    while (filled < bytes.len) {
+        const n = r.readSliceShort(bytes[filled..]) catch |err| {
+            noteAgentsUnread(io, arena, path, named, file_reader.err orelse err);
+            return null;
+        };
+        if (n == 0) break;
+        filled += n;
+    }
+    if (filled <= max_agents_bytes) return bytes[0..filled];
+    // The cut lands on a code point boundary, so the prompt never carries half
+    // a character at its end.
+    const head = bytes[0..max_agents_bytes];
+    const whole = head[0 .. head.len - chat_mod.partialTailLen(head)];
     net.note(io, arena, "microagent: the repository instructions {s} are larger than {d} bytes; the first {d} are followed\n", .{
         chat_mod.safeTextAll(arena, path),
         max_agents_bytes,
@@ -573,11 +585,24 @@ fn readAgentsFile(io: Io, arena: std.mem.Allocator, path: []const u8, named: boo
     return whole;
 }
 
+/// Why there are no repository instructions this turn, on stderr, when the
+/// reason is one the operator can act on. A named file that is not there is
+/// their own spelling of a setting that did nothing; the default name is silent
+/// there, because most repositories have no such file. A file that is there
+/// and unreadable is said either way, because it exists.
+fn noteAgentsUnread(io: Io, arena: std.mem.Allocator, path: []const u8, named: bool, err: anyerror) void {
+    if (!named and err == error.FileNotFound) return;
+    net.note(io, arena, "microagent: the repository instructions {s} could not be read ({s}); this run follows the system prompt alone\n", .{
+        chat_mod.safeTextAll(arena, path),
+        @errorName(err),
+    });
+}
+
 /// The system prompt: one string, so a run with no addendum, no repository
 /// instructions, no skills and every tool on sends exactly the prompt it sent
-/// before any of them existed. A run
-/// that turned built-in tools off ends it with one line naming them, so the
-/// model does not learn of them from a refusal.
+/// before any of them existed. A run that turned built-in tools off ends it
+/// with one line naming them, so the model does not learn of them from a
+/// refusal.
 fn systemText(arena: std.mem.Allocator, extra: []const u8, agents_block: []const u8, skill_block: []const u8, disabled: std.EnumSet(chat_mod.Tool)) ![]const u8 {
     if (extra.len == 0 and agents_block.len == 0 and skill_block.len == 0 and disabled.count() == 0) return conversation_mod.system_prompt;
     var text: std.ArrayList(u8) = .empty;
@@ -1514,6 +1539,9 @@ fn scrubSecrets(env: *std.process.Environ.Map, remote: []const mcp_mod.Entry) vo
 const LoadedConfig = struct {
     /// Text appended to the system prompt, empty for none.
     system_prompt_extra: []const u8,
+    /// The repository instructions file, and whether the config named it.
+    agents_file: []const u8,
+    agents_file_named: bool,
     /// The provider settings the file named, empty when it named none.
     model: []const u8,
     base_url: []const u8,
@@ -1567,6 +1595,8 @@ fn loadConfig(io: Io, init: std.process.Init, arena: std.mem.Allocator, config: 
     if (parsed.problem) |problem| reportConfigProblem(io, arena, source, problem);
     return .{
         .system_prompt_extra = parsed.system_prompt_extra,
+        .agents_file = parsed.agents_file,
+        .agents_file_named = parsed.agents_file_named,
         .model = parsed.model,
         .base_url = parsed.base_url,
         .api_key = parsed.api_key,
@@ -6528,6 +6558,42 @@ test "the system prompt names the tools that are off, and only then" {
     try std.testing.expect(std.mem.endsWith(u8, extended, "\n\nDisabled tools: ast, git."));
 }
 
+// The repository's own instructions are followed, so a file that is there is
+// read and a file that is not leaves the prompt alone. The three ways that can
+// come out nothing: the read turned off, the default name with no such file,
+// and a named path that is not there.
+test "the repository instructions are read, and their absence is silent unless the path was named" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    const io = std.testing.io;
+
+    // This file is the working directory the test runs in, so the default name
+    // resolves without anything setting a process-wide cwd.
+    try std.testing.expect(readAgentsFile(io, arena, "src/copy.zig", false) != null);
+    try std.testing.expectEqualStrings("", readAgentsFile(io, arena, "", false) orelse "");
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const big = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+    const big_path = try std.fs.path.join(arena, &.{ big, "AGENTS.md" });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "AGENTS.md",
+        .data = "house rules\n" ++ "a" ** (max_agents_bytes * 2),
+    });
+
+    // A file past the cap is followed up to the cap rather than not at all, cut
+    // on a code point boundary so the prompt never carries half a character.
+    const whole = readAgentsFile(io, arena, big_path, false).?;
+    try std.testing.expectEqual(max_agents_bytes, whole.len);
+    try std.testing.expect(std.mem.startsWith(u8, whole, "house rules\n"));
+
+    // None of the three is an error: the run follows the system prompt alone.
+    try std.testing.expect(readAgentsFile(io, arena, "src/there-is-no-such-file.md", false) == null);
+    try std.testing.expect(readAgentsFile(io, arena, "src/there-is-no-such-file.md", true) == null);
+}
+
 // The reason a run does not start is decided from the parsed file, before any
 // network, so it is the one place these three stops can be driven without a
 // process: `runMain` turns the message into exit status 2.
@@ -6541,6 +6607,8 @@ test "a config the tool tables make unusable stops the run with the fix named" {
             const parsed = config_mod.parse(a, text);
             return .{
                 .system_prompt_extra = parsed.system_prompt_extra,
+                .agents_file = parsed.agents_file,
+                .agents_file_named = parsed.agents_file_named,
                 .model = parsed.model,
                 .base_url = parsed.base_url,
                 .api_key = parsed.api_key,

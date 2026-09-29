@@ -345,8 +345,7 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8) Config {
 
 /// A key at the top of the file, outside any table: `system_prompt_extra`,
 /// `agents_file`, `model`, `base_url`, `api_key`, `skills` and `deny_commands`.
-/// `lines` is what
-/// follows this one, for the value that runs over several.
+/// `lines` is what follows this one, for the value that runs over several.
 fn topKey(config: *Config, arena: std.mem.Allocator, lines: *Lines, key: []const u8, value_text: []const u8) void {
     if (std.mem.eql(u8, key, "system_prompt_extra")) {
         const text = promptString(arena, lines, value_text) orelse
@@ -357,8 +356,12 @@ fn topKey(config: *Config, arena: std.mem.Allocator, lines: *Lines, key: []const
     }
     if (std.mem.eql(u8, key, "agents_file")) {
         topString(config, key, value_text, &config.agents_file);
-        if (config.agents_file.len > max_agents_path_bytes)
+        // A path past the bound is not a path, and the default stays in force
+        // as it does for every other bad value here.
+        if (config.agents_file.len > max_agents_path_bytes) {
+            config.agents_file = agents_file_default;
             return config.note(.{ .key = key, .kind = .bad_value });
+        }
         // Named, so a path that is not there is the operator's own spelling of
         // a setting that did nothing, and the run says so.
         config.agents_file_named = true;
@@ -904,6 +907,44 @@ test "system_prompt_extra past its bound is refused" {
 
     const multi = try std.fmt.allocPrint(arena, "system_prompt_extra = \"\"\"\n{s}\"\"\"\n", .{"a" ** (max_system_prompt_extra_bytes + 1)});
     try std.testing.expectEqual(Problem.Kind.bad_value, parse(arena, multi).problem.?.kind);
+}
+
+test "agents_file names the repository instructions, and only the file names it" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    // Absent is the default name and is not a named one, so a repository with
+    // no such file is not reported on every run.
+    const absent = parse(arena, "model = \"x\"\n");
+    try std.testing.expect(absent.problem == null);
+    try std.testing.expectEqualStrings(agents_file_default, absent.agents_file);
+    try std.testing.expect(!absent.agents_file_named);
+
+    const named = parse(arena, "agents_file = \"docs/HOUSE.md\"\n");
+    try std.testing.expect(named.problem == null);
+    try std.testing.expectEqualStrings("docs/HOUSE.md", named.agents_file);
+    try std.testing.expect(named.agents_file_named);
+
+    // An empty value is the operator turning the read off, not a path.
+    const off = parse(arena, "agents_file = \"\"\n");
+    try std.testing.expect(off.problem == null);
+    try std.testing.expectEqualStrings("", off.agents_file);
+    try std.testing.expect(off.agents_file_named);
+
+    for ([_][]const u8{ "agents_file = 5\n", "agents_file = bare\n" }) |text| {
+        const bad = parse(arena, text);
+        try std.testing.expectEqualStrings("agents_file", bad.problem.?.key);
+        try std.testing.expectEqual(Problem.Kind.bad_value, bad.problem.?.kind);
+        try std.testing.expectEqualStrings(agents_file_default, bad.agents_file);
+    }
+
+    // A path past the bound is not a path, and the run falls back to the
+    // default rather than reading whatever the prefix names.
+    const over = try std.fmt.allocPrint(arena, "agents_file = \"{s}\"\n", .{"a" ** (max_agents_path_bytes + 1)});
+    const refused = parse(arena, over);
+    try std.testing.expectEqual(Problem.Kind.bad_value, refused.problem.?.kind);
+    try std.testing.expectEqualStrings(agents_file_default, refused.agents_file);
 }
 
 test "model, base_url and api_key are quoted strings, and a bad one keeps the default" {
