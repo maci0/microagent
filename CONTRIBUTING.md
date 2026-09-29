@@ -10,13 +10,13 @@
 | `docs/` | reference and design docs: [usage](docs/usage.md), [benchmark](docs/benchmark.md), [performance](docs/performance.md), [threat model](docs/threat-model.md), the [to-do list](docs/todo.md), and the logo |
 | `reviews/` | this project's own [gauntlet](https://github.com/maci0/gauntlet) review prompts; run them with `gauntlet --prompt-dir reviews`, which replaces gauntlet's embedded set |
 | `.github/` | the `ci` and `release` workflows, the shared `setup-zig` and `setup-linters` actions, and the Dependabot config |
-| `scripts/` | the gate's own checks: the linter version pins (`lint-versions.sh`), each dependency set's lock against the manifest it was compiled from (`lint-lock.sh`), the `run:` steps in the workflows (`lint-ci-shell.sh`), the Markdown checks (`lint-md.sh`), and the release inventory (`sbom.sh`). The linters' hashed install is compiled from `lint-requirements.in` |
+| `scripts/` | the gate's own checks: the linter version pins (`lint-versions.sh`), each dependency set's lock against the manifest it was compiled from (`lint-lock.sh`), the `run:` steps in the workflows (`lint-ci-shell.sh`), the Markdown checks (`lint-md.sh`), the `src/path:line` citations (`check-refs.sh`), and the release inventory (`sbom.sh`). The linters' hashed install is compiled from `lint-requirements.in` |
 
 At the root: `build.zig` and `build.zig.zon` (the build and the version), the
 [Makefile](Makefile) (every command below), `README.md`, `CHANGELOG.md`, this
 file, `LICENSE`, `config.example.toml` (the config template), and the linter
-setup: `lint-requirements.txt`, `ruff.toml`, `.yamllint`. `.gitignore` and
-`.gitattributes` complete the list.
+setup: `lint-requirements.in`, `lint-requirements.txt`, `ruff.toml`,
+`.yamllint`. `.gitignore` and `.gitattributes` complete the list.
 
 ## Setup
 
@@ -317,7 +317,9 @@ checks the entry's shape while it is under `[Unreleased]`: the five sections,
 each at most once, in that order. Whether a change is worth an entry is the
 writer's call. `make check-changelog` checks the same shape on the entry a tag
 names, after the heading has become a version and the author no longer sees
-it. Both run `make check-changelog-links`, which holds the `[Unreleased]:` and
+it. `make check-unreleased` runs `make check-changelog-links`, and so does
+`make check-release` over the whole file before a tag. That check holds the
+`[Unreleased]:` and
 `[X.Y.Z]:` references at the bottom of the file to the versions the headings
 above them say: a release renames the `[Unreleased]` heading and adds the
 version's own, and the two links under them are written by hand, so a release
