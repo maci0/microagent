@@ -63,6 +63,24 @@ const max_name_bytes: usize = 64;
 /// The longest server description kept. A description is what the model picks
 /// a tool by, and every later turn pays for it.
 const max_description_bytes: usize = 1024;
+/// The most bytes one tool's `inputSchema` contributes to the request. A
+/// description is bounded because it is a sentence; a schema is whatever the
+/// server chose to serialize, and a server that embeds a large `description`,
+/// `examples` or `enum` in it wrote megabytes into the constant prefix of every
+/// request this run makes, for the whole run. Past this the tool is advertised
+/// with the empty object schema rather than the server's own, which is the
+/// shape a tool with no schema already gets: the model sees a tool whose
+/// arguments it has to infer, rather than a run billed for a schema nobody
+/// reads.
+const max_schema_bytes: usize = 16 * 1024;
+/// What a schema past the ceiling above is replaced with, and the shape a tool
+/// with no schema is already advertised under. The `description` is the model's
+/// warning that the server's own schema is not here, so a tool it finds no
+/// arguments for is one this run cut rather than one the server described
+/// badly.
+const omitted_schema_json =
+    \\{"type":"object","description":"The MCP server sent a schema too large to send (over 16 KB), so the arguments are not described here. Ask the operator what this tool takes."}
+;
 
 /// One tool a server offers.
 pub const Tool = struct {
@@ -357,7 +375,14 @@ fn resultText(arena: std.mem.Allocator, server_name: []const u8, result: std.jso
     };
     var buf: std.ArrayList(u8) = .empty;
     const content = object.get("content") orelse {
-        if (object.get("structuredContent")) |value| return std.json.Stringify.valueAlloc(arena, value, .{});
+        // The same bound the text path below builds to, for the same reason. A
+        // server that answers with a structured payload of a megabyte was
+        // stringified whole and clamped a moment later by the caller, so the
+        // copy, the clamp and the bytes in between were all work over text
+        // nobody keeps, on a value this run cannot bound before the stringify
+        // allocates it.
+        if (object.get("structuredContent")) |value|
+            return cappedJson(arena, value, tool_mod.max_tool_output);
         return "error: MCP result carried no content";
     };
     const items = switch (content) {
@@ -409,6 +434,29 @@ fn resultText(arena: std.mem.Allocator, server_name: []const u8, result: std.jso
         return std.fmt.allocPrint(arena, "{s}\n... [tool output truncated at {d} of {d} bytes]", .{ kept, cap, total });
     }
     return buf.items;
+}
+
+/// A structured MCP result as the model reads it: the value as the server
+/// wrote it, under `cap`, with the same note the text path uses when it cut.
+///
+/// The value is one this run did not write, so it is bounded on the way out
+/// rather than trusted to be small. `chat.clamp` cuts on a code point boundary,
+/// so the result is JSON no longer; a structured result the cap reached is
+/// reported as such instead, because a tool result that is half an object reads
+/// to the model as the whole of one.
+///
+/// The size is measured with the same writer the value is built with, into the
+/// same arena, so what is measured is what would have been returned: a
+/// stringify that fails on the cap's own memory is an allocation failure, which
+/// is this machine's and not the server's.
+fn cappedJson(arena: std.mem.Allocator, value: std.json.Value, cap: usize) ![]const u8 {
+    const note_room = 128;
+    var jb = chat.JsonBuf.init(arena);
+    try std.json.Stringify.value(value, .{}, jb.writer());
+    const text = jb.items();
+    if (text.len <= cap) return text;
+    const kept = chat.clamp(text, cap - note_room);
+    return std.fmt.allocPrint(arena, "{s}\n... [tool output truncated at {d} of {d} bytes]", .{ kept, cap, text.len });
 }
 
 /// A JSON-RPC error value as a line: its message, with the code when there is
@@ -615,13 +663,64 @@ fn handshake(io: Io, arena: std.mem.Allocator, server: *Server, client_version: 
 }
 
 /// A tool's `inputSchema` as the request carries it: the server's own bytes
-/// when they are an object, and an empty object schema when they are not.
-/// A tool with no schema still has to be callable, and a provider refuses an
-/// entry whose `parameters` is not an object.
+/// when they are an object and fit the ceiling, and an object schema that
+/// names the omission when they are not. A tool with no schema still has to be
+/// callable, and a provider refuses an entry whose `parameters` is not an
+/// object, so both replacements are objects.
+///
+/// The size is checked on the stringified bytes rather than on the value,
+/// because the value is what the server sent and the string is what every
+/// later turn of the run pays for.
 fn schemaJson(arena: std.mem.Allocator, value: ?std.json.Value) ![]const u8 {
     const v = value orelse return "{\"type\":\"object\"}";
     if (v != .object) return "{\"type\":\"object\"}";
-    return std.json.Stringify.valueAlloc(arena, v, .{});
+    const text = try std.json.Stringify.valueAlloc(arena, v, .{});
+    if (text.len > max_schema_bytes) return omitted_schema_json;
+    return text;
+}
+
+// Every schema the request can carry is bounded, and a server's own bytes
+// reach the request whole below that bound. Both ends are here because a cap
+// that only rejects leaves the size it accepts untested, and a reader that cut
+// too early would pass a test that only checks the cut.
+test "a schema over the ceiling is replaced, and one under it is the server's own" {
+    const gpa = std.testing.allocator;
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    // No schema, and one that is not an object, are the empty object schema
+    // they were: a tool with nothing to say still has to be callable, and a
+    // provider refuses an entry whose `parameters` is not an object.
+    try std.testing.expectEqualStrings("{\"type\":\"object\"}", try schemaJson(arena, null));
+    try std.testing.expectEqualStrings("{\"type\":\"object\"}", try schemaJson(arena, .null));
+    try std.testing.expectEqualStrings("{\"type\":\"object\"}", try schemaJson(arena, .{ .integer = 1 }));
+
+    // A schema the model can use reaches the request as the server wrote it,
+    // members in the order the server wrote them: a rewrite that reordered them
+    // would be a change to the byte prefix the provider caches on.
+    const small = try std.json.parseFromSliceLeaky(std.json.Value, arena,
+        \\{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}
+    , .{});
+    const kept = try schemaJson(arena, small);
+    try std.testing.expectEqualStrings(
+        \\{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}
+    , kept);
+
+    // And one past the ceiling is the replacement, which is short, is an
+    // object a provider accepts, and says the arguments are not described
+    // rather than leaving the model to infer them from a tool with no schema.
+    var big_state = std.heap.ArenaAllocator.init(gpa);
+    defer big_state.deinit();
+    const big_arena = big_state.allocator();
+    const big = try std.fmt.allocPrint(big_arena,
+        \\{{"type":"object","properties":{{"s":{{"type":"string","description":"{s}"}}}}}}
+    , .{"x" ** (max_schema_bytes + 1024)});
+    const omitted = try schemaJson(arena, try std.json.parseFromSliceLeaky(std.json.Value, big_arena, big, .{}));
+    try std.testing.expectEqualStrings(omitted_schema_json, omitted);
+    try std.testing.expect(omitted.len < max_schema_bytes);
+    // A provider parses `parameters` as an object, so the replacement is one.
+    try std.testing.expect(try std.json.parseFromSliceLeaky(std.json.Value, arena, omitted, .{}) == .object);
 }
 
 // The fake server the connection tests drive. It answers the three calls a
@@ -953,10 +1052,11 @@ fn fuzzFrame(_: void, smith: *std.testing.Smith) !void {
     }
 
     const result = object.get("result") orelse return;
-    // A result with no content is the structured one, and it is copied out as
-    // the server wrote it rather than under the cap, so the cap is asked of
-    // the text path only.
-    if (result != .object or result.object.get("content") == null) return;
+    if (result != .object) return;
+    // Both paths are held to the cap the caller clamps with, so a frame that
+    // reaches either of them is bounded before it becomes a tool result. A
+    // result with no content at all is one neither path reads.
+    if (result.object.get("content") == null and result.object.get("structuredContent") == null) return;
     const text = try resultText(arena, "srv", result);
     try std.testing.expect(text.len <= tool_mod.max_tool_output);
     // Where the text was cut, the note names the cap the caller clamps with and
@@ -1067,4 +1167,48 @@ test "a non-text result block is named rather than dropped" {
     // empty string a call clamps and hands on as a tool result.
     const empty = try std.json.parseFromSliceLeaky(std.json.Value, arena, "{\"content\":[]}", .{});
     try std.testing.expectEqualStrings("(the MCP server returned no text)", try resultText(arena, "srv", empty));
+}
+
+// A server's structured result is server output the model reads, so it is
+// bounded like the text path rather than trusted to be small. The two ends of
+// the cap are both here: a payload under it arrives whole, and one over it
+// arrives under the cap with a note naming the size the whole would have had,
+// because a result the model cannot parse reads to it as the whole of one.
+test "a structured result over the cap is cut, marked, and named for its size" {
+    const gpa = std.testing.allocator;
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    // Under the cap, whole and unannotated: nothing was dropped, so a note
+    // saying so would be the run lying about a result it kept.
+    const small = try std.fmt.allocPrint(arena,
+        \\{{"structuredContent":{{"n":1,"s":"{s}"}}}}
+    , .{"x" ** 1024});
+    const kept = try resultText(arena, "srv", try std.json.parseFromSliceLeaky(std.json.Value, arena, small, .{}));
+    try std.testing.expect(kept.len <= tool_mod.max_tool_output);
+    try std.testing.expect(std.mem.indexOf(u8, kept, "tool output truncated") == null);
+    try std.testing.expect(std.mem.indexOf(u8, kept, "x" ** 1024) != null);
+
+    // Over it, and the value is built here rather than spelled out, so the
+    // test says which size it wrote rather than carrying it.
+    var big_state = std.heap.ArenaAllocator.init(gpa);
+    defer big_state.deinit();
+    const big_arena = big_state.allocator();
+    const big = try std.fmt.allocPrint(big_arena,
+        \\{{"structuredContent":{{"s":"{s}"}}}}
+    , .{"y" ** (tool_mod.max_tool_output * 2)});
+    const cut = try resultText(arena, "srv", try std.json.parseFromSliceLeaky(std.json.Value, big_arena, big, .{}));
+    try std.testing.expect(cut.len <= tool_mod.max_tool_output);
+    const marker = "... [tool output truncated at ";
+    const at = std.mem.indexOf(u8, cut, marker) orelse return error.TestUnexpectedResult;
+    const rest = cut[at + marker.len ..];
+    const of_at = std.mem.indexOf(u8, rest, " of ") orelse return error.TestUnexpectedResult;
+    const cap_at = std.fmt.parseInt(u64, rest[0..of_at], 10) catch return error.TestUnexpectedResult;
+    const after = rest[of_at + " of ".len ..];
+    const bytes_at = std.mem.indexOfScalar(u8, after, ' ') orelse return error.TestUnexpectedResult;
+    const total = std.fmt.parseInt(u64, after[0..bytes_at], 10) catch return error.TestUnexpectedResult;
+    try std.testing.expectEqual(tool_mod.max_tool_output, cap_at);
+    try std.testing.expect(total > cap_at);
+    try std.testing.expect(std.mem.endsWith(u8, cut, "bytes]"));
 }
