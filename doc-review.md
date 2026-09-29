@@ -31,9 +31,9 @@ reduced to a fragment with no instructions for anyone to follow.
 1. **Commands the prose names that the Makefile does not carry.** Every
    `make <target>` in `README.md`, `CONTRIBUTING.md` and `PERFORMANCE.md` must be a
    target that exists. The ground truth is the rule list in the `Makefile` (a rule is a
-   line at column 0 whose name is followed by a colon, with or without prerequisites:
-   `default: build` and `lint: lint-versions lint-shell` are rules, and reading the list
-   as names followed by a bare colon drops them) and the `.PHONY` line,
+   line at column 0 whose name is followed by a colon, with or without
+   prerequisites: `default: build` is a rule, and reading the list as names
+   followed by a bare colon drops them) and the `.PHONY` line,
    not the help text, because a name in the help block that no rule backs is the
    same defect one file over. Search the documents for `` `make `` and for the
    commands inside their fenced blocks, and check each name against both lists.
@@ -86,12 +86,15 @@ reduced to a fragment with no instructions for anyone to follow.
    the only place the third spelling is checked.
 
 7. **What the release documentation promises against what the release does.**
-   The versioning section counts the published binaries and states the rules for
-   a tag; the ground truth is the `RELEASE_TARGETS` list in the `Makefile` (one
-   triple per published asset) and the conditions in
-   `.github/workflows/release.yml`. A count, a rule or an asset name the prose
-   states that the workflow does not enforce, or an asset the workflow
-   publishes that the prose does not mention, is a finding.
+   `CONTRIBUTING.md`'s "Version and changelog" counts the published binaries
+   ("the four published binaries and their asset names are spelled once, in the
+   `Makefile`") and `README.md`'s "Versioning" states the rules a tag is refused
+   for; the ground truth is the `RELEASE_TARGETS` list in the `Makefile` (one
+   published target triple per asset, the same list the `release-targets`
+   recipe prints) and the conditions in `.github/workflows/release.yml`. A count,
+   a rule or an asset name the prose states that the workflow does not enforce,
+   or an asset the workflow publishes that the prose does not mention, is a
+   finding.
 
 ## Instructions:
 
