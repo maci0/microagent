@@ -199,32 +199,73 @@ fn flagDistance(word: []const u8, candidate: []const u8) ?usize {
     // one flag, and measuring the missing half would put it level with
     // `--config`, which is what it is not.
     if (std.mem.startsWith(u8, c, w)) return 1;
-    const d = editDistance(w, c);
-    const longer = @max(w.len, c.len);
+    const d = editDistance(w, c) orelse return null;
+    const longer = @max(codepointCount(w), codepointCount(c));
     if (d > 2 or d * 3 > longer) return null;
     return d;
 }
 
-/// Levenshtein distance over two rows, so a long word costs two allocations of
-/// its own length rather than a square of it.
-fn editDistance(a: []const u8, b: []const u8) usize {
-    if (a.len == 0) return b.len;
-    if (b.len == 0) return a.len;
+/// How many codepoints `s` spells, which is the unit an edit is counted in.
+///
+/// The word being matched is whatever the user typed, and a keyboard with a
+/// CJK or a Cyrillic layout puts a multi-byte character where a flag has an
+/// ASCII letter. Counting bytes made one wrong character cost two, three or
+/// four edits, so the nearest flag fell outside the two-edit budget and the
+/// suggestion the user typed a flag for was the one thing they did not get.
+fn codepointCount(s: []const u8) usize {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < s.len) {
+        i += codepointLen(s, i);
+        n += 1;
+    }
+    return n;
+}
+
+/// The bytes the character starting at `i` is made of, treating bytes that are
+/// not a valid sequence as one byte each. A word a user half-typed can hold
+/// anything a terminal's paste delivers, and a run of bytes that is not text
+/// still has to be walked to the end rather than trusted to decode.
+fn codepointLen(s: []const u8, i: usize) usize {
+    const want = std.unicode.utf8ByteSequenceLength(s[i]) catch return 1;
+    if (i + want > s.len) return 1;
+    if (!std.unicode.utf8ValidateSlice(s[i .. i + want])) return 1;
+    return want;
+}
+
+/// Levenshtein distance over two rows of codepoints, so a long word costs two
+/// allocations of its own length rather than a square of it. Null when a word
+/// is too long for a row of `u8` distances, which no flag this suggests is.
+fn editDistance(a: []const u8, b: []const u8) ?usize {
+    if (a.len == 0) return codepointCount(b);
+    if (b.len == 0) return codepointCount(a);
+    const b_len = codepointCount(b);
+    if (b_len >= std.math.maxInt(u8)) return null;
     const gpa = std.heap.page_allocator;
-    const prev = gpa.alloc(u8, b.len + 1) catch return a.len + b.len;
+    const prev = gpa.alloc(u8, b_len + 1) catch return null;
     defer gpa.free(prev);
-    const cur = gpa.alloc(u8, b.len + 1) catch return a.len + b.len;
+    const cur = gpa.alloc(u8, b_len + 1) catch return null;
     defer gpa.free(cur);
-    for (0..b.len + 1) |j| prev[j] = @intCast(j);
-    for (a, 0..) |ca, i| {
-        cur[0] = @intCast(i + 1);
-        for (b, 0..) |cb, j| {
-            const cost: u8 = if (ca == cb) 0 else 1;
-            cur[j + 1] = @min(@min(cur[j] + 1, prev[j + 1] + 1), prev[j] + cost);
+    for (0..b_len + 1) |j| prev[j] = @intCast(j);
+    var i: usize = 0;
+    var at: usize = 0;
+    while (i < a.len) {
+        const ca = a[i .. i + codepointLen(a, i)];
+        i += ca.len;
+        at += 1;
+        cur[0] = @intCast(at);
+        var j: usize = 0;
+        var bj: usize = 0;
+        while (bj < b.len) {
+            const cb = b[bj .. bj + codepointLen(b, bj)];
+            bj += cb.len;
+            j += 1;
+            const cost: u8 = if (std.mem.eql(u8, ca, cb)) 0 else 1;
+            cur[j] = @min(@min(cur[j - 1] + 1, prev[j] + 1), prev[j - 1] + cost);
         }
         @memcpy(prev, cur);
     }
-    return prev[b.len];
+    return prev[b_len];
 }
 /// `$HOME`, trimmed, or null when it is not set or holds nothing but
 /// whitespace. Every path built under it is a path no filesystem holds when
@@ -915,6 +956,23 @@ test "a mistyped flag is answered from the nearest one that command has" {
     try std.testing.expectEqual(@as(?[]const u8, null), nearestFlag("mo", &flags));
     // A list of nothing suggests nothing, however well the word is spelled.
     try std.testing.expectEqual(@as(?[]const u8, null), nearestFlag("--model", &.{}));
+    // An edit is counted in characters, so the character a keyboard with a
+    // non-ASCII layout put where a letter belongs costs one edit and not the
+    // two, three or four its bytes are. `--pri字t` is `--print` with one
+    // character swapped, and is suggested as such; measured in bytes it was
+    // three edits from a five-character name, which is past what a suggestion
+    // is worth.
+    try std.testing.expectEqualStrings("--print", nearestFlag("--pri字t", &.{"--print"}).?);
+    try std.testing.expectEqualStrings("--print", nearestFlag("--priнt", &.{"--print"}).?);
+    // Two of them are still two edits, and a name this short has no room for
+    // two, so the rule is unchanged where the counting was already right.
+    try std.testing.expectEqualStrings("--model", nearestFlag("--mоdel", &flags).?);
+    try std.testing.expectEqual(@as(?[]const u8, null), nearestFlag("--моdel", &flags));
+    // Bytes that are not a character at all are walked one by one rather than
+    // trusted to decode, so a word a terminal's paste delivered still gets a
+    // distance: the byte it cannot read is one character of the five, and
+    // dropping it is the one edit that makes the word the flag.
+    try std.testing.expectEqualStrings("--print", nearestFlag("--pri\xfft", &.{"--print"}).?);
 }
 
 test "a header value is refused for every control byte and accepted for the rest" {

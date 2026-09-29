@@ -614,7 +614,7 @@ pub fn run(
         error.ChecksumMismatch => fail(io, "checksum mismatch; refusing to install unverified binary", .{}),
         else => fail(io, "could not replace {s} ({s}); the binary was not replaced", .{ shown_exe, @errorName(err) }),
     };
-    const line = std.fmt.allocPrint(arena, "Installed {s} to {s}", .{ tag, exe }) catch
+    const line = std.fmt.allocPrint(arena, "Installed {s} to {s}", .{ tag, shown_exe }) catch
         return fail(io, "{s} was installed", .{shown_exe});
     writeLine(io, arena, line) catch |err|
         return fail(io, "{s} was installed, but the install line could not be written to stdout ({s})", .{ shown_exe, @errorName(err) });

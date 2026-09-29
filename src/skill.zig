@@ -324,7 +324,16 @@ fn readHead(
         if (n == 0) break;
         got += n;
     }
-    return head[0..got];
+    // The head ends where the file does or where the cap does, and the cap is
+    // a byte count that lands in the middle of a character as readily as not:
+    // a `description:` whose value runs past byte 8191 leaves the last
+    // character of it as a lead byte with no continuation behind it, and the
+    // listing then holds that half a character. The name is read out of the
+    // same bytes, so a split there is a name whose last byte is half a
+    // character rather than a name. `partialTailLen` is how many bytes at the
+    // end are the start of a sequence the read cut, and they are held back the
+    // way the repository-instructions read holds its tail back.
+    return head[0..got -| chat.partialTailLen(head[0..got])];
 }
 
 /// Sorted by name, so the listing a provider sees is the same for the same
@@ -683,6 +692,46 @@ test "a large skill is listed from its head, and loads whole" {
     const loaded = try load(io, arena, set.get("big").?);
     try std.testing.expect(loaded.len > 200 * 1024);
     try std.testing.expect(std.mem.startsWith(u8, loaded, "# Heading\n"));
+}
+
+// The head the listing reads stops on a character boundary, so a file whose
+// bytes run past the cap mid-character leaves whole characters in the listing
+// rather than the first bytes of one.
+test "a head cut at its byte cap ends on a character boundary" {
+    const gpa = std.testing.allocator;
+    var scratch_state = std.heap.ArenaAllocator.init(gpa);
+    defer scratch_state.deinit();
+    const scratch = scratch_state.allocator();
+    var run_state = std.heap.ArenaAllocator.init(gpa);
+    defer run_state.deinit();
+    const arena = run_state.allocator();
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // A tail of two three-byte characters and one four-byte one, placed so the
+    // cap falls before, inside and just past each of them in turn. Every
+    // character the cap left whole is kept, and only the fragment at the end of
+    // the cap is dropped.
+    const tail = "\u{65e5}\u{65e5}\u{1f600}";
+    for (0..tail.len + 1) |back| {
+        const body = try scratch.alloc(u8, skill_head_bytes + tail.len - back);
+        @memset(body, 'x');
+        @memcpy(body[body.len - tail.len ..], tail);
+        try tmp.dir.writeFile(io, .{ .sub_path = "SKILL.md", .data = body });
+
+        const head = readHead(io, arena, tmp.dir, "SKILL.md", "cut", body.len).?;
+        // The property, spelled directly: what the listing reads is text,
+        // whatever byte the cap fell on.
+        try std.testing.expect(std.unicode.utf8ValidateSlice(head));
+        // The head is the cap less the fragment the cap cut a character into,
+        // and nothing else: every whole character before it is there, so a
+        // read that simply stopped short would fail the next line.
+        try std.testing.expect(head.len <= skill_head_bytes);
+        try std.testing.expect(head.len + chat.partialTailLen(body[0..skill_head_bytes]) == skill_head_bytes);
+        try std.testing.expect(head.len >= skill_head_bytes - chat.partialTailLen(body[0..skill_head_bytes]));
+    }
 }
 
 // An operator who linked a skill into a root installed it, so the listing has

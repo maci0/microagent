@@ -479,12 +479,22 @@ pub fn isInvisibleFormat(cp: u21) bool {
         // LRE, RLE, PDF, LRO, RLO: the embeddings and overrides, which are how
         // a file name is spelled backwards.
         0x202a...0x202e => true,
-        // WORD JOINER, then the isolates LRI, RLI, FSI and PDI, then the
-        // deprecated format characters the Unicode standard withdrew.
-        0x2060, 0x2066...0x206f => true,
+        // WORD JOINER, then FUNCTION APPLICATION, INVISIBLE TIMES, INVISIBLE
+        // SEPARATOR and INVISIBLE PLUS, then the isolates LRI, RLI, FSI and
+        // PDI, then the deprecated format characters the Unicode standard
+        // withdrew. The four in the middle are arithmetic operators the
+        // standard reserved and never gave a glyph, so `a\u{2062}b` and `ab`
+        // are one string on the screen and two strings to whatever compares
+        // them.
+        0x2060...0x2064, 0x2066...0x206f => true,
         // ZERO WIDTH NO-BREAK SPACE, a byte order mark inside a value rather
         // than ahead of it.
         0xfeff => true,
+        // MONGOLIAN VOWEL SEPARATOR, a format character in every Unicode
+        // version from 3.2 to 6.3 and a spacing character now. A tree that
+        // still spells a name with it, a copy of a file name out of a
+        // rendering from before, is text that prints as nothing.
+        0x180e => true,
         else => false,
     };
 }
@@ -1084,8 +1094,12 @@ test "a value quoting a bidi override names the override, not the name it revers
         .{ .cp = 0x200e, .invisible = true },
         .{ .cp = 0x200f, .invisible = true },
         .{ .cp = 0x2060, .invisible = true },
-        .{ .cp = 0x2061, .invisible = false },
+        .{ .cp = 0x2061, .invisible = true },
+        .{ .cp = 0x2064, .invisible = true },
+        // U+2065 is reserved and carries no character, so it is not one of
+        // the format characters and has no display effect to escape.
         .{ .cp = 0x2065, .invisible = false },
+        .{ .cp = 0x180e, .invisible = true },
         .{ .cp = 0x2066, .invisible = true },
         .{ .cp = 0x206f, .invisible = true },
         .{ .cp = 0x2070, .invisible = false },

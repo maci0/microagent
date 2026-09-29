@@ -1380,7 +1380,7 @@ fn credentialRefusal(arena: std.mem.Allocator, tool: chat.Tool, path: []const u8
         arena,
         "refused: {s} is a credentials file. `{s}` does not return one, because the result " ++
             "is re-sent to the provider on every later turn. {s}",
-        .{ path, tool.name(), advice },
+        .{ shownPath(arena, path), tool.name(), advice },
     );
 }
 
@@ -1402,14 +1402,14 @@ fn toolRead(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]const
 /// What a `read` says when the file is not there, is a directory, or cannot be
 /// opened: the same words whichever way the bytes were going to be fetched.
 fn readFailed(arena: std.mem.Allocator, path: []const u8, err: anyerror) []const u8 {
-    return std.fmt.allocPrint(arena, "error: cannot read {s}: {s}", .{ path, @errorName(err) }) catch
+    return std.fmt.allocPrint(arena, "error: cannot read {s}: {s}", .{ shownPath(arena, path), @errorName(err) }) catch
         "error: cannot read the file";
 }
 
 /// What a `write` or an `edit` says when the bytes did not land: the same
 /// words whichever way they were being put there.
 fn writeFailed(arena: std.mem.Allocator, path: []const u8, err: anyerror) []const u8 {
-    return std.fmt.allocPrint(arena, "error: cannot write {s}: {s}", .{ path, @errorName(err) }) catch
+    return std.fmt.allocPrint(arena, "error: cannot write {s}: {s}", .{ shownPath(arena, path), @errorName(err) }) catch
         "error: cannot write the file";
 }
 
@@ -1513,7 +1513,27 @@ fn readLines(io: Io, arena: std.mem.Allocator, path: []const u8, offset: usize, 
 /// entry of the batch it came from, and a reader who has seen one refusal has
 /// seen the rule behind all three.
 fn outsideSandbox(arena: std.mem.Allocator, path: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(arena, "refused: path '{s}' is outside the sandbox writable roots", .{chat.safeText(arena, path, 80)});
+    return std.fmt.allocPrint(arena, "refused: path '{s}' is outside the sandbox writable roots", .{shownPath(arena, path)});
+}
+
+/// How many bytes of a path a diagnostic spells. Long enough for a path as a
+/// filesystem spells one: the limit a single file name is held to on the
+/// common filesystems, and past it the message is the name of a file that is
+/// not the one the tool was asked about, so the cap only ever removes the
+/// directories above it rather than the leaf that names the file.
+const shown_path_bytes = 255;
+
+/// A path as a tool's own messages spell it: escaped, and bounded.
+///
+/// A path arrives from the model, and a file name is whatever the filesystem
+/// accepted, so it may carry a bidirectional override that reverses what the
+/// rest of the line reads as, a zero-width character that hides a component,
+/// or a control byte that moves the cursor. Every message a tool answers with
+/// is read on a terminal, and the path is the one field in it the other side
+/// chose, so the escaping is not optional here: the same path spelled back by
+/// the reader has to be the one the tool was asked for.
+fn shownPath(arena: std.mem.Allocator, path: []const u8) []const u8 {
+    return chat.safeText(arena, path, shown_path_bytes);
 }
 
 fn toolWrite(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, writable_roots: []const []const u8) ![]const u8 {
@@ -1536,7 +1556,7 @@ fn toolWrite(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, writabl
         return "error: missing content";
     writeFileAtomic(io, std.Io.Dir.cwd(), path, content) catch |err|
         return writeFailed(arena, path, err);
-    return std.fmt.allocPrint(arena, "wrote {d} bytes to {s}", .{ content.len, path });
+    return std.fmt.allocPrint(arena, "wrote {d} bytes to {s}", .{ content.len, shownPath(arena, path) });
 }
 
 /// The permission bits of a mode: the nine `rwx` ones, and nothing else. A
@@ -1617,7 +1637,7 @@ fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, writable
     };
     writeFileAtomic(io, std.Io.Dir.cwd(), path, done.bytes) catch |err|
         return writeFailed(arena, path, err);
-    return std.fmt.allocPrint(arena, "replaced {d} occurrence(s) in {s}", .{ done.count, path });
+    return std.fmt.allocPrint(arena, "replaced {d} occurrence(s) in {s}", .{ done.count, shownPath(arena, path) });
 }
 
 /// What one replacement made of a file's text, or the refusal the model reads. `edit` and
@@ -1643,7 +1663,7 @@ fn applyEdit(arena: std.mem.Allocator, path: []const u8, raw: []u8, old: []const
     // A replacement that is the text it replaces changes nothing, so it reports
     // that rather than rewriting the file with its own contents.
     if (std.mem.eql(u8, old, new)) {
-        return .{ .refused = try std.fmt.allocPrint(arena, "no change: new_string is the same text as old_string in {s}", .{path}) };
+        return .{ .refused = try std.fmt.allocPrint(arena, "no change: new_string is the same text as old_string in {s}", .{shownPath(arena, path)}) };
     }
     // A replacement that still contains what it replaces cannot be run twice:
     // the second execution matches the same text inside the first execution's
@@ -1659,8 +1679,8 @@ fn applyEdit(arena: std.mem.Allocator, path: []const u8, raw: []u8, old: []const
     }
 
     const count = std.mem.count(u8, raw, old);
-    if (count == 0) return .{ .refused = try std.fmt.allocPrint(arena, "error: old_string not found in {s}", .{path}) };
-    if (count > 1 and !all) return .{ .refused = try std.fmt.allocPrint(arena, "error: old_string occurs {d} times in {s}; add context or set replace_all", .{ count, path }) };
+    if (count == 0) return .{ .refused = try std.fmt.allocPrint(arena, "error: old_string not found in {s}", .{shownPath(arena, path)}) };
+    if (count > 1 and !all) return .{ .refused = try std.fmt.allocPrint(arena, "error: old_string occurs {d} times in {s}; add context or set replace_all", .{ count, shownPath(arena, path) }) };
 
     // The checks above leave either every occurrence replaced or, without
     // `all`, exactly one to replace, and one match is the loop below run once.
@@ -1720,7 +1740,7 @@ fn applyEdit(arena: std.mem.Allocator, path: []const u8, raw: []u8, old: []const
     // is one this rewrite created, and the next run of this call would find it
     // and apply again.
     if (std.mem.indexOf(u8, buf.items, old) != null) {
-        return .{ .refused = try std.fmt.allocPrint(arena, "error: replacing old_string with new_string would leave old_string matchable in {s}, so a second run of this edit would apply again; include more context in old_string", .{path}) };
+        return .{ .refused = try std.fmt.allocPrint(arena, "error: replacing old_string with new_string would leave old_string matchable in {s}, so a second run of this edit would apply again; include more context in old_string", .{shownPath(arena, path)}) };
     }
     return .{ .text = .{ .bytes = buf.items, .count = count } };
 }
@@ -1809,7 +1829,7 @@ fn toolMultiEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, wri
 
     var summary: std.ArrayList(u8) = .empty;
     try summary.print(arena, "applied {d} edit(s) to {d} file(s):", .{ list.len, files.items.len });
-    for (files.items) |file| try summary.print(arena, " {s} ({d})", .{ file.path, file.replacements });
+    for (files.items) |file| try summary.print(arena, " {s} ({d})", .{ shownPath(arena, file.path), file.replacements });
     return summary.items;
 }
 
@@ -3625,6 +3645,66 @@ test "the credentials refusal names the file and the way out" {
     try std.testing.expect(std.mem.indexOf(u8, search, "bash") != null);
     try std.testing.expect(std.mem.indexOf(u8, rewritten, "rewrites a credentials file") != null);
     try std.testing.expect(std.mem.indexOf(u8, rewritten, "bash") == null);
+}
+
+// Every message a tool answers a path with spells the path escaped. A path is
+// the one field in a tool's answer the other side chose, and a name a
+// filesystem accepted may carry a bidirectional override or a zero-width
+// character, so a message that quotes it whole shows the reader a different
+// name than the one the tool was asked for. One message per tool that takes a
+// path is what the property needs, since a call site that forgot the rule is
+// the defect.
+test "a path in a tool's own message is escaped and not shown whole" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // A right-to-left override and a zero-width space: the first reverses what
+    // is shown after it, the second is a character the reader cannot see at
+    // all, and a name the model must be able to spell back cannot carry
+    // either.
+    const hostile = "deploy/\u{202e}gnp.exe\u{200b}/x";
+
+    // The two failures, which is where a path most often reaches a message.
+    try std.testing.expectEqualStrings(
+        "error: cannot read deploy/\\u202egnp.exe\\u200b/x: FileNotFound",
+        readFailed(arena, hostile, error.FileNotFound),
+    );
+    try std.testing.expectEqualStrings(
+        "error: cannot write deploy/\\u202egnp.exe\\u200b/x: FileNotFound",
+        writeFailed(arena, hostile, error.FileNotFound),
+    );
+    try std.testing.expectEqualStrings(
+        "refused: deploy/\\u202egnp.exe\\u200b/x is a credentials file. `read` does not return one, " ++
+            "because the result is re-sent to the provider on every later turn. " ++
+            "Run the command that needs the key through `bash`, and do not print it.",
+        try credentialRefusal(arena, .read, hostile, false),
+    );
+    try std.testing.expectEqualStrings(
+        "refused: path 'deploy/\\u202egnp.exe\\u200b/x' is outside the sandbox writable roots",
+        try outsideSandbox(arena, hostile),
+    );
+
+    // And through dispatch, so the rule is on the call path and not only on
+    // the helpers: the model reads the answer on a terminal and copies the
+    // path out of it.
+    var args_buf: std.Io.Writer.Allocating = .init(arena);
+    try std.json.Stringify.value(@as([]const u8, hostile), .{}, &args_buf.writer);
+    const answered = try dispatch(arena, "read", try std.fmt.allocPrint(
+        arena,
+        "{{\"path\":{s}}}",
+        .{args_buf.written()},
+    ));
+    try std.testing.expect(std.mem.indexOf(u8, answered, "\\u202e") != null);
+    try std.testing.expect(std.mem.indexOf(u8, answered, "\u{202e}") == null);
+    try std.testing.expect(std.mem.indexOf(u8, answered, "\u{200b}") == null);
+
+    // An ordinary path is unchanged, so the escaping is not a rewrite.
+    try std.testing.expectEqualStrings(
+        "error: cannot read src/main.zig: FileNotFound",
+        readFailed(arena, "src/main.zig", error.FileNotFound),
+    );
 }
 
 // The guard is on the tool the model calls, not only on the predicate, so a

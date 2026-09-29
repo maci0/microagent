@@ -3558,7 +3558,7 @@ fn finishTurn(
                 // A tool that fails outright (rather than reporting its own
                 // failure as text) is named here, so a result reading
                 // `error: OutOfMemory` says which of the calls ran out.
-                try std.fmt.allocPrint(arena, "error: {s}: {s}", .{ call.name, @errorName(err) });
+                try std.fmt.allocPrint(arena, "error: {s}: {s}", .{ chat_mod.safeText(arena, call.name, 40), @errorName(err) });
         };
         // A tool result is capped at `max_tool_output`, so the message holding
         // it is bounded before the first byte is written. Reserving that now
