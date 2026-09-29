@@ -4924,13 +4924,17 @@ fn appendToolResults(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), count: us
     while (i < count) : (i += 1) {
         if (msgs.items.len > 1) try msgs.append(gpa, ',');
         var msg = chat_mod.JsonBuf.init(gpa);
+        // The `defer` rather than a free after the append, for the reason
+        // `appendMessage` below uses one: every `try` between the two is a path
+        // that returned without freeing, and a run that fails mid-turn is a
+        // run that has just allocated a buffer per result it had built.
+        defer msg.list.deinit(gpa);
         try msg.writer().writeAll("{\"role\":\"tool\",\"tool_call_id\":\"call_");
         try msg.writer().print("{d}", .{i});
         try msg.writer().writeAll("\",\"content\":");
         try chat_mod.writeJsonString(msg.writer(), blob);
         try msg.writer().writeAll("}");
         try msgs.appendSlice(gpa, msg.items());
-        msg.list.deinit(gpa);
     }
 }
 
