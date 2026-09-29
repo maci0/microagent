@@ -154,7 +154,7 @@ release, and `microagent update` moves you to it.
   default 0666 less the umask, which on a shared host left a run's whole account of the tree it was
   pointed at readable by every other account.
 - The usage text said a bare `help` is answered "the way `microagent update help` does". `update`
-  stopped taking that word when it shed `--repo` in 0.7.0 and answers to `--help` and `-h` only, so
+  stopped taking that word when it shed `--repo` in 0.6.0 and answers to `--help` and `-h` only, so
   the sentence promised an invocation that exits 2. The text now says what the parser does.
 
 - A provider error frame that arrives before any content ends the run with
