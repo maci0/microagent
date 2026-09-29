@@ -874,8 +874,8 @@ The version is `build.zig.zon` and nothing else, and [CHANGELOG.md](../CHANGELOG
 changed in each. Under `0.y`, the minor takes features, any change to what a run does by default,
 and anything removed; the patch takes fixes, and upgrading a patch must not change an existing
 invocation. The release workflow refuses a patch tag whose changelog section has an `Added`,
-`Changed` or `Removed` entry, a section that is not the five Keep a Changelog headings once each in
-order, a compare link under a heading that does not match the versions around it, and any tag while
+`Changed`, `Removed` or `Security` entry, a section that is not the five Keep a Changelog headings
+once each in order, a compare link under a heading that does not match the versions around it, and any tag while
 `## [Unreleased]` still holds entries. A breaking change to the flags, the environment variables, or
 the stdout and session-log JSON gets a changelog entry naming the before and the after. Only the
 latest release is supported: a fix ships in the next release, with no backports.
