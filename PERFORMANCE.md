@@ -33,12 +33,22 @@ that moves is a gate that moved with it:
 | compaction of a 1 MB conversation | 37,153,055 | one call |
 | building the request body (the row measures 40 of them) | 113,946 | 2,849 |
 | a ranged read of a 512 KB line | 7,543,604 | one call |
+| the session store, opened and pruned | 1,290,450 | once per run |
+| one more turn of the loop (a tool call that runs nothing) | 194,762 | 6,766 of it is the session record |
 
 Against a 284 s review and roughly 20,000 frames, the streaming path is on the order of ten
 milliseconds of CPU in total. Changing it is not worth risk.
 
 Syscalls, which no instruction count carries: 180 for `--version`, 277 for the whole pre-request
 path, and nothing per turn beyond one session-log write and one stdout write per chunk.
+
+The turn and session rows are measured the same way, with `perf stat -e instructions` as the median
+of three, against a stub provider on loopback that always asks for a tool that does not exist: the
+turn row is `--max-turns 101` minus `--max-turns 1`, over the hundred turns between them, and the
+session row is the same run with `MICROAGENT_SESSION_DIR=` (no log). A hundred turns cost about
+19.5 M instructions, or a few milliseconds, against a run measured in tens of seconds. The loop does
+not open a connection per turn either: ten turns against a keep-alive stub opened one TCP
+connection, because the client's pool returns the socket after each response is read.
 
 ## What was changed, and what it bought
 
