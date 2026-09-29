@@ -6,6 +6,7 @@
 //! arguments, so it is capped, reaped and reported from one place.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 
 const chat = @import("chat.zig");
@@ -92,6 +93,7 @@ const ToolChild = struct {
     pgid: std.posix.pid_t,
 
     pub fn spawn(io: Io, argv: []const []const u8, environ_map: ?*const std.process.Environ.Map) !ToolChild {
+        try requireInstalled(io, argv[0], environ_map);
         const child = try std.process.spawn(io, .{
             .argv = argv,
             .pgid = 0, // its own group leader, so the group signal stays ours
@@ -118,6 +120,118 @@ const ToolChild = struct {
         self.child.kill(io);
     }
 };
+
+/// The largest `PATH` entry a search will look under, which is the platform's
+/// own `PATH_MAX`. A longer entry cannot name a directory, so it is skipped
+/// rather than given a buffer of its own.
+const path_entry_max: usize = 4096;
+
+/// A delegated program this machine does not have, decided before the fork.
+///
+/// `std.process.spawn` reports a program that is not installed the only way it
+/// can: the forked child fails its own `execvpe` and writes the reason back
+/// over an error pipe. On that path the standard library returns the error and
+/// drops the `Spawned` value holding the child's two pipe read ends without
+/// closing them, and it returns before it ever waits, so the child that already
+/// exited stays in the process table. One missing binary therefore costs this
+/// process two descriptors and one process-table entry per tool call, for the
+/// rest of the run, and nothing in it is ever released. A stock macOS has git
+/// and neither ripgrep nor ast-grep, `missingProgram` is written for exactly
+/// that machine, and a model that keeps calling the tool it was told is missing
+/// reaches the default descriptor limit within a run.
+///
+/// Searching `PATH` first answers the same question with one `access` per
+/// entry and no fork, so the descriptors are never taken.
+///
+/// Only a bare name is resolved. An argv that names a path is left to the
+/// spawn, which is where its error is already reported, and so is a call that
+/// was handed no environment, because the search is then over a `PATH` this
+/// function has no way to read.
+fn requireInstalled(
+    io: Io,
+    name: []const u8,
+    environ_map: ?*const std.process.Environ.Map,
+) !void {
+    if (std.mem.indexOfScalar(u8, name, '/') != null) return;
+    const env = environ_map orelse return;
+    // The `PATH` the run hands its tools is the one it inherited: `scrubSecrets`
+    // removes credentials by name, and `PATH` is not a credential, so this is
+    // the same search the child performs for itself.
+    const path = env.get("PATH") orelse return;
+    try findOnPath(io, path, name);
+}
+
+/// Reports `error.FileNotFound` unless `name` is executable under one of the
+/// `PATH` entries, which is the search the forked child runs and the one whose
+/// failure costs it its pipes.
+fn findOnPath(io: Io, entries: []const u8, name: []const u8) !void {
+    var dirs = std.mem.splitScalar(u8, entries, ':');
+    while (dirs.next()) |dir| {
+        if (dir.len == 0) continue;
+        var buf: [path_entry_max]u8 = undefined;
+        const full = std.fmt.bufPrint(&buf, "{s}/{s}", .{ dir, name }) catch continue;
+        std.Io.Dir.cwd().access(io, full, .{ .execute = true }) catch continue;
+        return;
+    }
+    return error.FileNotFound;
+}
+
+/// How many calls the missing-program test makes, which is what turns a leak of
+/// two descriptors into a number the test can see rather than a number the
+/// default limit would eventually reach.
+const missing_program_calls: usize = 8;
+
+test "a delegated program that is not installed costs no descriptor and no process" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_path = dir_buf[0..try tmp.dir.realPath(io, &dir_buf)];
+
+    // The environment the run hands its tools, with the empty directory as the
+    // only place a program could be, and a name that is not installed, so
+    // every call below is the one this test is about.
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("PATH", dir_path);
+    const argv = [_][]const u8{"microagent-no-such-program"};
+
+    // An installed program still spawns, which is the half of the change that
+    // must not cost a working tool: its fork is untouched. Reaped before the
+    // count below, so its own two descriptors are not what is being measured.
+    var installed: std.process.Environ.Map = .init(arena);
+    try installed.put("PATH", "/bin:/usr/bin");
+    var sh = try ToolChild.spawn(io, &.{ "/bin/sh", "-c", "exit 0" }, &installed);
+    sh.reap(io);
+
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const before = try openDescriptors(io, arena);
+    for (0..missing_program_calls) |_| {
+        try std.testing.expectError(error.FileNotFound, ToolChild.spawn(io, &argv, &env));
+    }
+    // The spawn never happened, so nothing was taken: the count the loop would
+    // have grown by two each is the count the test pins.
+    try std.testing.expectEqual(before, try openDescriptors(io, arena));
+}
+
+/// How many descriptors this process holds, counted by walking `/proc/self/fd`.
+/// Linux only, and only a test uses it: what it measures has no portable
+/// equivalent, and a platform that has none is not the platform this leak
+/// reaches the limit on.
+fn openDescriptors(io: Io, arena: std.mem.Allocator) !usize {
+    var dir = try std.Io.Dir.cwd().openDir(io, "/proc/self/fd", .{ .iterate = true });
+    defer dir.close(io);
+    var walker = try dir.walk(arena);
+    defer walker.deinit();
+    var n: usize = 0;
+    while (try walker.next(io)) |_| n += 1;
+    // The descriptor this walk holds open, which the listing names along with
+    // the ones being counted.
+    return n -| 1;
+}
 
 /// SIGKILL to a whole process group. A group that is already gone is the normal
 /// case, not a failure.
