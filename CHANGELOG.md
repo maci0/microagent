@@ -20,6 +20,12 @@ release, and `microagent update` moves you to it.
   in `config.toml` configures a list of command names or sequences to deny. Any `bash`
   command containing one of the denied commands (e.g. `sudo`, `/usr/bin/sudo`, `su`,
   `rm -rf`) is refused before execution, returning `refused: command contains '...', which is denied by configuration`.
+- Configurable workspace sandbox: `[sandbox]` table (or top-level `sandbox = true`) in `config.toml`
+  confines filesystem modifications to designated roots (by default: current working directory, `/tmp`,
+  and session log directory; optionally customized with `writable = [...]`). On Linux (kernel 5.13+), applies
+  Landlock LSM rules to restrict microagent and all spawned child processes (`bash`, MCP servers, build tools),
+  marking `/` read-only and designated roots read-write. In-process canonical path verification additionally
+  refuses `write` and `edit` tool calls targeting paths outside writable roots.
 
 ## [0.5.0] - 2026-09-29
 

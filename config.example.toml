@@ -50,3 +50,14 @@ ponytail = "full"
 # under `[commands]` (`deny = [...]`).
 #
 # deny_commands = ["sudo", "su", "shutdown", "reboot"]
+
+# Workspace sandbox confinement. When enabled, restricts filesystem modifications
+# to designated roots (by default: current working directory, /tmp, and session dir).
+# On Linux (kernel 5.13+), applies Landlock LSM rules to confine both microagent
+# and all spawned child processes (bash, MCP, subcommands). In-process path checks
+# additionally refuse write and edit tool calls targeting paths outside writable roots.
+#
+# [sandbox]
+# enabled = true
+# writable = [".", "/tmp"]
+

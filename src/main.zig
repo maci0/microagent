@@ -38,6 +38,7 @@ const fuzzargv = @import("fuzzargv.zig");
 const mcp_mod = @import("mcp.zig");
 const net = @import("net.zig");
 const session_mod = @import("session.zig");
+const sandbox_mod = @import("sandbox.zig");
 const skill_mod = @import("skill.zig");
 const style_mod = @import("style.zig");
 const tool_mod = @import("tool.zig");
@@ -261,6 +262,10 @@ const Options = struct {
     mcp: mcp_mod.Servers = .{},
     /// Commands denied from running via the bash tool.
     deny_commands: []const []const u8 = &.{},
+    /// Sandbox settings to confine filesystem writes.
+    sandbox: config_mod.Sandbox = .{},
+    /// Absolute directory roots where writes are allowed when sandboxed.
+    writable_roots: []const []const u8 = &.{},
     /// What the command line asked for. `--help` and `--version` stop the
     /// parse where they appear, before any option value is needed.
     action: Action = .run,
@@ -409,8 +414,14 @@ fn runMain(init: std.process.Init) !u8 {
     // message is appended once, in the wire format, with no model in between.
     var msgs: std.ArrayList(u8) = .empty;
     defer msgs.deinit(gpa);
-    const loaded = loadConfig(io, init, init.arena.allocator(), opts.config);
+    const arena = init.arena.allocator();
+    const loaded = loadConfig(io, init, arena, opts.config);
     opts.deny_commands = loaded.deny_commands;
+    opts.sandbox = loaded.sandbox;
+    if (opts.sandbox.enabled) {
+        opts.writable_roots = try sandbox_mod.resolveWritableRoots(io, arena, init.environ_map, opts.sandbox.writable, opts.session_dir);
+        _ = sandbox_mod.applyLandlock(arena, opts.writable_roots);
+    }
     // Built before the skills and the servers, because a tool subprocess and
     // an MCP server both inherit the environment it withholds the provider
     // key from. Built once for the run: a tool subprocess is spawned once per
@@ -420,7 +431,6 @@ fn runMain(init: std.process.Init) !u8 {
     // Discovered before the trace and before the first request: the listing is
     // part of the system prompt, so a skill added between the two reads would
     // otherwise be advertised without a body to load.
-    const arena = init.arena.allocator();
     const skill_roots = skill_mod.roots(init.environ_map, arena, loaded.skills);
     opts.skills = skill_mod.discover(io, arena, skill_roots);
     // The servers are connected before the first request for the same reason:
@@ -1491,6 +1501,8 @@ const LoadedConfig = struct {
     mcp: []const mcp_mod.Entry,
     /// Commands denied from running via the bash tool.
     deny_commands: []const []const u8,
+    /// Sandbox settings to confine filesystem writes.
+    sandbox: config_mod.Sandbox,
     source: ?[]const u8,
 };
 
@@ -1525,6 +1537,7 @@ fn loadConfig(io: Io, init: std.process.Init, arena: std.mem.Allocator, config: 
         .skills = parsed.skills,
         .mcp = parsed.mcp,
         .deny_commands = parsed.deny_commands,
+        .sandbox = parsed.sandbox,
         .source = source.path,
     };
 }
@@ -2240,7 +2253,7 @@ fn runTurn(
     // above, so the record itself is the same either way; only the moment it
     // lands is not.
     session_mod.writeRecord(io, arena, session, model_ms, &result);
-    try finishTurn(io, arena, gpa, msgs, &result, usage, budget, tool_env, progress, opts.skills, mcp, opts.deny_commands);
+    try finishTurn(io, arena, gpa, msgs, &result, usage, budget, tool_env, progress, opts.skills, mcp, opts.deny_commands, opts.writable_roots);
     if (result.calls.items.len != 0) return .wants_tools;
     // No tool call ends the loop, but only an answer ends the run. A refusal, a
     // provider that stopped generating, a response cut at `max_tokens` and a
@@ -3655,6 +3668,7 @@ fn dispatchCall(
     ceiling_ms: ?u64,
     tool_env: ?*const std.process.Environ.Map,
     deny_commands: []const []const u8,
+    writable_roots: []const []const u8,
 ) ![]const u8 {
     if (std.mem.startsWith(u8, call.name, mcp_mod.tool_prefix)) {
         const remote = mcp.resolve(call.name) orelse
@@ -3667,7 +3681,7 @@ fn dispatchCall(
     }
     if (std.mem.eql(u8, call.name, skill_mod.tool_name))
         return skill_mod.call(io, arena, call.args.items, skills);
-    return tool_mod.runTool(io, arena, call, ceiling_ms, tool_env, deny_commands);
+    return tool_mod.runTool(io, arena, call, ceiling_ms, tool_env, deny_commands, writable_roots);
 }
 
 /// Appends the assistant message and, for every tool call it requested, runs
@@ -3685,6 +3699,7 @@ fn finishTurn(
     skills: skill_mod.Skills,
     mcp: *mcp_mod.Servers,
     deny_commands: []const []const u8,
+    writable_roots: []const []const u8,
 ) !void {
     try msgs.appendSlice(gpa, ",");
     try msgs.appendSlice(gpa, try assistantMessage(arena, result));
@@ -3719,7 +3734,7 @@ fn finishTurn(
             // loads from belongs to the run, and a run that found no skills
             // never advertised the name, so a call to it here is the model
             // asking for a tool the schema did not offer.
-            break :blk dispatchCall(io, arena, skills, mcp, call, budget.toolCeilingMs(io), tool_env, deny_commands) catch |err|
+            break :blk dispatchCall(io, arena, skills, mcp, call, budget.toolCeilingMs(io), tool_env, deny_commands, writable_roots) catch |err|
                 // A tool that fails outright (rather than reporting its own
                 // failure as text) is named here, so a result reading
                 // `error: OutOfMemory` says which of the calls ran out.
@@ -4901,12 +4916,32 @@ test "a skill call is served from the run's skill set" {
     var call: chat_mod.ToolCall = .{ .id = try arena.dupe(u8, ""), .name = try arena.dupe(u8, skill_mod.tool_name) };
     try call.args.appendSlice(arena, "{\"name\":\"pdf\"}");
     var mcp: mcp_mod.Servers = .{};
-    try std.testing.expectEqualStrings("use qpdf\n", try dispatchCall(io, arena, skills, &mcp, call, null, null, &.{}));
+    try std.testing.expectEqualStrings("use qpdf\n", try dispatchCall(io, arena, skills, &mcp, call, null, null, &.{}, &.{}));
 
     // The same call on a run with no skills is the set's own refusal, not the
     // tool module's `unknown tool`.
-    const out = try dispatchCall(io, arena, .{}, &mcp, call, null, null, &.{});
+    const out = try dispatchCall(io, arena, .{}, &mcp, call, null, null, &.{}, &.{});
     try std.testing.expect(std.mem.startsWith(u8, out, "error: unknown skill 'pdf'"));
+}
+
+test "dispatchCall enforces sandbox writable roots on write" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+    const writable_roots = [_][]const u8{root};
+
+    var call: chat_mod.ToolCall = .{ .id = try arena.dupe(u8, ""), .name = try arena.dupe(u8, "write") };
+    try call.args.appendSlice(arena, "{\"path\":\"/etc/forbidden.txt\",\"content\":\"hello\"}");
+    var mcp: mcp_mod.Servers = .{};
+    const out = try dispatchCall(io, arena, .{}, &mcp, call, null, null, &.{}, &writable_roots);
+    try std.testing.expect(std.mem.startsWith(u8, out, "refused:"));
+    try std.testing.expect(std.mem.indexOf(u8, out, "outside the sandbox writable roots") != null);
 }
 
 // An MCP server's tools are in the schema the same way a skill is: appended to

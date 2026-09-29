@@ -274,7 +274,7 @@ output text.
 
 ## Config file
 
-One TOML file carries the reply style, the skill roots, the MCP servers, and denied shell commands. It is `--config`, else
+One TOML file carries the reply style, the skill roots, the MCP servers, denied shell commands, and workspace sandbox settings. It is `--config`, else
 `MICROAGENT_CONFIG`, else `~/.microagent/config.toml`. A named path may start with `~` or `~/`, which
 is the home directory: a shell expands the tilde in a command line before the flag is read, but a
 value that came out of `MICROAGENT_CONFIG` never went through one, so microagent expands it here.
@@ -400,6 +400,22 @@ deny = ["sudo", "rm -rf"]
 
 Matching inspects command words and basenames (for example, denying `sudo` matches both `sudo apt install` and `/usr/bin/sudo ls` without false-positiving on safe names like `run_sudoku.py`), as well as multi-word sequences (such as `rm -rf`).
 
+### Sandbox
+
+Workspace confinement to restrict file modifications to designated directory roots:
+
+```toml
+[sandbox]
+enabled = true
+writable = [".", "/tmp"]
+```
+
+Or as a top-level boolean (`sandbox = true`), which defaults to allowing `.` (the working directory), `/tmp`, and the session log directory.
+
+When enabled, writes outside the designated roots are blocked:
+- **Kernel-level Landlock enforcement:** On Linux (kernels 5.13+), Landlock LSM rules are applied to microagent before executing tasks. The root `/` is marked read-only, while designated roots (current working directory, `/tmp`, the session directory, and any configured `writable` paths) remain read-write. Landlock restrictions are inherited across `execve` by all child processes (including `bash`, MCP servers, and child build tools).
+- **In-process path checking:** Both `write` and `edit` tools canonicalize paths and verify they resolve strictly within allowed roots before writing, returning `refused: path '...' is outside the sandbox writable roots`.
+
 ## Tools
 
 Seven built-in tools, each a thin wrapper over a program you already have:
@@ -408,8 +424,8 @@ Seven built-in tools, each a thin wrapper over a program you already have:
 | --- | --- |
 | `bash` | `/bin/sh -c`, 120 s default timeout (the model may ask for up to 600 s), output capped at 24 KB. A command naming a credentials file or matching the command filter is refused, and the child inherits no provider credential. |
 | `read` | read a file, with optional line offset and limit. Refuses credentials (`.env`, key and keystore files, anything under `.secrets` or `.ssh`), including a symlink to one. |
-| `write` | create or overwrite a file, creating parents. Refuses a credentials path, and a call with no `content`. |
-| `edit` | exact string replacement. Refuses a credentials path, an ambiguous match unless `replace_all`, and an edit that would leave `old_string` matchable in the result, so a repeated call cannot apply the change twice. |
+| `write` | create or overwrite a file, creating parents. Refuses a credentials path, a path outside sandbox roots when enabled, and a call with no `content`. |
+| `edit` | exact string replacement. Refuses a credentials path, a path outside sandbox roots when enabled, an ambiguous match unless `replace_all`, and an edit that would leave `old_string` matchable in the result, so a repeated call cannot apply the change twice. |
 | `search` | `rg --line-number --no-heading`, optional glob; credentials files excluded. |
 | `ast` | `ast-grep run` for a structural match, or `--rewrite --update-all` to apply one; credentials files excluded. |
 | `git` | read-only `status`, `diff`, `log`, `show`, `blame`, capped at 400 lines; a credentials path is refused. |

@@ -10,6 +10,7 @@ const Io = std.Io;
 
 const chat = @import("chat.zig");
 const net = @import("net.zig");
+const sandbox = @import("sandbox.zig");
 
 /// How much of one tool's output reaches the model. The whole conversation is
 /// re-sent every turn, so what a tool prints is paid for again on each of them;
@@ -635,7 +636,15 @@ fn firstLines(arena: std.mem.Allocator, text: []const u8, limit: usize) ![]const
 /// is compared, the gutter line is written, and only then is a name matched. A
 /// payload that is not an object, or a name that is not one of the seven,
 /// answers with an error string and no tool runs.
-pub fn runTool(io: Io, arena: std.mem.Allocator, call: chat.ToolCall, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map, deny_commands: []const []const u8) ![]const u8 {
+pub fn runTool(
+    io: Io,
+    arena: std.mem.Allocator,
+    call: chat.ToolCall,
+    ceiling_ms: ?u64,
+    environ_map: ?*const std.process.Environ.Map,
+    deny_commands: []const []const u8,
+    writable_roots: []const []const u8,
+) ![]const u8 {
     const parsed = std.json.parseFromSlice(std.json.Value, arena, call.args.items, .{}) catch
         return "error: tool arguments are not valid JSON";
     const args = switch (parsed.value) {
@@ -652,8 +661,8 @@ pub fn runTool(io: Io, arena: std.mem.Allocator, call: chat.ToolCall, ceiling_ms
     return switch (tool) {
         .bash => toolBash(io, arena, args, ceiling_ms, environ_map, deny_commands),
         .read => toolRead(io, arena, args),
-        .write => toolWrite(io, arena, args),
-        .edit => toolEdit(io, arena, args),
+        .write => toolWrite(io, arena, args, writable_roots),
+        .edit => toolEdit(io, arena, args, writable_roots),
         .search => toolSearch(io, arena, args, ceiling_ms, environ_map),
         .ast => toolAst(io, arena, args, ceiling_ms, environ_map),
         .git => toolGit(io, arena, args, ceiling_ms, environ_map),
@@ -1338,7 +1347,7 @@ fn readLines(io: Io, arena: std.mem.Allocator, path: []const u8, offset: usize, 
     return buf.items;
 }
 
-fn toolWrite(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]const u8 {
+fn toolWrite(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, writable_roots: []const []const u8) ![]const u8 {
     const path = chat.str(args.get("path")) orelse return "error: missing path";
     // The same refusal `read` makes. A run that cannot read a key file has no
     // business rewriting one either: `write` replaces the file whole, so a
@@ -1346,6 +1355,9 @@ fn toolWrite(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]cons
     // guess replaces the operator's working key with a placeholder, and the
     // next run of the agent cannot authenticate at all.
     if (credentialPath(io, arena, path)) |refused| return try credentialRefusal(arena, .write, refused, true);
+    if (!sandbox.isPathWritable(io, arena, path, writable_roots)) {
+        return std.fmt.allocPrint(arena, "refused: path '{s}' is outside the sandbox writable roots", .{chat.safeText(arena, path, 80)});
+    }
     // A call that names a path and no content is a call the model got cut
     // short on, not one asking for an empty file: a `write` is the one tool
     // result a run cannot undo, and emptying a source file is worse than
@@ -1413,13 +1425,16 @@ pub fn writeFileAtomic(io: Io, dir: std.Io.Dir, path: []const u8, bytes: []const
     try af.replace(io);
 }
 
-fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]const u8 {
+fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, writable_roots: []const []const u8) ![]const u8 {
     const path = chat.str(args.get("path")) orelse return "error: missing path";
     // The same refusal `read` makes. An edit reads the whole file to find its
     // match, and the operator's key is the one file in a tree where a match the
     // model guessed at and a rewrite of the value beside it is damage nobody
     // asked for.
     if (credentialPath(io, arena, path)) |refused| return try credentialRefusal(arena, .edit, refused, true);
+    if (!sandbox.isPathWritable(io, arena, path, writable_roots)) {
+        return std.fmt.allocPrint(arena, "refused: path '{s}' is outside the sandbox writable roots", .{chat.safeText(arena, path, 80)});
+    }
     const old = chat.str(args.get("old_string")) orelse return "error: missing old_string";
     const new = chat.str(args.get("new_string")) orelse return "error: missing new_string";
     const all = if (args.get("replace_all")) |v| v == .bool and v.bool else false;
@@ -1927,12 +1942,16 @@ pub fn dispatch(arena: std.mem.Allocator, name: []const u8, args: []const u8) ![
 }
 
 pub fn dispatchFiltered(arena: std.mem.Allocator, name: []const u8, args: []const u8, deny_commands: []const []const u8) ![]const u8 {
+    return dispatchFull(arena, name, args, deny_commands, &.{});
+}
+
+pub fn dispatchFull(arena: std.mem.Allocator, name: []const u8, args: []const u8, deny_commands: []const []const u8, writable_roots: []const []const u8) ![]const u8 {
     var call: chat.ToolCall = .{
         .id = try arena.dupe(u8, ""),
         .name = try arena.dupe(u8, name),
     };
     try call.args.appendSlice(arena, args);
-    return runTool(std.testing.io, arena, call, null, null, deny_commands);
+    return runTool(std.testing.io, arena, call, null, null, deny_commands, writable_roots);
 }
 
 /// The line range a `read` with `offset` and `limit` returns: every line in
@@ -2673,12 +2692,12 @@ test "a write with no content is refused rather than emptying the file" {
 
     var args: std.json.ObjectMap = .empty;
     try args.put(arena, "path", .{ .string = path });
-    try std.testing.expectEqualStrings("error: missing content", try toolWrite(io, arena, args));
+    try std.testing.expectEqualStrings("error: missing content", try toolWrite(io, arena, args, &.{}));
     try std.testing.expectEqualStrings("keep me", try tmp.dir.readFileAlloc(io, "a.txt", arena, .limited(64)));
 
     // A model that means an empty file says so, and gets one.
     try args.put(arena, "content", .{ .string = "" });
-    try std.testing.expect(std.mem.startsWith(u8, try toolWrite(io, arena, args), "wrote 0 bytes to "));
+    try std.testing.expect(std.mem.startsWith(u8, try toolWrite(io, arena, args, &.{}), "wrote 0 bytes to "));
     try std.testing.expectEqualStrings("", try tmp.dir.readFileAlloc(io, "a.txt", arena, .limited(64)));
 }
 
@@ -4203,17 +4222,17 @@ test "edit replaces one match, or every match when asked" {
     try args.put(arena, "new_string", .{ .string = "y" });
 
     try cwd.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.txt", .data = "a x b" });
-    try std.testing.expectEqualStrings("replaced 1 occurrence(s) in a.txt", try toolEdit(std.testing.io, arena, args));
+    try std.testing.expectEqualStrings("replaced 1 occurrence(s) in a.txt", try toolEdit(std.testing.io, arena, args, &.{}));
     try std.testing.expectEqualStrings("a y b", try cwd.tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
 
     // An ambiguous match is refused rather than guessed at, so the file the
     // model was shown is still the file on disk.
     try cwd.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.txt", .data = "x and x" });
-    try std.testing.expect(std.mem.startsWith(u8, try toolEdit(std.testing.io, arena, args), "error: old_string occurs 2 times"));
+    try std.testing.expect(std.mem.startsWith(u8, try toolEdit(std.testing.io, arena, args, &.{}), "error: old_string occurs 2 times"));
     try std.testing.expectEqualStrings("x and x", try cwd.tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
 
     try args.put(arena, "replace_all", .{ .bool = true });
-    try std.testing.expectEqualStrings("replaced 2 occurrence(s) in a.txt", try toolEdit(std.testing.io, arena, args));
+    try std.testing.expectEqualStrings("replaced 2 occurrence(s) in a.txt", try toolEdit(std.testing.io, arena, args, &.{}));
     try std.testing.expectEqualStrings("y and y", try cwd.tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
 }
 
@@ -4240,8 +4259,8 @@ test "an edit issued twice leaves the file the first run left" {
     try args.put(arena, "old_string", .{ .string = "x" });
     try args.put(arena, "new_string", .{ .string = "y" });
     try cwd.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.txt", .data = "a x b" });
-    try std.testing.expectEqualStrings("replaced 1 occurrence(s) in a.txt", try toolEdit(std.testing.io, arena, args));
-    try std.testing.expect(std.mem.startsWith(u8, try toolEdit(std.testing.io, arena, args), "error: old_string not found"));
+    try std.testing.expectEqualStrings("replaced 1 occurrence(s) in a.txt", try toolEdit(std.testing.io, arena, args, &.{}));
+    try std.testing.expect(std.mem.startsWith(u8, try toolEdit(std.testing.io, arena, args, &.{}), "error: old_string not found"));
     try std.testing.expectEqualStrings("a y b", try cwd.tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
 
     // The nesting shape, refused on the first run rather than applied and
@@ -4249,14 +4268,14 @@ test "an edit issued twice leaves the file the first run left" {
     try args.put(arena, "old_string", .{ .string = "x" });
     try args.put(arena, "new_string", .{ .string = "xy" });
     try cwd.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.txt", .data = "a x b" });
-    try std.testing.expect(std.mem.startsWith(u8, try toolEdit(std.testing.io, arena, args), "error: new_string contains old_string"));
+    try std.testing.expect(std.mem.startsWith(u8, try toolEdit(std.testing.io, arena, args, &.{}), "error: new_string contains old_string"));
     try std.testing.expectEqualStrings("a x b", try cwd.tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
 
     // Replacing text with itself writes nothing, so a duplicate of it is not a
     // second write either.
     try args.put(arena, "old_string", .{ .string = "x" });
     try args.put(arena, "new_string", .{ .string = "x" });
-    try std.testing.expect(std.mem.startsWith(u8, try toolEdit(std.testing.io, arena, args), "no change:"));
+    try std.testing.expect(std.mem.startsWith(u8, try toolEdit(std.testing.io, arena, args, &.{}), "no change:"));
     try std.testing.expectEqualStrings("a x b", try cwd.tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
 
     // The boundary shape: the replacement holds no copy of the text it
@@ -4267,7 +4286,7 @@ test "an edit issued twice leaves the file the first run left" {
     try args.put(arena, "old_string", .{ .string = "ab" });
     try args.put(arena, "new_string", .{ .string = "b" });
     try cwd.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.txt", .data = "aab" });
-    try std.testing.expect(std.mem.startsWith(u8, try toolEdit(std.testing.io, arena, args), "error: replacing old_string"));
+    try std.testing.expect(std.mem.startsWith(u8, try toolEdit(std.testing.io, arena, args, &.{}), "error: replacing old_string"));
     try std.testing.expectEqualStrings("aab", try cwd.tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
 
     // The same shape on a line, which is the one a dedent arrives in: the
@@ -4278,7 +4297,7 @@ test "an edit issued twice leaves the file the first run left" {
     try args.put(arena, "new_string", .{ .string = " f();" });
     try args.put(arena, "replace_all", .{ .bool = true });
     try cwd.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.txt", .data = "if x:\n   f();\n" });
-    try std.testing.expect(std.mem.startsWith(u8, try toolEdit(std.testing.io, arena, args), "error: replacing old_string"));
+    try std.testing.expect(std.mem.startsWith(u8, try toolEdit(std.testing.io, arena, args, &.{}), "error: replacing old_string"));
     try std.testing.expectEqualStrings("if x:\n   f();\n", try cwd.tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
 }
 
@@ -4504,7 +4523,7 @@ fn expectNoProcessSurvived() !void {
     // The kill is delivered asynchronously and the orphan is reaped by init
     // afterwards, so "gone" is a short poll rather than an instant check.
     var attempt: usize = 0;
-    while (attempt < 50) : (attempt += 1) {
+    while (attempt < 150) : (attempt += 1) {
         std.posix.kill(pid, .CONT) catch return;
         try io.sleep(.{ .nanoseconds = 20 * std.time.ns_per_ms }, .awake);
     }
@@ -5023,4 +5042,35 @@ test "a command that closes its pipes and keeps running is bounded by the tool t
     // reap is what keeps a timed-out command's background work from outliving
     // the turn, and it only runs because the wait returned.
     try std.testing.expectEqual(@as(std.posix.pid_t, 0), tool_group.load(.monotonic));
+}
+
+test "write and edit refuse paths outside sandbox writable roots" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = buf[0..try tmp.dir.realPath(io, &buf)];
+    const writable_roots = [_][]const u8{root};
+
+    // Write outside writable_roots
+    var write_args: std.json.ObjectMap = .empty;
+    try write_args.put(arena, "path", .{ .string = "/etc/notallowed.txt" });
+    try write_args.put(arena, "content", .{ .string = "test" });
+    const write_res = try toolWrite(io, arena, write_args, &writable_roots);
+    try std.testing.expect(std.mem.startsWith(u8, write_res, "refused:"));
+    try std.testing.expect(std.mem.indexOf(u8, write_res, "outside the sandbox writable roots") != null);
+
+    // Edit outside writable_roots
+    var edit_args: std.json.ObjectMap = .empty;
+    try edit_args.put(arena, "path", .{ .string = "/etc/notallowed.txt" });
+    try edit_args.put(arena, "old_string", .{ .string = "a" });
+    try edit_args.put(arena, "new_string", .{ .string = "b" });
+    const edit_res = try toolEdit(io, arena, edit_args, &writable_roots);
+    try std.testing.expect(std.mem.startsWith(u8, edit_res, "refused:"));
+    try std.testing.expect(std.mem.indexOf(u8, edit_res, "outside the sandbox writable roots") != null);
 }

@@ -31,11 +31,11 @@ document nobody signed.
 
 | # | Threat | Boundary | Exploitability | Impact | Control today |
 | --- | --- | --- | --- | --- | --- |
-| 1 | Repository content drives shell execution | repo → model → host | high: any content the model reads can carry an instruction | full compromise of the operator's account, files and keys | prompt wording only (`system_prompt`, `src/main.zig:138`); no mechanical control (gap 1) |
+| 1 | Repository content drives shell execution | repo → model → host | high: any content the model reads can carry an instruction | full compromise of the operator's account, files and keys | prompt wording (`system_prompt`, `src/main.zig:138`), command filter (`deny_commands`), and Landlock LSM confinement when sandbox enabled (gap 1) |
 | 2 | The provider's reply drives shell execution | provider → host | medium: needs a hostile, coerced or MITM'd endpoint | same as 1 | redirect refused (`streamChat`, `src/main.zig:2157`), response caps, timeouts, `bash` timeout default and ceiling (`default_bash_timeout_ms`, `src/tool.zig:59`; `max_bash_timeout_ms`, `src/tool.zig:54`) |
 | 3 | The API key is sent to whatever host the environment names | agent → provider | medium: any `https` host is accepted | provider account takeover, bill abuse | plaintext `http` refused off loopback (`baseUrlCarriesKey`, `src/main.zig:742`, enforced at `src/main.zig:334`) |
 | 4 | A named CA bundle adds a trust anchor for every TLS connection of the run | environment/argv → agent, agent → provider and GitHub | medium: needs a write to the environment, or `--ca-bundle` on the command line | the API key to a machine in the middle, and a release asset that hashes as published | additive to the system store; a bundle that is unreadable or holds no certificate is refused (`loadCaBundle`, `src/net.zig:39`); no policy on what a bundle may add (gap 3) |
-| 5 | Tools read and write outside the working tree | model → filesystem | high: `read`/`write`/`edit` take any path | overwrite `~/.ssh/authorized_keys`, a shell rc file, any file the operator can write | credential paths refused by name (`isCredentialPath`, `src/tool.zig:1057`, applied at `src/tool.zig:1158`, `src/tool.zig:1287`, `src/tool.zig:1361`); no confinement to the tree, so every other path is open (gap 5) |
+| 5 | Tools read and write outside the working tree | model → filesystem | high: `read`/`write`/`edit` take any path | overwrite `~/.ssh/authorized_keys`, a shell rc file, any file the operator can write | credential paths refused by name (`isCredentialPath`, `src/tool.zig:1057`); configurable sandbox (`[sandbox]` in config) enforces path checks and Landlock LSM rules to confine writes to writable roots (gap 5) |
 | 6 | Tool output carries credentials to the model and on to the provider | host → model → provider | low: needs a credential under a name the rules do not know, or one reached through shell indirection | secret exfiltration through a routine run | all six tools refuse or exclude a known credential name (`credential_globs`, `src/tool.zig:1009`; `credentialInCommand`, `src/tool.zig:871`; `gitPathspecs`, `src/tool.zig:615`); the run's own keys are absent from a tool's environment (`childEnviron`, `src/main.zig:1269`) |
 | 7 | A compromised release replaces the binary | GitHub → host | low: needs the release account or its token | persistent, silent code execution on every later run | sha256 sidecar, host allowlist (`checksumMatches`, `src/update.zig:283`; `hostTrusted`, `src/update.zig:218`) |
 | 8 | The API key is visible in the process table | operator → host | low: needs a local reader | key theft by any other process or user on the box | none |
@@ -57,7 +57,7 @@ source tree and the host. The one asset worth stealing on its own is the API key
 | --- | --- | --- |
 | Command line, agent mode | prompt, flags, API key in `argv` | `parseArgs`, `src/main.zig:997`; `main`, `src/main.zig:251`; the flag table at `src/main.zig:917` holds every valued flag the run accepts: `-p/--print`, `-m/--model`, `-b/--base-url`, `-k/--api-key`, `--ca-bundle`, `--config`, `--reasoning-effort`, `--budget`, `--max-spend-tokens`, `--max-turns`, `--max-tokens`, `--stall-timeout` |
 | `--ca-bundle <file>` | the PEM file whose certificates vouch for the provider and for GitHub | `net.caBundlePath`, `src/net.zig:105`; `loadCaBundle`, `src/net.zig:39`; applied at `src/main.zig:341` and `src/update.zig:939` |
-| `--config <file>`, `MICROAGENT_CONFIG`, `~/.microagent/config.toml` | reply-style levels, skill roots, `[[mcp]]` tables and denied shell commands: what the prompt says, what the run starts and what shell execution refuses | `styleConfigPath`, `src/main.zig:1433`; `loadConfig`, `src/main.zig:1309`; `config.parse`, `src/config.zig:95`; cap `max_config_bytes` (64 KB), `src/main.zig:131` |
+| `--config <file>`, `MICROAGENT_CONFIG`, `~/.microagent/config.toml` | reply-style levels, skill roots, `[[mcp]]` tables, denied shell commands, and sandbox settings: what the prompt says, what the run starts, what shell execution refuses, and filesystem confinement | `styleConfigPath`, `src/main.zig:1433`; `loadConfig`, `src/main.zig:1309`; `config.parse`, `src/config.zig:95`; cap `max_config_bytes` (64 KB), `src/main.zig:131` |
 | `[[mcp]]` tables in that config | programs the run starts over stdio, and the tools they offer | `connect`, `src/mcp.zig:403`; `handshake`, `src/mcp.zig:489` |
 | `skills` in that config, `MICROAGENT_SKILLS`, `~/.microagent/skills` | `SKILL.md` bodies the model may load, as prompt text | `roots`, `src/skill.zig:134`; `discover`, `src/skill.zig:180`; `call`, `src/skill.zig:363`; cap `max_skill_bytes`, `src/skill.zig:40` |
 | Command line, `update` | `--check`, `--repo` | `parseArgs`, `src/update.zig:848`; `run`, `src/update.zig:885`; dispatched from `main` at `src/main.zig:264` |
@@ -406,11 +406,13 @@ the same bug returning.
 
 ## Gaps, ranked by exploitability and impact
 
-1. **No confinement on model-driven execution.** `bash`, `write`, `edit` and an `ast`
+1. **No confinement on model-driven execution by default.** `bash`, `write`, `edit` and an `ast`
    rewrite run with full operator authority, and the instructions that trigger them can
    come from a file the run reads. The system prompt asks the model not to act on such a
-   file (`src/main.zig:138`), the same trust the operator already placed in the prompt. The
-   model, not the operator, is the last gate.
+   file (`src/main.zig:138`), the same trust the operator already placed in the prompt.
+   Command filtering (`deny_commands`) blocks dangerous command words before execution.
+   When sandbox mode is enabled (`[sandbox]` in config), Linux Landlock LSM rules confine
+   all child process writes to designated directory roots.
 2. **The credential rule is a name rule, and `bash` matches it on words.** All six tools
    refuse a path the tables name, at any depth rather than only at the leaf
    (`isCredentialPath`, `src/tool.zig:1057`), so none can put a known `.env` or private key
@@ -431,14 +433,13 @@ the same bug returning.
    plaintext `http` off loopback, but `MICROAGENT_BASE_URL` or `--base-url` may name any
    `https` host, and the key follows. A poisoned environment variable turns a review run
    into a key handoff to whoever answers on that name.
-5. **The tools are not confined to the working tree.** `read`, `write` and `edit` take and
+5. **The tools are not confined to the working tree by default.** `read`, `write` and `edit` take and
    follow an absolute path; `writeFileAtomic` (`src/tool.zig:1332`) follows a symlink
    before writing; `ast --rewrite` applies its replacement to every match
-   (`src/tool.zig:1497`). A file outside the tree that is not a credential by name is
-   writable, so an injected instruction can rewrite an rc file, a `PATH` entry or a service
-   unit with the operator's authority. `ast --rewrite` refuses a replacement its own
-   pattern would match again (`astRewriteRefusal`, `src/tool.zig:1565`), but that checks
-   the call, not where the writes land.
+   (`src/tool.zig:1497`). When sandbox mode is enabled (`[sandbox]` in config or `sandbox = true`),
+   in-process path checks refuse `write` and `edit` calls outside writable roots, and on Linux
+   (kernel 5.13+), Landlock LSM rules confine filesystem modifications for microagent and all
+   spawned subprocesses.
 6. **The API key is accepted on the command line.** It is visible in the process table and
    in shell history. The README's first example uses the environment, and the flag cannot
    be made to match that.

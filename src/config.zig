@@ -55,6 +55,8 @@ pub const Config = struct {
     mcp: []const mcp_mod.Entry = &.{},
     /// Commands denied from running via the bash tool.
     deny_commands: []const []const u8 = &.{},
+    /// Sandbox configuration restricting writes outside the workspace.
+    sandbox: Sandbox = .{},
     /// The first line the reader could not use, if any.
     problem: ?Problem = null,
 
@@ -64,6 +66,12 @@ pub const Config = struct {
     pub fn note(self: *Config, problem: Problem) void {
         if (self.problem == null) self.problem = problem;
     }
+};
+
+/// Workspace isolation / sandbox configuration.
+pub const Sandbox = struct {
+    enabled: bool = false,
+    writable: []const []const u8 = &.{},
 };
 
 /// A line of the config the reader could not use, so the caller can name it
@@ -89,7 +97,7 @@ pub const Problem = struct {
 };
 
 /// The section the lines after a header belong to.
-const Section = enum { top, style, commands, mcp, other };
+const Section = enum { top, style, commands, sandbox, mcp, other };
 
 /// Reads the document. Never fails: a document this reader cannot follow
 /// whole is read as far as it can be, and the first line it could not use is
@@ -118,6 +126,8 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8) Config {
                 section = .style;
             } else if (std.mem.eql(u8, header.name, "commands") or std.mem.eql(u8, header.name, "command_filter")) {
                 section = .commands;
+            } else if (std.mem.eql(u8, header.name, "sandbox")) {
+                section = .sandbox;
             } else if (std.mem.eql(u8, header.name, "mcp") and header.array) {
                 servers.append(arena, .{}) catch {
                     section = .other;
@@ -149,6 +159,7 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8) Config {
             .style => styleOnly(&config, key, value_text),
             .top => topKey(&config, arena, key, value_text),
             .commands => commandsOnly(&config, arena, key, value_text),
+            .sandbox => sandboxOnly(&config, arena, key, value_text),
             .mcp => if (open) |server| serverKey(&config, arena, server, key, value_text),
             .other => {},
         }
@@ -202,7 +213,51 @@ fn topKey(config: *Config, arena: std.mem.Allocator, key: []const u8, value_text
         addDenyCommands(config, arena, list);
         return;
     }
+    if (std.mem.eql(u8, key, "sandbox")) {
+        if (parseBool(value_text)) |b| {
+            config.sandbox.enabled = b;
+            return;
+        }
+        return config.note(.{ .key = key, .kind = .bad_value });
+    }
     config.note(.{ .key = key, .kind = .unknown_key });
+}
+
+/// A key under `[sandbox]`.
+fn sandboxOnly(config: *Config, arena: std.mem.Allocator, key: []const u8, value_text: []const u8) void {
+    if (std.mem.eql(u8, key, "enabled") or std.mem.eql(u8, key, "enable")) {
+        if (parseBool(value_text)) |b| {
+            config.sandbox.enabled = b;
+            return;
+        }
+        return config.note(.{ .key = key, .kind = .bad_value });
+    }
+    if (std.mem.eql(u8, key, "writable") or std.mem.eql(u8, key, "allow_write") or std.mem.eql(u8, key, "writeable")) {
+        const list = parseCommandList(arena, value_text) orelse
+            return config.note(.{ .key = key, .kind = .bad_value });
+        addSandboxWritable(config, arena, list);
+        return;
+    }
+    config.note(.{ .key = key, .kind = .unknown_key });
+}
+
+fn addSandboxWritable(config: *Config, arena: std.mem.Allocator, list: []const []const u8) void {
+    if (list.len == 0) return;
+    if (config.sandbox.writable.len == 0) {
+        config.sandbox.writable = list;
+    } else {
+        var merged: std.ArrayList([]const u8) = .empty;
+        merged.appendSlice(arena, config.sandbox.writable) catch return;
+        merged.appendSlice(arena, list) catch return;
+        config.sandbox.writable = merged.items;
+    }
+}
+
+fn parseBool(raw: []const u8) ?bool {
+    const trimmed = std.mem.trim(u8, unquote(raw), " \t\r\n");
+    if (std.ascii.eqlIgnoreCase(trimmed, "true") or std.mem.eql(u8, trimmed, "1") or std.ascii.eqlIgnoreCase(trimmed, "yes") or std.ascii.eqlIgnoreCase(trimmed, "on")) return true;
+    if (std.ascii.eqlIgnoreCase(trimmed, "false") or std.mem.eql(u8, trimmed, "0") or std.ascii.eqlIgnoreCase(trimmed, "no") or std.ascii.eqlIgnoreCase(trimmed, "off")) return false;
+    return null;
 }
 
 /// A key under `[commands]` or `[command_filter]`.
@@ -614,6 +669,31 @@ test "command filter parses from deny_commands, command_filter, or [commands] de
     try std.testing.expectEqual(@as(usize, 2), tabled.deny_commands.len);
     try std.testing.expectEqualStrings("sudo", tabled.deny_commands[0]);
     try std.testing.expectEqualStrings("rm -rf", tabled.deny_commands[1]);
+}
+
+test "sandbox parses from top-level sandbox or [sandbox] table" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    const top = parse(arena, "sandbox = true\n");
+    try std.testing.expect(top.problem == null);
+    try std.testing.expect(top.sandbox.enabled);
+    try std.testing.expectEqual(@as(usize, 0), top.sandbox.writable.len);
+
+    const tabled = parse(arena, "[sandbox]\nenabled = true\nwritable = [\".\", \"/tmp\", \"/var/log\"]\n");
+    try std.testing.expect(tabled.problem == null);
+    try std.testing.expect(tabled.sandbox.enabled);
+    try std.testing.expectEqual(@as(usize, 3), tabled.sandbox.writable.len);
+    try std.testing.expectEqualStrings(".", tabled.sandbox.writable[0]);
+    try std.testing.expectEqualStrings("/tmp", tabled.sandbox.writable[1]);
+    try std.testing.expectEqualStrings("/var/log", tabled.sandbox.writable[2]);
+
+    const single = parse(arena, "[sandbox]\nenabled = true\nwritable = \"/var/tmp\"\n");
+    try std.testing.expect(single.problem == null);
+    try std.testing.expect(single.sandbox.enabled);
+    try std.testing.expectEqual(@as(usize, 1), single.sandbox.writable.len);
+    try std.testing.expectEqualStrings("/var/tmp", single.sandbox.writable[0]);
 }
 
 test "an MCP server is one [[mcp]] table, and a broken one is named and skipped" {
