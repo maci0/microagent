@@ -3,7 +3,9 @@
 All notable changes to microagent, in the order a consumer meets them. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project follows [SemVer](https://semver.org)
 from `0.1.0`: under `0.y` the minor carries features and changes that alter a run's default behavior, the
-patch carries fixes, and a patch never changes what an existing invocation does. The version lives in
+patch carries fixes, and a patch never changes what an existing invocation does. A `Security` entry is a
+minor entry too, because closing a hole narrows what an invocation may do as often as it changes an
+answer. The version lives in
 `build.zig.zon`, and the README is the one place that repeats it, in the install snippet and the status
 line; `make check-readme` refuses a bump that moves the former and leaves the latter behind, and both
 `make check` and the push workflow run it. `microagent --version` prints it, and the release workflow
@@ -281,23 +283,6 @@ release, and `microagent update` moves you to it.
   The same invocation that used to exit non-zero now runs to its answer, so this
   is a change in what a run returns, not only in how it fails.
 
-- A writable path is resolved before it is compared to the sandbox roots. The
-  check read the path the call named, so a tree carrying `docs -> /etc` passed
-  it while writing outside the root: the lexical path began inside a root, and
-  nothing looked at what the link pointed at. Both halves now have to hold. The
-  deepest ancestor of the path that exists is resolved with every symlink on the
-  way followed and must itself be inside a root, and the lexical path must be
-  too. A `write`, `edit` or `multi_edit` to a file reached through a link out of
-  a root is refused, and so is one whose every path component is missing, which
-  used to be accepted because no ancestor was there to disagree. A repository
-  that keeps a symlinked directory inside its working tree and edits through it
-  sees those calls refused.
-
-- `ast` with `--rewrite` is confined to the sandbox writable roots. It was
-  checked only for a credential name, so on a host where the kernel sandbox did
-  not apply, a rewrite reached any file the process could open. It is refused
-  outside the roots now, as the editing tools already were.
-
 - A Landlock ruleset that the kernel will not grant the read-only `/` rule is
   no longer reported as enforced. Every other rule is written against that one,
   and a ruleset that dropped it denied the filesystem accesses outright, so a
@@ -319,25 +304,10 @@ release, and `microagent update` moves you to it.
   `.gitignore` does not exclude, so a build product still leaves the gate
   alone.
 
-- A `#` comment on a table header no longer hides the table. The closing
-  bracket was read off the whole header line, so a `]` inside the comment
-  closed the header there: `[tools.ast] # off ] per the review` named a key
-  this file does not use, and every setting under it was dropped without a
-  word. A tool the operator switched off stayed on, and a `[sandbox]` table
-  left the sandbox unconfined. The comment comes off the header first.
-
 - A config file of exactly 64 KB is read. `readFileAlloc` refuses the moment the
   limit it is given is reached, and it was given the cap itself, so the largest
   file the documentation says a run accepts was reported as over it and every
   setting in it was dropped for the built-in defaults.
-
-- The credential check follows a link in a directory component, not only one on
-  the last name. `docs/keys -> ~/.secrets` is a link the last component does
-  not hold, and `readlink` on `docs/keys/openrouter` answers `NotLink`, so a
-  model that spelled an ordinary path reached the key behind it: `read` returned
-  it as a tool result, which is re-sent to the provider on every later turn,
-  and `write` replaced the operator's key with whatever the model guessed. Every
-  component is now walked, in the order the kernel opens a path in.
 
 - A sandbox writable root is granted under both of the names that reach it. A
   root was recorded resolved, and `isPathWritable` asks about the path the call
@@ -394,11 +364,6 @@ release, and `microagent update` moves you to it.
   `[[mcp]]`, and a file that writes one bracket took the whole table as somebody
   else's, so its servers never started and their tools were simply absent from
   the schema the run sends, with nothing said on stderr.
-- A `[sandbox]` `writable` list with `enabled` at its default is reported and
-  runs unconfined, rather than reading as a set of roots the run is holding to.
-  The two keys are separate, so the list confined nothing while the run looked
-  the same as a confined one, and the only trace of it was a count in a debug
-  line.
 - The shipped config template sets no key at all. The `agents_files` example was
   the one line of the file that was not a comment, so a first run wrote a
   config the operator did not write, next to a stray `#`. The test that applies
@@ -449,12 +414,6 @@ release, and `microagent update` moves you to it.
   `--max-turns 2` on a run that answers on its second turn exits 0 rather than
   falling out of the loop on the turn that would have asked for a test.
 
-- A `bash` command is split on `:` and `=` as well, so a credentials file named
-  as the tail of a word is refused: `git show HEAD:.env` and
-  `curl --data=@.env` reached a `.env` the word walk could not see. A colon or
-  an equals in an ordinary command is still nothing on its own:
-  `git log --pretty=format:%h:%s` runs.
-
 - `microagent update` says why a download failed and tries it again on the
   network's backoff, up to three attempts, so a slow or dropped connection no
   longer ends as a bare error, and every MCP, skill and config failure that was
@@ -496,12 +455,6 @@ release, and `microagent update` moves you to it.
   began with those words, so a long entry denied commands it never named. Such
   an entry is matched on its verbatim text and on nothing else.
 
-- The credential walk reaches a word that carries a path separator. The guard
-  that skips a word with no `.` in it read the basename, but the guard beside it
-  had already passed over every word holding a separator, so `basename` was
-  never the word being asked about. The dot test runs on the word itself, which
-  is the test that decides.
-
 - A tool that printed nothing is no longer answered `(no output, exit exited 0)`.
   The status is spelled out from its tag name, so saying `exit` as well read as
   a typo. It now reads `(no output, exited 0)`.
@@ -528,6 +481,58 @@ release, and `microagent update` moves you to it.
 - `make sha256-of FILE=<path>` prints the digest of one file, which is what the
   release workflow needs beside the binary it builds. It is listed in `make help`
   and `.PHONY` beside the other targets.
+
+### Security
+
+- A writable path is resolved before it is compared to the sandbox roots. The
+  check read the path the call named, so a tree carrying `docs -> /etc` passed
+  it while writing outside the root: the lexical path began inside a root, and
+  nothing looked at what the link pointed at. Both halves now have to hold. The
+  deepest ancestor of the path that exists is resolved with every symlink on the
+  way followed and must itself be inside a root, and the lexical path must be
+  too. A `write`, `edit` or `multi_edit` to a file reached through a link out of
+  a root is refused, and so is one whose every path component is missing, which
+  used to be accepted because no ancestor was there to disagree. A repository
+  that keeps a symlinked directory inside its working tree and edits through it
+  sees those calls refused.
+
+- `ast` with `--rewrite` is confined to the sandbox writable roots. It was
+  checked only for a credential name, so on a host where the kernel sandbox did
+  not apply, a rewrite reached any file the process could open. It is refused
+  outside the roots now, as the editing tools already were.
+
+- A `#` comment on a table header no longer hides the table. The closing
+  bracket was read off the whole header line, so a `]` inside the comment
+  closed the header there: `[tools.ast] # off ] per the review` named a key
+  this file does not use, and every setting under it was dropped without a
+  word. A tool the operator switched off stayed on, and a `[sandbox]` table
+  left the sandbox unconfined. The comment comes off the header first.
+
+- The credential check follows a link in a directory component, not only one on
+  the last name. `docs/keys -> ~/.secrets` is a link the last component does
+  not hold, and `readlink` on `docs/keys/openrouter` answers `NotLink`, so a
+  model that spelled an ordinary path reached the key behind it: `read` returned
+  it as a tool result, which is re-sent to the provider on every later turn,
+  and `write` replaced the operator's key with whatever the model guessed. Every
+  component is now walked, in the order the kernel opens a path in.
+
+- A `[sandbox]` `writable` list with `enabled` at its default is reported and
+  runs unconfined, rather than reading as a set of roots the run is holding to.
+  The two keys are separate, so the list confined nothing while the run looked
+  the same as a confined one, and the only trace of it was a count in a debug
+  line.
+
+- A `bash` command is split on `:` and `=` as well, so a credentials file named
+  as the tail of a word is refused: `git show HEAD:.env` and
+  `curl --data=@.env` reached a `.env` the word walk could not see. A colon or
+  an equals in an ordinary command is still nothing on its own:
+  `git log --pretty=format:%h:%s` runs.
+
+- The credential walk reaches a word that carries a path separator. The guard
+  that skips a word with no `.` in it read the basename, but the guard beside it
+  had already passed over every word holding a separator, so `basename` was
+  never the word being asked about. The dot test runs on the word itself, which
+  is the test that decides.
 
 ## [0.7.0] - 2026-09-30
 

@@ -770,13 +770,14 @@ check-unreleased:
 # The changelog rules release.yml enforces on the tag, and the 0.y policy
 # CONTRIBUTING.md states, runnable before the tag exists. They were shell inside
 # release.yml, so the policy a contributor writes an entry against could only be
-# checked by pushing a tag: a patch carrying an `Added`, a section left under
-# [Unreleased] that the tag would drop, and a version with no notes at all were
-# all first found by a failed release job rather than by a command. The section
+# checked by pushing a tag: a patch carrying an `Added` or a `Security`, a
+# section left under [Unreleased] that the tag would drop, and a version with no
+# notes at all were all first found by a failed release job rather than by a
+# command. The section
 # this target publishes is asked for the same shape `check-unreleased` asks of
 # the entry being drafted, since by the time a tag names a version heading the
-# author who wrote it no longer sees it. VERSION is
-# the version under test and defaults to the one build.zig.zon declares, so the
+# author who wrote it no longer sees it. VERSION is the version under test and
+# defaults to the one build.zig.zon declares, so the
 # check a contributor runs while drafting an entry asks the same question the
 # tag will.
 check-changelog:
@@ -807,10 +808,13 @@ check-changelog:
 	' CHANGELOG.md)"; \
 	minor_of() { printf '%s\n' "$$1" | awk -F. '{ print $$1 "." $$2 }'; }; \
 	if [ -n "$$prev" ] && [ "$$(minor_of "$$prev")" = "$$(minor_of "$$want")" ] && [ "$$prev" != "$$want" ]; then \
-	  if printf '%s\n' "$$notes" | grep -q '^### \(Added\|Changed\|Removed\)$$'; then \
-	    echo "$$want is a patch over $$prev, and its section has an Added, a Changed or a Removed entry" >&2; \
+	  if printf '%s\n' "$$notes" | grep -q '^### \(Added\|Changed\|Removed\|Security\)$$'; then \
+	    echo "$$want is a patch over $$prev, and its section has an Added, a Changed, a Removed or a Security entry" >&2; \
 	    echo "under 0.y the minor carries features, anything that changes what a run does by default," >&2; \
-	    echo "and anything taken away: bump the minor in build.zig.zon and CHANGELOG.md, or move those entries out" >&2; \
+	    echo "anything taken away, and anything taken back that was letting text the model or the tree" >&2; \
+	    echo "controls through a control: a security fix narrows what an invocation may do as often as it" >&2; \
+	    echo "changes an answer, so it is a minor entry too. Bump the minor in build.zig.zon and" >&2; \
+	    echo "CHANGELOG.md, or move those entries out" >&2; \
 	    exit 1; \
 	  fi; \
 	fi

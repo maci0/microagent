@@ -299,12 +299,18 @@ Every change that lands gets a [CHANGELOG.md](CHANGELOG.md) entry under
 and at most once each: `Added`, `Changed`, `Removed`, `Fixed`, `Security`. A fix
 that closes a way for text the model or the tree controls to reach the prompt
 or the terminal is a `Security` entry, not `Fixed`, so a reader scanning for
-those finds it. A change to the flags, the environment variables, or the stdout
-and session-log JSON names the before and the after in its entry.
+those finds it. A control the operator set that was silently dropped, a refusal
+that was not applied, and a credential path a model could spell are the same
+class: a `Fixed` entry about any of them is a `Security` entry. A change to the
+flags, the environment variables, or the stdout and session-log JSON names the
+before and the after in its entry.
 
 Under `0.y` the minor carries features, anything that changes what a run does
 by default, and anything taken away. The patch carries fixes and must not
-change what an existing invocation does.
+change what an existing invocation does. A security fix is not exempt: closing
+a hole narrows what an invocation may do as often as it changes an answer, so a
+patch may not carry a `Security` entry either, and `make check-changelog`
+refuses one.
 
 `make check-unreleased` runs in `make check` and in the push workflow, and
 checks the entry's shape while it is under `[Unreleased]`: the five sections,
@@ -322,8 +328,9 @@ before.
 
 Releases are tags. The release workflow publishes only when the tag names the
 `build.zig.zon` version, that version has a `CHANGELOG.md` entry, and the bump
-matches the entry: a patch tag whose section carries an `Added`, `Changed` or
-`Removed` entry is refused, because under `0.y` those belong to the minor.
+matches the entry: a patch tag whose section carries an `Added`, `Changed`,
+`Removed` or `Security` entry is refused, because under `0.y` those belong to
+the minor.
 Those three rules are `make check-release TAG=vX.Y.Z` and `make
 check-changelog`, and `release.yml` runs those targets rather than its own copy
 of the rules, so a release note is written against something runnable:
