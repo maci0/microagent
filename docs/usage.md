@@ -493,7 +493,8 @@ env     = { LOG = "debug" }
 ```
 
 `name` and one of `command` or `url` are required; a table missing both, or carrying both, is
-named on stderr and skipped. Every local server is started before the first request and asked for its tool list, the remote ones are asked at the same time
+skipped and named on stderr by the server it declared, so a file with several tables says which one
+was dropped. Every local server is started before the first request and asked for its tool list, the remote ones are asked at the same time
 rather than one after another, and each tool is offered to
 the model as `mcp__<server>__<tool>` with the server's own `inputSchema`. A schema over 16 KB is
 replaced with an empty object schema that says so in its `description`, because a schema sits in the

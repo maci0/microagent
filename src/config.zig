@@ -195,6 +195,23 @@ const PresetSetting = struct {
     timeout_s: u32 = mcp_mod.default_timeout_s,
 };
 
+/// The header every server table is opened with, which is what a `Problem`
+/// names in place of a server whose name the file never gave. The same text
+/// `server_dropped` already falls back to, so one spelling answers "which
+/// table" for every problem about a server.
+const mcp_header = "[[mcp]]";
+
+/// Whether a `Problem` of this kind names a server rather than a key or a
+/// table, so the key it carries is a server name and not a span of the file.
+/// The four ways a table is checked and the two ways it is recorded are the
+/// kinds that carry one.
+fn namesServer(kind: Problem.Kind) bool {
+    return switch (kind) {
+        .bad_server, .bad_server_name, .mixed_server, .bad_url, .unusable_server, .duplicate_server, .server_dropped => true,
+        .bad_value, .unknown_key, .list_truncated => false,
+    };
+}
+
 /// A line of the config the reader could not use, so the caller can name it
 /// instead of running with a setting the file did not ask for.
 pub const Problem = struct {
@@ -208,9 +225,25 @@ pub const Problem = struct {
         /// A key this file does not define: a misspelling until proven
         /// otherwise.
         unknown_key,
-        /// A `[[mcp]]` table with no usable name or command, which is a
+        /// A `[[mcp]]` table with neither a `command` nor a `url`, which is a
         /// server nothing can start.
         bad_server,
+        /// A `[[mcp]]` table whose name is not one an exposed tool name can
+        /// hold: it is half of every `mcp__<server>__<tool>` the model is
+        /// offered.
+        bad_server_name,
+        /// A `[[mcp]]` table that says both forms, or that carries an option
+        /// only the other form takes: a `url` beside a `command`, or a
+        /// `timeout` on a table with no `url`. Neither form is run, so the
+        /// settings the table did ask for are not in force either.
+        mixed_server,
+        /// A `[[mcp]]` table whose `url` is not one this run will POST to.
+        /// Checked where it is read, because a server connected without a
+        /// usable url finds out a turn later, in the middle of a tool call.
+        bad_url,
+        /// A `[[mcp]]` table carrying a value this reader could not use, so
+        /// the server is dropped rather than started without it.
+        unusable_server,
         /// Two `[[mcp]]` tables with the same name: their tools would collide
         /// on one exposed name.
         duplicate_server,
@@ -361,12 +394,43 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8) Config {
         // half makes a name no provider accepts and no model can spell.
         // One form or the other, whole: a `command` with a `url`, or with the
         // options only a `url` takes, is a table that says two things.
+        //
+        // Each way a table fails those checks is its own kind, and each names
+        // the server it is about. They were one, reading "no usable name or
+        // command", which is false of a table carrying both and sent a reader
+        // looking for a name and a command the file already had; a file with
+        // several tables named none of them, so the only way to find the
+        // skipped one was to delete tables until the tools came back.
         const e = server.entry;
+        // The name as the file spelled it, so a file with several tables says
+        // which one was skipped. A table whose name was never read has none,
+        // and the header is the text a reader searching the file looks for.
+        const named = if (e.name.len != 0) e.name else mcp_header;
         const local = e.command.len != 0;
         const remote = e.url.len != 0;
-        const whole = if (remote) !local and !server.local_key_set and mcp_mod.validUrl(e.url) else !server.remote_key_set;
-        if (server.invalid or !(local or remote) or !whole or !mcp_mod.validName(e.name)) {
-            config.note(.{ .key = "mcp", .kind = .bad_server });
+        if (!mcp_mod.validName(e.name)) {
+            config.note(.{ .key = named, .kind = .bad_server_name });
+            continue;
+        }
+        if (server.invalid) {
+            config.note(.{ .key = named, .kind = .unusable_server });
+            continue;
+        }
+        if (!local and !remote) {
+            config.note(.{ .key = named, .kind = .bad_server });
+            continue;
+        }
+        if (remote) {
+            if (local or server.local_key_set) {
+                config.note(.{ .key = named, .kind = .mixed_server });
+                continue;
+            }
+            if (!mcp_mod.validUrl(e.url)) {
+                config.note(.{ .key = named, .kind = .bad_url });
+                continue;
+            }
+        } else if (server.remote_key_set) {
+            config.note(.{ .key = named, .kind = .mixed_server });
             continue;
         }
         var duplicate = false;
@@ -1650,9 +1714,10 @@ test "an MCP server is one [[mcp]] table, and a broken one is named and skipped"
         \\
     ;
     const config = parse(arena, text);
-    // The third table has no command, so it is skipped with the file named
-    // first rather than reaching a spawn with an empty argv.
-    try std.testing.expectEqualStrings("mcp", config.problem.?.key);
+    // The third table has no command, so it is skipped and named rather than
+    // reaching a spawn with an empty argv. The name is the one the file gave
+    // it: a file with several tables has to say which of them was dropped.
+    try std.testing.expectEqualStrings("no-command", config.problem.?.key);
     try std.testing.expectEqual(Problem.Kind.bad_server, config.problem.?.kind);
     try std.testing.expectEqual(@as(usize, 2), config.mcp.len);
     try std.testing.expectEqualStrings("fs", config.mcp[0].name);
@@ -1692,12 +1757,54 @@ test "an MCP server is one [[mcp]] table, and a broken one is named and skipped"
 
     // A server name is half of every exposed tool name, so a name that cannot
     // be spelled is refused here rather than offered to a provider inside
-    // `mcp__bad name__tool`.
+    // `mcp__bad name__tool`. It is named as the name, not as a table with no
+    // usable name, which is what the message used to say about it.
     const bad_name = parse(arena, "[[mcp]]\nname = \"bad name\"\ncommand = \"b\"\n");
-    try std.testing.expectEqual(Problem.Kind.bad_server, bad_name.problem.?.kind);
+    try std.testing.expectEqual(Problem.Kind.bad_server_name, bad_name.problem.?.kind);
+    try std.testing.expectEqualStrings("bad name", bad_name.problem.?.key);
     try std.testing.expectEqual(@as(usize, 0), bad_name.mcp.len);
     const double = parse(arena, "[[mcp]]\nname = \"a__b\"\ncommand = \"b\"\n");
-    try std.testing.expectEqual(Problem.Kind.bad_server, double.problem.?.kind);
+    try std.testing.expectEqual(Problem.Kind.bad_server_name, double.problem.?.kind);
+
+    // A table that says both forms is a table that cannot be run, and each way
+    // of saying it is its own message. A `timeout` under a `command` is the
+    // ordinary way to write it, and it used to be reported as a table with no
+    // command and no name: both of which the file carried, in plain sight.
+    const mixed = parse(arena, "[[mcp]]\nname = \"a\"\ncommand = \"b\"\ntimeout = 30\n");
+    try std.testing.expectEqual(Problem.Kind.mixed_server, mixed.problem.?.kind);
+    try std.testing.expectEqualStrings("a", mixed.problem.?.key);
+    try std.testing.expectEqual(@as(usize, 0), mixed.mcp.len);
+    const both = parse(arena, "[[mcp]]\nname = \"a\"\ncommand = \"b\"\nurl = \"https://x.example/mcp\"\n");
+    try std.testing.expectEqual(Problem.Kind.mixed_server, both.problem.?.kind);
+    // The option belongs to a url server alone, and a url server that also
+    // carries it is the same mistake read the other way round.
+    const args_and_url = parse(arena, "[[mcp]]\nname = \"a\"\nurl = \"https://x.example/mcp\"\nargs = [\"-y\"]\n");
+    try std.testing.expectEqual(Problem.Kind.mixed_server, args_and_url.problem.?.kind);
+
+    // A url that is not one this run will POST to, checked where it is read
+    // rather than at the first call a turn later.
+    const bad_url = parse(arena, "[[mcp]]\nname = \"a\"\nurl = \"not a url\"\n");
+    try std.testing.expectEqual(Problem.Kind.bad_url, bad_url.problem.?.kind);
+    try std.testing.expectEqualStrings("a", bad_url.problem.?.key);
+    try std.testing.expectEqual(@as(usize, 0), bad_url.mcp.len);
+    // Userinfo in a url would answer the server's challenge with a credential
+    // the file spelled in the clear, so it is refused the same way.
+    const userinfo = parse(arena, "[[mcp]]\nname = \"a\"\nurl = \"https://me:pw@x.example/mcp\"\n");
+    try std.testing.expectEqual(Problem.Kind.bad_url, userinfo.problem.?.kind);
+    const clear = parse(arena, "[[mcp]]\nname = \"a\"\nurl = \"http://x.example/mcp\"\n");
+    try std.testing.expectEqual(Problem.Kind.bad_url, clear.problem.?.kind);
+
+    // A value the reader could not use drops the server rather than starting
+    // it without the setting the file asked for.
+    const unusable = parse(arena, "[[mcp]]\nname = \"a\"\nurl = \"https://x.example/mcp\"\ntimeout = 0\n");
+    try std.testing.expectEqual(Problem.Kind.unusable_server, unusable.problem.?.kind);
+    try std.testing.expectEqualStrings("a", unusable.problem.?.key);
+
+    // A table whose name was never read is named by the header, which is the
+    // text a reader searching the file looks for.
+    const unnamed = parse(arena, "[[mcp]]\ncommand = \"b\"\n");
+    try std.testing.expectEqual(Problem.Kind.bad_server_name, unnamed.problem.?.kind);
+    try std.testing.expectEqualStrings(mcp_header, unnamed.problem.?.key);
 
     // Two tables with one name would collide on one exposed name, so the
     // second is skipped and named.
@@ -1854,12 +1961,16 @@ fn fuzzConfig(_: void, smith: *std.testing.Smith) !void {
     const arena = state.allocator();
     const config = parse(arena, text);
 
-    // The reader either found nothing to say or named something that is in the
-    // file, which is the whole claim a caller makes about the `Problem` it
-    // turns into a line on stderr. A bad server names the table, not a line.
+    // The reader either found nothing to say or named something that is in
+    // the file, which is the whole claim a caller makes about the `Problem` it
+    // turns into a line on stderr. A problem about a server names the server
+    // rather than a span of the file, and the name is not always those bytes:
+    // one written with an escape is the unescaped text, and a table whose
+    // name failed its own rule names itself with a name that rule refuses.
+    // The header every server table opens with is pinned where it is read.
     if (config.problem) |p| {
         try std.testing.expect(p.key.len > 0);
-        if (p.kind != .bad_server) try std.testing.expect(std.mem.indexOf(u8, text, p.key) != null);
+        if (!namesServer(p.kind)) try std.testing.expect(std.mem.indexOf(u8, text, p.key) != null);
     }
 
     // Whatever the file said, the addendum is within its bound.
