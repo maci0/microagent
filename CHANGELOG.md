@@ -18,6 +18,31 @@ release, and `microagent update` moves you to it.
 
 ### Added
 
+- A fuzz harness for the request body a turn assembles. Every member of the
+  message buffer is text nobody in this program wrote: the model picks the role
+  and the words, a file or a command picks the bytes of a tool result. The
+  elision harness started from messages it wrote itself, so the assembly was
+  untested, and a missing comma there is a body that is not JSON and a
+  duplicated one is a body where the second message is the first again. The
+  harness builds a turn from a fuzzed string, reads it back the way the
+  provider reads it, and asserts the message count, the order, the role and
+  content of each, and one `call_N` id per result. Bytes that are not UTF-8 come
+  back as the replacement character, which is what a JSON string can hold, so
+  what is asserted there is that what came back is still text and no longer
+  than the replacement takes.
+
+- A fuzz harness for the names an MCP entry is built from: the server name and
+  the tool name that become an exposed tool name, the variable a remote entry's
+  key is read from, and the header it travels in. Each was checked by
+  hand-written cases, which say what the ordinary spellings do; what no case
+  said is that a name the checks accept is usable afterwards, because one that
+  passes and then cannot be looked up, cannot be written as a header, or makes
+  an exposed name that resolves to a different tool is a failure the caller
+  cannot see: the entry is skipped with a line on stderr and the run carries on
+  with a tool missing. The harness puts an accepted name in a real environment
+  and looks it back up, splits a header line written with it, and resolves the
+  composed exposed name on a table holding the tool it was built from.
+
 - `microagent help update` prints the subcommand's own usage text. It printed
   the top-level text before, which carries one line about the subcommand, so
   the word after `help` was read and then ignored. A word after `help` that

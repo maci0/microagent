@@ -2408,6 +2408,181 @@ test "a remote entry's url, key variable and key header are held to what they ca
     try std.testing.expect(!validHeaderName("A" ** 65));
 }
 
+// What a config table, a server's `tools/list` answer and the environment all
+// put into this file's names: the server name and the tool name that become an
+// exposed name, the variable a remote entry's key is read from, and the header
+// it travels in. Each is checked by a hand-written case above, which says what
+// the ordinary spellings do; what no case says is that a name the check
+// accepts is usable afterwards, because a name that passes and then cannot be
+// looked up, cannot be written as a header, or makes an exposed name that
+// resolves to a different tool is a failure no caller would notice: the entry
+// is skipped with a line on stderr, and the run carries on with a tool missing.
+// `std.testing.fuzz` runs this corpus on every `zig build test`, and through the
+// fuzzer's mutations when the test binary is built in fuzz mode. The corpus is
+// the shapes that decide an answer: the letters a name is made of, the `__`
+// that separates the three parts, the `=` and the space an environment name is
+// split on, the colon and the line break a header is, the bytes past ASCII, the
+// bound from either side of it, and the schemes and hosts `validUrl` reads.
+const entry_name_corpus = [_][]const u8{
+    "",
+    " ",
+    "a",
+    "A" ** 64,
+    "A" ** 65,
+    "EXA_API_KEY",
+    "x-api-key",
+    "a__b",
+    "__",
+    "_",
+    "a-b_c.d9",
+    "a b",
+    "A=B",
+    "KEY NAME",
+    "$KEY",
+    "a\nb",
+    "a\r\nHost: x",
+    "X-Key:",
+    "X-Key: value",
+    "Authorization",
+    ":",
+    "a:",
+    "\u{0}",
+    "a\u{0}b",
+    "\u{1b}[31m",
+    "caf\u{00e9}",
+    "\u{65e5}\u{8a00}",
+    "\u{202e}gnp",
+    "https://mcp.exa.ai/mcp",
+    "HTTPS://MCP.EXA.AI/mcp",
+    "http://localhost:8080/mcp",
+    "http://127.0.0.1/mcp",
+    "http://[::1]/mcp",
+    "http://127.0.0.1.evil.com/mcp",
+    "http://mcp.example.com/mcp",
+    "https://user:pw@mcp.example.com/mcp",
+    "https://user@mcp.example.com/mcp",
+    "ftp://mcp.example.com/mcp",
+    "mcp__a__b",
+    "a.b.c_d-9",
+    "...",
+    "-",
+    ".",
+};
+
+test "a fuzzed name is usable as a name once the checks accept it" {
+    try std.testing.fuzz({}, fuzzEntryNames, .{ .corpus = &entry_name_corpus });
+}
+
+fn fuzzEntryNames(_: void, smith: *std.testing.Smith) !void {
+    const gpa = std.testing.allocator;
+    var raw: [512]u8 = undefined;
+    const bytes: []const u8 = if (smith.in) |seed| seed else raw[0..smith.slice(&raw)];
+    // Four names from one seed, so a mutation reaches any of them: the bytes
+    // a check accepts are the same whatever the check, so one name per run
+    // would leave three of the four untested on most inputs.
+    const parts = splitOnNul(bytes, 4);
+
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    // A name the check accepts has to be one this file can go on using, which
+    // is read here rather than reimplemented: an accepted name is put in the
+    // environment under that name and looked back up, and a header line is
+    // written with it and split at its colon the way the header reader splits
+    // one.
+    if (validEnvName(parts[2])) {
+        var env: std.process.Environ.Map = .init(arena);
+        try env.put(parts[2], "sk-live");
+        // The lookup is by this name, so the name the entry gives and the name
+        // the environment answers under cannot be two spellings of one thing.
+        try std.testing.expectEqualStrings("sk-live", env.get(parts[2]) orelse return error.TestUnexpectedResult);
+    }
+    if (validHeaderName(parts[3])) {
+        const line = try std.fmt.allocPrint(arena, "{s}: sk-live", .{parts[3]});
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.TestUnexpectedResult;
+        // A field name the header line can be split on, so nothing after it
+        // can be read as another header or as the body of this one.
+        try std.testing.expectEqualStrings(parts[3], line[0..colon]);
+        try std.testing.expect(colon > 0);
+    }
+
+    // A url the check accepts is one the request can be sent to, and the key it
+    // carries is one the scheme keeps off the wire: that is the pair of claims
+    // `validUrl` makes, read back off the parsed url rather than off the
+    // function.
+    if (validUrl(parts[0])) {
+        const uri = std.Uri.parse(parts[0]) catch return error.TestUnexpectedResult;
+        try std.testing.expect(uri.host != null);
+        try std.testing.expect(uri.user == null and uri.password == null);
+        try std.testing.expect(net.urlCarriesKey(parts[0]));
+        var host_buf: [Io.net.HostName.max_len]u8 = undefined;
+        const host = (uri.getHost(&host_buf) catch return error.TestUnexpectedResult).bytes;
+        if (std.ascii.eqlIgnoreCase(uri.scheme, "http")) try std.testing.expect(net.isLoopbackHost(host));
+    }
+
+    // A server name and a tool name that both pass compose an exposed name the
+    // model calls, and the pair that separates the three parts of one is
+    // exactly what a half of it may not hold, so the composed name splits back
+    // into the two it was built from.
+    if (!validName(parts[0]) or !validName(parts[1])) return;
+    var want: [tool_prefix.len + 2 * max_name_bytes + 2]u8 = undefined;
+    const exposed = try std.fmt.bufPrint(&want, tool_prefix ++ "{s}__{s}", .{ parts[0], parts[1] });
+
+    // The pair separates exactly one place, and the halves are the two names it
+    // was composed from: a name holding one anywhere else is refused, so a
+    // split at the first pair cannot land in the middle of either.
+    const body = exposed[tool_prefix.len..];
+    const at = std.mem.indexOf(u8, body, "__") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(parts[0], body[0..at]);
+    try std.testing.expectEqualStrings(parts[1], body[at + 2 ..]);
+    try std.testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, body[at + 2 ..], "__"));
+
+    // And the name resolves back to the tool it was built from, on a table
+    // holding that one tool. `resolve` walks the tables rather than splitting
+    // the name, so this is the only place a name that no longer matches what
+    // it was composed of is visible.
+    const tool: Tool = .{
+        .name = parts[1],
+        .exposed = exposed,
+        .description = "a fuzzed tool",
+        .schema = "{}",
+    };
+    var items = [_]Server{.{
+        .name = parts[0],
+        .run_arena = arena,
+        .transport = .{ .stdio = undefined },
+        .tools = &.{tool},
+    }};
+    var servers: Servers = .{ .items = &items };
+    const call = servers.resolve(exposed) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(parts[1], call.tool.name);
+    try std.testing.expectEqualStrings(parts[0], call.server.name);
+}
+
+/// Up to `count` runs of the seed's bytes between nul bytes, with what is left
+/// after the last one as the final part, so a seed with fewer separators is a
+/// run of parts some of which are empty rather than an index past the seed.
+fn splitOnNul(bytes: []const u8, comptime count: usize) [count][]const u8 {
+    var parts: [count][]const u8 = undefined;
+    var rest = bytes;
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        if (i + 1 == count) {
+            parts[i] = rest;
+            break;
+        }
+        const at = std.mem.indexOfScalar(u8, rest, 0) orelse {
+            parts[i] = rest;
+            @memset(parts[i + 1 ..], "");
+            break;
+        };
+        parts[i] = rest[0..at];
+        rest = rest[at + 1 ..];
+    }
+    return parts;
+}
+
 test "a key is read from the environment by the name the entry gives" {
     var state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer state.deinit();

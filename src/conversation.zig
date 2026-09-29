@@ -816,6 +816,127 @@ test "a fuzzed conversation is elided only where the run may elide it" {
     try std.testing.fuzz({}, fuzzElide, .{ .corpus = &compact_corpus });
 }
 
+// The other half of what a turn writes: the buffer is assembled message by
+// message before it is ever read back, and every member of it is text nobody
+// here wrote. The model chooses the role and the words of an assistant turn,
+// a file or a command chooses the bytes of a tool result, and a user chooses
+// the task, so a quote, a backslash, a nul or a byte that is not UTF-8 all
+// reach the escaper inside a body whose commas and ids this file has to place
+// correctly for the provider to read the turn at all. The elision harness above
+// starts from messages it wrote itself, so the assembly is what is left
+// untested: a missing comma produces a body that is not JSON, and a duplicated
+// one produces a body where the second message is the first again, and neither
+// shows up as a crash anywhere else.
+// `std.testing.fuzz` runs this corpus on every `zig build test`, and through the
+// fuzzer's mutations when the test binary is built in fuzz mode. The corpus is
+// the bytes the three members carry between them: the quotes and backslashes
+// that end a string early if they are not escaped, the control characters and
+// the non-UTF-8 bytes, the multi-byte text, the empty string, a run of quotes
+// deep enough to cross a word boundary in the escaper, and the bytes a terminal
+// would act on.
+const body_corpus = [_][]const u8{
+    "",
+    "a turn",
+    "\"",
+    "\\",
+    "\"\"\"\"",
+    "\"" ** 32,
+    "\n\r\t\u{8}\u{0}\u{1}\u{1b}\u{7f}",
+    "\\u0041\\n",
+    "caf\u{00e9} \u{65e5}\u{8a00} \u{1f600}",
+    "deploy/\u{202e}gnp.exe",
+    "\xff\xfe\xc3\x80",
+    "\u{0}",
+    "a\u{0}b",
+    "} ] , { : ",
+    "x" ** 1024,
+    "\"\n\u{1b}\u{0}\\\"" ** 16,
+};
+
+test "a fuzzed message is a message the provider can read back" {
+    try std.testing.fuzz({}, fuzzBody, .{ .corpus = &body_corpus });
+}
+
+fn fuzzBody(_: void, smith: *std.testing.Smith) !void {
+    const gpa = std.testing.allocator;
+    var scratch: [4 * 1024]u8 = undefined;
+    const text: []const u8 = if (smith.in) |seed| seed else scratch[0..smith.slice(&scratch)];
+    // A result count the fuzzer picks, so the ids run past a single digit and
+    // the comma before each message is placed with a buffer behind it.
+    var count_buf: [2]u8 = undefined;
+    const count = 1 + @as(usize, smith.slice(&count_buf)) % 24;
+
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    var msgs: std.ArrayList(u8) = .empty;
+    defer msgs.deinit(gpa);
+    try openConversation(gpa, &msgs, text, text);
+    try appendMessage(gpa, &msgs, "assistant", text);
+    try appendToolResults(gpa, &msgs, count, text);
+    try appendMessage(gpa, &msgs, "", "");
+
+    // What the request builder closes and sends. A body that is not a JSON
+    // array is a turn the provider rejects, and the run cannot tell a model
+    // that answered badly from one that was never asked.
+    const closed = try std.fmt.allocPrint(arena, "{s}]", .{msgs.items});
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena, closed, .{});
+    const array = parsed.value.array;
+    try std.testing.expectEqual(@as(usize, 4 + count), array.items.len);
+
+    // Every message reads back as the one that was appended, in the order they
+    // were appended. This is the pair of the boundary the harness crosses: the
+    // bytes are written here and read back as the provider reads them, and a
+    // message that came back as another one's is a turn about the wrong text.
+    // A byte sequence that is not UTF-8 is the one case where it comes back
+    // as something else, because a JSON string cannot hold it: what the
+    // provider reads is then the replacement character, so the property is
+    // that what came back is still text and no longer than the replacement
+    // takes, and not that it is the same bytes.
+    const texts = try messageTexts(arena, array);
+    try sameText(text, texts[0].content);
+    try std.testing.expectEqualStrings("system", texts[0].role);
+    try sameText(text, texts[1].content);
+    try std.testing.expectEqualStrings("user", texts[1].role);
+    try sameText(text, texts[2].content);
+    try std.testing.expectEqualStrings("assistant", texts[2].role);
+    try std.testing.expectEqualStrings("", texts[count + 3].content);
+    try std.testing.expectEqualStrings("", texts[count + 3].role);
+
+    // The tool results answer the calls the turn made, in order, one per
+    // result and each with an id of its own. A repeated id is the provider
+    // handed two answers to one call, and a count that does not match is a
+    // call left unanswered.
+    for (texts[3 .. 3 + count], 0..) |text_, i| {
+        try std.testing.expectEqualStrings("tool", text_.role);
+        try sameText(text, text_.content);
+        var id_buf: [64]u8 = undefined;
+        const want = try std.fmt.bufPrint(&id_buf, "call_{d}", .{i});
+        try std.testing.expectEqualStrings(want, idOf(array.items[3 + i]) orelse return error.TestUnexpectedResult);
+    }
+
+    // The empty message at the end is still a message: a role or a content the
+    // escaper drops when its bytes are nothing leaves a body the provider
+    // reads as a shorter turn, and the model never saw what it was sent.
+    try std.testing.expectEqualStrings("", chat_mod.str(array.items[count + 3].object.get("content")) orelse return error.TestUnexpectedResult);
+}
+
+/// That `sent` is what the body carries back for a message that carried `text`.
+fn sameText(text: []const u8, sent: []const u8) !void {
+    if (std.unicode.utf8ValidateSlice(text)) return std.testing.expectEqualStrings(text, sent);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(sent));
+    try std.testing.expect(sent.len <= text.len * 3);
+}
+
+fn idOf(message: std.json.Value) ?[]const u8 {
+    const object = switch (message) {
+        .object => |o| o,
+        else => return null,
+    };
+    return chat_mod.str(object.get("tool_call_id"));
+}
+
 /// One message as the elision walk reads it: the role it was given and the
 /// content it carries, which is the only member the walk looks at.
 const MessageText = struct { role: []const u8, content: []const u8 };
