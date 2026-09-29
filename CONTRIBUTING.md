@@ -172,8 +172,9 @@ macOS runners, where CI runs the same tests again.
 
 The three jobs in `ci.yml` are the checks a merge has to pass: `test`, `lint`
 and `release-assets`. The first two are the gate. The third builds the four
-published targets and refuses one whose rebuild is not byte-identical, so a
-merge that leaves the release unreproducible is caught before the tag.
+published targets under the tag, the inventory and the digests beside them, and
+refuses one whose rebuild is not byte-identical, so a merge that leaves the
+release unreproducible is caught before the tag.
 
 Mark all three required on the default branch, and require them to be up to
 date, not merely passing: `test` also runs on two macOS runners, and a merge
@@ -365,7 +366,9 @@ before the tag exists:
 
 ```sh
 make release-assets TAG=v0.2.0   # the four cross-built assets, in dist/
+make sbom                        # the SPDX inventory, which a scanner reads
 make checksums                   # the sha256 sidecars `update` verifies
+make check-checksums             # every asset has a sidecar naming its own digest
 make check-assets                # the host binary's version, and every asset's object format and machine
 ```
 
@@ -387,6 +390,15 @@ per target, so a target added to `RELEASE_TARGETS` states what it is before it
 can be published. `ci.yml` runs the same target over the rehearsal build and
 `release.yml` over the tagged one, so the check a laptop runs before a tag is
 the check the tag runs.
+
+`make check-checksums` is the same read-back for the digests. It refuses an
+asset in `dist/` with no `.sha256` beside it, and a sidecar whose recorded
+digest is not the one the asset hashes to, which is what `microagent update`
+compares a download against. `ci.yml` builds its rehearsal under the tag, runs
+`make sbom` and `make checksums` over it, and then this, so a defect in either
+lands on a push; `release.yml` runs it before the publish step rather than
+leaving it to the read-back below, which runs once a consumer can fetch the
+release.
 
 `make check-reproducible` rebuilds every published target twice, from cold
 compiler caches and with a different clock, timezone, locale and output

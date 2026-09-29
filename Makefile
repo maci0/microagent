@@ -196,6 +196,7 @@ help:
 	  'check-reproducible    every published target rebuilds byte-identical' \
 	  'checksums             sha256 sidecars for dist/ (after a tagged build)' \
 	  'sbom                  the SPDX inventory of dist/, naming the assets and every declared pin' \
+	  'check-checksums      every asset in dist/ has a sidecar naming its own digest' \
 	  'sha256-of FILE=<path> the sha256 of one file, through the command checksums wrote with' \
 	  'required-zig-version  the zig version build.zig.zon declares' \
 	  'clean                 remove zig-out, .zig-cache, dist and the Harbor musl binary'
@@ -1189,6 +1190,46 @@ sha256-of:
 	  exit 1; \
 	}; \
 	printf '%s\n' "$$digest"
+
+# The sidecars `checksums` wrote, read back against the assets they sit beside.
+# `checksums` counts what it wrote and fails on zero, so a glob, a skip list or a
+# hashing command that quietly covers less than dist/ holds passes it: an asset
+# shipped with no digest is an asset `microagent update` downloads and cannot
+# verify. Nothing else asks. `check-sbom` runs the generator over stand-in
+# assets in a temporary directory, so it reads neither dist/ nor the sidecars,
+# and the one place the real set is read back is release.yml's last step, which
+# runs after the release is public, on a tag whose publish step refuses to
+# replace a release a consumer may already have fetched. Both workflows run
+# this over their own build instead, before anything is published.
+#
+# The digest is read through `make sha256-of` rather than a second command
+# chosen here, for the reason `SHA256_CMD` exists: on a runner without GNU
+# coreutils the sidecar was written by `shasum -a 256` and a comparison beside it
+# by a command that does not exist.
+check-checksums:
+	@set -eu; \
+	test -d dist || { echo "no dist/, run 'make release-assets TAG=v0.2.0' first" >&2; exit 2; }; \
+	assets=0; \
+	for asset in dist/microagent-*; do \
+	  test -e "$$asset" || continue; \
+	  case "$$asset" in *.sha256) continue;; esac; \
+	  assets=$$((assets + 1)); \
+	  if [ ! -f "$$asset.sha256" ]; then \
+	    echo "$$asset has no sha256 sidecar beside it, so 'microagent update' cannot verify it" >&2; \
+	    exit 1; \
+	  fi; \
+	  want=$$(cut -d' ' -f1 < "$$asset.sha256"); \
+	  got=$$($(MAKE) --no-print-directory sha256-of "FILE=$$asset"); \
+	  if [ "$$want" != "$$got" ]; then \
+	    echo "$$asset.sha256 names $$want and $$asset hashes to $$got" >&2; \
+	    exit 1; \
+	  fi; \
+	done; \
+	test "$$assets" -gt 0 || { \
+	  echo "dist/ holds no microagent asset, so there is nothing to have checksummed" >&2; \
+	  exit 2; \
+	}; \
+	echo "all $$assets assets in dist/ carry a sidecar naming the digest of the asset beside it"
 
 # Two independent builds of the same source must be byte-identical, or a
 # released checksum describes one binary and a rebuild produces another. Every

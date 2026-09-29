@@ -127,6 +127,18 @@ release, and `microagent update` moves you to it.
   the running binary is answering. `make check-man` asked the same question of
   the man page and the usage page had no equivalent.
 
+- The sha256 sidecars a release ships are checked against the assets they sit
+  beside before anything is published. `make checksums` writes one per asset in
+  `dist/` and fails only when it wrote none, so a glob or a skip list covering
+  less than the directory passed it, and the one step that read the real set
+  back ran in the release workflow after the release was public, on a tag whose
+  publish step refuses to replace a release a consumer may already have
+  fetched. `make check-checksums` refuses an asset with no sidecar beside it
+  and a sidecar naming a digest other than the asset's, and both workflows run
+  it over their own build: the release before it publishes, and the push
+  workflow's `release-assets` job, which now rehearses the tagged asset names
+  so `make sbom` and `make checksums` have the real ones to work on.
+
 ### Changed
 
 - `make lint-lock` asks the linter lock the three questions it has been asking

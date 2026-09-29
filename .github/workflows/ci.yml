@@ -179,12 +179,32 @@ jobs:
       - uses: ./.github/actions/setup-zig
 
       # The target list and the asset names come from the Makefile, the same
-      # ones release.yml builds, so a rename lands in one place.
+      # ones release.yml builds, so a rename lands in one place. The build is
+      # tagged with the version build.zig.zon declares, which is the name the
+      # release publishes under and the one `make checksums` looks for: the
+      # sidecars and the inventory are the rest of what a release uploads, and
+      # a rehearsal under the untagged names builds neither of them.
       - name: build every published target
         run: |
           set -euo pipefail
-          make release-assets
+          tag="v$(make --no-print-directory version)"
+          make release-assets TAG="$tag"
           ls -l dist
+
+      # The SPDX inventory and the sha256 sidecars, the other half of what the
+      # publish step hands the API, built and read back over this job's own
+      # assets. Nothing else exercises either against a real dist/: `check-sbom`
+      # runs the generator over stand-in assets in a temporary directory, and
+      # the one step that read the real set back is release.yml's last, which
+      # runs once the release is public, on a tag whose publish step refuses to
+      # replace a release a consumer may already have fetched. These are the
+      # same three targets release.yml runs, in the same order.
+      - name: the inventory and the sidecars are the ones a release ships
+        run: |
+          set -euo pipefail
+          make sbom
+          make checksums
+          make check-checksums
 
       # The host binary reports the version in build.zig.zon, and every
       # published target is the object format its name promises. It is
@@ -193,7 +213,10 @@ jobs:
       # would publish an asset that cross-compiles into the wrong bytes is
       # refused here rather than by a user.
       - name: the built assets are the ones a release would publish
-        run: make check-assets
+        run: |
+          set -euo pipefail
+          tag="v$(make --no-print-directory version)"
+          make check-assets TAG="$tag"
 
       # Two independent builds of the same source must be byte-identical, or a
       # released checksum describes one binary and a rebuild produces another.

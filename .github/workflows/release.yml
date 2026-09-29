@@ -99,6 +99,10 @@ jobs:
           make release-assets
           make sbom
           make checksums
+          # Every asset in dist/ read back against the sidecar beside it, before
+          # anything is published rather than by the read-back step below, which
+          # runs once a consumer can already fetch the release.
+          make check-checksums
           # The host asset is run and every published target is read back for
           # the object format its name promises, off disk rather than from the
           # build that wrote it. It is `make check-assets`, the same target a
