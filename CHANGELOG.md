@@ -12,6 +12,8 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-29
+
 ### Added
 
 - `bench/stub_provider.py`, a loopback OpenAI-compatible endpoint that streams a
@@ -1440,7 +1442,8 @@ First release.
   `aarch64-macos` with a checksum sidecar each, and refuses a tag that does not name the version in
   `build.zig.zon`.
 
-[Unreleased]: https://github.com/maci0/microagent/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/maci0/microagent/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/maci0/microagent/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/maci0/microagent/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/maci0/microagent/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/maci0/microagent/compare/v0.1.0...v0.1.1
