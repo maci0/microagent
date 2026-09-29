@@ -18,6 +18,12 @@ release, and `microagent update` moves you to it.
 
 ### Added
 
+- `microagent help update` prints the subcommand's own usage text. It printed
+  the top-level text before, which carries one line about the subcommand, so
+  the word after `help` was read and then ignored. A word after `help` that
+  names no subcommand is a usage error, exit 2 with the reason, rather than the
+  text that did not answer it.
+
 - `--temperature <n>` and `MICROAGENT_TEMPERATURE` set the sampling the
   provider draws from, 0 to 2, and the field is sent only when one of them is
   given. A run that sends none is a run whose answers the provider varies on

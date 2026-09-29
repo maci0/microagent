@@ -35,7 +35,7 @@ microagent - tiny OpenAI-compatible coding agent
 
 usage: microagent [options] "<prompt>"
        microagent update [-c | --check]
-       microagent help
+       microagent help [update]
 
   -p, --print <prompt>   task to run (also accepted as a bare argument)
   -m, --model <model>    model id (env MICROAGENT_MODEL, config key
@@ -104,7 +104,9 @@ flags, so a task that begins with a dash is passed after it. A bare "help"
 asks for this text while the prompt is still empty; any other bare word, or
 a value of --print, is a task, and so is the word "update" anywhere but
 first: as the first argument it is the subcommand below, and a task of
-that name is written after a flag or a --. A
+that name is written after a flag or a --. "help update" is that
+subcommand's own text, and a word after "help" that names no subcommand
+is a usage error rather than this text. A
 second bare word is the one thing this does not read as a task: two prompts
 are a usage error. A word that names no flag is answered with the one it
 is closest to, so --modl says did you mean --model?; a word close to none
@@ -835,6 +837,7 @@ required.
 ```sh
 microagent update                         # replace this binary with the latest release
 microagent update --check                 # report the latest release, install nothing
+microagent help update                    # the subcommand's own flags, environment and exits
 ```
 
 The repository it installs from is the one this binary was built for, named by `default_repo` in
@@ -850,8 +853,8 @@ is never executed there. The download is checked
 against its sidecar, and the running binary is replaced atomically (following a symlink to the real
 file) only when the digest matches. A mismatch, a missing asset, or a release page that is not a
 GitHub https URL leaves the binary untouched. `GITHUB_TOKEN` lifts the anonymous API rate limit.
-Exit 1 means the check or the install failed, 2 is a usage error; `microagent update --help` has the
-rest.
+Exit 1 means the check or the install failed, 2 is a usage error; `microagent update --help`, or
+`microagent help update`, has the rest.
 
 ## Versioning
 

@@ -426,6 +426,28 @@ fn runMain(init: std.process.Init) !u8 {
         return update_mod.run(io, gpa, init.arena.allocator(), init.environ_map, args.items[2..]);
     }
 
+    // `microagent help update` is the subcommand's own text, which is where a
+    // reader who names a subcommand is looking. It printed this program's text
+    // before, and that text carries one line about the subcommand, so the word
+    // after `help` was read and then ignored. A word naming no subcommand is a
+    // usage error instead, because printing the top-level text for one is the
+    // same silence with a longer wait. `-h` after `help` asks for this text,
+    // which is what it asks for on its own.
+    if (args.items.len > 2 and std.mem.eql(u8, args.items[1], help_word)) {
+        const rest = args.items[2..];
+        if (helpTarget(rest)) |target| switch (target) {
+            // The request `help` already is, so the scan below answers it.
+            .self_text => {},
+            .update => {
+                update_mod.printUsage(io);
+                return 0;
+            },
+        } else if (rest.len == 1)
+            return usageError(io, "help takes no argument '{s}'; the only subcommand is update", .{clip(rest[0])})
+        else
+            return usageError(io, "help takes at most one argument, the subcommand it documents, and got {d}", .{rest.len});
+    }
+
     // `--help` and `--version` before the environment is read, so a variable
     // this machine cannot use cannot take away the one command line that
     // explains the rest. `MICROAGENT_MAX_TURNS=0 microagent --help` is the
@@ -767,7 +789,7 @@ const help_text =
     \\
     \\usage: microagent [options] "<prompt>"
     \\       microagent update [-c | --check]
-    \\       microagent help
+    \\       microagent help [update]
     \\
     \\  -p, --print <prompt>   task to run (also accepted as a bare argument)
     \\  -m, --model <model>    model id (env MICROAGENT_MODEL, config key
@@ -837,7 +859,9 @@ const help_text =
     \\asks for this text while the prompt is still empty; any other bare word, or
     \\a value of --print, is a task, and so is the word "update" anywhere but
     \\first: as the first argument it is the subcommand below, and a task of
-    \\that name is written after a flag or a --. A
+    \\that name is written after a flag or a --. "help update" is that
+    \\subcommand's own text, and a word after "help" that names no subcommand
+    \\is a usage error rather than this text. A
     \\second bare word is the one thing this does not read as a task: two prompts
     \\are a usage error. A word that names no flag is answered with the one it
     \\is closest to, so --modl says did you mean --model?; a word close to none
@@ -1046,7 +1070,7 @@ test "the help text spells every invocation in the usage block" {
     const lines = [_][]const u8{
         "usage: microagent [options] \"<prompt>\"",
         "       microagent update [-c | --check]",
-        "       microagent help",
+        "       microagent help [update]",
     };
     for (lines) |line| {
         if (std.mem.indexOf(u8, help_text, line) == null) {
@@ -1063,6 +1087,25 @@ test "the help text spells every invocation in the usage block" {
     try std.testing.expectEqualStrings("help", help_word);
     try std.testing.expect(subcommandArg("update"));
     try std.testing.expect(!subcommandArg(help_word));
+}
+
+test "help names a subcommand's own text, and a word that names none is a usage error" {
+    // `microagent help update` used to print the top-level text, which carries
+    // one line about the subcommand, so the word was read and then ignored. A
+    // reader who names a subcommand is asking about that subcommand, and a word
+    // that names none is answered with the reason and exit 2 rather than with
+    // the text that did not answer it.
+    try std.testing.expectEqual(HelpFor.update, helpTarget(&.{"update"}).?);
+    try std.testing.expectEqual(HelpFor.self_text, helpTarget(&.{"-h"}).?);
+    try std.testing.expectEqual(HelpFor.self_text, helpTarget(&.{"--help"}).?);
+    try std.testing.expect(helpTarget(&.{ "update", "--check" }) == null);
+    try std.testing.expect(helpTarget(&.{"modl"}) == null);
+    try std.testing.expect(helpTarget(&.{"--model"}) == null);
+    // The usage block says `help` alone prints this text, and the subcommand's
+    // own block says nothing about `help update`, so the help text has to be
+    // the one place the second spelling is written down.
+    try std.testing.expect(std.mem.indexOf(u8, help_text, "microagent help [update]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_text, "\"help update\" is that") != null);
 }
 
 test "the help text names the spend alarm the run prints" {
@@ -1661,6 +1704,19 @@ const help_word = "help";
 /// to arrive after a flag or a `--`.
 fn subcommandArg(arg: []const u8) bool {
     return std.mem.eql(u8, arg, "update");
+}
+
+/// What `microagent help` with the arguments after the word resolves to, or null
+/// when those arguments are a usage error. A subcommand's name asks for that
+/// subcommand's own text, and `-h` asks for the text `help` already is, so it is
+/// the same request rather than a second one.
+const HelpFor = enum { self_text, update };
+
+fn helpTarget(rest: []const []const u8) ?HelpFor {
+    if (rest.len != 1) return null;
+    if (subcommandArg(rest[0])) return .update;
+    if (isFlag(rest[0], "-h", "--help")) return .self_text;
+    return null;
 }
 
 fn isFlag(name: []const u8, short: []const u8, long: []const u8) bool {

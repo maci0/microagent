@@ -12,6 +12,7 @@ microagent \- tiny OpenAI-compatible coding agent
 .RB [ \-c | \-\-check ]
 .br
 .B "microagent help"
+.RI [ update ]
 .SH DESCRIPTION
 .B microagent
 runs one non-interactive task of an OpenAI-compatible coding agent: it sends a
@@ -29,7 +30,11 @@ The task is the bare argument, or the value of
 .BR \-\-print .
 Two bare arguments are a usage error rather than a prompt. A bare
 .B help
-prints the built-in usage text when the prompt is still empty. A bare
+prints the built-in usage text when the prompt is still empty, and
+.BI "help " update
+prints the subcommand's own text; a word after
+.B help
+naming no subcommand is a usage error. A bare
 .B \-\-
 ends the flags, so a task beginning with a dash is passed after it. A bare
 .B update
@@ -173,7 +178,8 @@ when the digest matches. A refusal touches nothing.
 Report the latest release as the release page URL on stdout, install nothing.
 .TP
 .BR \-h ", " \-\-help
-Print the update usage text and exit.
+Print the update usage text and exit. Also reached by
+.BR "help update" .
 .TP
 .BR \-V ", " \-\-version
 Print the version and exit.

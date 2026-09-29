@@ -521,6 +521,12 @@ fn unknownArgument(arena: std.mem.Allocator, arg: []const u8) []const u8 {
     return std.fmt.allocPrint(arena, "unknown argument '{s}'; did you mean {s}?", .{ shown, near }) catch "unknown argument";
 }
 
+/// The subcommand's usage text on stdout, for `microagent update --help` and
+/// for `microagent help update`, so both spellings print one text.
+pub fn printUsage(io: std.Io) void {
+    net.writeOut(io, usage_text) catch {};
+}
+
 /// Subcommand entry, called by main with the arguments after `update`.
 /// Returns the process exit code.
 pub fn run(
@@ -532,7 +538,7 @@ pub fn run(
 ) u8 {
     const check_only = switch (parseArgs(args)) {
         .help => {
-            net.writeOut(io, usage_text) catch {};
+            printUsage(io);
             return 0;
         },
         .version => {
