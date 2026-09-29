@@ -216,7 +216,7 @@ pub fn open(io: Io, arena: std.mem.Allocator, session_dir: []const u8, model: []
     // names. The prune below runs on that path too, so the retention window is
     // applied whether or not a log was opened.
     const file = createSessionLog(io, arena, session_dir, stamp);
-    pruneSessions(io, arena, session_dir, now_ns);
+    _ = pruneSessions(io, arena, session_dir, now_ns);
     const opened = file orelse {
         net.note(io, arena, "microagent: no session log could be opened under {s}; the rest of this run is not recorded\n", .{shown});
         return null;
@@ -360,8 +360,8 @@ fn logName(name: []const u8) ?LogName {
 /// creates the log: `createFileAbsolute` is a `cwd`-relative create, not a
 /// checked one, so `MICROAGENT_SESSION_DIR=logs/x` names a store the run really
 /// opens where it was asked for.
-fn pruneSessions(io: Io, arena: std.mem.Allocator, session_dir: []const u8, now_ns: i128) void {
-    pruneSessionsTo(io, arena, session_dir, max_session_logs, now_ns);
+fn pruneSessions(io: Io, arena: std.mem.Allocator, session_dir: []const u8, now_ns: i128) usize {
+    return pruneSessionsTo(io, arena, session_dir, max_session_logs, now_ns);
 }
 
 /// The note for a list the walk could not finish, however far it got: a read
@@ -385,13 +385,18 @@ fn partialList(io: Io, arena: std.mem.Allocator, shown: []const u8, seen: usize,
 /// put a handful of names over a window of two and check what the delete loop
 /// does with them, and a test can name a store a hundred days old without
 /// waiting for it.
-fn pruneSessionsTo(io: Io, arena: std.mem.Allocator, session_dir: []const u8, keep: usize, now_ns: i128) void {
+/// Returns how many logs it deleted, which is zero for every path that gives
+/// up and the number the delete loop removed otherwise. The count is what the
+/// tests read: a run that reports a delete it did not make, and one that makes
+/// a delete it cannot report, both leave the same directory behind, so the
+/// note text cannot tell them apart.
+fn pruneSessionsTo(io: Io, arena: std.mem.Allocator, session_dir: []const u8, keep: usize, now_ns: i128) usize {
     // Escaped once for the two notes below, for the reason `createSessionLog`
     // gives: the directory is a variable or a path under `$HOME`.
     const shown = chat.safeTextAll(arena, session_dir);
     var dir = std.Io.Dir.openDir(std.Io.Dir.cwd(), io, session_dir, .{ .iterate = true }) catch |err| {
         net.note(io, arena, "microagent: the session store under {s} could not be read for pruning ({s}); it is not pruned and is left as it stands\n", .{ shown, @errorName(err) });
-        return;
+        return 0;
     };
     defer dir.close(io);
 
@@ -406,13 +411,13 @@ fn pruneSessionsTo(io: Io, arena: std.mem.Allocator, session_dir: []const u8, ke
     {
         var walker = dir.walk(arena) catch |err| {
             net.note(io, arena, "microagent: the session store under {s} could not be walked for pruning ({s}); it is not pruned and is left as it stands\n", .{ shown, @errorName(err) });
-            return;
+            return 0;
         };
         defer walker.deinit();
         while (true) {
             const entry = walker.next(io) catch |err| {
                 partialList(io, arena, shown, found.items.len, err);
-                return;
+                return 0;
             } orelse break;
             if (entry.kind != .file) continue;
             const key = logName(entry.basename) orelse continue;
@@ -423,12 +428,12 @@ fn pruneSessionsTo(io: Io, arena: std.mem.Allocator, session_dir: []const u8, ke
             // the limit: the store then looks pruned and is not.
             const path_copy = arena.dupe(u8, entry.path) catch |err| {
                 partialList(io, arena, shown, found.items.len, err);
-                return;
+                return 0;
             };
             found.append(arena, .{ .path = path_copy, .key = key }) catch |err| {
                 arena.free(path_copy);
                 partialList(io, arena, shown, found.items.len, err);
-                return;
+                return 0;
             };
         }
     }
@@ -453,7 +458,7 @@ fn pruneSessionsTo(io: Io, arena: std.mem.Allocator, session_dir: []const u8, ke
         if (!over_count and !stampExpired(found.items[i].key.stamp, now_ns)) break;
         deleting += 1;
     }
-    if (deleting == 0) return;
+    if (deleting == 0) return 0;
 
     var failed: usize = 0;
     var first_err: ?anyerror = null;
@@ -466,6 +471,7 @@ fn pruneSessionsTo(io: Io, arena: std.mem.Allocator, session_dir: []const u8, ke
     if (failed != 0) net.note(io, arena, "microagent: {d} of {d} session logs under {s} could not be deleted ({s}); the store stays over its {d}-log limit and holds logs past the {d}-day age window until they can be\n", .{
         failed, deleting, shown, @errorName(first_err.?), keep, max_session_log_age_days,
     });
+    return deleting - failed;
 }
 
 /// Closes the log and clears the slot, so the handle is closed exactly once.
@@ -1031,7 +1037,10 @@ test "the session store keeps the most recent logs and drops the rest" {
     // program ever wrote is the first one the retention window removes.
     try store.tmp.dir.writeFile(io, .{ .sub_path = "1-.jsonl", .data = "keep me too" });
 
-    pruneSessions(io, arena, dir_path, test_now_ns);
+    // Twenty-five logs are past the window, so twenty-five deletes are the
+    // ones reported: a run that removed them and said nothing, or said more
+    // than it removed, is the failure this count is read for.
+    try std.testing.expectEqual(@as(usize, 25), pruneSessions(io, arena, dir_path, test_now_ns));
 
     try std.testing.expectEqual(max_session_logs, try countSessionLogs(io, arena, dir_path));
     try store.tmp.dir.access(io, "notes.jsonl", .{});
@@ -1099,7 +1108,8 @@ test "the session store drops a log the age window has passed" {
     }
     try std.testing.expectEqual(@as(usize, 3), try countSessionLogs(io, arena, dir_path));
 
-    pruneSessions(io, arena, dir_path, now_ns);
+    // The age window took one log, and the report says one.
+    try std.testing.expectEqual(@as(usize, 1), pruneSessions(io, arena, dir_path, now_ns));
 
     // The count was never the thing at issue: the store held three logs against
     // a limit of two hundred, and the one that went is the one past the age.
@@ -1145,7 +1155,9 @@ test "a store named relative to the working directory is pruned where it is" {
         log.close(io);
     }
 
-    pruneSessions(io, arena, relative, test_now_ns);
+    // One log over the window is one delete, addressed through the relative
+    // path the operator's `session_dir` can be written as.
+    try std.testing.expectEqual(@as(usize, 1), pruneSessions(io, arena, relative, test_now_ns));
 
     try std.testing.expectEqual(max_session_logs, try countSessionLogs(io, arena, relative));
 }
@@ -1273,7 +1285,7 @@ test "the session store prunes by stamp, not by the bytes of the name" {
     rerun.close(io);
     try std.testing.expectEqual(max_session_logs + 1, try countSessionLogs(io, arena, dir_path));
 
-    pruneSessions(io, arena, dir_path, test_now_ns);
+    try std.testing.expectEqual(@as(usize, 1), pruneSessions(io, arena, dir_path, test_now_ns));
 
     try std.testing.expectEqual(max_session_logs, try countSessionLogs(io, arena, dir_path));
     // The first of the pair is what goes; the run behind it is still the one a
@@ -1333,7 +1345,7 @@ test "a log named from a clock before 1970 is still one the pruner counts" {
         const filler = createSessionLog(io, arena, dir_path, @intCast(i + 3)) orelse return error.TestUnexpectedResult;
         filler.close(io);
     }
-    pruneSessions(io, arena, dir_path, test_now_ns);
+    try std.testing.expectEqual(@as(usize, 1), pruneSessions(io, arena, dir_path, test_now_ns));
 
     // The zero-stamped log is the oldest of the store, so it is the one the
     // window takes, and what is left is the limit rather than the limit plus
@@ -1360,7 +1372,9 @@ test "the session store prunes the logs a re-run wrote beside the first" {
     }
     try std.testing.expectEqual(max_session_logs * 2, try countSessionLogs(io, arena, dir_path));
 
-    pruneSessions(io, arena, dir_path, test_now_ns);
+    // A window of this width takes one of each pair, and the report counts
+    // only the logs it removed: the `1` stamp twice, the rest once.
+    try std.testing.expectEqual(@as(usize, max_session_logs), pruneSessions(io, arena, dir_path, test_now_ns));
 
     try std.testing.expectEqual(max_session_logs, try countSessionLogs(io, arena, dir_path));
     // The oldest stamp is gone entirely, the newest is still there in both of
@@ -1418,7 +1432,10 @@ test "a log in a subdirectory is pruned where it is, not by its bare name" {
         try store.tmp.dir.writeFile(io, .{ .sub_path = name, .data = "log" });
     }
 
-    pruneSessions(io, arena, dir_path, test_now_ns);
+    // One log is past the limit, so exactly one delete is reported as well as
+    // made: a pruner that took the nested log and also counted the root's own
+    // name toward its report would leave the directory looking right.
+    try std.testing.expectEqual(@as(usize, 1), pruneSessions(io, arena, dir_path, test_now_ns));
 
     // The oldest is the nested one, and it goes where it is: counted, deleted,
     // and the root's own `1.jsonl` is still a name the store holds. That root
@@ -1450,7 +1467,9 @@ test "a store that cannot be opened is named, and deletes nothing" {
     // store that cannot be pruned costs the run nothing but its disk; what
     // changed is that the run is told, so an operator watching the directory
     // fill knows to look.
-    pruneSessions(io, arena, missing, test_now_ns);
+    // The count is the part a monitor can be held to, and a store that could
+    // not be walked has no window to prune against.
+    try std.testing.expectEqual(@as(usize, 0), pruneSessions(io, arena, missing, test_now_ns));
     try std.testing.expectError(error.FileNotFound, store.tmp.dir.access(io, "not-a-store", .{}));
 }
 
@@ -1568,7 +1587,7 @@ fn fuzzStoreNames(_: void, smith: *std.testing.Smith) !void {
     // reads are the count window's alone. The age window prunes the same
     // prefix, and `the session store drops a log the age window has passed`
     // is the test on it.
-    pruneSessionsTo(io, arena, dir_path, keep, 0);
+    const removed = pruneSessionsTo(io, arena, dir_path, keep, 0);
 
     // A name no run of this program wrote is not its to delete, whatever the
     // walk found beside it and wherever in the window it would have sorted.
@@ -1591,6 +1610,10 @@ fn fuzzStoreNames(_: void, smith: *std.testing.Smith) !void {
     // The window is on the store's own logs only: what is left is the window,
     // or the whole store when it never reached it.
     try std.testing.expectEqual(@min(keep, survivors.items.len + deleted.items.len), survivors.items.len);
+    // And the report is the same set the directory holds: a pruner that
+    // removed a name the walk never saw, or left one out of its own count,
+    // is wrong whichever of the two it did.
+    try std.testing.expectEqual(deleted.items.len, removed);
     // And what is left is the newest of them, so no log that survived is older
     // than one that was deleted.
     for (deleted.items) |gone| {

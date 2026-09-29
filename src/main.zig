@@ -4472,33 +4472,58 @@ test "a bare help is a request, and only a bare one" {
 // a machine whose `MICROAGENT_MAX_TURNS` is not a number, which is the only
 // way that walk is reachable at all.
 test "the walk that answers help before reading the environment agrees with the parser" {
-    const cases = [_]struct { argv: []const []const u8, want: ?Action }{
-        .{ .argv = &.{ "a prompt", "--help" }, .want = .help },
-        .{ .argv = &.{ "-V", "--model" }, .want = .version },
-        .{ .argv = &.{"--help=1"}, .want = .help },
+    // `refused` is what the parser made of the same words. A row the parser
+    // refuses is a row the walk must not have answered with help or a
+    // version, and the two walks are compared on the message being there, not
+    // on `Options.action`, which is `.run` whether the parser read the line
+    // or turned it down. Both facts of a row are compared in one value, so a
+    // failure names the arguments it failed on.
+    const Walked = struct {
+        argv: []const []const u8,
+        early: ?Action,
+        action: ?Action,
+        refused: bool,
+    };
+    const cases = [_]struct { argv: []const []const u8, want: ?Action, refused: bool }{
+        .{ .argv = &.{ "a prompt", "--help" }, .want = .help, .refused = false },
+        .{ .argv = &.{ "-V", "--model" }, .want = .version, .refused = false },
+        .{ .argv = &.{"--help=1"}, .want = .help, .refused = false },
         // The value of a valued flag is stepped over, so these words are a
         // prompt and not a request for help. The parser says the same.
-        .{ .argv = &.{ "-p", "--help" }, .want = null },
-        .{ .argv = &.{ "--print", "--help" }, .want = null },
-        .{ .argv = &.{ "-p", "hi", "-h" }, .want = .help },
-        .{ .argv = &.{"hi"}, .want = null },
-        .{ .argv = &.{"help"}, .want = .help },
+        .{ .argv = &.{ "-p", "--help" }, .want = null, .refused = false },
+        .{ .argv = &.{ "--print", "--help" }, .want = null, .refused = false },
+        .{ .argv = &.{ "-p", "hi", "-h" }, .want = .help, .refused = false },
+        .{ .argv = &.{"hi"}, .want = null, .refused = false },
+        .{ .argv = &.{"help"}, .want = .help, .refused = false },
         // The word is a request only while it is the first bare word, and only
-        // outside a value a flag took.
-        .{ .argv = &.{ "hi", "help" }, .want = null },
-        .{ .argv = &.{ "-p", "hi", "help" }, .want = null },
-        .{ .argv = &.{ "--print=hi", "help" }, .want = null },
-        .{ .argv = &.{ "-p", "help" }, .want = null },
-        .{ .argv = &.{ "--", "help" }, .want = null },
-        .{ .argv = &.{"--nope"}, .want = null },
-        .{ .argv = &.{}, .want = null },
+        // outside a value a flag took. Two bare words is a prompt given twice,
+        // so the parser turns these three down.
+        .{ .argv = &.{ "hi", "help" }, .want = null, .refused = true },
+        .{ .argv = &.{ "-p", "hi", "help" }, .want = null, .refused = true },
+        .{ .argv = &.{ "--print=hi", "help" }, .want = null, .refused = true },
+        .{ .argv = &.{ "-p", "help" }, .want = null, .refused = false },
+        .{ .argv = &.{ "--", "help" }, .want = null, .refused = false },
+        .{ .argv = &.{"--nope"}, .want = null, .refused = true },
+        .{ .argv = &.{}, .want = null, .refused = false },
     };
     for (cases) |c| {
-        try std.testing.expectEqual(c.want, earlyAction(c.argv));
         var opts: Options = .{};
         var buf: [512]u8 = undefined;
-        _ = parseArgs(&buf, c.argv, &opts);
-        if (c.want) |want| try std.testing.expectEqual(want, opts.action) else try std.testing.expectEqual(Action.run, opts.action);
+        const refused = parseArgs(&buf, c.argv, &opts) != null;
+        // A refused line leaves `action` wherever the walk got to, so it is
+        // only compared on the rows the parser read.
+        const got: Walked = .{
+            .argv = c.argv,
+            .early = earlyAction(c.argv),
+            .action = if (refused) null else opts.action,
+            .refused = refused,
+        };
+        try std.testing.expectEqualDeep(Walked{
+            .argv = c.argv,
+            .early = c.want,
+            .action = if (c.refused) null else c.want orelse .run,
+            .refused = c.refused,
+        }, got);
     }
 }
 
@@ -5475,9 +5500,18 @@ test "a tool timeout is cut to what is left of the budget" {
     // ceiling is the only thing a tool's own timeout is measured against, so it
     // is the only thing asserted here; the min is `boundedMs`'s, and that it
     // does the min is the tool's own test.
+    // The ceiling is the whole budget less whatever the clock spent while the
+    // two readings were taken, so the gap is measured rather than bounded by a
+    // tolerance: a host that stalls a second between them takes a second off the
+    // answer and still passes, and a ceiling that cut anything the clock did not
+    // spend still fails.
     const fresh = Budget.of(now, 600);
     const left = fresh.toolCeilingMs(io).?;
-    try std.testing.expect(left <= 600_000 and left > 599_000);
+    const spent_ms = @divTrunc(Io.Timestamp.now(io, budget_clock).nanoseconds - now, std.time.ns_per_ms);
+    // The millisecond is where both answers are rounded, so the gap is allowed
+    // the millisecond the two roundings can differ by.
+    try std.testing.expect(left <= 600_000);
+    try std.testing.expect(left + spent_ms + 1 >= 600_000);
 
     // Nearly spent: the floor, but never zero, which would fail before the tool
     // started and read as a broken tool rather than a spent budget.
@@ -5863,9 +5897,16 @@ test "a budget too large to count in milliseconds is a ceiling, not a trap" {
     // minute taken at the clock this test reads has its 60,000 milliseconds
     // left, less whatever the run between the two readings spent on the
     // assertion itself.
-    const now = Io.Timestamp.now(std.testing.io, budget_clock).nanoseconds;
-    const left = Budget.of(now, 60).remainingMs(std.testing.io).?;
-    try std.testing.expect(left > 59_000 and left <= 60_000);
+    // The budget is the whole minute less the gap between the two readings, so
+    // the gap is measured rather than left to a tolerance.
+    const io = std.testing.io;
+    const now = Io.Timestamp.now(io, budget_clock).nanoseconds;
+    const left = Budget.of(now, 60).remainingMs(io).?;
+    const spent_ms = @divTrunc(Io.Timestamp.now(io, budget_clock).nanoseconds - now, std.time.ns_per_ms);
+    // The millisecond is where both answers are rounded, so the gap is allowed
+    // the millisecond the two roundings can differ by.
+    try std.testing.expect(left <= 60_000);
+    try std.testing.expect(left + spent_ms + 1 >= 60_000);
 }
 
 test "a Retry-After header sets the wait, and only a wait worth taking" {
@@ -5912,7 +5953,11 @@ test "a Retry-After date becomes a wait, read against the clock it names" {
     const now = net.nowSeconds(std.testing.io);
     var head: [160]u8 = undefined;
     const thirty_ms = net.retryAfterMs(retryAfterDateHead(&head, now, 30), now).?;
-    try std.testing.expect(thirty_ms >= 29_000 and thirty_ms <= 30_000);
+    // The arithmetic is the header against the reading it was handed, so it is
+    // thirty seconds exactly: a wait a second short of what the header says is
+    // the gateway being obeyed early, which is the failure this header exists
+    // to stop.
+    try std.testing.expectEqual(@as(u64, 30_000), thirty_ms);
 
     // A deadline already past is a wait of zero rather than the backoff
     // schedule: the wait it names has elapsed, and adding to it is how a run

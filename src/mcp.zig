@@ -1861,9 +1861,13 @@ test "every server is started before any of them is asked to initialize" {
     const base = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
 
     try tmp.dir.writeFile(io, .{ .sub_path = "responder.sh", .data = fake_server });
+    // The bounded wait is long enough for a loaded machine to spawn the second
+    // server in, since a waiter that runs out of patience here fails the test
+    // for the runner's speed rather than for the ordering. It ends the moment
+    // the file appears, so the wait costs nothing when the property holds.
     const waiter = try std.fmt.allocPrint(arena,
         \\i=0
-        \\while [ ! -f "{s}/started" ] && [ "$i" -lt 40 ]; do i=$((i+1)); sleep 0.05; done
+        \\while [ ! -f "{s}/started" ] && [ "$i" -lt 200 ]; do i=$((i+1)); sleep 0.05; done
         \\[ -f "{s}/started" ] || exit 1
         \\exec /bin/sh "{s}/responder.sh"
         \\

@@ -659,6 +659,56 @@ test "skills are discovered from a root, sorted, and a directory without one is 
     try std.testing.expectEqualStrings("alpha body\n", try load(io, arena, set.get("alpha").?));
 }
 
+// A skill past the cap is not a skill this run offers, and the one below it
+// is: the cap is a boundary rather than a rule about size in general, so both
+// sides of it are checked, and the refused one takes no part in the listing.
+test "a skill past the size a skill may hold is not offered" {
+    const gpa = std.testing.allocator;
+    var scratch_state = std.heap.ArenaAllocator.init(gpa);
+    defer scratch_state.deinit();
+    const scratch = scratch_state.allocator();
+    var run_state = std.heap.ArenaAllocator.init(gpa);
+    defer run_state.deinit();
+    const arena = run_state.allocator();
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+
+    // One byte over the cap is the whole difference between the two skills, so
+    // a cap that moved, or one compared with the head rather than the file,
+    // fails here rather than passing on a body nobody reads.
+    // Padded to the byte rather than built to a length: the cap is compared
+    // with the file's own size, so the two files are written at a size rather
+    // than at a formula that has to agree with it.
+    const file_of = struct {
+        fn write(alloc: std.mem.Allocator, name: []const u8, size: usize) ![]u8 {
+            const text = try std.fmt.allocPrint(alloc, "---\nname: {s}\ndescription: a skill\n---\n# Heading\n", .{name});
+            try std.testing.expect(size >= text.len);
+            const full = try alloc.alloc(u8, size);
+            @memcpy(full[0..text.len], text);
+            @memset(full[text.len..], 'x');
+            return full;
+        }
+    }.write;
+    const over = try file_of(scratch, "over", max_skill_bytes + 1);
+    const exact = try file_of(scratch, "exact", max_skill_bytes);
+    try std.testing.expectEqual(max_skill_bytes + 1, over.len);
+    try std.testing.expectEqual(max_skill_bytes, exact.len);
+    try tmp.dir.createDirPath(io, "over");
+    try tmp.dir.writeFile(io, .{ .sub_path = "over/SKILL.md", .data = over });
+    try tmp.dir.createDirPath(io, "exact");
+    try tmp.dir.writeFile(io, .{ .sub_path = "exact/SKILL.md", .data = exact });
+
+    const root_list = [_]Root{.{ .path = root, .named = true }};
+    const set = discover(io, arena, &root_list);
+    try std.testing.expectEqual(@as(usize, 1), set.items.len);
+    try std.testing.expectEqualStrings("exact", set.items[0].name);
+    try std.testing.expect(set.get("over") == null);
+}
+
 // The listing reads a skill's head and keeps it; the body is read when the
 // model loads the skill. The counter below is what fails if a whole-file read
 // comes back: a 200 KB file against a 64 KB bound is not a close call on any

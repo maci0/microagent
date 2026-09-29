@@ -1131,6 +1131,19 @@ test "update: a download's deadline is its floor until the body needs more" {
     try std.testing.expect(fetchTimeoutMs(2 * max_asset_bytes) >= fetchTimeoutMs(max_asset_bytes));
 }
 
+// The sentence a status is read with. Three statuses carry one and the rest
+// carry none, and the two that share a sentence are the two a token fixes, so
+// a hint that moved between them sends a reader after the wrong thing.
+test "update: a status names what a person has to do about it" {
+    try std.testing.expectEqualStrings(" (nothing published at that url)", statusHint(.not_found));
+    try std.testing.expectEqualStrings(" (rate limited; set GITHUB_TOKEN)", statusHint(.forbidden));
+    try std.testing.expectEqualStrings(" (rate limited; set GITHUB_TOKEN)", statusHint(.too_many_requests));
+    // Nothing to do about these, so nothing is said past the number.
+    for ([_]std.http.Status{ .ok, .internal_server_error, .bad_gateway, .unauthorized }) |status| {
+        try std.testing.expectEqualStrings("", statusHint(status));
+    }
+}
+
 // The two waits the loop can take are the shared schedule under this path's
 // own, shorter cap: three attempts means two waits, and neither is longer than
 // what `net` was written to be given here.

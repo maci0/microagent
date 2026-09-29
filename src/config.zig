@@ -924,6 +924,13 @@ test "agents_files names the repository instructions, and an empty list turns th
     try std.testing.expectEqualStrings("agents_files", bare_string.problem.?.key);
     const long = parse(arena, std.fmt.allocPrint(arena, "agents_files = [\"{s}\"]\n", .{"a" ** (max_agents_path_bytes + 1)}) catch unreachable);
     try std.testing.expectEqualStrings("agents_files", long.problem.?.key);
+
+    // The accepting side of the same bound, because a comparison that moved by
+    // one byte refuses a path the length is there to allow.
+    const at_limit = parse(arena, std.fmt.allocPrint(arena, "agents_files = [\"{s}\"]\n", .{"a" ** max_agents_path_bytes}) catch unreachable);
+    try std.testing.expectEqual(@as(?Problem, null), at_limit.problem);
+    try std.testing.expectEqual(@as(usize, 1), at_limit.agents_files.?.len);
+    try std.testing.expectEqual(max_agents_path_bytes, at_limit.agents_files.?[0].len);
 }
 
 test "the config sets system_prompt_extra and leaves absent or bad keys alone" {
@@ -1688,11 +1695,23 @@ test "every built-in tool and every preset is on until the file says otherwise" 
     try std.testing.expectEqual(preset_count, empty.mcp.len);
     try std.testing.expect(empty.tool_problem == null);
 
-    // A table with no `enabled` key changes nothing.
+    // A table with no `enabled` key leaves the tool on. The other key is
+    // there to say the two are read apart: a `timeout` under a preset is the
+    // one option a table can carry without naming `enabled`, so a reader that
+    // treated the table as an `enabled` switch would either drop the timeout
+    // or switch the tool off, and only the timeout below tells them apart.
     const bare = parse(arena, "[tools.bash]\n[tools.web_search]\ntimeout = 10\n");
     try std.testing.expect(bare.problem == null and bare.tool_problem == null);
     try std.testing.expectEqual(@as(usize, 0), bare.disabled_tools.count());
     try std.testing.expectEqual(preset_count, bare.mcp.len);
+    var web: ?u32 = null;
+    var untouched: u32 = 0;
+    for (bare.mcp) |entry| {
+        if (std.mem.eql(u8, entry.name, "web_search")) web = entry.timeout_s else untouched = entry.timeout_s;
+    }
+    try std.testing.expectEqual(@as(?u32, 10), web);
+    // And the presets it did not touch keep the default.
+    try std.testing.expectEqual(mcp_mod.default_timeout_s, untouched);
 }
 
 test "a built-in tool is switched off by enabled = false, and only that spelling of a boolean" {
