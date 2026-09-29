@@ -27,6 +27,11 @@ release, and `microagent update` moves you to it.
   api key travels over plaintext and is printed on every failure, and the git
   command line, which is composed out of a model's subcommand, revision and
   path and carries the credential exclusion pathspecs.
+- The retryable-status test now covers every status the run's own set names,
+  including the two it did not (a 409 and a 425), and the 4xx either side of
+  the ones it does. The rule is `408, 409, 425, 429, or >= 500`, and neither
+  boundary was asserted, so a set that dropped 409 or that started at 501 read
+  the same.
 - `make test-sanitize` runs the unit tests a second time with the
   undefined-behavior sanitizer, and `make check` and both workflows run it. The
   plain suite says the assertions hold, not that nothing inside them is out of
@@ -197,6 +202,16 @@ release, and `microagent update` moves you to it.
   provider's own code and message on stderr, says that stdout holds a prefix,
   and is not retried, because the request is not a resumption and a second one
   is a second billable completion.
+- Two git tests no longer pass on a revision git could not resolve. The control
+  asked only that the output not start with this tool's own `error: rev`, so on
+  a depth-1 checkout, where `HEAD~3` does not exist, git's `fatal:` line
+  satisfied it. One control now names a revision every checkout has, and both
+  reject any error rather than one spelling of it.
+- The two git fixtures that commit set `commit.gpgsign=false` and an empty
+  `core.hooksPath` on the repository they build. A developer whose own git
+  signs commits has no key the runner holds, and the fixture commit was then
+  the only thing in the test that failed, for a reason unrelated to what it
+  tests.
 - A session record's `elapsed_ms` no longer counts a suspend as model time. The
   stamp and the reading were both taken on the clock `--budget` is measured on,
   which keeps counting while the machine is off, so a laptop closed for eight

@@ -3290,11 +3290,16 @@ test "git tool refuses a rev that names a file through a tree-ish" {
     try std.testing.expect(std.mem.indexOf(u8, directed, "path argument") != null);
 
     // A rev with no path in it is what the tool is for, and it is not refused.
+    // The control asks for no error at all rather than for this tool's own
+    // `error: rev`, because a git that cannot resolve the rev answers with its
+    // own `fatal:` line and the narrower check reads that as the tool having run.
     var head: std.json.ObjectMap = .empty;
     try head.put(arena, "cmd", .{ .string = "diff" });
     try head.put(arena, "rev", .{ .string = "HEAD" });
     const shown = try toolGit(std.testing.io, arena, head, null, null);
-    try std.testing.expect(!std.mem.startsWith(u8, shown, "error: rev"));
+    try std.testing.expect(!std.mem.startsWith(u8, shown, "error:"));
+    try std.testing.expect(!std.mem.startsWith(u8, shown, "fatal:"));
+    try std.testing.expect(!std.mem.startsWith(u8, shown, "refused:"));
 }
 
 // The same hole with no colon in it. `git blame .env` and `git diff .env` take
@@ -3324,12 +3329,17 @@ test "git tool refuses a rev that is a bare credentials filename" {
         try std.testing.expect(std.mem.startsWith(u8, out, "refused: "));
     }
     // A revision is not a file, and the tool has to keep answering for those.
+    // `HEAD` and not `HEAD~3`: a runner checks out at depth 1, where a revision
+    // past the first commit does not resolve, and the control below would then
+    // be reading git's own `fatal:` line and passing on it. The checks name no
+    // error rather than this tool's `error: rev`, for the same reason.
     var head: std.json.ObjectMap = .empty;
     try head.put(arena, "cmd", .{ .string = "diff" });
-    try head.put(arena, "rev", .{ .string = "HEAD~3" });
+    try head.put(arena, "rev", .{ .string = "HEAD" });
     const shown = try toolGit(std.testing.io, arena, head, null, null);
     try std.testing.expect(!std.mem.startsWith(u8, shown, "refused:"));
-    try std.testing.expect(!std.mem.startsWith(u8, shown, "error: rev"));
+    try std.testing.expect(!std.mem.startsWith(u8, shown, "error:"));
+    try std.testing.expect(!std.mem.startsWith(u8, shown, "fatal:"));
 }
 
 // The credential exclusions and the model's `path` are a conjunction, not a
@@ -3360,10 +3370,17 @@ test "a scoped git call still leaves the committed credentials out" {
     const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
 
     // `git -C` keeps the test out of whatever directory the runner started in.
+    // `commit.gpgsign=false` and an empty `core.hooksPath` are the developer's
+    // own git configuration turned off for this repository: a machine with
+    // signing on commits has no key this runner holds, and the commit below is
+    // then the only thing in the test that fails, for a reason that has nothing
+    // to do with what it is testing.
     for ([_][]const []const u8{
         &.{ "git", "-C", root, "init", "-q" },
         &.{ "git", "-C", root, "config", "user.email", "a@b.c" },
         &.{ "git", "-C", root, "config", "user.name", "test" },
+        &.{ "git", "-C", root, "config", "commit.gpgsign", "false" },
+        &.{ "git", "-C", root, "config", "core.hooksPath", "" },
         &.{ "git", "-C", root, "add", "-A" },
         &.{ "git", "-C", root, "commit", "-qm", "x" },
     }) |argv| {
@@ -3481,9 +3498,11 @@ test "a git path does not switch the credential exclusions off" {
     // The tool spawns `git` in this process's working directory, so the fixture
     // is built through the same runner and every call below carries `-C root`
     // where the tool would have inherited the directory instead.
+    // `commit.gpgsign=false` and an empty `core.hooksPath` are this developer's
+    // own git configuration turned off, for the reason the other fixture's says.
     const script = try std.fmt.allocPrint(arena,
-        \\git -C '{s}' init -q && git -C '{s}' add -A && git -C '{s}' -c user.email=t@t -c user.name=t commit -qm base
-    , .{ root, root, root });
+        \\git -C '{s}' init -q && git -C '{s}' config commit.gpgsign false && git -C '{s}' config core.hooksPath '' && git -C '{s}' add -A && git -C '{s}' -c user.email=t@t -c user.name=t commit -qm base
+    , .{ root, root, root, root, root });
     const setup = [_][]const u8{ "/bin/sh", "-c", script };
     const made = try runCapped(io, arena, &setup, 1 << 20, net.durationMs(60_000), null, null);
     if (made.term != .exited or made.term.exited != 0) {

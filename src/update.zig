@@ -1123,6 +1123,26 @@ test "update: only a transient failure or a busy provider is retried" {
     try std.testing.expect(net.retryableStatus(.service_unavailable));
     try std.testing.expect(net.retryableStatus(.too_many_requests));
     try std.testing.expect(net.retryableStatus(.request_timeout));
+    // The other two the run's own set names: a 409 and a 425 are a provider
+    // saying the request conflicts or arrived too early, and both are answered
+    // by sending it again.
+    try std.testing.expect(net.retryableStatus(.conflict));
+    try std.testing.expect(net.retryableStatus(.too_early));
+    // The 4xx the set does not name, either side of the ones it does: a
+    // `>= 500` rule that started at 4xx would retry every 4xx, and one that
+    // started at 501 would stop retrying a 500.
+    try std.testing.expect(!net.retryableStatus(.bad_request));
+    try std.testing.expect(!net.retryableStatus(.precondition_failed));
+    try std.testing.expect(!net.retryableStatus(.locked));
+    try std.testing.expect(!net.retryableStatus(.failed_dependency));
+    try std.testing.expect(!net.retryableStatus(.upgrade_required));
+    try std.testing.expect(!net.retryableStatus(.unavailable_for_legal_reasons));
+    // Every status from 500 up is retried, including the ones with no name
+    // here, so a gateway that answers 599 is answered again.
+    try std.testing.expect(net.retryableStatus(.bad_gateway));
+    try std.testing.expect(net.retryableStatus(.gateway_timeout));
+    try std.testing.expect(net.retryableStatus(@enumFromInt(599)));
+    try std.testing.expect(net.retryableStatus(@enumFromInt(500)));
 
     // A name that is not published is a 404 whichever way it is asked for.
     try std.testing.expect(!net.retryableStatus(.not_found));
