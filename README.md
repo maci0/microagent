@@ -36,8 +36,10 @@ a container that has nothing installed. microagent is the other shape:
   re-sent once the provider has produced anything, and a prompt prefix that stays byte-identical so
   the provider's cache keeps hitting.
 - **Small on purpose.** No subagents, no plugins, no TUI. Skills and MCP servers are yours to add. Four public remote
-  tools (web search, library docs, GitHub code search, repository wikis) are on by default, described by
-  this binary rather than by a start-up handshake, so they cost nothing until one is called.
+  tools (web search, library docs, GitHub code search, repository wikis) are off until a
+  `[tools.<name>]` table names one, described by
+  this binary rather than by a start-up handshake, so they cost nothing until one is called and a
+  fresh config sends a query to nobody.
 
 ## What it looks like
 

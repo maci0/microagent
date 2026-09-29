@@ -140,8 +140,8 @@ Tools (`[tools.<name>]` tables in the config):
   `enabled = false` removes a built-in tool (bash, read, write, edit,
   multi_edit, search, ast, git, todo) from the schema and refuses its calls;
   at least one must stay on. The presets web_search, context7, grep_app and deepwiki
-  are public remote MCP servers, on until `enabled = false`, and take `url`,
-  `api_key_env` (the NAME of a variable holding the key), `api_key_header`
+  are public remote MCP servers, off until a [tools.<name>] table sets `enabled = true`, and
+  take `url`, `api_key_env` (the NAME of a variable holding the key), `api_key_header`
   and `timeout` (seconds). A name that is not a tool stops the run with exit
   status 2.
 
@@ -313,12 +313,16 @@ switched on, is an HTTPS endpoint somebody else runs. A call sends it the same t
 arguments, and the handshake sends the client name and version (`microagent`, this build's
 version); the operator of the endpoint sees this machine's IP address, the query the model built and
 the key the entry names, when it names one. Nothing else of the run is sent. The sandbox does not
-confine this traffic. The presets are on by default, and their tools come from a table in this
-binary, so a run with no config reaches no endpoint until the model calls one of those tools, and
+confine this traffic. A preset is off unless the config names it, so a run with no config reaches
+none of those four endpoints; a query the model built out of the task is the operator's to send, and
+naming a preset is the one line that says it may go. The tools of a preset the config did name come
+from a table in this binary, so the run reaches its endpoint only when the model calls one of those
+tools, and
 every one of those tools is described to the model with the same sentence: put nothing in an argument
 that belongs to the repository under review, no code, no path, no file content, no repository name and
-nothing that names a person in it. The guidance is the whole of the control, since the arguments are
-the model's own words; a server the operator configured is a server they chose and describe
+nothing that names a person in it. The guidance is the whole of the control once a preset is on, since
+the arguments are the model's own words; a server the operator configured is a server they chose and
+describe
 themselves. The
 first call is what connects, initializes and asks for the server's own tool list, and a tool the
 server no longer offers is reported then. Set `enabled = false` in a `[tools.<name>]` table to make
@@ -554,15 +558,19 @@ enabled = true
 
 `enabled` takes the TOML booleans `true` and `false` and nothing else, like every boolean in this file.
 
-**Built-ins** are on unless the table says `enabled = false`, and they take no other key. A disabled
+**Built-ins** are on unless the table says `enabled = false`, and they take no other key. A
+**preset** is off unless the table says `enabled = true`: a preset is somebody else's endpoint, and a
+call to one carries the query the model built, so a run ships nothing to those four hosts until the
+config names one. A disabled
 built-in is left out of the tool schema sent to the model, its calls are answered with
 `error: the tool 'x' is disabled by configuration`, and the system prompt ends with one line,
 `Disabled tools: ast, git.`. A run that disables nothing sends the same schema and system prompt, byte
 for byte, as one with no `[tools]` table, so the provider's prompt cache is unaffected. At least one
 built-in must stay on.
 
-**Presets** are public MCP servers, and are on until `enabled = false`. Their tools and schemas are in
-this binary, so a run with no key for one reaches it only when the model calls a tool from it; a call
+**Presets** are public MCP servers, and are off until the table says `enabled = true`. Their tools
+and schemas are in
+this binary, so a run that names one reaches it only when the model calls a tool from it; a call
 to a server that cannot be reached is answered with an error naming it, so a run with no network still
 works. Each is served by the same transport as a `url` table of the same name, so its tools reach the
 model as `mcp__<preset>__<tool>`:

@@ -954,9 +954,9 @@ const Terse = struct { preset: Preset, tool: []const u8, description: []const u8
 /// files in the tree. The tree is what the run was asked about and its operator
 /// did not offer to publish it, so a snippet, a path, a file name or a name
 /// belonging to somebody in it does not go to a search index or a wiki to answer
-/// a coding task. The four presets are on by default, which is why the guidance
-/// is theirs to carry: a server an operator configured is a server they chose
-/// and can describe themselves.
+/// a coding task. A preset is off until the config names it, and once it is on the
+/// guidance is its own to carry, since the arguments are the model's own words and
+/// a server an operator configured is a server they chose and can describe.
 const off_host_note =
     " A call here leaves the machine, so put nothing in an argument that belongs to the repository under review: no code, no path, no file content, no repository name, and nothing that names a person in it.";
 

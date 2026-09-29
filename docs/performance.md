@@ -114,8 +114,8 @@ run-to-run noise, so there is no build flag to reach for either.
 | the stock system prompt | escaped per run (about 12 instr per byte) | **escaped at compile time** | a run with no reply style and no skills sends the same 3 KB every time |
 | a JSON string's plain runs | one table lookup per byte | **a word at a time** | after a plain byte, eight bytes are tested at once; compaction of a 1 MB conversation fell 37.2 M to 31.0 M instr, and the byte loop is unchanged for text that is mostly escapes or non-ASCII |
 | the sandbox path check | a `realpath` of `.` per `write` and `edit` | **none** | the working directory is `writable_roots[0]`, taken at startup; a `realpath` is an `openat`, a `readlink` and a `close` |
-| a connection to a host with several addresses, default config | 4,607 ms before the first request | **2,820 ms** | `std.net.HostName.connect` dials every address a name resolves to as its own async task and keeps the first, and `Io.Threaded` runs a task inline when every async slot is busy -- four slots for four handshakes and their fan-out, so a connection cost the sum of the host's addresses instead of the fastest and the handshakes queued behind each other. Sixteen slots is the measured knee; the wait is per connection and a run opens several |
-| the four presets at run start, default config | 2,820 ms before the first request | **0.6 ms** | none of them is handshaken: their tools and schemas are in this binary, so the model sees them with no request, and the first call to one of their tools is what connects. The row above still governs that call, and every keyed preset, `url` server and provider connection |
+| a connection to a host with several addresses, all four presets on | 4,607 ms before the first request | **2,820 ms** | `std.net.HostName.connect` dials every address a name resolves to as its own async task and keeps the first, and `Io.Threaded` runs a task inline when every async slot is busy -- four slots for four handshakes and their fan-out, so a connection cost the sum of the host's addresses instead of the fastest and the handshakes queued behind each other. Sixteen slots is the measured knee; the wait is per connection and a run opens several |
+| the four presets at run start, all four on | 2,820 ms before the first request | **0.6 ms** | none of them is handshaken: their tools and schemas are in this binary, so the model sees them with no request, and the first call to one of their tools is what connects. The row above still governs that call, and every keyed preset, `url` server and provider connection |
 | the session store walked per run | two full walks and two sorts | **one walk, one sort** | `session.open` pruned before creating the log and again after, so every run start listed, copied and sorted the whole store twice over a directory of up to 200 names. Pruning once with the run's own log already in place settles on the same size, and it runs on the path where no log could be opened as well, which is the case the pre-open prune was for |
 
 Four of the rows above are one body of work on one run, and they compound. Between `v0.4.0` and the
@@ -348,8 +348,8 @@ put the whole MCP path (spawn, two round trips, and the reap at the end) at 0.7 
 the boot overlap was worth touching.
 
 The fan-out row is a product measurement, `hyperfine -N -w 1 -r 20` over one stub run
-(`bench/stub_provider.py` on loopback, 20 frames, `--max-turns 1`) with the default config, so all
-four presets are handshaken before the first request: median 4,607 ms at four async slots and
+(`bench/stub_provider.py` on loopback, 20 frames, `--max-turns 1`) with a config that names all four
+presets, so all four are handshaken before the first request: median 4,607 ms at four async slots and
 2,820 ms at sixteen, and 1 ms either way with `enabled = false` on all four. The four presets are
 not four equal parts. One at a time, `mcp.context7.com` answers in 2.8 s and `mcp.deepwiki.com`,
 which resolves to five addresses at 0.16 s a connect, takes 4,368 ms at four slots against
@@ -365,7 +365,7 @@ against 19.8 MB and `VmHWM` 3.4 MB against 3.9 MB, and `bench/maxrss.py --versio
 one: the cost is a wait, which no instruction count carries, so the guard is a test that fails if
 the limit drops under the measured knee.
 
-The preset row is the same command and stub, default config, after the four presets stopped being
+The preset row is the same command and stub, the four presets on, after they stopped being
 handshaken at start: median 0.6 ms over fifteen runs (0.7 ms with every preset disabled, so the
 table itself costs nothing at start). That is the whole of the run's wait before its provider
 request on this machine. A `tools/call` to a preset is where its connection is opened, and that

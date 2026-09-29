@@ -895,8 +895,8 @@ const help_text =
     \\  `enabled = false` removes a built-in tool (bash, read, write, edit,
     \\  multi_edit, search, ast, git, todo) from the schema and refuses its calls;
     \\  at least one must stay on. The presets web_search, context7, grep_app and deepwiki
-    \\  are public remote MCP servers, on until `enabled = false`, and take `url`,
-    \\  `api_key_env` (the NAME of a variable holding the key), `api_key_header`
+    \\  are public remote MCP servers, off until a [tools.<name>] table sets `enabled = true`, and
+    \\  take `url`, `api_key_env` (the NAME of a variable holding the key), `api_key_header`
     \\  and `timeout` (seconds). A name that is not a tool stops the run with exit
     \\  status 2.
     \\

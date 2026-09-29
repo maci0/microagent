@@ -159,6 +159,15 @@ release, and `microagent update` moves you to it.
 
 ### Changed
 
+- The four public remote presets (`web_search`, `context7`, `grep_app`,
+  `deepwiki`) are off until a `[tools.<name>]` table sets `enabled = true`,
+  where they were on until a table set `enabled = false`. A call to one carries
+  the query the model built out of the task, so an install that never asked for
+  a third party's search index was sending one on every question that reached
+  for it. Naming a preset is the line that says the query may go; the tools,
+  the schemas and the off-host note in each description are unchanged, and the
+  threat model already described this as the default.
+
 - `make lint-lock` asks the linter lock the three questions it has been asking
   the Harbor lock, so both dependency sets are checked the same way. It takes
   the lock beside the manifest it was compiled from rather than deriving one

@@ -185,10 +185,10 @@ fn toolTarget(name: []const u8) ?ToolTarget {
     return null;
 }
 
-/// The options a preset table set. Presets are on until the file says otherwise: a preset whose
-/// server cannot be reached is named on stderr at start and skipped.
+/// The options a preset table set. A preset is a third party's endpoint, and a call to
+/// one carries the query the model built, so it is off until the file names it.
 const PresetSetting = struct {
-    enabled: bool = true,
+    enabled: bool = false,
     url: []const u8 = "",
     api_key_env: []const u8 = "",
     api_key_header: []const u8 = mcp_mod.default_key_header,
@@ -1630,16 +1630,6 @@ test "the sandbox is the [sandbox] table with enabled and writable, and only tru
 
 const preset_count = @typeInfo(mcp_mod.Preset).@"enum".fields.len;
 
-/// `parse` with every preset switched off, for tests that count the servers the file itself declared.
-fn parseBare(arena: std.mem.Allocator, text: []const u8) Config {
-    const off = comptime blk: {
-        var t: []const u8 = "";
-        for (@typeInfo(mcp_mod.Preset).@"enum".fields) |f| t = t ++ "[tools." ++ f.name ++ "]\nenabled = false\n";
-        break :blk t;
-    };
-    return parse(arena, std.fmt.allocPrint(arena, "{s}{s}", .{ off, text }) catch @panic("out of memory"));
-}
-
 test "an MCP server is one [[mcp]] table, and a broken one is named and skipped" {
     var state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer state.deinit();
@@ -1660,7 +1650,7 @@ test "an MCP server is one [[mcp]] table, and a broken one is named and skipped"
         \\name = "no-command"
         \\
     ;
-    const config = parseBare(arena, text);
+    const config = parse(arena, text);
     // The third table has no command, so it is skipped with the file named
     // first rather than reaching a spawn with an empty argv.
     try std.testing.expectEqualStrings("mcp", config.problem.?.key);
@@ -1679,7 +1669,7 @@ test "an MCP server is one [[mcp]] table, and a broken one is named and skipped"
     try std.testing.expectEqual(@as(usize, 0), config.mcp[1].env.len);
 
     // A comment trails `args` and `env` the way it trails any other value.
-    const commented = parseBare(arena, "[[mcp]]\nname = \"a\"\ncommand = \"b\"\nargs = [\"-y\", \"x\"] # flags\nenv = { K = \"v\" } # one\n");
+    const commented = parse(arena, "[[mcp]]\nname = \"a\"\ncommand = \"b\"\nargs = [\"-y\", \"x\"] # flags\nenv = { K = \"v\" } # one\n");
     try std.testing.expect(commented.problem == null);
     try std.testing.expectEqual(@as(usize, 2), commented.mcp[0].args.len);
     try std.testing.expectEqualStrings("x", commented.mcp[0].args[1]);
@@ -1689,7 +1679,7 @@ test "an MCP server is one [[mcp]] table, and a broken one is named and skipped"
     // A quoted key is the same name as a bare one: the quotes are how the file
     // spells it, not part of what the variable is called. Before this the
     // quotes reached the child, and the server saw a variable named `"LOG"`.
-    const quoted_key = parseBare(arena, "[[mcp]]\nname = \"a\"\ncommand = \"b\"\nenv = { \"LOG\" = \"debug\" }\n");
+    const quoted_key = parse(arena, "[[mcp]]\nname = \"a\"\ncommand = \"b\"\nenv = { \"LOG\" = \"debug\" }\n");
     try std.testing.expect(quoted_key.problem == null);
     try std.testing.expectEqual(@as(usize, 1), quoted_key.mcp[0].env.len);
     try std.testing.expectEqualStrings("LOG", quoted_key.mcp[0].env[0][0]);
@@ -1697,38 +1687,38 @@ test "an MCP server is one [[mcp]] table, and a broken one is named and skipped"
 
     // A key this reader does not have inside a table is a problem like any
     // other, and the entry still applies.
-    const extra = parseBare(arena, "[[mcp]]\nname = \"a\"\ncommand = \"b\"\ncwd = \"/tmp\"\n");
+    const extra = parse(arena, "[[mcp]]\nname = \"a\"\ncommand = \"b\"\ncwd = \"/tmp\"\n");
     try std.testing.expectEqualStrings("cwd", extra.problem.?.key);
     try std.testing.expectEqual(@as(usize, 1), extra.mcp.len);
 
     // A server name is half of every exposed tool name, so a name that cannot
     // be spelled is refused here rather than offered to a provider inside
     // `mcp__bad name__tool`.
-    const bad_name = parseBare(arena, "[[mcp]]\nname = \"bad name\"\ncommand = \"b\"\n");
+    const bad_name = parse(arena, "[[mcp]]\nname = \"bad name\"\ncommand = \"b\"\n");
     try std.testing.expectEqual(Problem.Kind.bad_server, bad_name.problem.?.kind);
     try std.testing.expectEqual(@as(usize, 0), bad_name.mcp.len);
-    const double = parseBare(arena, "[[mcp]]\nname = \"a__b\"\ncommand = \"b\"\n");
+    const double = parse(arena, "[[mcp]]\nname = \"a__b\"\ncommand = \"b\"\n");
     try std.testing.expectEqual(Problem.Kind.bad_server, double.problem.?.kind);
 
     // Two tables with one name would collide on one exposed name, so the
     // second is skipped and named.
-    const twice = parseBare(arena, "[[mcp]]\nname = \"a\"\ncommand = \"b\"\n[[mcp]]\nname = \"a\"\ncommand = \"c\"\n");
+    const twice = parse(arena, "[[mcp]]\nname = \"a\"\ncommand = \"b\"\n[[mcp]]\nname = \"a\"\ncommand = \"c\"\n");
     try std.testing.expectEqual(Problem.Kind.duplicate_server, twice.problem.?.kind);
     try std.testing.expectEqual(@as(usize, 1), twice.mcp.len);
     try std.testing.expectEqualStrings("b", twice.mcp[0].command);
 
     // Args that are not a list, and an env that is not an inline table, are
     // refused rather than read as empty.
-    const bad_args = parseBare(arena, "[[mcp]]\nname = \"a\"\ncommand = \"b\"\nargs = \"-y\"\n");
+    const bad_args = parse(arena, "[[mcp]]\nname = \"a\"\ncommand = \"b\"\nargs = \"-y\"\n");
     try std.testing.expectEqualStrings("args", bad_args.problem.?.key);
-    const bad_env = parseBare(arena, "[[mcp]]\nname = \"a\"\ncommand = \"b\"\nenv = [\"K\"]\n");
+    const bad_env = parse(arena, "[[mcp]]\nname = \"a\"\ncommand = \"b\"\nenv = [\"K\"]\n");
     try std.testing.expectEqualStrings("env", bad_env.problem.?.key);
 
     // `[mcp]`, one bracket short of the header the servers are declared under.
     // The keys under it are a table nobody else writes, so they are named
     // rather than passed over: a run whose server never starts is a run whose
     // tools are missing, and silence reads as a server that had none to give.
-    const one_bracket = parseBare(arena, "[mcp]\nname = \"a\"\ncommand = \"b\"\n");
+    const one_bracket = parse(arena, "[mcp]\nname = \"a\"\ncommand = \"b\"\n");
     try std.testing.expectEqualStrings("[mcp]", one_bracket.problem.?.key);
     try std.testing.expectEqual(Problem.Kind.unknown_key, one_bracket.problem.?.kind);
     try std.testing.expectEqual(@as(usize, 0), one_bracket.mcp.len);
@@ -1756,7 +1746,8 @@ test "the shipped config template applies" {
 
     // Every example in the template is a comment, so a user who copies the
     // file gets the stock prompt and nothing that spawns a process, reads a
-    // directory they did not write or denies a command they did not name.
+    // directory they did not write, denies a command they did not name, or
+    // offers a query to a third party's search index.
     try std.testing.expectEqualStrings("", config.system_prompt_extra);
     try std.testing.expect(config.agents_files == null);
     try std.testing.expect(config.skills == null);
@@ -1767,7 +1758,7 @@ test "the shipped config template applies" {
     try std.testing.expectEqualStrings("", config.base_url);
     try std.testing.expectEqualStrings("", config.api_key);
     try std.testing.expectEqual(@as(usize, 0), config.disabled_tools.count());
-    try std.testing.expectEqual(preset_count, config.mcp.len);
+    try std.testing.expectEqual(@as(usize, 0), config.mcp.len);
 }
 
 /// The template is a handful of commented lines; a bigger file is not one.
@@ -1905,33 +1896,47 @@ fn fuzzConfig(_: void, smith: *std.testing.Smith) !void {
     }
 }
 
-test "every built-in tool and every preset is on until the file says otherwise" {
+test "every built-in tool is on until the file says otherwise, and every preset is off until it names one" {
     var state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer state.deinit();
     const arena = state.allocator();
 
     const empty = parse(arena, "");
     try std.testing.expectEqual(@as(usize, 0), empty.disabled_tools.count());
-    try std.testing.expectEqual(preset_count, empty.mcp.len);
+    // A preset is a third party's endpoint, so a file that names none starts
+    // the run with none of them: the count is the default, not the count the
+    // file asked for.
+    try std.testing.expectEqual(@as(usize, 0), empty.mcp.len);
     try std.testing.expect(empty.tool_problem == null);
 
-    // A table with no `enabled` key leaves the tool on. The other key is
-    // there to say the two are read apart: a `timeout` under a preset is the
-    // one option a table can carry without naming `enabled`, so a reader that
-    // treated the table as an `enabled` switch would either drop the timeout
-    // or switch the tool off, and only the timeout below tells them apart.
+    // A table with no `enabled` key leaves a built-in tool on and leaves a
+    // preset off. The other key is there to say the two are read apart: a
+    // `timeout` under a preset is the one option a table can carry without
+    // naming `enabled`, so a reader that treated the table as an `enabled`
+    // switch would either drop the timeout or switch the tool off, and only
+    // the timeout below tells them apart.
     const bare = parse(arena, "[tools.bash]\n[tools.web_search]\ntimeout = 10\n");
     try std.testing.expect(bare.problem == null and bare.tool_problem == null);
     try std.testing.expectEqual(@as(usize, 0), bare.disabled_tools.count());
-    try std.testing.expectEqual(preset_count, bare.mcp.len);
-    var web: ?u32 = null;
-    var untouched: u32 = 0;
-    for (bare.mcp) |entry| {
-        if (std.mem.eql(u8, entry.name, "web_search")) web = entry.timeout_s else untouched = entry.timeout_s;
-    }
-    try std.testing.expectEqual(@as(?u32, 10), web);
-    // And the presets it did not touch keep the default.
-    try std.testing.expectEqual(mcp_mod.default_timeout_s, untouched);
+    try std.testing.expectEqual(@as(usize, 0), bare.mcp.len);
+
+    // Naming one is what puts it in this run, with the timeout the table set
+    // and the defaults for the rest of its options.
+    const on = parse(arena, "[tools.web_search]\nenabled = true\ntimeout = 10\n");
+    try std.testing.expect(on.problem == null and on.tool_problem == null);
+    try std.testing.expectEqual(@as(usize, 1), on.mcp.len);
+    try std.testing.expectEqualStrings("web_search", on.mcp[0].name);
+    try std.testing.expectEqual(@as(u32, 10), on.mcp[0].timeout_s);
+    try std.testing.expectEqualStrings(mcp_mod.default_key_header, on.mcp[0].api_key_header);
+    // And a file that names every preset gets every preset, which is the count
+    // a default that shipped them all would also have produced, and a
+    // regression to a default that ships them all again is not this test.
+    const every = comptime blk: {
+        var t: []const u8 = "";
+        for (@typeInfo(mcp_mod.Preset).@"enum".fields) |f| t = t ++ "[tools." ++ f.name ++ "]\nenabled = true\n";
+        break :blk t;
+    };
+    try std.testing.expectEqual(preset_count, parse(arena, every).mcp.len);
 }
 
 test "a built-in tool is switched off by enabled = false, and only that spelling of a boolean" {
@@ -1939,7 +1944,7 @@ test "a built-in tool is switched off by enabled = false, and only that spelling
     defer state.deinit();
     const arena = state.allocator();
 
-    const config = parseBare(arena,
+    const config = parse(arena,
         \\[tools.ast]
         \\enabled = false
         \\
@@ -1966,7 +1971,7 @@ test "a built-in tool is switched off by enabled = false, and only that spelling
     // A built-in is not a remote server, whatever its table says.
     try std.testing.expectEqual(@as(usize, 0), config.mcp.len);
 
-    const junk = parseBare(arena, "[tools.ast]\nenabled = maybe\n[tools.git]\nenabled = false\n");
+    const junk = parse(arena, "[tools.ast]\nenabled = maybe\n[tools.git]\nenabled = false\n");
     try std.testing.expectEqualStrings("ast", junk.tool_problem.?.name);
     try std.testing.expectEqualStrings("enabled", junk.tool_problem.?.key);
     try std.testing.expectEqual(@as(@TypeOf(junk.tool_problem.?.kind), .bad_value), junk.tool_problem.?.kind);
@@ -1976,7 +1981,7 @@ test "a built-in tool is switched off by enabled = false, and only that spelling
     // `yes`, `0` and a quoted boolean are not booleans.
     for ([_][]const u8{ "yes", "0", "\"off\"", "False" }) |value| {
         const text = try std.fmt.allocPrint(arena, "[tools.ast]\nenabled = {s}\n", .{value});
-        const bad = parseBare(arena, text);
+        const bad = parse(arena, text);
         try std.testing.expectEqualStrings("ast", bad.tool_problem.?.name);
         try std.testing.expectEqual(@as(usize, 0), bad.disabled_tools.count());
     }
@@ -1987,7 +1992,7 @@ test "a preset is one more remote server once it is enabled, with its options va
     defer state.deinit();
     const arena = state.allocator();
 
-    const config = parseBare(arena,
+    const config = parse(arena,
         \\[[mcp]]
         \\name = "fs"
         \\command = "npx"
@@ -2025,7 +2030,7 @@ test "a preset is one more remote server once it is enabled, with its options va
     try std.testing.expectEqual(@as(u32, 30), docs.timeout_s);
 
     // Plain http is for this machine only, and a loopback one is allowed.
-    const local = parseBare(arena, "[tools.grep_app]\nenabled = true\nurl = \"http://127.0.0.1:9000/mcp\"\n");
+    const local = parse(arena, "[tools.grep_app]\nenabled = true\nurl = \"http://127.0.0.1:9000/mcp\"\n");
     try std.testing.expect(local.tool_problem == null);
     try std.testing.expectEqualStrings("http://127.0.0.1:9000/mcp", local.mcp[0].url);
 
@@ -2049,7 +2054,7 @@ test "a preset is one more remote server once it is enabled, with its options va
     };
     for (bad) |entry| {
         const text = try std.fmt.allocPrint(arena, "[tools.web_search]\nenabled = true\n{s}\n", .{entry.line});
-        const parsed = parseBare(arena, text);
+        const parsed = parse(arena, text);
         const problem = parsed.tool_problem.?;
         std.testing.expectEqualStrings("web_search", problem.name) catch |err| {
             std.debug.print("line {s}\n", .{entry.line});
@@ -2061,7 +2066,7 @@ test "a preset is one more remote server once it is enabled, with its options va
         };
     }
     // An empty variable name is no key, not an error.
-    const unset = parseBare(arena, "[tools.web_search]\nenabled = true\napi_key_env = \"\"\n");
+    const unset = parse(arena, "[tools.web_search]\nenabled = true\napi_key_env = \"\"\n");
     try std.testing.expect(unset.tool_problem == null);
     try std.testing.expectEqualStrings("", unset.mcp[0].api_key_env);
 }
@@ -2119,12 +2124,12 @@ test "a key a tool table does not have is noted and the default kept" {
     const arena = state.allocator();
 
     // A built-in takes only `enabled`.
-    const builtin = parseBare(arena, "[tools.bash]\nurl = \"https://x.example\"\n");
+    const builtin = parse(arena, "[tools.bash]\nurl = \"https://x.example\"\n");
     try std.testing.expectEqualStrings("url", builtin.problem.?.key);
     try std.testing.expectEqual(Problem.Kind.unknown_key, builtin.problem.?.kind);
     try std.testing.expect(builtin.tool_problem == null);
 
-    const preset = parseBare(arena, "[tools.context7]\nenabled = true\nretries = 3\n");
+    const preset = parse(arena, "[tools.context7]\nenabled = true\nretries = 3\n");
     try std.testing.expectEqualStrings("retries", preset.problem.?.key);
     try std.testing.expectEqual(Problem.Kind.unknown_key, preset.problem.?.kind);
     try std.testing.expectEqual(@as(usize, 1), preset.mcp.len);
@@ -2136,7 +2141,7 @@ test "an [[mcp]] table is a command or a url, and a url server takes the remote 
     defer state.deinit();
     const arena = state.allocator();
 
-    const config = parseBare(arena,
+    const config = parse(arena,
         \\[[mcp]]
         \\name = "docs"
         \\url = "https://docs.example/mcp"
@@ -2177,13 +2182,13 @@ test "an [[mcp]] table is a command or a url, and a url server takes the remote 
         "name = \"a\"\ncommand = \"c\"\nenv = { K = \"a\x00b\" }\n",
     };
     for (broken) |body| {
-        const parsed = parseBare(arena, try std.fmt.allocPrint(arena, "[[mcp]]\n{s}", .{body}));
+        const parsed = parse(arena, try std.fmt.allocPrint(arena, "[[mcp]]\n{s}", .{body}));
         try std.testing.expectEqual(@as(usize, 0), parsed.mcp.len);
         try std.testing.expect(parsed.problem != null);
     }
 
     // A preset and a table of the same name would collide on one tool name.
-    const twice = parseBare(arena, "[[mcp]]\nname = \"context7\"\ncommand = \"c\"\n[tools.context7]\nenabled = true\n");
+    const twice = parse(arena, "[[mcp]]\nname = \"context7\"\ncommand = \"c\"\n[tools.context7]\nenabled = true\n");
     try std.testing.expectEqual(@as(usize, 1), twice.mcp.len);
     try std.testing.expectEqual(Problem.Kind.duplicate_server, twice.problem.?.kind);
     try std.testing.expectEqualStrings("c", twice.mcp[0].command);

@@ -194,7 +194,7 @@ That 6,516 is the entire fixed cost of a request, and the schemas are nearly two
 every turn and cached from the second turn on, so it is a prefix cost, not a per-turn one (see
 [Un-cacheable request bytes](#un-cacheable-request-bytes) for the part that is not).
 
-With the three remote presets on the tool schemas are 7,519 bytes and the fixed cost 9,912: the five
+With the remote presets on the tool schemas are 7,519 bytes and the fixed cost 9,912: the five
 remote tools ship compact descriptions and schemas (`terse_tools` in `src/mcp.zig`, used only for the
 preset's own host), because the servers send 8.4 KB for them, of which most is examples and emphasis.
 

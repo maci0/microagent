@@ -109,31 +109,32 @@
 # [tools.git]
 # enabled = false
 
-# Four public remote MCP servers, on by default. Their tools and schemas are in the binary, so a run
-# with no key for one does not contact it until one of its tools is called; a server that cannot be
-# reached is named on stderr then. `enabled = false` makes no request to it at all. Their tools are offered as mcp__<name>__<tool>
+# Four public remote MCP servers, off until a table below says `enabled = true`: a call to one
+# carries the query the model built out of your task, so naming one is what says it may go. Their
+# tools and schemas are in the binary, so a run that names one does not contact it until one of its
+# tools is called; a server that cannot be reached is named on stderr then. Their tools are offered as mcp__<name>__<tool>
 # (mcp__context7__query-docs, mcp__grep_app__searchGitHub, ...). None needs a
 # key today. Each takes the same optional keys as a `url` server above: url
 # (another endpoint), api_key_env, api_key_header and timeout.
 #
 # Web search and page fetch (https://mcp.exa.ai/mcp).
 # [tools.web_search]
-# enabled = false
+# enabled = true
 # timeout = 30
 # api_key_env = "EXA_API_KEY"   # only for a plan that has a key
 #
 # Library documentation (https://mcp.context7.com/mcp).
 # [tools.context7]
-# enabled = false
+# enabled = true
 #
 # Code search over public GitHub repositories (https://mcp.grep.app).
 # [tools.grep_app]
-# enabled = false
+# enabled = true
 # url = "https://mcp.grep.app"
 #
 # Documentation and questions about a GitHub repository (https://mcp.deepwiki.com/mcp).
 # [tools.deepwiki]
-# enabled = false
+# enabled = true
 
 # Denied shell commands for the `bash` tool. Any command containing one of these
 # command names or sequences (e.g. `sudo`, `/usr/bin/sudo`, `rm -rf`) is refused
