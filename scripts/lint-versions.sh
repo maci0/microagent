@@ -32,6 +32,19 @@ ruff_pin="$(sed -n 's/^ruff==\([^ ]*\).*/\1/p' lint-requirements.txt)"
 yamllint_pin="$(sed -n 's/^yamllint==\([^ ]*\).*/\1/p' lint-requirements.txt)"
 { [ "$ruff_pin" = "$RUFF_VERSION" ] && [ "$yamllint_pin" = "$YAMLLINT_VERSION" ]; } || {
   echo "lint-requirements.txt pins ruff==$ruff_pin and yamllint==$yamllint_pin, not $RUFF_VERSION and $YAMLLINT_VERSION: CI installs that file, so a bump here has to bump the Makefile too, and the file is recompiled from lint-requirements.in with: uv pip compile --generate-hashes --python-version 3.12 --universal -o lint-requirements.txt lint-requirements.in" >&2; bad=1; }
+# The manifest the lock is compiled from is read too. Every other record of a pin
+# is checked, and a bump that stops at this file is the one drift left standing:
+# the compiled lock still installs the old version, so the gate stays green, and
+# the recompile someone runs next month then lands a linter bump nobody reviewed.
+# Both files are read by bare name, as the one above is.
+for source in lint-requirements.in lint-requirements.txt; do
+  test -f "$source" || { echo "no $source, so the linter pins cannot be checked" >&2; exit 1; }
+done
+ruff_source="$(sed -n 's/^ruff==\([^ ]*\).*/\1/p' lint-requirements.in)"
+yamllint_source="$(sed -n 's/^yamllint==\([^ ]*\).*/\1/p' lint-requirements.in)"
+{ [ -n "$ruff_source" ] && [ -n "$yamllint_source" ] && [ "$ruff_source" = "$ruff_pin" ] && [ "$yamllint_source" = "$yamllint_pin" ] && [ "$ruff_source" = "$RUFF_VERSION" ] && [ "$yamllint_source" = "$YAMLLINT_VERSION" ]; } || {
+  echo "lint-requirements.in names ruff==$ruff_source and yamllint==$yamllint_source, where lint-requirements.txt names ruff==$ruff_pin and yamllint==$yamllint_pin, and the gate runs $RUFF_VERSION and $YAMLLINT_VERSION: the manifest uv compiles from has to name the versions CI installs, or the next recompile lands a linter bump no run gated" >&2;
+  echo "a bump to either has to bump RUFF_VERSION or YAMLLINT_VERSION, lint-requirements.in, and lint-requirements.txt, in the same change" >&2; bad=1; }
 ruff_required="$(sed -n 's/^required-version = "\(.*\)"/\1/p' ruff.toml)"
 [ "$ruff_required" = "$RUFF_VERSION" ] || {
   echo "ruff.toml requires ruff $ruff_required, not $RUFF_VERSION: a contributor running 'ruff check --config ruff.toml' directly is told nothing by the gate, and 'required-version' is the one pin ruff reads there" >&2;

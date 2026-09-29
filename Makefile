@@ -1256,7 +1256,10 @@ check-reproducible: zig-version
 # with the digests in another order, is caught here. The declared license is
 # the one LICENSE's first line names, taken over the package and every file with
 # the pins' NOASSERTION left out and sort -u collapsing the rest, so a single
-# line is left only when the document and the tree agree on the grant.
+# line is left only when the document and the tree agree on the grant. The role
+# each pin carries is the third count: a pin the document records as declared is
+# one the manifests record as a root, so the ninety the benchmark harness pulls
+# in cannot be described as direct dependencies of the tree.
 check-sbom:
 	@set -eu; \
 	dir="$$(mktemp -d)"; \
@@ -1291,6 +1294,12 @@ check-sbom:
 	named="$$(grep -c '"referenceLocator": "pkg:pypi/' "$$doc")"; \
 	test "$$pins" -eq "$$named" || { \
 	  echo "the manifests pin $$pins packages and $$doc names $$named of them" >&2; \
+	  exit 1; \
+	}; \
+	declared_pins="$$(grep -c '"comment": "Declared in ' "$$doc")"; \
+	roots="$$(grep -h -c '^[[:space:]]*# via -r ' lint-requirements.txt $(HARBOR_DIR)/requirements.lock | awk '{ n += $$1 } END { print n + 0 }')"; \
+	test "$$declared_pins" -eq "$$roots" || { \
+	  echo "$$doc records $$declared_pins pins as declared where the manifests record $$roots as their roots: the role each pin carries is read out of the manifests, so a pin described as a direct dependency is one the manifest does not name" >&2; \
 	  exit 1; \
 	}; \
 	echo "$$doc names both stand-in assets with their digests and all $$pins declared pins"

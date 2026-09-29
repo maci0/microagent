@@ -102,9 +102,28 @@ created="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 # One line per pin, the manifest that declares it last, deduplicated on the pin
 # so a package both manifests name is described once, by the first of them.
+# The third field is what the manifest's own `via` comment says the pin is
+# there for, and it is read rather than written because the two sets are a
+# linter's two packages and the benchmark harness's ninety: a document that
+# called boto3 a linter would describe a role nothing in this tree gives it,
+# and a role read out of the lock cannot drift from the lock.
 pins="$(
 	for manifest in $manifests; do
-		awk -v manifest="$manifest" '/^[A-Za-z0-9_.-]+==/ { print $1 "|" manifest }' "$manifest"
+		awk -v manifest="$manifest" '
+			function flush() { if (cur != "") print cur "|" manifest "|" parents; cur = ""; parents = ""; wrapped = 0 }
+			/^[A-Za-z0-9_.-]+==/ { flush(); cur = $1; next }
+			cur == "" { next }
+			# `    # via <parent>` names the parents on the comment line itself.
+			/^[[:space:]]*# via[[:space:]]+/ {
+				wrapped = 0
+				for (i = 3; i <= NF; i++) parents = parents " " $i
+				next
+			}
+			# `    # via` with nothing after it puts the parents on the lines below.
+			/^[[:space:]]*# via[[:space:]]*$/ { wrapped = 1; next }
+			wrapped && /^[[:space:]]*#   [^ ]/ { for (i = 1; i <= NF; i++) if ($i != "#") parents = parents " " $i; next }
+			END { flush() }
+		' "$manifest"
 	done | sort -u -t'|' -k1,1
 )"
 test -n "$pins" || { echo "no manifest names a package, so the inventory would claim the tree pins nothing" >&2; exit 1; }
@@ -195,9 +214,24 @@ out="$dist/microagent-$tag.spdx.json"
 	printf '    }'
 	# A here-document rather than a pipe: a pipe would run the loop in a
 	# subshell, and the separator each entry after the first needs is state.
-	while IFS='|' read -r pin manifest; do
+	while IFS='|' read -r pin manifest via; do
 		name="${pin%%==*}"
 		pin_version="${pin#*==}"
+		# The role is what the manifest records, in each of the three shapes a
+		# `via` comment takes. A pin the manifest names no parent for says so
+		# rather than being described as a linter or the adapter, which is the
+		# one role nothing in this tree can support from an absent record.
+		case "$via" in
+			" -r "*)
+				role="Declared in $manifest, which uv resolves directly for the gate or the benchmark, and in no published asset."
+				;;
+			" "*)
+				role="Pinned in $manifest as a dependency of${via}, resolved by uv and asked for by nothing here, and in no published asset."
+				;;
+			*)
+				role="Pinned in $manifest, which records no parent for it, and in no published asset."
+				;;
+		esac
 		printf ',\n'
 		printf '    {\n'
 		printf '      "SPDXID": "SPDXRef-Package-%s-%s",\n' "$name" "$pin_version"
@@ -215,7 +249,7 @@ out="$dist/microagent-$tag.spdx.json"
 		printf '          "referenceLocator": "pkg:pypi/%s@%s"\n' "$name" "$pin_version"
 		printf '        }\n'
 		printf '      ],\n'
-		printf '      "comment": "Pinned in %s, for a linter the gate runs or for the benchmark adapter, and in no published asset."\n' "$manifest"
+		printf '      "comment": "%s"\n' "$role"
 		printf '    }'
 	done <<EOF
 $pins
