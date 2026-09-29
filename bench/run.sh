@@ -7,9 +7,10 @@
 #   bench/run.sh [agent ...]        default: microagent
 #   bench/run.sh microagent kimi
 #
-# Results are appended to bench/results.jsonl (one JSON object per run) and a
-# table is printed. A fresh work directory per (task, agent) keeps runs from
-# reading each other's tree.
+# Results are appended to bench/results.jsonl (one JSON object per run, each
+# carrying the `run` that wrote it, so a re-measurement is not a duplicate row)
+# and a table is printed. A fresh work directory per (task, agent) keeps runs
+# from reading each other's tree.
 set -u
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -22,6 +23,13 @@ tasks_dir="$root/bench/tasks"
 work_root="${BENCH_WORK:-${TMPDIR:-/tmp}/microagent-bench}"
 results="$root/bench/results.jsonl"
 timeout_s="${BENCH_TIMEOUT:-600}"
+# Every row of this invocation carries the same `run`, because the file is
+# appended to and a re-run of the same script writes rows beside the ones it
+# wrote before: a second row for one (agent, task) is a re-measurement nobody
+# can tell from a row this run wrote twice. The reader groups by `run` and
+# takes the rows of one invocation; a row with no `run` is from before this
+# field existed and reads as a run of its own.
+run_id="${BENCH_RUN_ID:-$(date +%Y%m%dT%H%M%S)-$$}"
 
 agents=${*:-microagent}
 
@@ -58,14 +66,14 @@ for agent in $agents; do
 		# the row is written as an error instead.
 		if ! ( cd "$work" && sh "$task_dir/setup.sh" ) >"$work_root/$task.setup.log" 2>&1; then
 			printf '%-10s %-14s %8s %10s %8s  %s\n' "$agent" "$task" - - - setup-error
-			printf '{"agent":"%s","task":"%s","wall_s":null,"tokens":null,"lines":"n/a","result":"setup-error"}\n' \
-				"$agent" "$task" >>"$results"
+			printf '{"run":"%s","agent":"%s","task":"%s","wall_s":null,"tokens":null,"lines":"n/a","result":"setup-error"}\n' \
+				"$run_id" "$agent" "$task" >>"$results"
 			continue
 		fi
 		if ! ( cd "$work" && git init -q && git add -A && git -c user.email=b@b -c user.name=b commit -qm base ) >/dev/null 2>&1; then
 			printf '%-10s %-14s %8s %10s %8s  %s\n' "$agent" "$task" - - - commit-error
-			printf '{"agent":"%s","task":"%s","wall_s":null,"tokens":null,"lines":"n/a","result":"commit-error"}\n' \
-				"$agent" "$task" >>"$results"
+			printf '{"run":"%s","agent":"%s","task":"%s","wall_s":null,"tokens":null,"lines":"n/a","result":"commit-error"}\n' \
+				"$run_id" "$agent" "$task" >>"$results"
 			continue
 		fi
 
@@ -82,8 +90,8 @@ for agent in $agents; do
 		# empty tree.
 		if ! cmd=$(argv_for "$agent"); then
 			printf '%-10s %-14s %8s %10s %8s  %s\n' "$agent" "$task" - - - argv-error
-			printf '{"agent":"%s","task":"%s","wall_s":null,"tokens":null,"lines":"n/a","result":"argv-error"}\n' \
-				"$agent" "$task" >>"$results"
+			printf '{"run":"%s","agent":"%s","task":"%s","wall_s":null,"tokens":null,"lines":"n/a","result":"argv-error"}\n' \
+				"$run_id" "$agent" "$task" >>"$results"
 			continue
 		fi
 		# No clock, no number. A duration measured off a wall clock is
@@ -91,8 +99,8 @@ for agent in $agents; do
 		# downstream can tell them apart.
 		if ! start=$(monotonic_ns); then
 			printf '%-10s %-14s %8s %10s %8s  %s\n' "$agent" "$task" - - - no-clock
-			printf '{"agent":"%s","task":"%s","wall_s":null,"tokens":null,"lines":"n/a","result":"no-clock"}\n' \
-				"$agent" "$task" >>"$results"
+			printf '{"run":"%s","agent":"%s","task":"%s","wall_s":null,"tokens":null,"lines":"n/a","result":"no-clock"}\n' \
+				"$run_id" "$agent" "$task" >>"$results"
 			continue
 		fi
 		run_limited "$timeout_s" "$work" sh -c "$cmd" >"$work/.out" 2>"$work/.err"
@@ -104,8 +112,8 @@ for agent in $agents; do
 		# billion and appended a wall_s nobody measured.
 		if ! end=$(monotonic_ns); then
 			printf '%-10s %-14s %8s %10s %8s  %s\n' "$agent" "$task" - - - no-clock
-			printf '{"agent":"%s","task":"%s","wall_s":null,"tokens":null,"lines":"n/a","result":"no-clock"}\n' \
-				"$agent" "$task" >>"$results"
+			printf '{"run":"%s","agent":"%s","task":"%s","wall_s":null,"tokens":null,"lines":"n/a","result":"no-clock"}\n' \
+				"$run_id" "$agent" "$task" >>"$results"
 			continue
 		fi
 		wall=$(echo "$end $start" | awk '{printf "%.1f", ($1-$2)/1000000000}')
@@ -150,7 +158,7 @@ for agent in $agents; do
 		fi
 
 		printf '%-10s %-14s %8s %10s %8s  %s\n' "$agent" "$task" "$wall" "$tokens" "$lines" "$result"
-		printf '{"agent":"%s","task":"%s","wall_s":%s,"tokens":%s,"lines":"%s","result":"%s"}\n' \
-			"$agent" "$task" "$wall" "$tokens_json" "$lines" "$result" >>"$results"
+		printf '{"run":"%s","agent":"%s","task":"%s","wall_s":%s,"tokens":%s,"lines":"%s","result":"%s"}\n' \
+			"$run_id" "$agent" "$task" "$wall" "$tokens_json" "$lines" "$result" >>"$results"
 	done
 done

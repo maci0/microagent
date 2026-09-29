@@ -60,14 +60,42 @@ if [ "${PROVIDER:-openrouter}" = "nvidia" ]; then
 	model_micro=deepseek-ai/deepseek-v4.1-flash
 	model_open=nvidia/deepseek-ai/deepseek-v4.1-flash
 	allow="--allow-agent-host integrate.api.nvidia.com"
+	# The overlay is JSON, so the quotes are part of the argument harbor is
+	# meant to receive and word splitting is how the arguments reach it.
+	# shellcheck disable=SC2089
 	extra_open="--ak opencode_config={\"provider\":{\"nvidia\":{\"npm\":\"@ai-sdk/openai-compatible\",\"name\":\"NVIDIA\",\"options\":{\"baseURL\":\"${MICROAGENT_BASE_URL:-https://integrate.api.nvidia.com/v1}\",\"apiKey\":\"{env:OPENAI_API_KEY}\"},\"models\":{\"deepseek-ai/deepseek-v4.1-flash\":{}}}}} --ae OPENAI_API_KEY=${MICROAGENT_API_KEY:-}"
 fi
 
+# A job name no earlier run already holds, printed on stdout.
+#
+# The name is a directory under $jobs_dir, and harbor writes one trial
+# directory per task into it. Two runs that pick the same name therefore share
+# one directory: the second run's trials land beside the first run's, and the
+# summary printed at the end of the second is a mean over the two runs' trials
+# as if they were one, with a trial count nobody can explain. A rerun minutes
+# after a run that died, or a rerun of the same script from a second shell, is
+# the ordinary way to get there, so the name carries seconds and the pid, and
+# a name whose directory is still there is given a counter rather than reused.
+#
+# A stale directory is left where it is: it is the record of a run somebody may
+# still want, and this script is not the thing that decides which runs are
+# worth keeping.
+new_job() {
+	base="$1-$(date +%H%M%S)-$$"
+	n=0
+	while [ -e "$jobs_dir/$base" ] && [ "$n" -lt 100 ]; do
+		n=$((n + 1))
+		base="$1-$(date +%H%M%S)-$$-$n"
+	done
+	printf '%s' "$base"
+}
+
 for harness in $harnesses; do
-	job="$harness-$bench-$(date +%H%M)"
+	job=$(new_job "$harness-$bench")
 	echo "=== $job: $bench, ${jobs} at a time"
 	case "$harness" in
 	microagent)
+		# shellcheck disable=SC2086
 		PYTHONPATH="$root/integrations/harbor" \
 			MICROAGENT_AGENT_TIMEOUT_SEC=$agent_timeout \
 			MICROAGENT_BUDGET_SECONDS=$budget \
@@ -77,7 +105,7 @@ for harness in $harnesses; do
 			--jobs-dir "$jobs_dir" -n "$jobs" --job-name "$job" 2>&1 | tail -6
 		;;
 	opencode)
-		# shellcheck disable=SC2086
+		# shellcheck disable=SC2086,SC2089,SC2090
 		$harbor run -d "$dataset" $include $allow \
 			-a opencode -m "$model_open" $extra_open \
 			--jobs-dir "$jobs_dir" -n "$jobs" --job-name "$job" 2>&1 | tail -6

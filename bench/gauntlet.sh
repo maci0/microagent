@@ -26,6 +26,11 @@ verify_cmd="${GAUNTLET_VERIFY:-}"
 # directory, and /tmp is a world-writable sticky shared by every account on the
 # machine, so two gauntlet runs on one host collide there.
 work_root="${GAUNTLET_WORK:-${TMPDIR:-/tmp}/microagent-gauntlet}"
+# Every row of this invocation carries the same `run`, because the file is
+# appended to and a second run of this script writes its rows beside the ones
+# already there: a reader cannot otherwise tell a re-measurement of an agent
+# from a row this run wrote twice. A row with no `run` predates the field.
+run_id="${GAUNTLET_RUN_ID:-$(date +%Y%m%dT%H%M%S)-$$}"
 agents=${*:-microagent}
 
 # The tool that runs the review is named here rather than left to the shell: a
@@ -76,8 +81,8 @@ for agent in $agents; do
 	# review that finished instantly.
 	if ! start=$(monotonic_ns); then
 		printf '%-40s %6s %6s %7s %8s %8s %8s  %s\n' "$agent" - - - no-clock - - -
-		printf '{"agent":"%s","passed":null,"failed":null,"changed_files":null,"wall_s":null,"tokens":null,"verify":null,"rc":null}\n' \
-			"$agent" >>"$root/bench/gauntlet-results.jsonl"
+		printf '{"run":"%s","agent":"%s","passed":null,"failed":null,"changed_files":null,"wall_s":null,"tokens":null,"verify":null,"rc":null}\n' \
+			"$run_id" "$agent" >>"$root/bench/gauntlet-results.jsonl"
 		continue
 	fi
 
@@ -90,8 +95,8 @@ for agent in $agents; do
 	# the start reading alone rather than one that was refused.
 	if ! end=$(monotonic_ns); then
 		printf '%-40s %6s %6s %7s %8s %8s %8s  %s\n' "$agent" - - - no-clock - - -
-		printf '{"agent":"%s","passed":null,"failed":null,"changed_files":null,"wall_s":null,"tokens":null,"verify":null,"rc":null}\n' \
-			"$agent" >>"$root/bench/gauntlet-results.jsonl"
+		printf '{"run":"%s","agent":"%s","passed":null,"failed":null,"changed_files":null,"wall_s":null,"tokens":null,"verify":null,"rc":null}\n' \
+			"$run_id" "$agent" >>"$root/bench/gauntlet-results.jsonl"
 		continue
 	fi
 	# Subtracted in awk rather than in `$(( ))`, which is what bench/run.sh and
@@ -129,7 +134,7 @@ for agent in $agents; do
 	fi
 
 	printf '%-40s %6s %6s %7s %8s %8s %8s  %s\n' "$agent" "$passed" "$failed" "$changed" "$elapsed" "$tokens" "$verify" "$rc"
-	printf '{"agent":"%s","passed":%s,"failed":%s,"changed_files":%s,"wall_s":%s,"tokens":%s,"verify":"%s","rc":%s}\n' \
-		"$agent" "$passed" "$failed" "$changed" "$elapsed" "$tokens_json" "$verify" "$rc" \
+	printf '{"run":"%s","agent":"%s","passed":%s,"failed":%s,"changed_files":%s,"wall_s":%s,"tokens":%s,"verify":"%s","rc":%s}\n' \
+		"$run_id" "$agent" "$passed" "$failed" "$changed" "$elapsed" "$tokens_json" "$verify" "$rc" \
 		>>"$root/bench/gauntlet-results.jsonl"
 done
