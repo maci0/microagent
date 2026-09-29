@@ -48,8 +48,6 @@ const std = @import("std");
 const chat = @import("chat.zig");
 const mcp_mod = @import("mcp.zig");
 
-/// One MCP server as the file declares it: the same fields `mcp_mod.Entry`
-/// carries, built up a line at a time while a `[[mcp]]` table is open.
 /// The largest `system_prompt_extra` the reader takes. The text rides on every
 /// request, so a value past this is a pasted file and not an addendum.
 pub const max_system_prompt_extra_bytes: usize = 16 * 1024;
@@ -64,15 +62,11 @@ pub const max_agents_path_bytes: usize = 1024;
 
 const Lines = std.mem.SplitIterator(u8, .scalar);
 
+/// One MCP server as the file declares it: the entry this run will start, built
+/// up a line at a time while a `[[mcp]]` table is open, beside the three
+/// facts about how the table was spelled that the entry itself does not carry.
 const Server = struct {
-    name: []const u8 = "",
-    command: []const u8 = "",
-    args: []const []const u8 = &.{},
-    env: []const [2][]const u8 = &.{},
-    url: []const u8 = "",
-    api_key_env: []const u8 = "",
-    api_key_header: []const u8 = mcp_mod.default_key_header,
-    timeout_s: u32 = mcp_mod.default_timeout_s,
+    entry: mcp_mod.Entry = .{ .name = "" },
     /// A key that is only meaningful for a remote server was set, so a table
     /// that also has a `command` is one that mixes the two forms.
     remote_key_set: bool = false,
@@ -307,13 +301,13 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8) Config {
     for (std.enums.values(mcp_mod.Preset)) |preset| {
         const setting = presets.get(preset);
         if (!setting.enabled) continue;
-        servers.append(arena, .{
+        servers.append(arena, .{ .entry = .{
             .name = @tagName(preset),
             .url = if (setting.url.len != 0) setting.url else preset.url(),
             .api_key_env = setting.api_key_env,
             .api_key_header = setting.api_key_header,
             .timeout_s = setting.timeout_s,
-        }) catch {
+        } }) catch {
             // A preset the file left enabled and this run cannot record is a
             // server whose tools are missing from every request, and the file
             // said nothing about it, so the preset is named here.
@@ -330,38 +324,30 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8) Config {
         // half makes a name no provider accepts and no model can spell.
         // One form or the other, whole: a `command` with a `url`, or with the
         // options only a `url` takes, is a table that says two things.
-        const local = server.command.len != 0;
-        const remote = server.url.len != 0;
-        const whole = if (remote) !local and !server.local_key_set and mcp_mod.validUrl(server.url) else !server.remote_key_set;
-        if (server.invalid or !(local or remote) or !whole or !mcp_mod.validName(server.name)) {
+        const e = server.entry;
+        const local = e.command.len != 0;
+        const remote = e.url.len != 0;
+        const whole = if (remote) !local and !server.local_key_set and mcp_mod.validUrl(e.url) else !server.remote_key_set;
+        if (server.invalid or !(local or remote) or !whole or !mcp_mod.validName(e.name)) {
             config.note(.{ .key = "mcp", .kind = .bad_server });
             continue;
         }
         var duplicate = false;
         for (entries.items) |kept| {
-            if (std.mem.eql(u8, kept.name, server.name)) {
+            if (std.mem.eql(u8, kept.name, e.name)) {
                 duplicate = true;
                 break;
             }
         }
         if (duplicate) {
-            config.note(.{ .key = server.name, .kind = .duplicate_server });
+            config.note(.{ .key = e.name, .kind = .duplicate_server });
             continue;
         }
         // A server that survived every check above and still could not be
         // copied is a server this run does not start, and each check above
         // names the server it skipped. This one is named the same way.
-        entries.append(arena, .{
-            .name = server.name,
-            .command = server.command,
-            .args = server.args,
-            .env = server.env,
-            .url = server.url,
-            .api_key_env = server.api_key_env,
-            .api_key_header = server.api_key_header,
-            .timeout_s = server.timeout_s,
-        }) catch {
-            config.note(.{ .key = server.name, .kind = .server_dropped });
+        entries.append(arena, e) catch {
+            config.note(.{ .key = e.name, .kind = .server_dropped });
             break;
         };
     }
@@ -498,19 +484,20 @@ fn addDenyCommands(config: *Config, arena: std.mem.Allocator, list: []const []co
 
 /// One line inside an open `[[mcp]]` table.
 fn serverKey(config: *Config, arena: std.mem.Allocator, server: *Server, key: []const u8, value_text: []const u8) void {
+    const e = &server.entry;
     if (std.mem.eql(u8, key, "name")) {
-        server.name = unquote(arena, value_text) orelse
+        e.name = unquote(arena, value_text) orelse
             return config.note(.{ .key = key, .kind = .bad_value });
         return;
     }
     if (std.mem.eql(u8, key, "command")) {
-        server.command = unquote(arena, value_text) orelse
+        e.command = unquote(arena, value_text) orelse
             return config.note(.{ .key = key, .kind = .bad_value });
         return;
     }
     if (std.mem.eql(u8, key, "args")) {
         server.local_key_set = true;
-        server.args = stringArray(arena, value_text) orelse
+        e.args = stringArray(arena, value_text) orelse
             return config.note(.{ .key = key, .kind = .bad_value });
         return;
     }
@@ -521,20 +508,20 @@ fn serverKey(config: *Config, arena: std.mem.Allocator, server: *Server, key: []
         // does: a spawn carrying a name with a `=` or a NUL in it either
         // asserts the run down or hands the server a variable it never asked
         // for, and neither is a server this configuration declared.
-        server.env = inlineTable(arena, value_text) orelse {
+        e.env = inlineTable(arena, value_text) orelse {
             server.invalid = true;
             return config.note(.{ .key = key, .kind = .bad_value });
         };
         return;
     }
     if (std.mem.eql(u8, key, "url")) {
-        server.url = unquote(arena, value_text) orelse
+        e.url = unquote(arena, value_text) orelse
             return config.note(.{ .key = key, .kind = .bad_value });
         return;
     }
     // The options a remote server takes are checked as they are read. A
     // server given a key it cannot use is dropped, not connected without one.
-    if (remoteOption(arena, &server.api_key_env, &server.api_key_header, &server.timeout_s, key, value_text)) |usable| {
+    if (remoteOption(arena, &e.api_key_env, &e.api_key_header, &e.timeout_s, key, value_text)) |usable| {
         server.remote_key_set = true;
         if (!usable) server.invalid = true;
         return;

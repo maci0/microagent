@@ -227,10 +227,8 @@ fn codepointCount(s: []const u8) usize {
 /// anything a terminal's paste delivers, and a run of bytes that is not text
 /// still has to be walked to the end rather than trusted to decode.
 fn codepointLen(s: []const u8, i: usize) usize {
-    const want = std.unicode.utf8ByteSequenceLength(s[i]) catch return 1;
-    if (i + want > s.len) return 1;
-    if (!std.unicode.utf8ValidateSlice(s[i .. i + want])) return 1;
-    return want;
+    const want = chat.utf8SequenceLen(s, i);
+    return if (want == 0) 1 else want;
 }
 
 /// Levenshtein distance over two rows of codepoints, so a long word costs two
