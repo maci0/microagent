@@ -14,6 +14,12 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+### Added
+
+- A first run with no config file writes the commented template to the default path,
+  `~/.microagent/config.toml`, at mode 0600 and names the path on stderr. A path named by `--config`
+  or `MICROAGENT_CONFIG` is never created, and an existing file is never touched.
+
 ## [0.7.0] - 2026-09-30
 
 ### Added

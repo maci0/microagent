@@ -296,7 +296,11 @@ is the home directory: a shell expands the tilde in a command line before the fl
 value that came out of `MICROAGENT_CONFIG` never went through one, so microagent expands it here.
 [`config.example.toml`](../config.example.toml) is a commented template.
 
-A missing file means the defaults. A file that cannot be read, is a directory, or is over the 64 KB
+A missing file means the defaults, and a run that finds nothing at the default path writes the
+commented template there (mode 0600, under `~/.microagent` at 0700) and names the path on stderr, so
+the next edit has a file to make. A path named by `--config` or `MICROAGENT_CONFIG` is never created,
+and a file that is already there is never touched. A file that cannot be read, is a directory, or is
+over the 64 KB
 cap is named on stderr and the run continues on the defaults. A value a key does not take, and a key the
 file format does not define, are reported on stderr with that key's default kept, so a misspelled
 `system_prompt_extra` cannot leave the default in force quietly. One spelling exists per setting:

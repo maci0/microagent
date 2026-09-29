@@ -32,6 +32,11 @@ pub fn build(b: *std.Build) void {
     // update check compare against the same number the release was tagged with.
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "version", @import("build.zig.zon").version);
+    // The first run with no config file writes this out, so an installed binary
+    // hands the user the same commented template the repository ships. Embedded
+    // from the tracked file rather than a second copy, and a test compares the
+    // two, so the template cannot drift from the one the tests apply.
+    build_options.addOption([]const u8, "config_template", @embedFile("config.example.toml"));
     const build_options_module = build_options.createModule();
     exe.root_module.addImport("build_options", build_options_module);
     // A word-at-a-time `memcpy` for `ReleaseSmall`, whose compiler runtime copies a byte at a time.
