@@ -64,10 +64,11 @@ jobs:
       - name: the shell, Python and YAML linters are clean
         run: make lint
 
-      # The release ships docs/microagent.1 next to the binary, and this is the
-      # check that says the page names the version build.zig.zon declares and
+      # `make install` ships docs/microagent.1 next to the binary, so the page
+      # carries the version of the tag it was packaged with, and this is the
+      # check that says it names the version build.zig.zon declares and
       # documents every flag `--help` lists. `make check` runs it, and neither
-      # workflow did, so a tag could publish a binary under a page describing an
+      # workflow did, so a tag could publish a binary whose page describes an
       # older interface. `check-release` above already gates the tag on the
       # README, which is the same question about a different file.
       - name: the man page documents the flags this build lists

@@ -88,9 +88,9 @@ jobs:
       - name: the readme installs the version this tree declares
         run: make check-readme
 
-      # The man page and `--help` are two renderings of one interface, and the
-      # release ships the page next to the binary, so a flag added to the help
-      # and left out of the page publishes a binary whose page documents an
+      # The man page and `--help` are two renderings of one interface, and
+      # `make install` ships the page next to the binary, so a flag added to the
+      # help and left out of the page packages a binary whose page documents an
       # older one. `make check` runs this and neither workflow did, so it gated
       # a laptop and not a push. The same target a version bump has to satisfy.
       - name: the man page documents the flags this build lists

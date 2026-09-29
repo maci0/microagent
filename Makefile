@@ -334,6 +334,17 @@ ZIG_SOURCES := $(shell $(TRACKED) '*.zig')
 # and a manifest has none.
 ZON_SOURCES := $(shell $(TRACKED) '*.zon')
 
+# The paths `zig build` reads a compiled artifact out of, named once so
+# `check-reproducible` can refuse to compare a build-directory rebuild against a
+# working tree that is not what git holds. The tracked half of that question is
+# asked over the whole tree, because the copy the comparison builds from is
+# every tracked file; the untracked half is asked over these paths, because a
+# new file the build reads and git does not name is the one case the tracked
+# half cannot see. config.example.toml belongs here rather than under src/
+# because build.zig embeds it into the binary, so an edit to it changes the
+# bytes of every published asset without changing a line under src/.
+BUILD_INPUT_PATHS := src build.zig build.zig.zon config.example.toml integrations
+
 # The Python and YAML the linters read, for the same reason.
 PY_SOURCES := $(shell $(TRACKED) '*.py')
 YAML_SOURCES := $(shell $(TRACKED) '*.yml' '*.yaml')
@@ -1253,10 +1264,12 @@ check-reproducible: zig-version
 	    exit 1; \
 	  fi; \
 	  if [ "$$target" = "$(firstword $(RELEASE_TARGETS))" ]; then \
-	    if [ -n "$$(git status --porcelain -- src build.zig build.zig.zon)" ]; then \
-	      echo "skipping the build-directory comparison: a tracked build input is modified or deleted in this"; \
-	      echo "working tree, and the copy is made from git, so it would compare two different sources and"; \
-	      echo "report a build path reaching the binary when the source is what differs"; \
+	    dirty="$$(git diff --name-only HEAD --; git ls-files --others --exclude-standard -- $(BUILD_INPUT_PATHS))"; \
+	    if [ -n "$$dirty" ]; then \
+	      echo "skipping the build-directory comparison: this working tree is not what git holds" >&2; \
+	      printf '%s\n' "$$dirty" >&2; \
+	      echo "the copy above is made from git, so it would compare two different sources and" >&2; \
+	      echo "report a build path reaching the binary when the source is what differs" >&2; \
 	    else \
 	      elsewhere=$$(build_from_copy 1900000000 C UTC "$$target"); \
 	      if [ "$$first" != "$$elsewhere" ]; then \
