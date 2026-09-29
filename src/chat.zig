@@ -26,6 +26,21 @@ pub const ToolCall = struct {
     args: std.ArrayList(u8) = .empty,
 };
 
+/// What the `name` a stream delivered is, or null for a name this program has
+/// no tool for.
+///
+/// Resolved once per call, at the point the call stops being raw stream bytes
+/// and starts being something the run dispatches, and handed to everything that
+/// asks what a call is: the dispatcher, the edit predicate and the test-run
+/// predicate. Each of those resolving the same name for itself is a tool added
+/// to the enum and missed by one of them, and the one that missed it keeps
+/// answering as though the call were some other tool. The name stays on the
+/// call because the wire spells it with it, the assistant message quotes it
+/// back, and an unknown name is named to the model in the refusal.
+pub fn toolOf(call: ToolCall) ?Tool {
+    return Tool.fromName(call.name);
+}
+
 /// The tools a response can name, as a type rather than as the bytes that
 /// spell one.
 ///
@@ -139,6 +154,27 @@ test "only the tools that change a file say they write" {
     try std.testing.expectEqual(by_schema_order.len, tools().len);
     for (tools(), by_schema_order) |tool, writes| {
         try std.testing.expectEqual(writes, tool.writes());
+    }
+}
+
+// The one resolution every consumer of a call's identity shares. The
+// dispatcher, the edit predicate and the test-run predicate each need to know
+// what a call is, and each resolving the name for itself is a tool that one of
+// them does not recognize: the loop would call a `write` an edit that the
+// verification turn was not asked for, or dispatch nothing for a name the schema
+// advertised. Going through one function is what keeps them answering alike.
+test "a call resolves to the tool its name spells, and to nothing for a name that is not one" {
+    for (tools()) |expected| {
+        const call: ToolCall = .{ .id = "", .name = @constCast(expected.name()) };
+        try std.testing.expectEqual(@as(?Tool, expected), toolOf(call));
+    }
+    // The names a model can send that are not tools, which the dispatcher turns
+    // into a refusal and the two predicates into "did not change the tree" and
+    // "did not run anything". A name that resolved to a variant here would be a
+    // tool the run runs under a spelling the schema never advertised.
+    for ([_][]const u8{ "", "bash ", "Bash", "delete_everything", "bash\n", "read/write" }) |name| {
+        const call: ToolCall = .{ .id = "", .name = @constCast(name) };
+        try std.testing.expectEqual(@as(?Tool, null), toolOf(call));
     }
 }
 

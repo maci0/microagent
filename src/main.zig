@@ -1682,6 +1682,10 @@ const test_runner_words = blk: {
 /// or the issue text mentioning pytest, is not a test run, and judging by the
 /// conversation counted both of those and never asked for verification.
 ///
+/// Only a `bash` call runs a command, so only a `bash` call can be one; the
+/// variant arrives resolved, and a name this program has no tool for is null
+/// and is not a run.
+///
 /// A substring is not the question the flag is asking. The model reads
 /// `pytest_output.log`, greps a comment for the words `cargo test`, or edits
 /// `build/tox.ini`, and a substring match called each of those a test run, which
@@ -1705,8 +1709,8 @@ const test_runner_words = blk: {
 /// every tool call walks until the run has seen a test. A name matches where
 /// its words end at the word just read, so the last `test_runner_max_words`
 /// words are all the answer needs, and each name is tried against them once.
-fn isTestRun(call_name: []const u8, args: []const u8) bool {
-    if (!std.mem.eql(u8, call_name, "bash")) return false;
+fn isTestRun(tool: ?chat_mod.Tool, args: []const u8) bool {
+    if (tool != .bash) return false;
     var window: [test_runner_max_words][]const u8 = undefined;
     var filled: usize = 0;
     var words = std.mem.tokenizeAny(u8, args, tool_word_separators);
@@ -1745,10 +1749,13 @@ fn isTestRun(call_name: []const u8, args: []const u8) bool {
 /// search as an edit made a read-only investigation ask for a verification turn
 /// on changes that were never made. The key is read as a string, which is the
 /// only shape `runTool` dispatches a rewrite from.
-fn isEdit(call_name: []const u8, args: []const u8) bool {
-    const tool = chat_mod.Tool.fromName(call_name) orelse return false;
-    if (tool.writes()) return true;
-    if (tool != .ast) return false;
+///
+/// `tool` is null for a name this program has no tool for, which is not an
+/// edit and did not run: the model may call anything.
+fn isEdit(tool: ?chat_mod.Tool, args: []const u8) bool {
+    const which = tool orelse return false;
+    if (which.writes()) return true;
+    if (which != .ast) return false;
     // The page allocator, freed on the way out: this is a per-call parse of
     // arguments a few hundred bytes long, once, and the tree it builds is
     // released before the next one is read.
@@ -3102,8 +3109,13 @@ fn finishTurn(
         // Both flags only ever go false to true, so once one is set nothing
         // later in the turn can change it, and the check that would record it
         // is skipped rather than repeated over the remaining calls' arguments.
-        if (!progress.edited and isEdit(call.name, call.args.items)) progress.edited = true;
-        if (!progress.tested and isTestRun(call.name, call.args.items)) progress.tested = true;
+        // Resolved once here, where the call's last name fragment has landed,
+        // and handed to the two predicates and the dispatcher below: three
+        // places asking what a call is, each resolving the same name for itself,
+        // is a tool added to the enum and missed by one of them.
+        const tool = chat_mod.toolOf(call);
+        if (!progress.edited and isEdit(tool, call.args.items)) progress.edited = true;
+        if (!progress.tested and isTestRun(tool, call.args.items)) progress.tested = true;
         // A call the budget will not pay for still gets a tool message. An
         // assistant turn that names calls the conversation never answers is one
         // the next request rejects, so the loop below would spend a turn on a
@@ -3120,7 +3132,7 @@ fn finishTurn(
             // run's own, and a tool that takes no time at all costs nothing to
             // re-read: a `git status` spends its reading on the same syscall
             // the process spawn beside it already makes.
-            tool_mod.runTool(io, arena, call, budget.toolCeilingMs(io), tool_env) catch |err|
+            tool_mod.runTool(io, arena, call, tool, budget.toolCeilingMs(io), tool_env) catch |err|
                 // A tool that fails outright (rather than reporting its own
                 // failure as text) is named here, so a result reading
                 // `error: OutOfMemory` says which of the calls ran out.
@@ -5289,29 +5301,29 @@ test "the api key is sent as the request's authorization header" {
 
 test "only a bash call that names a runner counts as verification" {
     // A runner in a bash command is a test run.
-    try std.testing.expect(isTestRun("bash", "{\"command\":\"python -m pytest tests/\"}"));
-    try std.testing.expect(isTestRun("bash", "{\"command\":\"cargo test --all\"}"));
-    try std.testing.expect(isTestRun("bash", "{\"command\":\"zig build test\"}"));
+    try std.testing.expect(isTestRun(.bash, "{\"command\":\"python -m pytest tests/\"}"));
+    try std.testing.expect(isTestRun(.bash, "{\"command\":\"cargo test --all\"}"));
+    try std.testing.expect(isTestRun(.bash, "{\"command\":\"zig build test\"}"));
 
     // Reading a test file is not, and neither is the issue text mentioning
     // pytest: judging by the conversation counted both and asked for nothing.
-    try std.testing.expect(!isTestRun("read", "{\"path\":\"tests/test_thing.py\"}"));
-    try std.testing.expect(!isTestRun("bash", "{\"command\":\"ls tests/\"}"));
-    try std.testing.expect(!isTestRun("search", "{\"pattern\":\"pytest\"}"));
+    try std.testing.expect(!isTestRun(.read, "{\"path\":\"tests/test_thing.py\"}"));
+    try std.testing.expect(!isTestRun(.bash, "{\"command\":\"ls tests/\"}"));
+    try std.testing.expect(!isTestRun(.search, "{\"pattern\":\"pytest\"}"));
 
     // A name inside a longer word is not a runner either: a substring match
     // read each of these as a test run, which told the loop an untested edit had
     // been tested and took away the verification turn that would have caught
     // it. The words have to stand as they are typed.
-    try std.testing.expect(!isTestRun("bash", "{\"command\":\"cat pytest_output.log\"}"));
-    try std.testing.expect(!isTestRun("bash", "{\"command\":\"grep -rn 'cargo test' src/\"}"));
-    try std.testing.expect(!isTestRun("bash", "{\"command\":\"sed -i s/tox/pox/ tox.ini\"}"));
-    try std.testing.expect(!isTestRun("bash", "{\"command\":\"cargo testfoo\"}"));
-    try std.testing.expect(!isTestRun("bash", "{\"command\":\"zig build test-fast\"}"));
+    try std.testing.expect(!isTestRun(.bash, "{\"command\":\"cat pytest_output.log\"}"));
+    try std.testing.expect(!isTestRun(.bash, "{\"command\":\"grep -rn 'cargo test' src/\"}"));
+    try std.testing.expect(!isTestRun(.bash, "{\"command\":\"sed -i s/tox/pox/ tox.ini\"}"));
+    try std.testing.expect(!isTestRun(.bash, "{\"command\":\"cargo testfoo\"}"));
+    try std.testing.expect(!isTestRun(.bash, "{\"command\":\"zig build test-fast\"}"));
 
     // The same words on their own still are, whatever surrounds them.
-    try std.testing.expect(isTestRun("bash", "{\"command\":\"cd src && cargo test --all\"}"));
-    try std.testing.expect(isTestRun("bash", "{\"command\":\"uv run pytest -q\"}"));
+    try std.testing.expect(isTestRun(.bash, "{\"command\":\"cd src && cargo test --all\"}"));
+    try std.testing.expect(isTestRun(.bash, "{\"command\":\"uv run pytest -q\"}"));
 
     // The window is the optimization, and the edge it puts between a name that
     // matches and one that does not is a name spanning a word boundary the
@@ -5349,7 +5361,7 @@ test "only a bash call that names a runner counts as verification" {
     inline for (cases) |args| {
         try std.testing.expectEqual(
             bruteForceTestRun(args),
-            isTestRun("bash", args),
+            isTestRun(.bash, args),
         );
     }
 }
@@ -5432,8 +5444,8 @@ test "a fuzzed bash call is a test run to both the window and the whole-string s
     // The corpus has to reach both answers, or the equality above is never
     // disagreed with: a command naming a runner is a test run, and one naming
     // none is not.
-    try std.testing.expect(isTestRun("bash", "{\"command\":\"cargo test\"}"));
-    try std.testing.expect(!isTestRun("bash", "{\"command\":\"cargo tests\"}"));
+    try std.testing.expect(isTestRun(.bash, "{\"command\":\"cargo test\"}"));
+    try std.testing.expect(!isTestRun(.bash, "{\"command\":\"cargo tests\"}"));
 }
 
 fn fuzzTestRun(_: void, smith: *std.testing.Smith) !void {
@@ -5446,14 +5458,16 @@ fn fuzzTestRun(_: void, smith: *std.testing.Smith) !void {
     // edited the tree and never named a runner is the one this predicate asks
     // for a turn it did not get. The reference is the whole-string search, so
     // the window is what the fuzzer holds to it.
-    const windowed = isTestRun("bash", args);
+    const windowed = isTestRun(.bash, args);
     try std.testing.expectEqual(bruteForceTestRun(args), windowed);
 
     // Only a `bash` call is one. The same bytes under a read or a search named
     // nothing that was run, and counting it would verify a run that did not
-    // happen.
-    for ([_][]const u8{ "read", "search", "edit", "git", "write", "" }) |name|
-        try std.testing.expect(!isTestRun(name, args));
+    // happen. The last entry is null, which is what a call naming a tool this
+    // program has not got resolves to, and it is a case the loop still has to
+    // answer: the model may call anything.
+    for ([_]?chat_mod.Tool{ .read, .search, .edit, .git, .write, null }) |tool|
+        try std.testing.expect(!isTestRun(tool, args));
 
     // What separates one word of the argument from the next is the set below,
     // and the arguments arrive as raw JSON where a name is often split by its
@@ -5466,7 +5480,7 @@ fn fuzzTestRun(_: void, smith: *std.testing.Smith) !void {
         for (tool_word_separators) |separator| {
             var spelled: [max_runner_spelling]u8 = undefined;
             const n = replaceSpaces(runner, separator, &spelled);
-            const windowed_spell = isTestRun("bash", spelled[0..n]);
+            const windowed_spell = isTestRun(.bash, spelled[0..n]);
             try std.testing.expectEqual(bruteForceTestRun(spelled[0..n]), windowed_spell);
             if (windowed_spell) any_matched = true;
         }
@@ -5533,23 +5547,23 @@ fn bruteForceTestRun(args: []const u8) bool {
 test "only a call that changes the tree counts as an edit" {
     // The two tools that write whatever they are handed, with or without
     // arguments this has to read.
-    try std.testing.expect(isEdit("edit", "{\"path\":\"src/net.zig\",\"old_string\":\"a\",\"new_string\":\"b\"}"));
-    try std.testing.expect(isEdit("write", "{\"path\":\"src/net.zig\",\"content\":\"\"}"));
-    try std.testing.expect(!isEdit("read", "{\"path\":\"src/net.zig\"}"));
-    try std.testing.expect(!isEdit("bash", "{\"command\":\"sed -i s/a/b/ src/net.zig\"}"));
+    try std.testing.expect(isEdit(.edit, "{\"path\":\"src/net.zig\",\"old_string\":\"a\",\"new_string\":\"b\"}"));
+    try std.testing.expect(isEdit(.write, "{\"path\":\"src/net.zig\",\"content\":\"\"}"));
+    try std.testing.expect(!isEdit(.read, "{\"path\":\"src/net.zig\"}"));
+    try std.testing.expect(!isEdit(.bash, "{\"command\":\"sed -i s/a/b/ src/net.zig\"}"));
 
     // A structural search prints its matches and changes nothing, so it is not
     // an edit: a run that only looked was being asked to verify changes it
     // never made.
-    try std.testing.expect(!isEdit("ast", "{\"pattern\":\"$A == $A\",\"lang\":\"zig\"}"));
+    try std.testing.expect(!isEdit(.ast, "{\"pattern\":\"$A == $A\",\"lang\":\"zig\"}"));
     // The one that does rewrite, every match of it.
-    try std.testing.expect(isEdit("ast", "{\"pattern\":\"$A == $A\",\"lang\":\"zig\",\"rewrite\":\"$A != $A\"}"));
+    try std.testing.expect(isEdit(.ast, "{\"pattern\":\"$A == $A\",\"lang\":\"zig\",\"rewrite\":\"$A != $A\"}"));
     // A rewrite key carrying something other than a string is not the shape
     // `runTool` dispatches, and arguments a stream cut in half are not a call
     // at all: neither is an edit, and neither has to parse to say so.
-    try std.testing.expect(!isEdit("ast", "{\"pattern\":\"$A\",\"rewrite\":true}"));
-    try std.testing.expect(!isEdit("ast", "{\"pattern\":\"$A\",\"rewri"));
-    try std.testing.expect(!isEdit("ast", ""));
+    try std.testing.expect(!isEdit(.ast, "{\"pattern\":\"$A\",\"rewrite\":true}"));
+    try std.testing.expect(!isEdit(.ast, "{\"pattern\":\"$A\",\"rewri"));
+    try std.testing.expect(!isEdit(.ast, ""));
 }
 
 test "a tool timeout is cut to what is left of the budget" {

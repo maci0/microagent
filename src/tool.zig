@@ -598,7 +598,7 @@ fn firstLines(arena: std.mem.Allocator, text: []const u8, limit: usize) ![]const
 /// is compared, the gutter line is written, and only then is a name matched. A
 /// payload that is not an object, or a name that is not one of the seven,
 /// answers with an error string and no tool runs.
-pub fn runTool(io: Io, arena: std.mem.Allocator, call: chat.ToolCall, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map) ![]const u8 {
+pub fn runTool(io: Io, arena: std.mem.Allocator, call: chat.ToolCall, tool: ?chat.Tool, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map) ![]const u8 {
     const parsed = std.json.parseFromSlice(std.json.Value, arena, call.args.items, .{}) catch
         return std.fmt.allocPrint(arena, "error: tool arguments are not valid JSON", .{});
     const args = switch (parsed.value) {
@@ -609,10 +609,13 @@ pub fn runTool(io: Io, arena: std.mem.Allocator, call: chat.ToolCall, ceiling_ms
     // The one place a tool name is a string. Past it the call is a variant, so
     // the switch below is exhaustive by the compiler: a tool added without a
     // handler here fails the build rather than answering `unknown tool` to a
-    // model the schema had just advertised it to.
-    const tool = chat.Tool.fromName(call.name) orelse return unknownTool(arena, call.name);
-    noteToolCall(io, arena, tool, args);
-    return switch (tool) {
+    // model the schema had just advertised it to. The variant arrives resolved
+    // from the boundary that judged the call dispatchable, so the dispatcher
+    // reads what was decided rather than deciding it again; a name this program
+    // has no tool for is the refusal below.
+    const which = tool orelse return unknownTool(arena, call.name);
+    noteToolCall(io, arena, which, args);
+    return switch (which) {
         .bash => toolBash(io, arena, args, ceiling_ms, environ_map),
         .read => toolRead(io, arena, args),
         .write => toolWrite(io, arena, args),
@@ -1795,7 +1798,7 @@ pub fn dispatch(arena: std.mem.Allocator, name: []const u8, args: []const u8) ![
         .name = try arena.dupe(u8, name),
     };
     try call.args.appendSlice(arena, args);
-    return runTool(std.testing.io, arena, call, null, null);
+    return runTool(std.testing.io, arena, call, chat.toolOf(call), null, null);
 }
 
 /// The line range a `read` with `offset` and `limit` returns: every line in
