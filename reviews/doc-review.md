@@ -1,5 +1,5 @@
 You are a senior technical writer reviewing the prose this repository ships about
-itself. Your task is to review `README.md`, `CONTRIBUTING.md`, `PERFORMANCE.md` and
+itself. Your task is to review `README.md`, `CONTRIBUTING.md`, `docs/usage.md`, `docs/performance.md` and
 `config.example.toml`, fix the defects listed below, and leave the writing alone
 where it is already right. This prompt file is the instrument, not the subject.
 
@@ -11,9 +11,9 @@ about what the gate runs are all read as fact: the reader has no way to check
 one and every one of them goes stale the moment the file it names is edited.
 This review owns those claims, in the documents a contributor reads before
 touching the tree. It does not own the invocation contract itself (the flags,
-environment variables, exit codes and JSON keys belong to `cli-contract-review.md`,
-README included), the published measurements (`benchmark-accuracy-review.md`),
-the threat model (`threat-model-review.md`), or how well the prose reads. A
+environment variables, exit codes and JSON keys belong to `reviews/cli-contract-review.md`,
+`docs/usage.md` included), the published measurements (`reviews/benchmark-accuracy-review.md`),
+the threat model (`reviews/threat-model-review.md`), or how well the prose reads. A
 finding here must be provable by running the named command's dry run, by
 reading the file the sentence names, or by resolving the link, not by an opinion
 about what the sentence ought to say.
@@ -29,7 +29,7 @@ reduced to a fragment with no instructions for anyone to follow.
 ## Review the following:
 
 1. **Commands the prose names that the Makefile does not carry.** Every
-   `make <target>` in `README.md`, `CONTRIBUTING.md` and `PERFORMANCE.md` must be a
+   `make <target>` in `README.md`, `docs/usage.md`, `CONTRIBUTING.md` and `docs/performance.md` must be a
    target that exists. The ground truth is the rule list in the `Makefile` (a rule is a
    line at column 0 whose name is followed by a colon, with or without
    prerequisites: `default: build` is a rule, and reading the list as names
@@ -38,8 +38,8 @@ reduced to a fragment with no instructions for anyone to follow.
    same defect one file over. Search the documents for `` `make `` and for the
    commands inside their fenced blocks, and check each name against both lists.
    A named target that no rule implements sends a reader to `No rule to make
-   target`. The instruction counts `PERFORMANCE.md` publishes belong to
-   `benchmark-accuracy-review.md`; the `make` lines and the links around them are
+   target`. The instruction counts `docs/performance.md` publishes belong to
+   `reviews/benchmark-accuracy-review.md`; the `make` lines and the links around them are
    this item's.
 
 2. **Targets the help block does not list.** `CONTRIBUTING.md` claims that
@@ -59,7 +59,7 @@ reduced to a fragment with no instructions for anyone to follow.
    destination and the two environment variables that override the file.
 
 4. **Links that resolve to nothing.** Every relative markdown link in
-   `README.md` and `CONTRIBUTING.md`: the file part must be tracked in the tree,
+   `README.md`, the files under `docs/` and `CONTRIBUTING.md`: the file part must be tracked in the tree,
    and a `#fragment` must be the slug of a heading in the file it points at (the
    heading lowercased, spaces to hyphens, punctuation dropped). A link to a
    heading that has been renamed is a dead end in the middle of a sentence that
@@ -88,7 +88,7 @@ reduced to a fragment with no instructions for anyone to follow.
 7. **What the release documentation promises against what the release does.**
    `CONTRIBUTING.md`'s "Version and changelog" counts the published binaries
    ("the four published binaries and their asset names are spelled once, in the
-   `Makefile`") and `README.md`'s "Versioning" states the rules a tag is refused
+   `Makefile`") and `docs/usage.md`'s "Versioning" states the rules a tag is refused
    for; the ground truth is the `RELEASE_TARGETS` list in the `Makefile` (one
    published target triple per asset, the same list the `release-targets`
    recipe prints) and the conditions in `.github/workflows/release.yml`. A count,
@@ -118,8 +118,8 @@ reduced to a fragment with no instructions for anyone to follow.
   command is one a contributor runs and the target is the whole gap, in which
   case add the target the way the neighbouring bench targets are written and
   list it in `make help`.
-- Do not touch `BENCHMARK.md`, the instruction counts in `PERFORMANCE.md`,
-  `THREAT_MODEL.md`, the flags and JSON keys in `README.md`, or the
+- Do not touch `docs/benchmark.md`, the instruction counts in `docs/performance.md`,
+  `docs/threat-model.md`, the flags and JSON keys in `docs/usage.md`, or the
   `CHANGELOG.md` entries, and do not run the benchmarks, the instruction gate,
   the release, or the Harbor adapter. Those belong to the reviews named in the
   goal above.

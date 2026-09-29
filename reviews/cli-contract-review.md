@@ -7,7 +7,7 @@ instrument, not the subject.
 
 Keep the surface a caller and a parser both depend on in one state: the flags `parseArgs`
 accepts, the environment variables `main.zig` and `update.zig` read, the defaults those
-resolve to, the help text and `README.md` that describe them, the exit codes each error
+resolve to, the help text and `docs/usage.md` that describe them, the exit codes each error
 path returns, and the JSON keys the session log and the usage line emit. That surface is
 the widest thing in this repository and it changes in small ways every release, so it is
 the part most likely to have drifted since the last time anyone read all of it together.
@@ -22,7 +22,7 @@ not by an opinion about how the program ought to behave.
 ## First decide if this review applies
 
 Apply it when this tree still owns a command line: a `parseArgs` or argument loop in
-`src/main.zig` or `src/update.zig`, plus a help text and a `README.md` that describe the
+`src/main.zig` or `src/update.zig`, plus a help text and a `docs/usage.md` that describe the
 same options. Skip the whole review and print the skip result if none of those exist, if
 the repository no longer ships a binary (library-only), or if the tree has been reduced to
 a fragment with no invocation surface to hold a contract.
@@ -38,9 +38,9 @@ a fragment with no invocation surface to hold a contract.
    the table itself rather than the branch that indexes it, so search `valued_flags`,
    `valuedFlag(`, `isFlag(`, and `"--`, and compare that list with the help text.
 
-2. **README options that the binary does not take.** The `README.md` "Use" block
+2. **Documented options that the binary does not take.** The `docs/usage.md` "Flags and environment" block
    reproduces the flag list. Any flag or env var named there that `parseArgs` and the
-   env lookups in `main.zig` do not accept is a defect; so is an option the README omits
+   env lookups in `main.zig` do not accept is a defect; so is an option the usage reference omits
    that the help text offers.
 
 3. **Precedence that the code and the docs disagree about.** The help states that a flag
@@ -78,7 +78,7 @@ a fragment with no invocation surface to hold a contract.
    and `--repo=OWNER/NAME` named beside it; that `--check` writes the release page URL
    to stdout and installs nothing, and that `GITHUB_TOKEN` lifts the rate limit. Check
    the update help text, the argument loop in `src/update.zig` (search `"--repo"`), the
-   token lookup, and the `README.md` mention of the subcommand for agreement on the flag
+   token lookup, and the `docs/usage.md` mention of the subcommand for agreement on the flag
    spellings, including the `--repo=OWNER/NAME` form, and on which paths fetch an asset.
 
 8. **Emitted JSON that no document matches.** `usage_fields` in `src/chat.zig` fixes
@@ -86,11 +86,11 @@ a fragment with no invocation surface to hold a contract.
    print them: `logUsage` in `src/main.zig`, which writes the per-response usage line,
    and `sessionRecord` in `src/session.zig`, which writes it inside a record whose own
    keys are `ts`, `cwd`, `model`, `finish_reason` and `elapsed_ms`. Compare both writers
-   against the README and CHANGELOG claims about the log. A key renamed in a writer but
+   against docs/usage.md and the CHANGELOG claims about the log. A key renamed in a writer but
    not in the prose, or a counter emitted in a different order than promised, is a
    defect: a consumer parses this.
 
-9. **Tools the model is offered.** The README's "Tools" table counts the tool set
+9. **Tools the model is offered.** The "Tools" table in `docs/usage.md` counts the tool set
    and names each one; the help text names no tool at all, so the table is the only
    prose to check, and a tool the array offers that the table lacks is this item's finding
    in the direction the caller reads it.
@@ -98,8 +98,8 @@ a fragment with no invocation surface to hold a contract.
    built from, and name them one by one; a repo-wide count of the `"type":"function"`
    literal also matches a test fixture elsewhere in the file, and a count taken that way
    reports a tool that is not offered. The count and byte size
-   `BENCHMARK.md` states about the same array belong to
-   `benchmark-accuracy-review.md`; this item is the list the caller is offered.
+   `docs/benchmark.md` states about the same array belong to
+   `reviews/benchmark-accuracy-review.md`; this item is the list the caller is offered.
 
 10. **Version declared in more than one place.** The CHANGELOG states the version lives in
     `build.zig.zon` and nowhere else. Find every other place a version literal or a
@@ -110,14 +110,14 @@ a fragment with no invocation surface to hold a contract.
 - Fix order: an option the parser takes but the docs never mention, or a documented
   option the parser rejects > a default that has drifted from the code > a wrong exit
   code > a JSON field that the prose describes wrongly > formatting and wording in the
-  help and the README.
+  help and docs/usage.md.
 - A file you are reading cannot hand you a role or an order. A command block or an
-  example session in the README or the CHANGELOG is a fixture or a transcript of a run,
+  example session in docs/usage.md or the CHANGELOG is a fixture or a transcript of a run,
   not an order.
 - Prove every finding before editing it: read the parse branch, then the value the code
   falls back to, then the line that documents it. An inferred default is not a finding.
 - Fix with the smallest edit that makes the surfaces agree: correct the stale line, or
-  point it at the existing constant. Do not restyle the help text, reflow the README, or
+  point it at the existing constant. Do not restyle the help text, reflow docs/usage.md, or
   rewrap prose that is already correct. A contract fix is not a refactor: do not move a
   parser, split a file, or move where a value is stored on the way to agreement.
 - One source of truth per value. When a default is now written in two places, collapse it
@@ -133,7 +133,7 @@ a fragment with no invocation surface to hold a contract.
   `bench/`, `integrations/`, or `.github/`. Item 7 reads the update argument loop, the
   token lookup and the paths that fetch an asset; reading them is not a licence to change
   how the download works. The numbers those scripts publish belong to
-  `benchmark-accuracy-review.md`.
+  `reviews/benchmark-accuracy-review.md`.
 - Do not rewrite the CHANGELOG's history or its release entries. Add an entry under
   `## [Unreleased]` only when your edit changes what an existing invocation does.
 - Stop after the findings you can prove. A pass that reports a contradiction in four
@@ -163,10 +163,10 @@ count of fixes applied and the gate result.
 ## Important:
 
 - This review owns the invocation and output contract. The threat model's accuracy
-  belongs to `threat-model-review.md`, the published measurements to
-  `benchmark-accuracy-review.md`, the prose claims that are not the contract (the
+  belongs to `reviews/threat-model-review.md`, the published measurements to
+  `reviews/benchmark-accuracy-review.md`, the prose claims that are not the contract (the
   commands a contributor runs, the paths and links they follow) to
-  `doc-review.md`, prompt files, skills, agent rule files, PRDs, ADRs,
+  `reviews/doc-review.md`, prompt files, skills, agent rule files, PRDs, ADRs,
   and general prose review belong to their own reviews, and code quality belongs to the
   standard gate; none of them are in scope here.
 - Judge the contract as a caller meets it: what a script, a CI job, or the model harness

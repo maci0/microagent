@@ -1,11 +1,11 @@
 You are a senior engineer reviewing the measurement harness of this Zig agent
-binary. Your task is to review `BENCHMARK.md`, `PERFORMANCE.md` and the scripts under
+binary. Your task is to review `docs/benchmark.md`, `docs/performance.md` and the scripts under
 `bench/` and `integrations/harbor/` that produce the numbers they publish, and fix the
 defects listed below. This prompt file is the instrument, not the subject.
 
 ## Your goal is to
 
-Keep every number in `BENCHMARK.md` and `PERFORMANCE.md` traceable to a script that
+Keep every number in `docs/benchmark.md` and `docs/performance.md` traceable to a script that
 still runs, and every comparison in it a comparison of two measurements taken the same
 way. A benchmark document is read as evidence, so its failure modes are not
 ugly prose but numbers that were written from memory, rows for harnesses no
@@ -14,7 +14,7 @@ That surface is the one place in this repository where a stale claim cannot be
 caught by compiling anything, because nothing consumes the numbers. This review
 owns their accuracy: the scripts, the committed results files, and the adapter.
 It does not own the binary's speed, the invocation contract (the options belong
-to `cli-contract-review.md`), the threat model (`threat-model-review.md`), or
+to `reviews/cli-contract-review.md`), the threat model (`reviews/threat-model-review.md`), or
 the prose quality of any document. A finding here must be provable by reading a
 script against the document, or by running a script and reading what it produced,
 not by an opinion about whether a harness ought to be faster.
@@ -22,7 +22,7 @@ not by an opinion about whether a harness ought to be faster.
 ## First decide if this review applies
 
 Apply it when this tree still carries the measurement apparatus: a
-`BENCHMARK.md` or `PERFORMANCE.md` with measured figures, at least one driver script
+`docs/benchmark.md` or `docs/performance.md` with measured figures, at least one driver script
 under `bench/` that writes a results file or a baseline, and that results file or
 baseline in the tree. Skip the whole review and print the skip result if both
 documents are gone, if `bench/` holds no driver script, or if the tree has been
@@ -76,11 +76,11 @@ reduced to a fragment with nothing measured left to check.
 
 6. **One measured fact spelled in two documents.** The static binary's size is
    quoted in `integrations/harbor/README.md` and, if the size table carries a
-   musl row, in `BENCHMARK.md`; the tool count is in `BENCHMARK.md` and in the
+   musl row, in `docs/benchmark.md`; the tool count is in `docs/benchmark.md` and in the
    `README.md` opening. Two spellings of one measured fact are a defect when
    they disagree, and the fix is the pairing a comment names, never a third
-   copy. The tool *names* the help and the README promise against the `tools` array
-   belong to `cli-contract-review.md`; the count and the byte size are this item's,
+   copy. The tool *names* the help and `docs/usage.md` promise against the `tools` array
+   belong to `reviews/cli-contract-review.md`; the count and the byte size are this item's,
    and a figure the tree no longer produces is item 1's finding, not that
    review's.
 
@@ -105,8 +105,8 @@ reduced to a fragment with nothing measured left to check.
    is a finding even when no number moved, because it is the sentence that tells
    a reader whether the table is comparable with anything.
 
-10. **An instruction count `PERFORMANCE.md` publishes that the committed
-    baseline does not back.** `PERFORMANCE.md` claims its per-frame, compaction,
+10. **An instruction count `docs/performance.md` publishes that the committed
+    baseline does not back.** `docs/performance.md` claims its per-frame, compaction,
     body and ranged-read rows are the rows `bench/instructions.baseline` gates. Read
     the table against that file: the baseline carries a `path` and an
     `instructions_per_unit` for each row, and `bench/instructions.sh` compares a

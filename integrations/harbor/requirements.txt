@@ -3,7 +3,7 @@
 # harbor.environments.base.BaseEnvironment and reads
 # harbor.models.agent.context.AgentContext, so a Harbor release that moves or
 # renames any of them breaks the adapter, and `harbor run` is what the numbers
-# in BENCHMARK.md come from. Pinned exactly, so a benchmark and the adapter
+# in docs/benchmark.md come from. Pinned exactly, so a benchmark and the adapter
 # that produced it are the same pair on any machine.
 #
 # Install into the venv the README names:

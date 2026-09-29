@@ -10,6 +10,7 @@
         "config.example.toml",
         "LICENSE",
         "README.md",
+        "docs",
         "src",
     },
 }

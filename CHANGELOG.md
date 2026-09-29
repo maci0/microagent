@@ -12,16 +12,34 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+### Changed
+
+- The documentation moved under `docs/`: `BENCHMARK.md` is `docs/benchmark.md`,
+  `PERFORMANCE.md` is `docs/performance.md`, and `THREAT_MODEL.md` is
+  `docs/threat-model.md`. The README is now a short front page with a logo,
+  and its reference sections (flags, environment variables, config, skills,
+  MCP servers, tools, output formats, exit codes, update, versioning) are
+  `docs/usage.md`, which the test holding the documents to the variables the
+  program reads now checks in place of the README. The project's own gauntlet
+  review prompts moved from the root to `reviews/`, run with
+  `gauntlet --prompt-dir reviews`.
+
 ### Fixed
 
 - MCP servers are started before any of them is asked to initialize, so their
   own boot times overlap instead of adding up. A server's handshake mostly waits
-  for that boot -- `npx` resolving a package, a node or python interpreter
-  coming up -- and a run with `[[mcp]]` tables paid for each one in series
+  for that boot (`npx` resolving a package, a node or python interpreter
+  coming up), and a run with `[[mcp]]` tables paid for each one in series
   before it could send its first request. Measured against a stub provider with
   three servers that each take 0.5 s to answer: 1.51 s before, 0.51 s after.
   With six servers it is still 0.51 s, because the run now waits for the
   slowest server rather than the sum of them.
+- An `[[mcp]]` table whose `name` holds a character outside letters, digits,
+  dot, dash and underscore is refused and named on stderr. Before, the config
+  reader accepted `name = "bad name"` and the run offered the provider
+  `mcp__bad name__echo`, a tool name no provider accepts and no model can spell
+  back. Two tables with the same `name` were both connected and their tools
+  collided on one exposed name; the second is now skipped and named.
 
 ## [0.2.0] - 2026-09-29
 
@@ -92,7 +110,7 @@ release, and `microagent update` moves you to it.
   step each `sed`-parsed the Makefile and `build.zig.zon` themselves, so the toolchain pin and the
   published target list were each spelled twice, and a rename had to land in both to be a rename.
   Both read the Makefile now.
-- `THREAT_MODEL.md`: the attack surface as a whole, entry points, trust boundaries, assets,
+- `docs/threat-model.md`: the attack surface as a whole, entry points, trust boundaries, assets,
   the threats on each boundary, the controls the code implements and the gaps it does not
   cover, each with a file reference.
 - Every request now carries `max_tokens`, and `--max-tokens` / `MICROAGENT_MAX_TOKENS` set it
@@ -132,7 +150,7 @@ release, and `microagent update` moves you to it.
   second asserts that a fuzzed body leaves the same length, keeps every byte that was already
   printable, and is its own fixed point. Both run their corpus on every `zig build test` through
   `std.testing.fuzz`.
-- Stale `path:line` references in `THREAT_MODEL.md` now point at the functions they name; the
+- Stale `path:line` references in `docs/threat-model.md` now point at the functions they name; the
   gutter and `terminalSafe` rows had been citing the dispatcher above them.
 - `MDEBUG=1` prints the configuration the run resolved: model, base url, the ceilings, the level
   each style key took, and the name of the variable or file the API key came from. The key is never
@@ -140,9 +158,9 @@ release, and `microagent update` moves you to it.
   there was no way to see which one answered.
 - `config.example.toml` is a commented template for the reply-style file, with both keys, their
   levels and their defaults.
-- `PERFORMANCE.md`: what a turn costs inside the harness itself, the four changes that bought
+- `docs/performance.md`: what a turn costs inside the harness itself, the four changes that bought
   what they bought, and the four that were measured and left out, so the next round reads the
-  refusals rather than re-running the experiment. `BENCHMARK.md` still says what the harness
+  refusals rather than re-running the experiment. `docs/benchmark.md` still says what the harness
   measures against other harnesses.
 
 - `git` tool: read-only `status`, `diff`, `log`, `show` and `blame` with a fixed subcommand list and a
@@ -284,7 +302,7 @@ release, and `microagent update` moves you to it.
   `aarch64-linux-musl`, still needs a machine of its own and is covered by the build alone.
 
 - `make gauntlet AGENTS=...` wraps `bench/gauntlet.sh`, the usefulness
-  benchmark whose results BENCHMARK.md publishes, beside the `make bench` and
+  benchmark whose results docs/benchmark.md publishes, beside the `make bench` and
   `make overhead` targets that already wrap its two siblings, and the
   `Reproducing` block names the command. Each of the three scripts invoked the
   harnesses by bare name and skipped the ones missing from PATH, so running one
@@ -339,7 +357,7 @@ release, and `microagent update` moves you to it.
 - The benchmark venv installs from `integrations/harbor/requirements.lock`, which pins Harbor's
   whole dependency tree to one sha256 per published artifact, and is `uv pip compile` output
   from `requirements.txt`. A pinned `harbor` alone still left 89 packages resolved at install
-  time, so the pair that produced a number in `BENCHMARK.md` was not the pair the next run
+  time, so the pair that produced a number in `docs/benchmark.md` was not the pair the next run
   installed.
 - A style config that is present but unreadable, is a directory, or is over the 64 KB cap says so on
   stderr, not only one a flag or `MICROAGENT_CONFIG` named. A file that is simply absent stays quiet.
@@ -439,7 +457,7 @@ release, and `microagent update` moves you to it.
 - A Harbor run's job directory defaults to `~/harbor-jobs` rather than
   `/tmp/harbor-jobs`, which is what the adapter's own README already passes to
   `--jobs-dir`. A job directory holds every container log and agent transcript
-  the run produced and the scores in BENCHMARK.md are read out of it, so a
+  the run produced and the scores in docs/benchmark.md are read out of it, so a
   tmpfs that a reboot empties is the wrong place for it, and the default
   disagreed with the documented command. `JOBS_DIR` still overrides it.
 - A pre-release tag carrying dots of its own no longer reads as no version at
@@ -588,8 +606,8 @@ release, and `microagent update` moves you to it.
   the JSON separators as gluing a key to the first word when they split it, and
   named a `tool_mod` constant that is not exported. `update.zig` listed two of
   the four published triples, and `tool.zig` listed six of the seven tools that
-  refuse a credential path. `PERFORMANCE.md` presented a 40-build instruction
-  total as a per-build figure, and `BENCHMARK.md` still carried the line count
+  refuse a credential path. `docs/performance.md` presented a 40-build instruction
+  total as a per-build figure, and `docs/benchmark.md` still carried the line count
   from before the last four thousand lines landed. No behavior changed except one
   prompt string: `ponytail` said "Ask first whether the change needs to exist"
   in the same request as a system prompt that says "Do not ask questions", so it
@@ -1304,7 +1322,7 @@ release, and `microagent update` moves you to it.
   arguments, and every byte a tool read out of the tree, which is the material the tools
   themselves refuse to hand the provider. The modes are now `0o600` and `0o700`, and only on
   what this run creates: an operator who pointed `MICROAGENT_SESSION_DIR` at a store that
-  already exists keeps the mode they gave it. `THREAT_MODEL.md` records the two modes as
+  already exists keeps the mode they gave it. `docs/threat-model.md` records the two modes as
   controls, and its `src/session.zig` references point at the declarations they name again.
 
 - A path whose symlink lands on a credentials file is refused, by the same rule and

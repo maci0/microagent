@@ -1,7 +1,7 @@
 #!/bin/sh
 # Run a Harbor benchmark for microagent and opencode, sequentially, and print a
 # per-task summary. One harness at a time on purpose: two 23-task jobs at once
-# measured the machine's load, not the harnesses (see BENCHMARK.md).
+# measured the machine's load, not the harnesses (see docs/benchmark.md).
 #
 #   bench/harbor.sh tb2                     # Terminal-Bench 2, stride sample
 #   bench/harbor.sh swebench                # SWE-bench Verified, stride sample
@@ -23,7 +23,7 @@ bench=${1:-tb2}
 shift 2>/dev/null || true
 harnesses=${*:-"microagent opencode"}
 # A job directory holds every container log and agent transcript the run
-# produced, and the scores in BENCHMARK.md are read out of it, so it is not
+# produced, and the scores in docs/benchmark.md are read out of it, so it is not
 # scratch: it lands beside the home directory the adapter's venv goes in, on
 # disk rather than on the tmpfs a /tmp is on a machine that keeps one.
 jobs_dir=${JOBS_DIR:-$HOME/harbor-jobs}

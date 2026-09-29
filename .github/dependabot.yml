@@ -21,7 +21,7 @@
 # `uv pip compile` recorded at the top of the manifest by hand. Ninety
 # transitive packages with no automated bump means an advisory in one of them
 # is found by reading, not by a bot: the Harbor release is a benchmark harness,
-# the versions in BENCHMARK.md were measured against a specific one, and
+# the versions in docs/benchmark.md were measured against a specific one, and
 # changing it changes a number rather than a binary.
 version: 2
 

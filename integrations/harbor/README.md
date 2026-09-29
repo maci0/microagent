@@ -1,8 +1,8 @@
 # Running microagent on Harbor benchmarks
 
 [Harbor](https://github.com/laude-institute/harbor) runs containerized agent
-benchmarks (Terminal-Bench 2, SWE-bench Verified, aider-polyglot, ...). This
-directory holds the adapter that lets Harbor drive microagent.
+benchmarks such as Terminal-Bench 2, SWE-bench Verified and aider-polyglot.
+This directory holds the adapter that lets Harbor drive microagent.
 
 microagent is a static binary with its own shell and file tools, so it runs
 *inside* the task container, where the task's files already are. The adapter
@@ -14,19 +14,18 @@ uploads it, then runs one non-interactive turn with the task instruction.
 make musl
 ```
 
-That is the same two commands spelled in the
-[Makefile](../../Makefile): `zig build -Dtarget=<host arch>-linux-musl
--Doptimize=ReleaseFast`, then the binary copied to
-`microagent-<host arch>-linux-musl` next to the adapter, which is the name
-`binary_path()` below looks for. The architecture is the host's own, read with
+The [Makefile](../../Makefile) runs `zig build -Dtarget=<host arch>-linux-musl
+-Doptimize=ReleaseFast` and copies the binary to
+`microagent-<host arch>-linux-musl` next to the adapter, the name the adapter's
+`binary_path()` looks for. The architecture is the host's own, read with
 `uname -m`: Harbor runs the task container on the host's architecture, so
-Apple silicon and arm64 Linux hosts need `aarch64` and the `x86_64` binary does
-not execute in their containers. Pass a different one with `make musl
-MUSL_ARCH=<arch>`, or a binary of any other architecture through
+Apple silicon and arm64 Linux hosts need `aarch64`, and an `x86_64` binary does
+not execute in their containers. Pick another with `make musl
+MUSL_ARCH=<arch>`, or pass a binary of any architecture through
 `MICROAGENT_BINARY`. Neither file is committed.
 
-Statically linked, ~1.46 MB, no runtime dependencies — it runs in `python:slim`,
-bare `ubuntu`, and distroless images alike.
+The binary is statically linked, about 1.6 MB, with no runtime dependencies:
+it runs in `python:slim`, bare `ubuntu` and distroless images alike.
 
 ## Run
 
@@ -49,12 +48,12 @@ PYTHONPATH=$PWD/integrations/harbor ~/harbor-venv/bin/harbor run \
 Harbor's registry work the same way; only the dataset name changes.
 
 Harbor itself is pinned in [requirements.txt](requirements.txt), because the
-adapter subclasses its agent API and a score is only the same score against the
+adapter subclasses its agent API, and a score is comparable only against the
 Harbor release that produced it. The install above reads
-[requirements.lock](requirements.lock), which is that pin plus Harbor's whole
-dependency tree with a sha256 per published artifact, so the venv a number in
-[BENCHMARK.md](../../BENCHMARK.md) was measured in is the one the next run
-installs. The command that regenerates it is in the comment at the top of
+[requirements.lock](requirements.lock): that pin plus Harbor's whole dependency
+tree, with a sha256 per published artifact, so the next run installs the venv a
+number in [docs/benchmark.md](../../docs/benchmark.md) was measured in. The
+command that regenerates the lock is in the comment at the top of
 `requirements.txt`.
 
 ## Environment
@@ -65,57 +64,68 @@ installs. The command that regenerates it is in the comment at the top of
 | `MICROAGENT_BASE_URL` | OpenAI-compatible endpoint (default OpenRouter); https, or http on loopback, because the key goes to it in the clear, and a url the binary refuses stops the run here |
 | `MICROAGENT_BUDGET_SECONDS` | elapsed-time budget inside the container, read from the monotonic clock (default 600), capped at `MICROAGENT_AGENT_TIMEOUT_SEC` less 360 s |
 | `MICROAGENT_MAX_TURNS` | `--max-turns` passed to the binary (default 150, above the binary's own 100) |
-| `MICROAGENT_REASONING_EFFORT` | `none`/`low`/... — reasoning models otherwise spend the whole budget thinking; a level the binary does not have stops the run here |
+| `MICROAGENT_REASONING_EFFORT` | `minimal`, `low`, `medium`, `high` or `none`; reasoning models otherwise spend the whole budget thinking. A level the binary does not have stops the run here |
 | `MICROAGENT_MAX_TOKENS` | generation ceiling passed to the binary (its own default when unset); a low account balance is answered with `402 ... you can only afford N`, and asking for less is the only lever |
 | `MICROAGENT_CA_BUNDLE` | PEM file to upload as the container's trust store, else `SSL_CERT_FILE`, else the host's system store |
 | `MICROAGENT_AGENT_TIMEOUT_SEC` | hard cap on the in-container process (default 1500), and the ceiling the budget is derived from |
 | `MICROAGENT_BINARY` | path to the static binary, if not next to this file |
 | `MICROAGENT_VERSION` | version string reported to harbor, if not the binary's own |
 
-An empty value is the same as an unset one for every variable here, and a value
-is trimmed before it is read, so a wrapper that exports one from a file leaves
-no newline on a path or a key. A non-numeric or zero `MICROAGENT_MAX_TURNS`,
-`MICROAGENT_BUDGET_SECONDS`, `MICROAGENT_AGENT_TIMEOUT_SEC` or
-`MICROAGENT_MAX_TOKENS`, and a
-`MICROAGENT_REASONING_EFFORT` that is not one of `minimal`, `low`, `medium`,
-`high`, `none`, and a `MICROAGENT_BASE_URL` the binary would refuse (no scheme,
-or http to anything but loopback), stop the run before the container starts,
-naming the variable.
-`MICROAGENT_MAX_TURNS` is passed as `--max-turns` and the binary reads the same
-name itself, so either route ends at the same ceiling.
+An empty value counts as unset for every variable here, and each value is
+trimmed before it is read, so a wrapper that exports one from a file leaves no
+newline on a path or a key. These stop the run before the container starts,
+naming the variable:
+
+- a non-numeric or zero `MICROAGENT_MAX_TURNS`, `MICROAGENT_BUDGET_SECONDS`,
+  `MICROAGENT_AGENT_TIMEOUT_SEC` or `MICROAGENT_MAX_TOKENS`;
+- a `MICROAGENT_REASONING_EFFORT` that is not one of `minimal`, `low`,
+  `medium`, `high`, `none`;
+- a `MICROAGENT_BASE_URL` the binary would refuse (no scheme, or http to
+  anything but loopback).
+
+`MICROAGENT_MAX_TURNS` is passed as `--max-turns`, and the binary reads the
+same name itself, so either route ends at the same ceiling.
+
+### The budget cap
 
 The budget is the agent's working time, so the adapter takes the smaller of
 `MICROAGENT_BUDGET_SECONDS` and `MICROAGENT_AGENT_TIMEOUT_SEC` less 360 s,
-floored at one second. A run whose budget was cut says so on the job log, with
-both numbers, because a score is read from that log. The 360 s is the binary's own 300 s grace on the forced
-final push plus a minute for teardown: a run that reaches its budget is allowed
-to keep going for that grace, so a smaller room puts the caller's timeout in the
-middle of the last turn. At the defaults the budget stays 600 against the 1500 s
-timeout, since 600 is the smaller. A task timeout of 900 s therefore runs a 540 s
-budget, and `MICROAGENT_BUDGET_SECONDS=1200` under the default timeout is capped
-to 1140. The floor is one second rather than the minute it used to be, because a
-floor that outgrew the timeout handed a 60 s budget to a 30 s timeout: the
-container was killed 30 s in and the run was recorded as an exception rather
-than scored on the tree it had left. A timeout that leaves no room after the
-grace, so the budget cannot be shorter than it, is refused before the container
-starts rather than answered with a budget the caller's timeout expires inside.
+floored at one second. A run whose budget was cut says so on the job log with
+both numbers, because a score is read from that log.
+
+The 360 s is the binary's own 300 s grace on the forced final push plus a
+minute for teardown. A run that reaches its budget keeps going for that grace,
+so less room puts the caller's timeout in the middle of the last turn. At the
+defaults the budget stays 600 against the 1500 s timeout, since 600 is the
+smaller. A task timeout of 900 s runs a 540 s budget, and
+`MICROAGENT_BUDGET_SECONDS=1200` under the default timeout is capped to 1140.
+
+The floor is one second, not a minute, because a floor larger than the timeout
+allows hands a 60 s budget to a 30 s timeout: the container is killed 30 s in
+and the run is recorded as an exception rather than scored on the tree it left.
+A timeout that leaves no room after the grace is refused before the container
+starts, rather than answered with a budget the caller's timeout expires inside.
 
 A run that still reaches the caller's timeout is scored on the tree it left
-rather than raised: the trial would otherwise be recorded as an exception and
-the work counted as nothing. The timeout is written to
-`microagent-timeout.txt` in the job's log directory and a warning names it, so a
-trial that scored on a partial tree is visible in the log rather than silent.
+rather than raised, since the trial would otherwise be recorded as an exception
+and the work counted as nothing. The timeout is written to
+`microagent-timeout.txt` in the job's log directory and a warning names it, so
+a trial scored on a partial tree is visible in the log.
 
-`MICROAGENT_CA_BUNDLE` is read here in the order the binary reads it, the
-project's own variable first and `SSL_CERT_FILE` after it, so the bundle a host
+### The CA bundle
+
+The adapter reads the CA bundle in the order the binary does,
+`MICROAGENT_CA_BUNDLE` first and `SSL_CERT_FILE` after it, so the bundle a host
 names for its own runs is the one uploaded for the container's. With neither
-set, the host's trust store is probed at the usual distribution and Homebrew
-paths, and a host where none of those holds a PEM is warned about at setup: the
-container then keeps its own trust store, and a bare image has none, so the
-first request dies as `TlsInitializationFailed` with nothing in the job log to
-connect it to the host.
+set, it probes the host's trust store at the usual distribution and Homebrew
+paths, and warns at setup when none of those holds a PEM. The container then
+keeps its own trust store; a bare image has none, so the first request dies as
+`TlsInitializationFailed` with nothing in the job log connecting it to the
+host.
 
 ## Two things the containers forced
+
+### CA store
 
 Bare images have no CA store, and microagent's TLS then fails before its first
 request with `TlsInitializationFailed`. The adapter uploads the host's CA bundle
@@ -123,12 +133,14 @@ and passes `MICROAGENT_CA_BUNDLE`; the host path is usually a symlink into
 `ca-certificates/extracted`, which `docker cp` would copy as a dangling link, so
 the adapter resolves it first.
 
+### Reasoning
+
 Reasoning models burn the entire per-task timeout thinking. Measured on
 Terminal-Bench 2 `log-summary-date-ranges` with deepseek-v4-flash: with reasoning
 on, 12-minute gauntlet reviews timed out with zero files changed; with
-`MICROAGENT_REASONING_EFFORT=none`, the same work lands in minutes.
+`MICROAGENT_REASONING_EFFORT=none`, the same work landed in minutes.
 
 ## Results
 
-See [BENCHMARK.md](../../BENCHMARK.md#terminal-bench-2) for the scores and the
+See [docs/benchmark.md](../../docs/benchmark.md#terminal-bench-2) for the scores and the
 machine they were produced on.

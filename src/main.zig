@@ -92,7 +92,7 @@ const exit_incomplete: u8 = 3;
 /// streams until something else stops it, and the run pays for every token of
 /// it, up to `max_response_bytes` per turn and `max_turns_default` turns deep.
 /// Well past the largest single response a coding turn needs (the 13-instance
-/// SWE run in BENCHMARK.md bills 80k output tokens in total, so no one
+/// SWE run in docs/benchmark.md bills 80k output tokens in total, so no one
 /// response in it came near this), and low enough that one runaway turn cannot
 /// run up a real bill.
 const default_max_tokens: u32 = 65_536;
@@ -629,7 +629,7 @@ test "the help text groups each variable under what it configures" {
 
 test "the help text names the spend alarm the run prints" {
     // `--max-spend-tokens` warns on stderr once the share is spent, and the
-    // README says so. A flag documented without the warning is a flag whose
+    // usage reference says so. A flag documented without the warning is a flag whose
     // one line of stderr looks like a fault rather than the ceiling working.
     // Spelled from the constant, so a percent that moves takes the sentence
     // with it.
@@ -1175,14 +1175,14 @@ fn resolveKey(io: Io, environ: *std.process.Environ.Map, arena_state: *std.heap.
     return .{ .value = "", .source = "none" };
 }
 
-/// In the order they are tried, and the order the help text and README name
+/// In the order they are tried, and the order the help text and usage reference name
 /// them: the project's own variable first, then the provider's.
 const key_vars = [_][]const u8{ "MICROAGENT_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY" };
 
 /// Every environment variable the program reads, which is what a user has to
 /// know to configure it. The resolution order each one is read in is spelled by
 /// the reader that reads it; this list is the documentation check and nothing
-/// else, so a variable added to a reader and to neither `--help` nor the README
+/// else, so a variable added to a reader and to neither `--help` nor the usage reference
 /// is one a user finds by reading the source. `key_vars` carries the order the
 /// four credentials are tried in, `net.caBundlePath` the bundle's two, and
 /// `secret_env_vars` the credentials scrubbed from a tool's environment; this is
@@ -1222,11 +1222,11 @@ const env_vars = [_][]const u8{
 /// which: `MICROAGENT_CONFIG` and `MICROAGENT_SESSION_DIR` turn their feature
 /// off, and the bundle and the style levels fall through to the next source.
 ///
-/// The help text states this in prose and so does the README, and the two have
-/// drifted: the help named `MICROAGENT_STALL_TIMEOUT` here and the README did
-/// not, so a reader of the README alone could not tell that an empty
-/// `MICROAGENT_STALL_TIMEOUT` falls back rather than reaching the provider. The
-/// list is the category, and the test below holds both documents to it.
+/// The help text and docs/usage.md both state this in prose, and prose
+/// drifts: a variable one names here and the other leaves out means a reader
+/// of that document cannot tell whether an empty value falls back or reaches
+/// the provider. The list is the category, and the test below holds both
+/// documents to it.
 const empty_is_unset_vars = [_][]const u8{
     "MICROAGENT_MODEL",
     "MICROAGENT_BASE_URL",
@@ -7616,7 +7616,7 @@ test "the key is the flag, then the first variable, then the file" {
         try std.testing.expectEqualStrings(key_vars[0], k.source);
     }
 
-    // Each variable in turn, so the order the help text and README name is the
+    // Each variable in turn, so the order the help text and usage reference name is the
     // order a key is looked for in, and not merely the order the array spells.
     for (key_vars) |name| {
         for (key_vars) |other| _ = env.swapRemove(other);
@@ -7754,35 +7754,34 @@ const harbor_adapter_path = "integrations/harbor/microagent_agent.py";
 /// The adapter is a few hundred lines; a bigger file is not the one tracked.
 const max_harbor_adapter_bytes: usize = 128 * 1024;
 
-// Every variable the program reads is named by `--help` and by the README, and
-// the two documents state the empty-value rule for the same subset. Nothing
-// else in the tree connects the two: the readers are spread over main.zig,
-// net.zig and session.zig, a variable added to one of them works from the first
-// request, and the only place a user looks for its name is the help text, so a
-// variable that reached none of the three documents is one a user finds by
+// Every variable the program reads is named by `--help` and by docs/usage.md,
+// and the two documents state the empty-value rule for the same subset.
+// Nothing else in the tree connects the two: the readers are spread over
+// main.zig, net.zig and session.zig, a variable added to one of them works from
+// the first request, and the only place a user looks for its name is the help
+// text, so a variable that reached neither document is one a user finds by
 // reading this source.
 //
-// The empty-value rule is the narrower half and the one that has drifted: the
-// help text named MICROAGENT_STALL_TIMEOUT among the variables an empty value
-// leaves at their default, and the README did not, so the two documents
-// disagreed about what an empty value means for a third of the surface. Both
-// are prose about `empty_is_unset_vars` rather than a rendering of it, since
-// the help wraps its lines by hand; the test is what holds the prose to the
-// list.
-test "the help text and the README name every variable the program reads" {
+// The empty-value rule is the narrower half and the one that drifts: a
+// variable one document lists among those an empty value leaves at their
+// default and the other does not makes the two disagree about what an empty
+// value means. Both are prose about `empty_is_unset_vars` rather than a
+// rendering of it, since the help wraps its lines by hand; the test is what
+// holds the prose to the list.
+test "the help text and the usage reference name every variable the program reads" {
     const gpa = std.testing.allocator;
     // The test runs with the build root as its working directory, which is
-    // where the README is tracked.
-    const readme = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, readme_path, gpa, .limited(max_readme_bytes));
-    defer gpa.free(readme);
+    // where docs/usage.md is tracked.
+    const doc = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, usage_doc_path, gpa, .limited(max_usage_doc_bytes));
+    defer gpa.free(doc);
 
     for (env_vars) |name| {
         if (!namesWholeToken(help_text, name)) {
-            std.debug.print("\n" ++ readme_path ++ ": --help does not name {s}, so a user has to read the source to find it\n", .{name});
+            std.debug.print("\n" ++ usage_doc_path ++ ": --help does not name {s}, so a user has to read the source to find it\n", .{name});
             return error.TestUnexpectedResult;
         }
-        if (!namesWholeToken(readme, name)) {
-            std.debug.print("\n" ++ readme_path ++ ": does not name {s}, so a user has to read the source to find it\n", .{name});
+        if (!namesWholeToken(doc, name)) {
+            std.debug.print("\n" ++ usage_doc_path ++ ": does not name {s}, so a user has to read the source to find it\n", .{name});
             return error.TestUnexpectedResult;
         }
     }
@@ -7799,8 +7798,8 @@ test "the help text and the README name every variable the program reads" {
         std.debug.print("\n--help has no paragraph saying an empty value is not a value\n", .{});
         return error.TestUnexpectedResult;
     };
-    const readme_rule = paragraphFrom(readme, rule_anchor) orelse {
-        std.debug.print("\n" ++ readme_path ++ ": has no paragraph saying an empty value is not a value\n", .{});
+    const doc_rule = paragraphFrom(doc, rule_anchor) orelse {
+        std.debug.print("\n" ++ usage_doc_path ++ ": has no paragraph saying an empty value is not a value\n", .{});
         return error.TestUnexpectedResult;
     };
     for (empty_is_unset_vars) |name| {
@@ -7808,8 +7807,8 @@ test "the help text and the README name every variable the program reads" {
             std.debug.print("\n--help: {s} keeps its default on an empty value and the paragraph saying so does not name it\n", .{name});
             return error.TestUnexpectedResult;
         }
-        if (!namesWholeToken(readme_rule, name)) {
-            std.debug.print("\n" ++ readme_path ++ ": {s} keeps its default on an empty value and the paragraph saying so does not name it\n", .{name});
+        if (!namesWholeToken(doc_rule, name)) {
+            std.debug.print("\n" ++ usage_doc_path ++ ": {s} keeps its default on an empty value and the paragraph saying so does not name it\n", .{name});
             return error.TestUnexpectedResult;
         }
     }
@@ -7823,8 +7822,8 @@ test "the help text and the README name every variable the program reads" {
     // convention from starting, where a variable is settled in a paragraph and
     // in no list.
     for ([_][]const u8{ "MICROAGENT_CONFIG", "MICROAGENT_SESSION_DIR", "MICROAGENT_SKILLS" }) |name| {
-        if (!namesWholeToken(help_rule, name) or !namesWholeToken(readme_rule, name)) {
-            std.debug.print("\n" ++ readme_path ++ ": {s} reads empty as off rather than falling through, and one paragraph saying so does not name it\n", .{name});
+        if (!namesWholeToken(help_rule, name) or !namesWholeToken(doc_rule, name)) {
+            std.debug.print("\n" ++ usage_doc_path ++ ": {s} reads empty as off rather than falling through, and one paragraph saying so does not name it\n", .{name});
             return error.TestUnexpectedResult;
         }
     }
@@ -7840,9 +7839,9 @@ fn paragraphFrom(text: []const u8, anchor: []const u8) ?[]const u8 {
     return text[at..end];
 }
 
-const readme_path = "README.md";
-/// The README is prose; a bigger file is not the one tracked.
-const max_readme_bytes: usize = 256 * 1024;
+const usage_doc_path = "docs/usage.md";
+/// The usage reference is prose; a bigger file is not the one tracked.
+const max_usage_doc_bytes: usize = 256 * 1024;
 
 /// Whether `text` spells `name` as a word of its own, rather than as a part of
 /// a longer one: a plain substring search lets `MICROAGENT_MAX_TOKENS` be
