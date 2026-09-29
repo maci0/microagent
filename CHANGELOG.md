@@ -14,6 +14,8 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-29
+
 ### Added
 
 - `deepwiki` preset (`https://mcp.deepwiki.com/mcp`): `read_wiki_structure`, `read_wiki_contents`, `ask_wiki_question`.
@@ -1761,7 +1763,8 @@ First release.
   `aarch64-macos` with a checksum sidecar each, and refuses a tag that does not name the version in
   `build.zig.zon`.
 
-[Unreleased]: https://github.com/maci0/microagent/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/maci0/microagent/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/maci0/microagent/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/maci0/microagent/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/maci0/microagent/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/maci0/microagent/compare/v0.2.0...v0.3.0
