@@ -42,8 +42,8 @@ document nobody signed.
 | 9 | A hostile or malformed provider response exhausts memory or CPU | provider → agent | medium | run killed, machine memory spent | per-response cap (`max_response_bytes`, `src/main.zig:114`), frame cap (`max_frame_bytes`, `src/main.zig:129`), error-body cap (`max_error_body_bytes`, `src/main.zig:136`), timeouts, process-group kill |
 | 10 | A hostile repository writes escape sequences to the operator's terminal | repo → terminal | high: any file the model echoes | terminal spoofing, clipboard tricks | control bytes escaped in the gutter (`toolCallLine` via `chat.safeText`, `src/tool.zig:699`, `src/chat.zig:656`) and scrubbed in error text (`terminalSafe`, `src/tool.zig:750`) |
 | 11 | A hostile model result spends the operator's money | model → provider | medium: a runaway or looping run | unbounded bill on the provider account | per-request `max_tokens` (`buildBody`, `src/main.zig:2090`), turn and wall-clock ceilings, and an opt-in run-wide spend ceiling (`--max-spend-tokens`, `spendCeilingReached`, `src/main.zig:1654`); nothing bounds the spend of a run that set none (gap 8) |
-| 12 | An `[[mcp]]` table chooses a program the run executes | operator config → host | medium: needs a write to the config file, the environment or `--config` | arbitrary code execution as the operator; every tool result the server returns reaches the model | servers are read only from the config file (`--config`, `MICROAGENT_CONFIG` or `$HOME/.microagent/config.toml`), never from the working tree (`config.parse`, `src/config.zig:95`; `connect`, `src/mcp.zig:378`), so a repository under review cannot add one; the server inherits the scrubbed environment, never the provider key (`childEnviron`, `src/main.zig:1269`); it is trusted exactly as far as a `bash` command the operator wrote, and no further |
-| 13 | A skill body is prompt text the model is told to follow | operator config → model | low: needs a write to a skills directory, the config file, or `MICROAGENT_SKILLS` | the run follows instructions the operator did not write, and the conversation is re-sent to the provider | skills are read only from the roots the config file or the variable names, else `$HOME/.microagent/skills`, never from the working tree (`roots`, `src/skill.zig:126`; `discover`, `src/skill.zig:172`), so a repository under review cannot install one; the listing escapes control bytes (`Skills.prompt`, `src/skill.zig:87`); a body reaches the conversation only when the model calls the tool, as a tool result under the same cap as any other |
+| 12 | An `[[mcp]]` table chooses a program the run executes | operator config → host | medium: needs a write to the config file, the environment or `--config` | arbitrary code execution as the operator; every tool result the server returns reaches the model | servers are read only from the config file (`--config`, `MICROAGENT_CONFIG` or `$HOME/.microagent/config.toml`), never from the working tree (`config.parse`, `src/config.zig:95`; `connect`, `src/mcp.zig:403`), so a repository under review cannot add one; the server inherits the scrubbed environment, never the provider key (`childEnviron`, `src/main.zig:1269`); it is trusted exactly as far as a `bash` command the operator wrote, and no further |
+| 13 | A skill body is prompt text the model is told to follow | operator config → model | low: needs a write to a skills directory, the config file, or `MICROAGENT_SKILLS` | the run follows instructions the operator did not write, and the conversation is re-sent to the provider | skills are read only from the roots the config file or the variable names, else `$HOME/.microagent/skills`, never from the working tree (`roots`, `src/skill.zig:134`; `discover`, `src/skill.zig:180`), so a repository under review cannot install one; the listing escapes control bytes (`Skills.prompt`, `src/skill.zig:95`); a body reaches the conversation only when the model calls the tool, as a tool result under the same cap as any other |
 
 `microagent` is a local CLI with no listener, no server and no database. It holds no user
 data of its own: it exposes the operator's own machine, and an attacker wants the key, the
@@ -58,8 +58,8 @@ source tree and the host. The one asset worth stealing on its own is the API key
 | Command line, agent mode | prompt, flags, API key in `argv` | `parseArgs`, `src/main.zig:997`; `main`, `src/main.zig:251`; the flag table at `src/main.zig:917` holds every valued flag the run accepts: `-p/--print`, `-m/--model`, `-b/--base-url`, `-k/--api-key`, `--ca-bundle`, `--config`, `--reasoning-effort`, `--budget`, `--max-spend-tokens`, `--max-turns`, `--max-tokens`, `--stall-timeout` |
 | `--ca-bundle <file>` | the PEM file whose certificates vouch for the provider and for GitHub | `net.caBundlePath`, `src/net.zig:105`; `loadCaBundle`, `src/net.zig:39`; applied at `src/main.zig:341` and `src/update.zig:939` |
 | `--config <file>`, `MICROAGENT_CONFIG`, `~/.microagent/config.toml` | reply-style levels, skill roots and `[[mcp]]` tables: what the prompt says and what the run starts | `styleConfigPath`, `src/main.zig:1433`; `loadConfig`, `src/main.zig:1309`; `config.parse`, `src/config.zig:95`; cap `max_config_bytes` (64 KB), `src/main.zig:131` |
-| `[[mcp]]` tables in that config | programs the run starts over stdio, and the tools they offer | `connect`, `src/mcp.zig:378`; `handshake`, `src/mcp.zig:464` |
-| `skills` in that config, `MICROAGENT_SKILLS`, `~/.microagent/skills` | `SKILL.md` bodies the model may load, as prompt text | `roots`, `src/skill.zig:126`; `discover`, `src/skill.zig:172`; `call`, `src/skill.zig:320`; cap `max_skill_bytes`, `src/skill.zig:40` |
+| `[[mcp]]` tables in that config | programs the run starts over stdio, and the tools they offer | `connect`, `src/mcp.zig:403`; `handshake`, `src/mcp.zig:489` |
+| `skills` in that config, `MICROAGENT_SKILLS`, `~/.microagent/skills` | `SKILL.md` bodies the model may load, as prompt text | `roots`, `src/skill.zig:134`; `discover`, `src/skill.zig:180`; `call`, `src/skill.zig:363`; cap `max_skill_bytes`, `src/skill.zig:40` |
 | Command line, `update` | `--check`, `--repo` | `parseArgs`, `src/update.zig:848`; `run`, `src/update.zig:885`; dispatched from `main` at `src/main.zig:264` |
 | `MICROAGENT_MODEL`, `MICROAGENT_BASE_URL`, `MICROAGENT_REASONING_EFFORT` | endpoint, model, response style | `envValue`, `src/main.zig:672`; read at `src/main.zig:281-283` |
 | `MICROAGENT_MAX_TURNS`, `MICROAGENT_MAX_TOKENS` | loop and response ceilings | `max_turns_default`, `src/main.zig:83`; `default_max_tokens`, `src/main.zig:98`; both through `ceiling`, `src/main.zig:722` |
@@ -127,19 +127,19 @@ program is trusted.
    written to the session log or to a tool result.
 8. **Operator config → host (MCP).** The `[[mcp]]` tables name programs the run starts as
    children before the first request; the tools they report are advertised to the model and
-   dispatched to them (`config.parse`, `src/config.zig:95`; `connect`, `src/mcp.zig:378`).
+   dispatched to them (`config.parse`, `src/config.zig:95`; `connect`, `src/mcp.zig:403`).
    Validation point: the tables come from the config file named by `--config`, the variable
    or `$HOME/.microagent/config.toml`, and from nowhere in the tree (`styleConfigPath`,
    `src/main.zig:1433`). The children inherit the scrubbed environment, which lacks the
    provider key (`childEnviron`, `src/main.zig:1269`). A server whose name or tool name
-   cannot be spelled in a tool name is refused (`validName`, `src/mcp.zig:364`). What a
+   cannot be spelled in a tool name is refused (`validName`, `src/mcp.zig:389`). What a
    configured server does with its own authority is the operator's decision, as with a
    `bash` command they write.
 9. **Operator skills → model.** A `SKILL.md` body is instruction text the model is told to
    follow. It reaches the conversation only when the model calls the `skill` tool (`call`,
-   `src/skill.zig:320`). Validation point: the roots are the config file's `skills` list,
+   `src/skill.zig:363`). Validation point: the roots are the config file's `skills` list,
    the directories `MICROAGENT_SKILLS` names, or the operator's home directory, never the
-   tree (`roots`, `src/skill.zig:126`; `discover`, `src/skill.zig:172`).
+   tree (`roots`, `src/skill.zig:134`; `discover`, `src/skill.zig:180`).
 
 Privilege transitions are total, not gradual: once the model calls `bash`, the run has the
 operator's full authority. No user confirmation sits between a model decision and a

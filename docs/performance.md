@@ -77,6 +77,10 @@ run-to-run noise, so there is no build flag to reach for either.
 | a retry wait past the budget | up to 6 min asleep | **refused** | `--budget` was defeated by the `Retry-After` path |
 | turn arena after a ceiling-sized response | 48 MB resident | **4 MB** | the reset retained without bound |
 | MCP server startup, 3 servers | 1.513 s | **0.506 s** | every server is spawned before any is asked to initialize, so their boots overlap: the run waits for the slowest server instead of the sum |
+| a 200 x 100 KB skill library | 24.3 MB resident | **4.6 MB** | the listing read every `SKILL.md` whole and kept the text in the run arena, because the name and description it lists are slices of it; it reads the head of the file now, and a `skill` call reads the body |
+| the same library, system time to the first request | 9.3 ms | **2.0 ms** | the same change: 21 MB of reads become about 1.6 MB, and kernel time is the half that carries it |
+| three MCP servers with 1 MB `tools/list` answers | 12.2 MB resident | **4.5 MB** | a `tools/list` answer was parsed into the run arena, tree and line both, and the buffer it arrived in kept its size; the answer is parsed in a scratch arena now, only the schema bytes are copied out, and that buffer has its own allocator and is handed back |
+| one such server | 8.5 MB | **4.5 MB** | the same change |
 
 The two largest wins are not CPU at all. The request-bytes fix is the most valuable change in this
 file, and every counter the harness prints misses it: `cached_tokens` reports what was reused, never
@@ -96,14 +100,6 @@ Kept out on the numbers, not on taste:
   concurrently.
 - **A byte-level compaction rewrite.** Compaction is 4.7 ms per megabyte, about 0.02% of a run, and
   the replacement would hand-rewrite the exact bytes the prompt cache depends on.
-- **A prefix read for skill discovery.** The listing reads each `SKILL.md` whole and keeps it in the
-  run arena, because the name and description it lists are slices of that text. Measured with
-  `hyperfine -w 3 -r 15` against the stub provider: 20 skills of 4 KB are inside the noise of no
-  skills at all (p50 1.28 against 1.36 ms), 200 of them add 0.7 ms, and 200 of 100 KB add 5 ms and
-  about 20 MB resident. A head-only read helps only the last case, since a file smaller than the cap
-  is read whole either way, so it is not worth the open-and-read-to-a-limit loop it needs. Revisit if
-  a skill library that size turns up.
-
 The escaper tests written for the word-at-a-time attempt were kept, because they cover a real edge:
 the escaper takes a byte's width from its lead byte, and an escapable byte or a multi-byte character
 landing at an arbitrary offset produces invalid JSON when that is wrong.
@@ -164,6 +160,8 @@ guard fails, not merely that the guard exists.
 | session pruning by path | `a log in a subdirectory is pruned` | present |
 | escaper correctness | `a fuzzed byte string leaves a JSON string that reads back as itself` | fuzzer |
 | MCP servers started before any handshake | `every server is started before any of them is asked to initialize` | defeated: two servers connected to one, test fails |
+| a large skill listed from its head | `a large skill is listed from its head, and loads whole` | defeated: the run arena holds the file, and the 64 KB bound fails by 3x |
+| a `tools/list` answer parsed in a scratch arena | `a tools/list answer is parsed in a scratch arena and its buffer is handed back` | defeated: run arena 3.4 MB against a 1 MB bound, pending capacity one answer's size |
 
 Re-checking one takes a minute and is worth doing after any refactor that touches a test file,
 because guards move. Tell three outcomes apart; confusing the first two reports a broken guard as a
@@ -197,11 +195,23 @@ server refuses to answer until the starter server has run, so a sequential conne
 test sees one server where it expects two. Where `/bin/sh` has no fractional `sleep`, the waiter's
 bounded wait spins instead of sleeping; the guard still works and gives up sooner.
 
-The skill-discovery row is measured the same way: `MICROAGENT_SKILLS` pointed at a directory of N
-generated `SKILL.md` files, `hyperfine -w 3 -r 15`, and the numbers above are the medians.
-`hyperfine -w 3 -r 20` over an instant-answer server put the whole MCP path (spawn, two round trips,
-and the reap at the end) at 0.7 ms for one server, 1.2 ms for three and 3.2 ms for ten, against
-1.5 ms for a run with none, which is why nothing after the boot overlap was worth touching.
+The skill rows are measured with `MICROAGENT_SKILLS` pointed at a directory of generated `SKILL.md`
+files, the same directory before and after the change. The resident figures are peak `VmHWM` from
+`/proc/<pid>/status`, sampled every 20 ms through a 400-turn run against the stub. That is the only
+method that agreed with `smaps`: `getrusage`'s `ru_maxrss` answered 10.8 MB for a 5 KB hello-world on
+this machine, the same figure it gave the harness, so it is not usable for small processes here. The
+wall figure is `hyperfine -w 3 -r 20` and it moves with the page cache (11.1 ms against 10.9 ms per
+run warm, 27.2 against 12.9 loaded and cold); the system time does not, 9.3 ms against 2.0 ms, which
+is the read volume. A library of ordinary size pays nothing either way: 2.9 MB against 2.9 MB with
+none, 5.5 against 5.9 for 200 skills of 4 KB.
+
+The MCP rows are the same shape: a fake server whose `tools/list` carries 1 MB of padding in its
+`inputSchema`, one and three servers, peak `VmHWM` sampled the same way. One server went from 8.5 MB
+to 4.5 MB and three from 12.2 MB to 4.5 MB, because three schemas stay resident (the request carries
+them) while the parsed answer no longer does. `hyperfine -w 3 -r 20` over an instant-answer server
+put the whole MCP path (spawn, two round trips, and the reap at the end) at 0.7 ms for one server,
+1.2 ms for three and 3.2 ms for ten, against 1.5 ms for a run with none, which is why nothing after
+the boot overlap was worth touching.
 
 The instruction gate needs `perf` and exits 1 when a row leaves its band, 2 when a row cannot be
 measured. It is not in `make check` because a shared runner may have performance counters switched
