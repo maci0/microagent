@@ -272,7 +272,7 @@ pub fn release(gpa: std.mem.Allocator, field: *[]u8) void {
 /// Replaces an owned field with what a frame carried, and copies only when the
 /// value changed. The copy is taken before the old one is released, so an
 /// allocation that fails leaves the field holding what it held.
-fn keepChanged(gpa: std.mem.Allocator, current: *[]u8, next: ?[]const u8) !void {
+pub fn keepChanged(gpa: std.mem.Allocator, current: *[]u8, next: ?[]const u8) !void {
     const value = next orelse return;
     if (std.mem.eql(u8, current.*, value)) return;
     const owned = try ownString(gpa, value);

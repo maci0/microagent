@@ -1809,6 +1809,7 @@ fn run(
     // the conversation itself, and it is the one that grows with the server
     // count rather than with the work.
     const prefix = try bodyPrefix(arena, opts);
+    const ep = try endpoint(arena, opts);
     // What one turn allocates from the wire down -- the request body (a full
     // copy of the conversation), the streamed content, the tool results --
     // is dead once that turn's messages are appended. The run arena is never
@@ -1852,7 +1853,7 @@ fn run(
             // way any other does. A model that answers it finished, and one
             // that asks for more tools was cut off mid-work, which is a
             // different exit status from a finished run.
-            return try runTurn(client, io, turn_arena, gpa, prefix, opts, msgs, &session, &usage, budget.withGraceNs(final_push_grace_s), tool_env, &progress, mcp);
+            return try runTurn(client, io, turn_arena, gpa, prefix, opts, ep, msgs, &session, &usage, budget.withGraceNs(final_push_grace_s), tool_env, &progress, mcp);
         }
         // The ceiling is announced on the turn it applies to, before it is
         // spent, so a truncated answer is never the last thing on stdout with no
@@ -1862,7 +1863,7 @@ fn run(
         try compactMessages(io, gpa, msgs, turn_arena, &compaction_floor);
         // `.wants_tools` keeps the loop going, and `.cut_off` is the budget
         // ending the run mid-turn, so neither is a finished run.
-        switch (try runTurn(client, io, turn_arena, gpa, prefix, opts, msgs, &session, &usage, budget, tool_env, &progress, mcp)) {
+        switch (try runTurn(client, io, turn_arena, gpa, prefix, opts, ep, msgs, &session, &usage, budget, tool_env, &progress, mcp)) {
             // The tool results are already appended, so the next request
             // carries them and the loop asks again. Returning here ended the
             // run on the first turn that asked for a tool, which is every turn
@@ -2048,6 +2049,7 @@ fn runTurn(
     gpa: std.mem.Allocator,
     prefix: []const u8,
     opts: Options,
+    ep: Endpoint,
     msgs: *std.ArrayList(u8),
     session: *?session_mod.Session,
     usage: *chat_mod.Usage,
@@ -2062,7 +2064,7 @@ fn runTurn(
     // A turn the budget cut off is not a turn: half a tool call's arguments is
     // not a tool call, so nothing of it is appended and the run ends here with
     // the reason already on stderr.
-    var result = streamChat(client, io, gpa, arena, opts, prefix, budget, msgs.items) catch |err| switch (err) {
+    var result = streamChat(client, io, gpa, arena, opts, ep, prefix, budget, msgs.items) catch |err| switch (err) {
         error.BudgetExhausted => return .cut_off,
         else => return err,
     };
@@ -2269,6 +2271,33 @@ fn setStallTimeout(handle: std.posix.socket_t, seconds: u32) !void {
     return std.posix.setsockopt(handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv));
 }
 
+/// Where a request goes and what authorizes it, both settled by `opts` before
+/// the first turn. Built once from the run arena for the reason `bodyPrefix` is
+/// built there: nothing in the loop changes a base url or a key, so a URI parse
+/// and a `Bearer` copy per turn were per-turn work over a run constant, and
+/// both landed on the turn arena that the loop resets.
+const Endpoint = struct {
+    uri: std.Uri,
+    shown_url: []const u8,
+    auth: std.http.Client.Request.Headers,
+};
+
+fn endpoint(arena: std.mem.Allocator, opts: Options) !Endpoint {
+    const url = try std.fmt.allocPrint(arena, "{s}/chat/completions", .{std.mem.trimEnd(u8, opts.base_url, "/")});
+    return .{
+        .uri = std.Uri.parse(url) catch return error.InvalidUrl,
+        // What the notes below name, and what the userinfo a base url may carry
+        // never reaches: the run's log is not the place for a password.
+        .shown_url = displayUrl(arena, url),
+        // The authorization header is `override`, not `privileged`, and
+        // `authHeaders` says why. The redirect is unhandled, which is the
+        // promise made again where the request is opened: a provider that
+        // answers with a Location is an error rather than a second request, so
+        // nothing to drop the key out of.
+        .auth = try authHeaders(arena, opts.api_key),
+    };
+}
+
 /// Streams one completion, printing visible text as it arrives and accumulating
 /// tool calls and token counters. Text on stderr is tool activity; stdout is
 /// the model's own output plus one JSON usage line per response.
@@ -2278,20 +2307,14 @@ fn streamChat(
     gpa: std.mem.Allocator,
     arena: std.mem.Allocator,
     opts: Options,
+    ep: Endpoint,
     prefix: []const u8,
     budget: Budget,
     msgs: []const u8,
 ) !chat_mod.ChatResult {
-    const url = try std.fmt.allocPrint(arena, "{s}/chat/completions", .{std.mem.trimEnd(u8, opts.base_url, "/")});
-    const uri = std.Uri.parse(url) catch return error.InvalidUrl;
-    // What the notes below name, and what the userinfo a base url may carry
-    // never reaches: the run's log is not the place for a password.
-    const shown_url = displayUrl(arena, url);
-    // The authorization header is `override`, not `privileged`, and
-    // `authHeaders` says why. The redirect is unhandled, which is the promise
-    // made again here: a provider that answers with a Location is an error
-    // rather than a second request, so nothing to drop the key out of.
-    const auth_headers = try authHeaders(arena, opts.api_key);
+    const uri = ep.uri;
+    const shown_url = ep.shown_url;
+    const auth_headers = ep.auth;
 
     // The request lives in a slot so `Response.request` stays valid for the
     // reader handed back out of the retry loop below.
@@ -2783,11 +2806,13 @@ const StreamFrame = struct {
 ///
 /// Both parse paths land it before the delta, because a frame may carry the
 /// reason with no delta beside it.
+///
+/// A gateway repeats the reason on every chunk, and the field is owned, so
+/// copying it unconditionally is a dupe and a free per frame to hold bytes that
+/// did not move. `keepChanged` is the same rule `recordServed` follows for the
+/// two fields above it.
 fn applyFinishReason(gpa: std.mem.Allocator, result: *chat_mod.ChatResult, value: ?std.json.Value) !void {
-    const reason = chat_mod.str(value) orelse return;
-    const owned = try chat_mod.ownString(gpa, reason);
-    chat_mod.release(gpa, &result.finish_reason);
-    result.finish_reason = owned;
+    try chat_mod.keepChanged(gpa, &result.finish_reason, chat_mod.str(value));
 }
 
 /// The member a provider reports a mid-stream failure in, spelled as the bytes
