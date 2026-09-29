@@ -39,7 +39,8 @@ usage: microagent [options] "<prompt>"
   -m, --model <model>    model id (env MICROAGENT_MODEL, default
                          deepseek/deepseek-v4-flash)
   -b, --base-url <url>   OpenAI-compatible base url (env
-                         MICROAGENT_BASE_URL, default https://openrouter.ai/api/v1);
+                         MICROAGENT_BASE_URL, default
+                         https://openrouter.ai/api/v1);
                          https, or http on loopback, because the api
                          key goes to it in the clear otherwise
   -k, --api-key <key>    api key (env MICROAGENT_API_KEY, OPENAI_API_KEY,
@@ -164,8 +165,9 @@ MICROAGENT_STALL_TIMEOUT and MDEBUG keep their defaults, and
 MICROAGENT_CA_BUNDLE, the four api key variables and
 MICROAGENT_CAVEMAN/PONYTAIL fall through to whatever comes next.
 MICROAGENT_CONFIG, MICROAGENT_SESSION_DIR and MICROAGENT_SKILLS are the
-three where empty means off: no style file, no session log, no skills. HOME is trimmed like the rest, and an
-empty one is no home rather than a path off the root.
+three where empty means off: no style file, no session log, no skills. HOME
+is trimmed like the rest, and an empty one is no home rather than a path
+off the root.
 ```
 
 ## How values resolve

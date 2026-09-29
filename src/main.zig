@@ -463,7 +463,7 @@ const help_text =
 ++ " default\n" ++ "                         " ++ default_model ++ ")\n" ++
     \\  -b, --base-url <url>   OpenAI-compatible base url (env
     \\                         MICROAGENT_BASE_URL, default
-++ " " ++ default_base_url ++ ");\n" ++
+++ "\n                         " ++ default_base_url ++ ");\n" ++
     \\                         https, or http on loopback, because the api
     \\                         key goes to it in the clear otherwise
     \\  -k, --api-key <key>    api key (env MICROAGENT_API_KEY, OPENAI_API_KEY,
@@ -588,8 +588,9 @@ const help_text =
     \\MICROAGENT_CA_BUNDLE, the four api key variables and
     \\MICROAGENT_CAVEMAN/PONYTAIL fall through to whatever comes next.
     \\MICROAGENT_CONFIG, MICROAGENT_SESSION_DIR and MICROAGENT_SKILLS are the
-    \\three where empty means off: no style file, no session log, no skills. HOME is trimmed like the rest, and an
-    \\empty one is no home rather than a path off the root.
+    \\three where empty means off: no style file, no session log, no skills. HOME
+    \\is trimmed like the rest, and an empty one is no home rather than a path
+    \\off the root.
     \\
 ;
 
