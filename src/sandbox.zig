@@ -361,6 +361,41 @@ test "resolveWritableRoots resolves cwd, tmp, session_dir, and custom roots" {
     try std.testing.expectEqualStrings(canonical(io, arena, "/var/log"), roots[3]);
 }
 
+test "resolveWritableRoots adds $TMPDIR on macOS, and nowhere else" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    const io = std.testing.io;
+
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    // A directory no machine holds, so the root it becomes is spelled the way
+    // it was given rather than resolved: the same expectation answers on every
+    // platform, and what is under test is whether the root is added at all.
+    const tmpdir = "/nonexistent-tmpdir-for-the-sandbox-test";
+    try env.put("TMPDIR", tmpdir);
+
+    const roots = try resolveWritableRoots(io, arena, &env, &.{}, null);
+    var found = false;
+    for (roots) |root| {
+        if (std.mem.eql(u8, root, tmpdir)) found = true;
+    }
+    // macOS keeps per-user scratch space in $TMPDIR, which is under
+    // /var/folders and not under /tmp, so a run sandboxed there cannot write
+    // anything the way a tool expects to. Every other claimed platform puts it
+    // in /tmp, which is already a root, and a relative or empty value names no
+    // directory to add.
+    try std.testing.expectEqual(builtin.os.tag == .macos, found);
+
+    var relative: std.process.Environ.Map = .init(std.testing.allocator);
+    defer relative.deinit();
+    try relative.put("TMPDIR", "relative/scratch");
+    const from_relative = try resolveWritableRoots(io, arena, &relative, &.{}, null);
+    for (from_relative) |root| {
+        try std.testing.expect(!std.mem.eql(u8, root, "relative/scratch"));
+    }
+}
+
 test "isPathWritable resolves a relative path against the first root" {
     var state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer state.deinit();
