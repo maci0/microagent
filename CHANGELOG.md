@@ -575,6 +575,20 @@ release, and `microagent update` moves you to it.
 
 ### Security
 
+- A repository's own instructions file cannot close its own block. `AGENTS.md`
+  is the one file in the tree the run follows as instructions, and the block it
+  becomes is fenced between a begin and an end marker, so the system prompt's
+  limits on it have something to be limits of. The fences were ordinary text in
+  the prompt, which meant the file's own text too: a file spelling
+  `--- end repository instructions ---` and continuing past it handed the model
+  the rest of its instructions in the operator's own voice, where those limits
+  do not apply, with nothing to argue against. A line of the file that spells
+  either fence is now marked with a backslash before its dashes, and the run
+  says on stderr how many lines it marked. The words are not edited or dropped,
+  a `---` horizontal rule and a YAML frontmatter fence are ordinary text in an
+  instructions file and are left whole, and the system prompt tells the model
+  what a mark is, so a marked line answers to the block's limits like any other.
+
 - A writable path is resolved before it is compared to the sandbox roots. The
   check read the path the call named, so a tree carrying `docs -> /etc` passed
   it while writing outside the root: the lexical path began inside a root, and

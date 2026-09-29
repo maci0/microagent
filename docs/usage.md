@@ -395,6 +395,14 @@ in for the operator. A line in the file asking for one of those is reported in t
 rather than obeyed. Text from the tree arriving anywhere else, through `read` or `search` or
 quoted in a tool result, stays data.
 
+The fences belong to the run, not to the file, so a line of the file that spells either one is
+marked with a backslash before its dashes and stays inside the block. A file that closed its own
+block would hand the model the rest of its text in the operator's own voice, where the limits above
+do not apply, and the mark is what stops it. The file's words are not edited or dropped, a `---`
+horizontal rule and a YAML frontmatter fence are ordinary text and are left whole, and the number
+of lines marked is reported on stderr. The model is told what a mark means, so a marked line
+answers to the block's limits like any other line of the file.
+
 ```toml
 agents_files = ["AGENTS.md", "docs/HOUSE.md"]
 ```
