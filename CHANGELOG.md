@@ -12,6 +12,14 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+### Fixed
+
+- An MCP tool result is built up to the 24 KB ceiling a tool result is clamped
+  to, instead of being built whole and clamped a moment later. A server that
+  answered with a 4 MB text block cost about 19 MB of peak memory; the same
+  answer now costs about 13 MB, and the note naming the size it was cut from is
+  written while the text is built, so it still reports the whole size.
+
 ## [0.4.0] - 2026-09-29
 
 ### Added

@@ -81,6 +81,7 @@ run-to-run noise, so there is no build flag to reach for either.
 | the same library, system time to the first request | 9.3 ms | **2.0 ms** | the same change: 21 MB of reads become about 1.6 MB, and kernel time is the half that carries it |
 | three MCP servers with 1 MB `tools/list` answers | 12.2 MB resident | **4.5 MB** | a `tools/list` answer was parsed into the run arena, tree and line both, and the buffer it arrived in kept its size; the answer is parsed in a scratch arena now, only the schema bytes are copied out, and that buffer has its own allocator and is handed back |
 | one such server | 8.5 MB | **4.5 MB** | the same change |
+| three 4 MB MCP tool results | 19.1 MB resident | **12.8 MB** | the text was built whole and clamped to 24 KB a moment later, so the copy and the clamp both worked over bytes nobody keeps; it stops at the cap while it is built, and the note names the size it would have had |
 
 The two largest wins are not CPU at all. The request-bytes fix is the most valuable change in this
 file, and every counter the harness prints misses it: `cached_tokens` reports what was reused, never
@@ -162,6 +163,7 @@ guard fails, not merely that the guard exists.
 | MCP servers started before any handshake | `every server is started before any of them is asked to initialize` | defeated: two servers connected to one, test fails |
 | a large skill listed from its head | `a large skill is listed from its head, and loads whole` | defeated: the run arena holds the file, and the 64 KB bound fails by 3x |
 | a `tools/list` answer parsed in a scratch arena | `a tools/list answer is parsed in a scratch arena and its buffer is handed back` | defeated: run arena 3.4 MB against a 1 MB bound, pending capacity one answer's size |
+| an MCP result built up to the cap | `a tools/call answer is built up to the result cap, not whole` | defeated: the whole answer is built, and the 512 KB bound on the run arena fails |
 
 Re-checking one takes a minute and is worth doing after any refactor that touches a test file,
 because guards move. Tell three outcomes apart; confusing the first two reports a broken guard as a
@@ -204,6 +206,13 @@ wall figure is `hyperfine -w 3 -r 20` and it moves with the page cache (11.1 ms 
 run warm, 27.2 against 12.9 loaded and cold); the system time does not, 9.3 ms against 2.0 ms, which
 is the read volume. A library of ordinary size pays nothing either way: 2.9 MB against 2.9 MB with
 none, 5.5 against 5.9 for 200 skills of 4 KB.
+
+The MCP result row is a fake server that answers `tools/call` with a 4 MB text block, three calls in
+one run, peak `VmHWM` sampled the same way: the median of three runs is 19.1 MB before and 12.8 MB
+after. What stays is the answer's line and the values parsed from it, which is what reading a 4 MB
+document costs; what went is the second copy of its text. The cap leaves 128 bytes under the ceiling
+for the note, so the note survives the caller's own clamp and the prefix is that much shorter than
+the 24 KB a whole-file clamp would have kept.
 
 The MCP rows are the same shape: a fake server whose `tools/list` carries 1 MB of padding in its
 `inputSchema`, one and three servers, peak `VmHWM` sampled the same way. One server went from 8.5 MB

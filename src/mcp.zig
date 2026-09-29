@@ -26,6 +26,7 @@ const Io = std.Io;
 
 const chat = @import("chat.zig");
 const net = @import("net.zig");
+const tool_mod = @import("tool.zig");
 
 /// Every exposed tool name starts with this, so dispatch can tell a remote
 /// name from a built-in one without consulting a table. The double underscore
@@ -331,28 +332,50 @@ fn resultText(arena: std.mem.Allocator, server_name: []const u8, result: std.jso
         .array => |a| a.items,
         else => &[_]std.json.Value{},
     };
+    // The text stops at the ceiling the caller clamps a tool result to, while
+    // it is built rather than after it: a server that answers with a megabyte
+    // was otherwise copied into the turn whole and clamped a moment later, so
+    // the copy, the clamp and the bytes in between were all work over text
+    // nobody keeps. The note below is the caller's own wording, written here
+    // because this is the side that knows the size the whole text would have.
+    const cap = tool_mod.max_tool_output;
+    const note_room = 128;
+    var total: usize = 0;
+    var started = false;
     for (items) |item| {
         const entry = switch (item) {
             .object => |o| o,
             else => continue,
         };
         const kind = chat.str(entry.get("type")) orelse "";
-        if (std.mem.eql(u8, kind, "text")) {
-            if (chat.str(entry.get("text"))) |text| {
-                if (buf.items.len != 0) try buf.append(arena, '\n');
-                try buf.appendSlice(arena, text);
-            }
-        } else {
-            if (buf.items.len != 0) try buf.append(arena, '\n');
-            try buf.appendSlice(arena, try std.fmt.allocPrint(arena, "[{s} content from MCP server {s}, not shown]", .{ kind, server_name }));
+        const piece = if (std.mem.eql(u8, kind, "text"))
+            (chat.str(entry.get("text")) orelse continue)
+        else
+            try std.fmt.allocPrint(arena, "[{s} content from MCP server {s}, not shown]", .{ kind, server_name });
+        total += piece.len + @intFromBool(started);
+        if (buf.items.len < cap) {
+            if (started) try buf.append(arena, '\n');
+            const room = cap - buf.items.len;
+            try buf.appendSlice(arena, piece[0..@min(piece.len, room)]);
         }
+        started = true;
     }
     if (object.get("isError")) |flag| switch (flag) {
-        .bool => |is_error| if (is_error)
-            try buf.appendSlice(arena, "\n(the MCP server marked this result an error)"),
+        .bool => |is_error| if (is_error) {
+            const suffix = "\n(the MCP server marked this result an error)";
+            total += suffix.len;
+            const room = cap -| buf.items.len;
+            try buf.appendSlice(arena, suffix[0..@min(suffix.len, room)]);
+        },
         else => {},
     };
-    if (buf.items.len == 0) return "(the MCP server returned no text)";
+    if (total == 0) return "(the MCP server returned no text)";
+    if (total > cap) {
+        // `note_room` bytes short of the cap, so the note survives the caller's
+        // own clamp with the cap and the true size it names.
+        const kept = chat.clamp(buf.items, cap - note_room);
+        return std.fmt.allocPrint(arena, "{s}\n... [tool output truncated at {d} of {d} bytes]", .{ kept, cap, total });
+    }
     return buf.items;
 }
 
@@ -674,6 +697,58 @@ test "every server is started before any of them is asked to initialize" {
     try std.testing.expectEqual(@as(usize, 2), servers.items.len);
     try std.testing.expect(servers.resolve("mcp__waiter__echo") != null);
     try std.testing.expect(servers.resolve("mcp__starter__echo") != null);
+}
+
+// A tools/call answer is built up to the cap the caller clamps a tool result
+// to, not whole: the text past it is discarded a moment later, so copying it
+// into the turn and clamping it there is work over bytes nobody keeps. The
+// note carries the size the whole text would have had, which is why the build
+// counts instead of appending.
+test "a tools/call answer is built up to the result cap, not whole" {
+    const gpa = std.testing.allocator;
+    var scratch_state = std.heap.ArenaAllocator.init(gpa);
+    defer scratch_state.deinit();
+    const scratch = scratch_state.allocator();
+    var run_state = std.heap.ArenaAllocator.init(gpa);
+    defer run_state.deinit();
+    const run = run_state.allocator();
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+
+    const pad = try scratch.alloc(u8, 400 * 1024);
+    @memset(pad, 'x');
+    const script = try std.fmt.allocPrint(scratch,
+        \\while IFS= read -r line; do
+        \\  case "$line" in
+        \\    *'"method":"initialize"'*) printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"{s}","capabilities":{{}},"serverInfo":{{"name":"big","version":"1"}}}}}}' ;;
+        \\    *'"method":"tools/list"'*) printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"tools":[{{"name":"echo","inputSchema":{{"type":"object"}}}}]}}}}' ;;
+        \\    *'"method":"tools/call"'*) printf '{{"jsonrpc":"2.0","id":3,"result":{{"content":[{{"type":"text","text":"{s}"}}]}}}}\n' ;;
+        \\  esac
+        \\done
+        \\
+    , .{ protocol_version, pad });
+    try tmp.dir.writeFile(io, .{ .sub_path = "big.sh", .data = script });
+    const path = try std.fs.path.join(scratch, &.{ base, "big.sh" });
+
+    const entries = [_]Entry{.{ .name = "big", .command = "/bin/sh", .args = &.{path} }};
+    var env: std.process.Environ.Map = .init(scratch);
+    var servers = connect(io, run, &env, &entries, "test");
+    defer servers.shutdown(io);
+    const remote = servers.resolve("mcp__big__echo") orelse return error.TestUnexpectedResult;
+
+    const text = try Servers.call(io, run, remote, "{}", net.durationMs(10_000));
+    try std.testing.expect(text.len <= tool_mod.max_tool_output);
+    try std.testing.expect(std.mem.indexOf(u8, text, "... [tool output truncated at") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, try std.fmt.allocPrint(scratch, "of {d} bytes]", .{pad.len})) != null);
+    // The run keeps the capped text, not the answer it was cut from.
+    // Half a megabyte is the bound: the capped text plus the arena's own
+    // granularity comes to about 264 KB, and building the whole 400 KB answer
+    // first came to about 1 MB.
+    try std.testing.expect(run_state.queryCapacity() < 512 * 1024);
 }
 
 // A tools/list answer is the largest document this program reads, and its
