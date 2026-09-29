@@ -612,7 +612,9 @@ deny_commands = ["sudo", "su", "shutdown", "reboot"]
 
 `deny_commands` is a top-level list of strings; a bare string is refused as a bad value.
 
-Matching inspects command words and basenames (for example, denying `sudo` matches both `sudo apt install` and `/usr/bin/sudo ls` without false-positiving on safe names like `run_sudoku.py`), as well as multi-word sequences (such as `rm -rf`).
+Matching inspects command words and basenames (for example, denying `sudo` matches both `sudo apt install` and `/usr/bin/sudo ls` without false-positiving on safe names like `run_sudoku.py`), as well as multi-word sequences (such as `rm -rf`). Quoting inside a word is read out before the comparison, so `s'udo'`, `su"do"` and `su\do` are matched as the `sudo` a shell would run.
+
+The check is a word match over the command text, not a shell parse, so it is a guard against a model running a denied command by naming it, not a sandbox. A command that reaches the same program without spelling its name (`$(command -v sudo)`, `busybox sudo`, a copy of it renamed on `PATH`, or `sudo` reached through a variable) is not caught. `[sandbox] enabled = true` is what confines `bash` to writable roots, and it is off by default.
 
 ### Sandbox
 
@@ -645,7 +647,7 @@ them off ([tool set](#tool-set)).
 | tool | what it does |
 | --- | --- |
 | `bash` | `/bin/sh -c`, 120 s default timeout (the model may ask for up to 600 s), output capped at 24 KB. A command naming a credentials file or matching the command filter is refused, and the child inherits no provider credential. |
-| `read` | read a file, with optional line offset and limit. Refuses credentials (`.env`, key and keystore files, anything under `.secrets` or `.ssh`), including a symlink to one. |
+| `read` | read a file, with optional line offset and limit. Refuses credentials (`.env`, key and keystore files, anything under `.secrets` or `.ssh`), including a symlink to one, and refuses `/proc/*/environ` and `/proc/*/cmdline`. |
 | `write` | create or overwrite a file, creating parents. Refuses a credentials path, a path outside sandbox roots when enabled, and a call with no `content`. |
 | `edit` | exact string replacement. Refuses a credentials path, a path outside sandbox roots when enabled, an ambiguous match unless `replace_all`, and an edit that would leave `old_string` matchable in the result, so a repeated call cannot apply the change twice. |
 | `multi_edit` | a list of `{path, old_string, new_string, replace_all}` replacements, in one file or across files, applied in order on the text the earlier ones left. Every edit is judged as `edit` judges it, and no file is written unless all are accepted, so a refusal names the edit and changes nothing; up to 64 edits per call. A file written part way says how many files had already landed. |
@@ -674,11 +676,13 @@ key to a third party and keep shipping it. `read` refuses those names, `search` 
 out of results, `git` refuses one named as a path, `bash` refuses a command whose words name one,
 and `write` and `edit` refuse to replace one. The name is checked twice, on the path the model sent
 and on the path a symlink resolves to, so a link committed under an ordinary name does not leak the
-file it points at. The run's own keys are removed structurally: every tool subprocess gets the
-environment minus the variables this binary sends in an `Authorization` header, so `bash: env` has
-nothing to print. What remains open is the name rule itself: a credential the tables do not
-recognize, and a path a command assembles at run time, are still read. See
-[threat-model.md](threat-model.md).
+file it points at. The two `/proc` files that report a process's own environment and argument
+vector are refused by name as well, since `read /proc/self/environ` returned the run's own key
+under a path no name table could have caught. The run's own keys are removed structurally: every
+tool subprocess gets the environment minus the variables this binary sends in an `Authorization`
+header, so `bash: env` has nothing to print. What remains open is the name rule itself: a
+credential the tables do not recognize, and a path a command assembles at run time, are still read.
+See [threat-model.md](threat-model.md).
 
 **Tool calls run once.** The stream is delivered at least once, so a turn's tool calls are
 deduplicated by the id the provider gave them before anything runs: a relay that reconnects replays

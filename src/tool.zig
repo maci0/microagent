@@ -1134,6 +1134,13 @@ fn credentialInCommand(command: []const u8) ?[]const u8 {
         // a separator, and `basename` of such a word is not the word.
         if (std.mem.indexOfScalar(u8, word, std.fs.path.sep) == null and std.mem.indexOfScalar(u8, word, '.') == null) continue;
         if (isCredentialPath(word)) return word;
+        // `cat /proc/self/environ` is a word the name rule above clears, for
+        // the reason `isProcfsCredential` gives. A `$PPID` in the spelling is
+        // expanded by the shell after this walk rather than by it, so that
+        // word arrives here in three pieces and is not caught; the file behind
+        // it holds this run's key either way, which is the limit the doc comment
+        // on this function already states for indirection in general.
+        if (isProcfsCredential(word)) return word;
     }
     return null;
 }
@@ -1141,12 +1148,71 @@ fn credentialInCommand(command: []const u8) ?[]const u8 {
 /// True when `word` matches `entry`, checking case-insensitive equality or
 /// the leaf basename when `entry` is a command name with no path separator.
 fn wordMatches(word: []const u8, entry: []const u8) bool {
-    if (std.ascii.eqlIgnoreCase(word, entry)) return true;
+    if (equalsUnquoted(word, entry)) return true;
     if (std.mem.indexOfScalar(u8, entry, std.fs.path.sep) == null) {
         const leaf = std.fs.path.basename(word);
-        if (std.ascii.eqlIgnoreCase(leaf, entry)) return true;
+        if (equalsUnquoted(leaf, entry)) return true;
     }
     return false;
+}
+
+/// The characters a shell reads as quoting rather than as part of a word. They
+/// are separators of a word in `command_word_separators`, which the credential
+/// walk needs so that `cat".env"` is one word the name rule can be asked about,
+/// and the deny walk above inherits them from the same set.
+/// The characters the deny walk splits a command on, which is
+/// `command_word_separators` without the three quote characters.
+///
+/// The credential walk needs the quotes in that set so that `cat".env"` is one
+/// word for the name rule to be asked about. The deny walk is asking a
+/// different question, of a different thing, and splitting on the quotes is
+/// what made the question unanswerable: `s'udo'`, `su\do` and `su"do"` are the
+/// single word `sudo` to a shell, and this walk received each of them as two
+/// ordinary words that matched nothing, so one inserted quote was enough to put
+/// a denied command past the check. They are left inside the word here and read
+/// out of it by `equalsUnquoted`, which is the only place a quote is dropped.
+///
+/// Whitespace is in the set, which is what keeps `sh -c 'sudo test'` refused:
+/// the quotes stay in the words and the words are still cut where a shell would
+/// cut them, so `sudo` arrives as a word of its own.
+const deny_word_separators = " \t\n$&;<>|()[]{}*?!#:=";
+
+/// The characters a shell reads as quoting rather than as part of a word, and
+/// which `deny_word_separators` leaves inside a word for `equalsUnquoted` to
+/// read out of it.
+const quote_characters = "\"'\\";
+
+/// The next byte of `bytes` at or after `i` that is not quoting, advancing `i`
+/// past whatever it skipped.
+fn nextUnquoted(bytes: []const u8, i: *usize) ?u8 {
+    while (i.* < bytes.len) {
+        const c = bytes[i.*];
+        i.* += 1;
+        if (std.mem.indexOfScalar(u8, quote_characters, c) == null) return c;
+    }
+    return null;
+}
+
+/// Whether `word` and `entry` are the same word once the shell's quoting is read
+/// out of both of them. To a shell `s'udo'`, `su"do"` and `su\do` are all the
+/// single word `sudo`, and the walk above reached the words through a tokenizer
+/// that splits on the quote characters, so each of those arrived as three
+/// ordinary words, none of which was `sudo`. One inserted quote was enough to
+/// put a denied command past the check.
+///
+/// The entry is read the same way so a configuration that quotes its own list
+/// is matched by what it names rather than by how it was typed. Nothing is
+/// unescaped beyond the three quote characters: this answers whether two words
+/// are the same, not what a shell would run, and the shell's own rules are not
+/// what this check has ever parsed.
+fn equalsUnquoted(word: []const u8, entry: []const u8) bool {
+    var wi: usize = 0;
+    var ei: usize = 0;
+    while (true) {
+        const w = nextUnquoted(word, &wi) orelse return nextUnquoted(entry, &ei) == null;
+        const e = nextUnquoted(entry, &ei) orelse return false;
+        if (std.ascii.toLower(w) != std.ascii.toLower(e)) return false;
+    }
 }
 
 /// Checks whether a command contains or executes a command in `deny_list`. An
@@ -1169,7 +1235,7 @@ pub fn deniedInCommand(command: []const u8, deny_list: []const []const u8) ?[]co
         // first sixteen words and differs on the rest, so the two halves of
         // this check would disagree about the entry they are both about.
         var truncated = false;
-        var e_iter = std.mem.tokenizeAny(u8, entry, command_word_separators);
+        var e_iter = std.mem.tokenizeAny(u8, entry, deny_word_separators);
         while (e_iter.next()) |ew| {
             if (entry_count < entry_tokens.len) {
                 entry_tokens[entry_count] = ew;
@@ -1179,7 +1245,7 @@ pub fn deniedInCommand(command: []const u8, deny_list: []const []const u8) ?[]co
         if (entry_count == 0) continue;
 
         if (entry_count == 1) {
-            var words = std.mem.tokenizeAny(u8, command, command_word_separators);
+            var words = std.mem.tokenizeAny(u8, command, deny_word_separators);
             while (words.next()) |word| {
                 if (wordMatches(word, entry_tokens[0])) return raw_entry;
             }
@@ -1187,7 +1253,7 @@ pub fn deniedInCommand(command: []const u8, deny_list: []const []const u8) ?[]co
             if (std.ascii.indexOfIgnoreCase(command, entry) != null) return raw_entry;
             if (truncated) continue;
 
-            var words = std.mem.tokenizeAny(u8, command, command_word_separators);
+            var words = std.mem.tokenizeAny(u8, command, deny_word_separators);
             var match_idx: usize = 0;
             while (words.next()) |word| {
                 if (match_idx == 0) {
@@ -1258,6 +1324,15 @@ fn appendExitStatus(arena: std.mem.Allocator, buf: *std.ArrayList(u8), term: std
     try buf.appendSlice(arena, @tagName(term));
     if (term == .exited) try buf.appendSlice(arena, try std.fmt.allocPrint(arena, " {d}", .{term.exited}));
 }
+
+/// The two leaves under `/proc` that carry this run's credentials whatever the
+/// path around them looks like. `environ` is a process's own environment block,
+/// which holds the provider key until something removes it from the block as
+/// well as from the map handed to children, and `cmdline` is its argument
+/// vector, which holds the key when the operator passed it as `--api-key`. The
+/// name rule below sees only `proc`, `self` and `environ`, all ordinary, so
+/// neither is caught by it.
+const procfs_credential_leaves = [_][]const u8{ "environ", "cmdline" };
 
 /// Directories whose every file is a credential. Matched per path component,
 /// so `~/.secrets/openrouter` and `.ssh/id_ed25519` are refused wherever they
@@ -1449,7 +1524,44 @@ fn isCredentialPath(path: []const u8) bool {
 /// the last component does not hold, and reading it that way answered the path
 /// unchanged: `docs`, `keys` and `openrouter` are ordinary names the rule above
 /// clears, and the key behind the link came back as a tool result.
+/// Whether `path` is a `/proc` pseudo-file that reports a process's own
+/// environment or its argument vector, the two places this run's key is
+/// readable whatever the file is named.
+///
+/// The name rule cannot see it: the components of `/proc/self/environ` are
+/// `proc`, `self` and `environ`, and none of them is a credential name, a
+/// credential directory or a credential extension. So a one-call `read` of
+/// that file returned the provider key as a tool result, and a tool result is
+/// re-sent to the provider on every later turn of the run, which is the one
+/// outcome `scrubSecrets` exists to prevent. `cmdline` is the same read of an
+/// operator who passed `--api-key` on the command line, where the key is in
+/// the argument vector for the life of the process.
+///
+/// Only the two leaves are refused. The rest of `/proc` is a process's own
+/// diagnostics, which a coding run has ordinary use for, and a rule that took
+/// the whole tree would take that use with it. The prefix is tested on the
+/// model-supplied bytes rather than on a resolved path, so a symlink is the
+/// only way past it, and the file behind one is a name the rule does read.
+///
+/// This is a name check, like the one above, and says so the way that one does:
+/// a word that reaches the file through a variable (`d=/proc; cat "$d"/self/environ`)
+/// is not caught here.
+fn isProcfsCredential(path: []const u8) bool {
+    const trimmed = std.mem.trimEnd(u8, path, &path_sep);
+    // Case-insensitively, as `isCredentialName` is: a name the rule is about
+    // to refuse must not become readable by being spelled another way.
+    for (procfs_credential_leaves) |name| {
+        if (!std.ascii.eqlIgnoreCase(std.fs.path.basename(trimmed), name)) continue;
+        // `/proc/<pid>/environ`, `/proc/self/environ` and
+        // `/proc/thread-self/environ` are the three spellings; all of them
+        // carry the prefix, and nothing outside `/proc` is refused.
+        if (std.mem.startsWith(u8, trimmed, "/proc/")) return true;
+    }
+    return false;
+}
+
 fn credentialPath(io: Io, arena: std.mem.Allocator, path: []const u8) ?[]const u8 {
+    if (isProcfsCredential(path)) return path;
     if (isCredentialPath(path)) return path;
     var name_buf: [std.fs.max_path_bytes]u8 = undefined;
     var cur_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
@@ -3625,6 +3737,51 @@ test "read refuses a credentials file and leaves every other path alone" {
     for (allowed) |path| {
         try std.testing.expect(!isCredentialPath(path));
     }
+}
+
+test "the two procfs files that carry this run's own credentials are refused" {
+    // The name rule above clears every one of these: `proc`, `self` and
+    // `environ` are ordinary components, so `read` on the first one returned
+    // the provider key as a tool result, which is re-sent to the provider on
+    // every later turn.
+    const refused = [_][]const u8{
+        "/proc/self/environ",
+        "/proc/self/cmdline",
+        "/proc/1/environ",
+        "/proc/thread-self/environ",
+        "/proc/self/task/1/environ",
+        "/proc/self/environ/",
+        "/proc/SELF/ENVIRON",
+    };
+    for (refused) |path| {
+        try std.testing.expect(isProcfsCredential(path));
+    }
+    try std.testing.expect(isCredentialPath("/proc/self/environ") == false);
+
+    // The rest of `/proc` is a process's own diagnostics, and a coding run has
+    // ordinary use for it, so the rule takes the two leaves and nothing else.
+    const allowed = [_][]const u8{
+        "/proc/cpuinfo",
+        "/proc/meminfo",
+        "/proc/self/status",
+        "/proc/self/maps",
+        "/proc/self/exe",
+        "/proc/version",
+        "/tmp/environ",
+        "src/environ.zig",
+        "docs/cmdline.md",
+        "/proc",
+    };
+    for (allowed) |path| {
+        try std.testing.expect(!isProcfsCredential(path));
+    }
+}
+
+test "bash refuses a command reading this run's own process environment" {
+    try std.testing.expectEqualStrings("/proc/self/environ", credentialInCommand("cat /proc/self/environ").?);
+    try std.testing.expectEqualStrings("/proc/self/cmdline", credentialInCommand("strings /proc/self/cmdline").?);
+    try std.testing.expectEqualStrings("/proc/1/environ", credentialInCommand("head -c 4096 /proc/1/environ").?);
+    try std.testing.expect(credentialInCommand("cat /proc/cpuinfo") == null);
 }
 
 // The bytes a tool's path and command arguments carry are the model's, and the
@@ -6094,7 +6251,40 @@ const deny_corpus = [_][]const u8{
     "\ncat /home/u/.aws/credentials",
     "-rf -\nrm -rf -",
     "sudo\nsh -c 'sudo test'",
+    // The quoted spellings: the tokenizer splits on the quote characters, so
+    // each of these used to arrive as three ordinary words.
+    "sudo\ns'udo' apt update",
+    "sudo\nsu\"do\" apt update",
+    "sudo\nsu\\do apt update",
+    "rm -rf\nr''m -rf /tmp/scratch",
+    "rm -rf\n\"rm\" -rf /tmp",
+    "sudo\nSU'DO' ls",
+    // A leaf reached through quoting is still the leaf.
+    "/usr/bin/sudo\n/bin/su'do' whoami",
 };
+
+test "a quote inside a denied word does not put it past the check" {
+    // The characters `command_word_separators` splits on are the credential
+    // walk's separators, and the deny walk inherited them from that set, so a
+    // single quote turned `sudo` into three words and none of them matched.
+    // The shell reads all of these as the denied word, so the check does too.
+    const list = [_][]const u8{"sudo"};
+    const refused = [_][]const u8{
+        "s'udo' apt update",
+        "su\"do\" apt update",
+        "su\\do apt update",
+        "SU'DO' ls",
+        "echo hi; s'u''d''o' whoami",
+    };
+    for (refused) |command| {
+        try std.testing.expectEqualStrings("sudo", deniedInCommand(command, &list).?);
+    }
+
+    // The other direction: stripping the quotes must not make a word into an
+    // entry it was never equal to.
+    try std.testing.expect(deniedInCommand("sudoku solve", &list) == null);
+    try std.testing.expect(deniedInCommand("ls -la", &list) == null);
+}
 
 test "a fuzzed deny entry refuses the command it spells, in any shape around it" {
     try std.testing.fuzz({}, fuzzDenyList, .{ .corpus = &deny_corpus });
@@ -6126,7 +6316,7 @@ fn fuzzDenyList(_: void, smith: *std.testing.Smith) !void {
     // sit between the words. A matcher that missed this would let the plainest
     // form of a denied command through.
     var entry_words: usize = 0;
-    var entry_tokens = std.mem.tokenizeAny(u8, std.mem.trim(u8, entry, " \t\r\n"), command_word_separators);
+    var entry_tokens = std.mem.tokenizeAny(u8, std.mem.trim(u8, entry, " \t\r\n"), deny_word_separators);
     while (entry_tokens.next()) |_| entry_words += 1;
     if (entry_words != 0) {
         try std.testing.expect(deniedInCommand(entry, &deny_list) != null);
@@ -6150,8 +6340,11 @@ fn fuzzDenyList(_: void, smith: *std.testing.Smith) !void {
 
     // A command that is only separators and whitespace runs nothing, so no
     // entry refuses it: a refusal here is a call the model could not make.
+    // Counted over `deny_word_separators`, which is the set the walk above
+    // actually splits on: the quote characters are inside a word there, so a
+    // command of nothing but quotes is one word, not none.
     var command_words: usize = 0;
-    var command_tokens = std.mem.tokenizeAny(u8, command, command_word_separators);
+    var command_tokens = std.mem.tokenizeAny(u8, command, deny_word_separators);
     while (command_tokens.next()) |_| command_words += 1;
     if (command_words == 0) try std.testing.expect(verdict == null);
 
