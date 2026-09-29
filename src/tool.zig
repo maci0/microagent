@@ -2610,6 +2610,73 @@ fn fuzzToolCall(_: void, smith: *std.testing.Smith) !void {
     );
 }
 
+// `old_string` and `new_string` are the model's, and the decision `applyEdit`
+// makes about them is a safety one: the text it hands back is a file about to
+// be overwritten, and a shape it does not refuse is a file that grows or loses
+// bytes on every duplicate of a call the model may issue twice. The corpus
+// holds the shapes the refusals above are written for, spelled the way a call
+// does: the file's text, the text to find, and the text to leave.
+// `std.testing.fuzz` runs it on every `zig build test`, and through the
+// fuzzer's mutations when the test binary is built in fuzz mode.
+const edit_corpus = [_][]const u8{
+    "}\nx\ny\n",
+    "}\n}\nx\n",
+    "aab\nab\nb\n",
+    "aaaaa\n    a\n    a\n",
+    "  x  \n  x  \n",
+    "foo\nfoo\nx\n",
+    "aaaa\naa\naa\n",
+    "old\nnew\n",
+    "x\r\ny\r\n",
+    "\n\n",
+};
+
+test "a fuzzed edit is accepted or refused, and an accepted one cannot run twice" {
+    try std.testing.fuzz({}, fuzzEdit, .{ .corpus = &edit_corpus });
+}
+
+fn fuzzEdit(_: void, smith: *std.testing.Smith) !void {
+    const gpa = std.testing.allocator;
+    var scratch: [8 * 1024]u8 = undefined;
+    const text = if (smith.in) |seed| seed else scratch[0..smith.slice(&scratch)];
+
+    // The three operands arrive as three lines, so the fuzzer's bytes reach
+    // all of them rather than only the pair the refusals are written about.
+    var fields = std.mem.splitScalar(u8, text, '\n');
+    const raw = fields.next() orelse return;
+    const old = fields.next() orelse return;
+    const new = fields.next() orelse return;
+    const all = smith.boolWeighted(1, 1);
+
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    const done = switch (try applyEdit(arena, "f.zig", raw, old, new, all)) {
+        .refused => |message| {
+            // A refusal is a line the model reads and acts on, so it says
+            // something rather than handing back an empty answer.
+            try std.testing.expect(message.len > 0);
+            return;
+        },
+        .text => |t| t,
+    };
+
+    // The pair the whole refusal chain exists for, asked of the bytes rather
+    // than of the decision: what the rewrite wrote must not match the text
+    // the call looks for, or the next run of it applies again.
+    try std.testing.expect(std.mem.indexOf(u8, done.bytes, old) == null);
+
+    // The file's size is the one the count implies, so a count reported to the
+    // model and the bytes written cannot disagree.
+    const replaced = if (all) done.count else 1;
+    try std.testing.expectEqual(raw.len - replaced * old.len + replaced * new.len, done.bytes.len);
+
+    // And the call itself, run on what it produced, is refused: a turn that was
+    // cut before its result reached the model must not change the file twice.
+    try std.testing.expect(try applyEdit(arena, "f.zig", done.bytes, old, new, all) == .refused);
+}
+
 test "a capped tool result says how much was dropped" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
