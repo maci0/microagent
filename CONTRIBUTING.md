@@ -83,7 +83,7 @@ say nothing about the interpreter the adapter is installed into.
 make check                  # the gate: zig fmt --check, the linters, the tests, an optimized build
 make test FILTER="..."      # one test, while you are mid-edit; a filter matching no test is refused
 make test-sanitize          # the same suite under the undefined-behavior sanitizer
-zig build test --watch    # the suite again on every source change, until Ctrl-C
+make watch [FILTER="..."]   # the suite again on every source change, until Ctrl-C
 make preflight              # name any tool check and lint need that is not on PATH
 make lint                   # the pin checks, shellcheck, ruff and yamllint on their own
 make check-asset-run        # the published asset for this host, cross-built and started
@@ -114,8 +114,9 @@ says nothing inside them goes out of bounds or overflows, which is silent in
 the `ReleaseSmall` binary the release assets are made of.
 
 `make test FILTER=...` checks the filter against the declared test names first, because a filter that
-matches nothing reports success while running no test. `zig build test --watch` is the build system's own
-edit loop and is not what `check` runs: a green watch is not a push.
+matches nothing reports success while running no test. `make watch` is that same check around
+`zig build test --watch`, the build system's own edit loop, and is not what `check` runs: a green
+watch is not a push.
 
 `make fmt` applies `zig fmt` and `ruff format`; `make fmt-check` is what the
 gate runs. The three linters cover what `zig fmt` cannot: the bench shell, the

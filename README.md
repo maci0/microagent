@@ -154,6 +154,8 @@ lists this and the other gaps, ranked.
 ```sh
 make            # ReleaseSmall build, the smallest resident memory
 make test       # the whole suite
+make test FILTER="usage counters"  # one test, while you are mid-edit
+make watch      # the suite again on every source change, until Ctrl-C
 make check      # the CI gate: format, linters, tests, sanitizer run, ReleaseSmall build
 make help       # every target
 ```

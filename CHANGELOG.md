@@ -29,16 +29,9 @@ release, and `microagent update` moves you to it.
 - `MDEBUG=1` names the sandbox, the number of writable roots, the number of tools the config turned
   off and the number of denied commands, so the settings that decide what a run may touch are on the
   same line as the ones that decide where it sends them.
-
-### Fixed
-
-- A `[[mcp]]` `env` key is held to the same rule as `api_key_env`: a name carrying a `=`, a NUL or a
-  control character drops the server, where it reached the child's environment block and took the run
-  down. A quoted key is unquoted, so `env = { "LOG" = "debug" }` sets `LOG` and not a variable named
-  `"LOG"`, and a bare value may no longer carry the `=` that separates it from its name.
-- A key holding a control character is refused before the first request, from every source. The key
-  goes into an `Authorization` header, and a CR or an LF in it ends that line; a remote MCP server's
-  key was already refused for this, and the provider's was not.
+- `make watch [FILTER=...]` runs the suite again on every source change, under the same filter check
+  `make test` applies. CONTRIBUTING.md spelled the loop as the raw `zig build test --watch`, so the one
+  command a contributor runs all day was the one absent from `make help`.
 
 ### Changed
 
@@ -60,6 +53,13 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- A `[[mcp]]` `env` key is held to the same rule as `api_key_env`: a name carrying a `=`, a NUL or a
+  control character drops the server, where it reached the child's environment block and took the run
+  down. A quoted key is unquoted, so `env = { "LOG" = "debug" }` sets `LOG` and not a variable named
+  `"LOG"`, and a bare value may no longer carry the `=` that separates it from its name.
+- A key holding a control character is refused before the first request, from every source. The key
+  goes into an `Authorization` header, and a CR or an LF in it ends that line; a remote MCP server's
+  key was already refused for this, and the provider's was not.
 - The harbor adapter's run logs, and the work trees and transcripts under `.scratch/` that
   `bench/run.sh` and `bench/gauntlet.sh` leave, are created at mode 0600 and 0700 rather than at the
   default 0666 less the umask, which on a shared host left a run's whole account of the tree it was

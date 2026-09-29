@@ -15,7 +15,7 @@ BIN := zig-out/bin/microagent
 export LC_ALL := C
 export TZ := UTC
 
-.PHONY: default help preflight version build musl test test-sanitize fmt fmt-check fmt-python lint lint-versions lint-lock check-sbom zig-version required-zig-version release-targets check-assets check-asset-run check-binary check-changelog check-changelog-links check-changelog-sections check-unreleased check-readme check-man check-release check-reproducible lint-shell lint-python lint-yaml check bench gauntlet instructions overhead install release-assets checksums sbom sha256-of clean
+.PHONY: default help preflight version build musl test watch test-sanitize fmt fmt-check fmt-python lint lint-versions lint-lock check-sbom zig-version required-zig-version release-targets check-assets check-asset-run check-binary check-changelog check-changelog-links check-changelog-sections check-unreleased check-readme check-man check-release check-reproducible lint-shell lint-python lint-yaml check bench gauntlet instructions overhead install release-assets checksums sbom sha256-of clean
 
 # The Harbor adapter's directory, the one place that path is written down.
 # lint-lock.sh and lint-versions.sh both take it as an argument rather than
@@ -119,6 +119,7 @@ help:
 	  'musl                  static musl binary for integrations/harbor, for this host ($(MUSL_ARCH))' \
 	  'version               the version build.zig.zon declares' \
 	  'test [FILTER=...]     the whole unit test suite, or only the tests FILTER names' \
+	  'watch [FILTER=...]    the same tests again on every source change, until Ctrl-C' \
 	  'test-sanitize         the same suite under the undefined-behavior sanitizer' \
 	  'preflight             name every tool check and lint need that is not on PATH' \
 	  'fmt                   rewrite every tracked .zig and .py file in format style' \
@@ -240,17 +241,29 @@ musl: zig-version
 	mv $(MUSL_BINARY).tmp $(MUSL_BINARY)
 
 # A filter that matches no declared test would report success without running one, so it is checked
-# against the test names first.
-test:
-	@if [ -n "$(FILTER)" ]; then \
+# against the test names first. Spelled once, because `test` and `watch` take the same filter and a
+# filter one of them refuses has to be refused by the other.
+REFUSE_UNKNOWN_FILTER = if [ -n "$(FILTER)" ]; then \
 	  grep -h -o -E '^test "[^"]+"' $(ZIG_SOURCES) | grep -F -q -- "$(FILTER)" || { \
 	    printf 'no declared test is named like "%s"\n' "$(FILTER)" >&2; \
 	    printf "  list the names with: grep -h -o -E '^test \"[^\"]+\"' $(ZIG_SOURCES)\n" >&2; \
 	    exit 2; }; \
+	fi
+
+test:
+	@$(REFUSE_UNKNOWN_FILTER); \
+	if [ -n "$(FILTER)" ]; then \
 	  $(ZIG) build test -Dtest-filter="$(FILTER)" --summary all; \
 	else \
 	  $(ZIG) build test --summary all; \
 	fi
+
+# The suite again on every source change, until Ctrl-C: the build system's own edit loop, and the
+# command a contributor runs all day. It is not what `check` runs, so a green watch is not a push.
+# FILTER narrows it to the test being edited, as it does for `test`.
+watch:
+	@$(REFUSE_UNKNOWN_FILTER); \
+	$(ZIG) build test --watch $(if $(FILTER),-Dtest-filter="$(FILTER)") --summary all
 
 # The same tests, compiled with the undefined-behavior sanitizer. The suite
 # passing tells a reader the assertions hold, not that no load, store or
