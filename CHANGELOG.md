@@ -306,6 +306,12 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- `make test FILTER=...` runs the filter over the whole suite. The `copy`
+  module's test artifact took no filter, so a run of the one test being edited
+  also ran the two `memcpyWords` tests and reported three, and a filter naming
+  one of them still ran the other. Every test artifact the build makes now
+  takes the same `-Dtest-filter`.
+
 - The gate reads a file the contributor has not committed yet. Every linter's
   file list came from `git ls-files`, which names the tracked tree and nothing
   else, so a `.zig`, `.py`, `.sh`, `.yml` or `.md` file that existed on disk but

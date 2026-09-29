@@ -60,9 +60,14 @@ pub fn build(b: *std.Build) void {
     // -Dtest-filter runs one test by name, so editing a function does not mean
     // re-running the whole suite to see its own test.
     const test_filter = b.option([]const u8, "test-filter", "run only tests whose name contains this text");
+    // One filter for every test artifact below, so a name picks a test of the
+    // suite rather than a test of the module beside it. The copy module took
+    // none: `make test FILTER=...` ran its two tests whatever the filter
+    // named, so a run of the one test being edited reported three.
+    const test_filters: []const []const u8 = if (test_filter) |f| &[_][]const u8{f} else &.{};
     const tests = b.addTest(.{
         .root_module = exe.root_module,
-        .filters = if (test_filter) |f| &[_][]const u8{f} else &.{},
+        .filters = test_filters,
     });
     const run_tests = b.addRunArtifact(tests);
     // The suite spawns real `/bin/sh` children and several tests assert on the
@@ -86,7 +91,7 @@ pub fn build(b: *std.Build) void {
         }
     }.pin;
     pin_test_env(run_tests);
-    const run_copy_tests = b.addRunArtifact(b.addTest(.{ .root_module = copy_module }));
+    const run_copy_tests = b.addRunArtifact(b.addTest(.{ .root_module = copy_module, .filters = test_filters }));
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
     test_step.dependOn(&run_copy_tests.step);
@@ -125,7 +130,7 @@ pub fn build(b: *std.Build) void {
     sanitize_module.addImport("copy", copy_module);
     const sanitize_tests = b.addTest(.{
         .root_module = sanitize_module,
-        .filters = if (test_filter) |f| &[_][]const u8{f} else &.{},
+        .filters = test_filters,
     });
     const run_sanitize = b.addRunArtifact(sanitize_tests);
     pin_test_env(run_sanitize);
