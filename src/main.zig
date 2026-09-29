@@ -6146,6 +6146,151 @@ test "compaction leaves the cached prefix byte-identical" {
     try std.testing.expect(std.mem.endsWith(u8, msgs.items, "\"content\":\"" ++ blob ++ "\"}"));
 }
 
+// The one place a conversation is read back and rewritten, and every string in
+// it is a provider's words or a tool's output. Three questions are asked of
+// the same bytes at once: the role decides whether a message may be replaced,
+// the length of its content decides whether it is, and the length of the
+// marker that replaces it is subtracted from the counter that sizes the buffer
+// written next. A hand-written case pins one length at a time, so the corpus
+// below is the shapes a real conversation has (a whole file read back, a
+// message the model wrote, a result already carrying a marker, bytes that are
+// not UTF-8) and the fuzzer's mutations are the lengths and mixtures nobody
+// wrote down. `std.testing.fuzz` runs the corpus on every `zig build test`, and
+// through the fuzzer's mutations when the test binary is built in fuzz mode.
+const compact_corpus = [_][]const u8{
+    "",
+    "a tool result",
+    "\n\t\r \" \\ \u{0}\u{1b}\u{7f}",
+    "caf\u{00e9} \u{65e5}\u{1f600}",
+    "deploy/\u{202e}gnp.exe",
+    "\xff\xfe\xc3",
+    "\"" ** 32,
+    "[earlier tool output elided: 0 bytes]",
+    "[earlier tool output elided: 4096 bytes]",
+    "x" ** 4096,
+    "y" ** 8192,
+};
+
+test "a fuzzed conversation is elided only where the run may elide it" {
+    try std.testing.fuzz({}, fuzzElide, .{ .corpus = &compact_corpus });
+}
+
+/// One message as the elision walk reads it: the role it was given and the
+/// content it carries, which is the only member the walk looks at.
+const MessageText = struct { role: []const u8, content: []const u8 };
+
+fn messageTexts(arena: std.mem.Allocator, array: std.json.Array) ![]MessageText {
+    const out = try arena.alloc(MessageText, array.items.len);
+    for (array.items, out) |*message, *text| {
+        const object = switch (message.*) {
+            .object => |o| o,
+            else => {
+                text.* = .{ .role = "", .content = "" };
+                continue;
+            },
+        };
+        text.* = .{
+            .role = chat_mod.str(object.get("role")) orelse "",
+            .content = switch (object.get("content") orelse .null) {
+                .string => |s| s,
+                else => "",
+            },
+        };
+    }
+    return out;
+}
+
+fn fuzzElide(_: void, smith: *std.testing.Smith) !void {
+    const gpa = std.testing.allocator;
+    var scratch: [8 * 1024]u8 = undefined;
+    const text: []const u8 = if (smith.in) |seed| seed else scratch[0..smith.slice(&scratch)];
+    // A repeat count the fuzzer picks, so a result lands below the threshold,
+    // on it and past it, and the second pass's own threshold is inside the
+    // range rather than beside it.
+    var count_buf: [2]u8 = undefined;
+    const count = 1 + @as(usize, smith.slice(&count_buf)) % 64;
+
+    var blob: std.ArrayList(u8) = .empty;
+    defer blob.deinit(gpa);
+    for (0..count) |_| try blob.appendSlice(gpa, text);
+    const result = if (blob.items.len > 32 * 1024) blob.items[0 .. 32 * 1024] else blob.items;
+
+    var msgs: std.ArrayList(u8) = .empty;
+    defer msgs.deinit(gpa);
+    // The messages a turn adds, in the order it adds them: the task and the
+    // model's own words are not the run's to elide, and the tool output
+    // between them is whatever the file or the command returned. The array is
+    // opened the way `openConversation` opens it and closed below, because
+    // that open array is the buffer the run hands the walk.
+    try msgs.append(gpa, '[');
+    try appendMessage(gpa, &msgs, "user", "fix the bug");
+    try appendToolResults(gpa, &msgs, 1, result);
+    try appendToolResults(gpa, &msgs, 1, "a result too small to elide");
+    try appendMessage(gpa, &msgs, "assistant", text);
+    try appendToolResults(gpa, &msgs, 1, result);
+    try appendToolResults(gpa, &msgs, 1, result);
+    try appendMessage(gpa, &msgs, "assistant", "");
+
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    const closed = try std.fmt.allocPrint(arena, "{s}]", .{msgs.items});
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena, closed, .{});
+    const array = parsed.value.array;
+    var widest: usize = 0;
+    for (try messageTexts(arena, array)) |m| widest = @max(widest, m.content.len);
+
+    // Passes until the walk has nothing left to take: the run makes two, and a
+    // pass that kept finding bytes would be a conversation that never stops
+    // shrinking, which is the failure the marker itself exists to prevent. The
+    // snapshot is taken inside the loop because a pass leaves markers behind,
+    // and the next pass has to read those rather than the text they replaced.
+    var passes: usize = 0;
+    while (passes < 8) : (passes += 1) {
+        const threshold = if (passes == 0) min_elided_bytes else min_marker_bytes;
+        const before = try messageTexts(arena, array);
+        const reported = try elideToolResults(arena, array, threshold, std.math.maxInt(usize));
+        if (reported == 0) break;
+        const after = try messageTexts(arena, array);
+        // Nothing is ever dropped: a message the walk removed would leave the
+        // tool results beside it answering a call the provider no longer sees.
+        try std.testing.expectEqual(before.len, after.len);
+        var measured: usize = 0;
+        for (before, after) |was, now| {
+            if (std.mem.eql(u8, was.content, now.content)) continue;
+            // Only a tool result changes, and only into the marker spelling the
+            // length it had. A message the model wrote is not the run's to
+            // replace, and a marker that is not shorter than the text it
+            // replaces takes bytes out of nothing.
+            try std.testing.expectEqualStrings("tool", now.role);
+            try std.testing.expectEqualStrings(was.role, now.role);
+            try std.testing.expectEqualStrings(
+                try std.fmt.allocPrint(arena, elision_marker, .{was.content.len}),
+                now.content,
+            );
+            try std.testing.expect(now.content.len < was.content.len);
+            measured += was.content.len - now.content.len;
+        }
+        // Every byte the walk says it saved is a byte that is gone from the
+        // content it read: the counter sizes the buffer written next, so a
+        // claim it cannot show for is a buffer allocated for a conversation
+        // that is still too long.
+        try std.testing.expectEqual(reported, measured);
+    }
+    try std.testing.expect(passes < 8);
+
+    // The pass the run makes with a target to stop at, on the conversation the
+    // walk above left alone: the target is checked before a message is read,
+    // so the walk stops at the first one past it and what it reports is that
+    // message's saving away, never the whole conversation's.
+    const again = try std.json.parseFromSlice(std.json.Value, arena, closed, .{});
+    const target = widest;
+    const reported = try elideToolResults(arena, again.value.array, min_elided_bytes, target);
+    try std.testing.expect(reported <= target + widest);
+    try std.testing.expectEqual(@as(usize, 7), again.value.array.items.len);
+}
+
 test "the api key is sent as the request's authorization header" {
     // Regression: this was passed as a privileged header, which never reached
     // the wire, and every provider answered 401 with no credential at all. The
