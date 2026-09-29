@@ -33,6 +33,18 @@ release, and `microagent update` moves you to it.
   `make test` applies. CONTRIBUTING.md spelled the loop as the raw `zig build test --watch`, so the one
   command a contributor runs all day was the one absent from `make help`.
 
+- A man page, `docs/microagent.1`, documenting every flag `--help` lists, and
+  `make install` stages it under `man1` next to the binary. The install takes
+  `PREFIX` (default `~/.local`), `BINDIR`, `MANDIR` and `DESTDIR`, so
+  `make install PREFIX=/usr DESTDIR=$pkgdir` stages a package and an unprefixed
+  call still writes to `~/.local/bin`. `make check-man` fails a release whose
+  page names a version other than the one `build.zig.zon` declares, or omits a
+  flag the binary's help lists, and `make check` runs it.
+
+- A tagged release carries the `LICENSE` beside the binaries, under the versioned
+  prefix the assets use, so it lands in the same `dist/` and carries a `.sha256`
+  sidecar like every other asset.
+
 ### Changed
 
 - The tool gutter names the tool with a colon (⏺ bash: echo hi) and draws that name bold when
@@ -80,6 +92,30 @@ release, and `microagent update` moves you to it.
   stopped taking that word when it shed `--repo` in 0.7.0 and answers to `--help` and `-h` only, so
   the sentence promised an invocation that exits 2. The text now says what the parser does.
 
+- A provider error frame that arrives before any content ends the run with
+  `StreamError`, where nothing was generated and nothing reached stdout, so the
+  turn is asked again on the same 1 s and 2 s backoff the pre-request stages use,
+  bounded by `--budget`. A frame part way through a stream still ends the run: a
+  completion that may already have been billed is never paid for twice.
+
+- A finished answer is no longer reported as an unfinished one. The automatic
+  verification turn is asked only when `--max-turns` leaves room for it, so
+  `--max-turns 2` on a run that answers on its second turn exits 0 rather than
+  falling out of the loop on the turn that would have asked for a test.
+
+- A `bash` command is split on `:` and `=` as well, so a credentials file named
+  as the tail of a word is refused: `git show HEAD:.env` and
+  `curl --data=@.env` reached a `.env` the word walk could not see. A colon or
+  an equals in an ordinary command is still nothing on its own:
+  `git log --pretty=format:%h:%s` runs.
+
+- `microagent update` says why a download failed and tries it again on the
+  network's backoff, up to three attempts, so a slow or dropped connection no
+  longer ends as a bare error, and every MCP, skill and config failure that was
+  dropped without a line is named on stderr. A remote MCP server that returns
+  an unexpected content type, or is cut off mid-body, closes the connection
+  instead of handing the next request the bytes it never read.
+
 ## [0.7.0] - 2026-09-30
 
 ### Added
@@ -108,8 +144,9 @@ release, and `microagent update` moves you to it.
   tools. `enabled = false` in `[tools.<name>]` turns one off.
 
 - `[tools.<name>]` config tables switch the nine built-in tools on or off (`enabled = false` removes a tool
-  from the schema and refuses its calls; an unknown tool name stops the run with exit 2) and enable three
-  public remote MCP presets (`web_search`, `context7`, `grep_app`, off by default). `[[mcp]]` tables take
+  from the schema and refuses its calls; an unknown tool name stops the run with exit 2) and give the
+  public remote MCP presets (`web_search`, `context7`, `grep_app`, `deepwiki`) their url, key variable
+  name and timeout, the defaults the first entry above describes. `[[mcp]]` tables take
   a `url` for a remote streamable-HTTP server, with optional `api_key_env` (a variable name, never the key;
   scrubbed from tool subprocesses), `api_key_header` and `timeout`. When something is disabled the system
   prompt says which tools, in one line; with nothing disabled the request is byte-identical.
@@ -200,7 +237,7 @@ The figures behind the changes below, with the method and the guard for each, ar
   word-at-a-time `memcpy` (`src/copy.zig`, built with `-fno-builtin`, Linux `ReleaseSmall` only)
   replaces the compiler runtime's byte loop; and the stream's `"error":` check compares a machine word
   per position. `ReleaseFast` is unchanged apart from the environment map.
-- Remote MCP servers (`url` entries and the `web_search`, `context7` and `grep_app` presets) are connected
+- Remote MCP servers (`url` entries and the `web_search`, `context7`, `grep_app` and `deepwiki` presets) are connected
   concurrently at startup instead of one after another. Server and tool order still follow the config,
   and a server that fails is still reported and skipped; peak resident memory of that startup rises by
   about 0.45 MB, because three TLS handshakes are alive at once.

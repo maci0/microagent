@@ -94,12 +94,13 @@ Or build it. Zig 0.16.0 or newer is the only requirement:
 
 ```sh
 zig build -Doptimize=ReleaseSmall     # zig-out/bin/microagent
-make install                         # into ~/.local/bin
+make install                         # the binary and docs/microagent.1 into ~/.local
 ```
 
-A distro or homebrew-style packager stages the same binary with
-`make install PREFIX=/usr DESTDIR=$pkgdir`, which writes `$pkgdir/usr/bin/microagent` mode 755
-and nothing else. The binary is static, so the package declares no runtime dependencies.
+A distro or homebrew-style packager stages the same two files with
+`make install PREFIX=/usr DESTDIR=$pkgdir`, which writes `$pkgdir/usr/bin/microagent` mode 755 and
+`$pkgdir/usr/share/man/man1/microagent.1` mode 644, and nothing else. `BINDIR` and `MANDIR` move
+those two directories. The binary is static, so the package declares no runtime dependencies.
 
 The `search`, `ast` and `git` tools call `rg`, `ast-grep` and `git`, so put those on `PATH` too.
 
