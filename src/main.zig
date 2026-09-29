@@ -1346,7 +1346,8 @@ fn reportConfigProblem(io: Io, arena: std.mem.Allocator, source: StyleSource, un
     switch (unknown.kind) {
         .bad_value => net.note(io, arena, "microagent: config {s}: '{s}' is not a value this key takes; keeping the default\n", .{ configPathText(arena, source), key }),
         .unknown_key => net.note(io, arena, "microagent: config {s}: '{s}' is not a key this file uses; keeping the default\n", .{ configPathText(arena, source), key }),
-        .bad_server => net.note(io, arena, "microagent: config {s}: a [[mcp]] entry with no name or no command is skipped\n", .{configPathText(arena, source)}),
+        .bad_server => net.note(io, arena, "microagent: config {s}: a [[mcp]] entry with no usable name or command is skipped\n", .{configPathText(arena, source)}),
+        .duplicate_server => net.note(io, arena, "microagent: config {s}: the MCP server '{s}' is declared twice; the second entry is skipped\n", .{ configPathText(arena, source), key }),
     }
 }
 

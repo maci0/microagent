@@ -77,9 +77,12 @@ pub const Problem = struct {
         /// A key this file does not define: a misspelling until proven
         /// otherwise.
         unknown_key,
-        /// A `[[mcp]]` table with no name or no command, which is a server
-        /// nothing can start.
+        /// A `[[mcp]]` table with no usable name or command, which is a
+        /// server nothing can start.
         bad_server,
+        /// Two `[[mcp]]` tables with the same name: their tools would collide
+        /// on one exposed name.
+        duplicate_server,
     };
 };
 
@@ -148,8 +151,23 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8) Config {
 
     var entries: std.ArrayList(mcp_mod.Entry) = .empty;
     for (servers.items) |server| {
-        if (server.name.len == 0 or server.command.len == 0) {
+        // The name is half of every exposed tool name, so it is held to the
+        // rule the server's own tool names are held to: `mcp__<server>__<tool>`
+        // is what the model is offered, and a space or a `__` in the server
+        // half makes a name no provider accepts and no model can spell.
+        if (server.command.len == 0 or !mcp_mod.validName(server.name)) {
             config.note(.{ .key = "mcp", .kind = .bad_server });
+            continue;
+        }
+        var duplicate = false;
+        for (entries.items) |kept| {
+            if (std.mem.eql(u8, kept.name, server.name)) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) {
+            config.note(.{ .key = server.name, .kind = .duplicate_server });
             continue;
         }
         entries.append(arena, .{
@@ -575,6 +593,22 @@ test "an MCP server is one [[mcp]] table, and a broken one is named and skipped"
     try std.testing.expectEqualStrings("cwd", extra.problem.?.key);
     try std.testing.expectEqual(@as(usize, 1), extra.mcp.len);
 
+    // A server name is half of every exposed tool name, so a name that cannot
+    // be spelled is refused here rather than offered to a provider inside
+    // `mcp__bad name__tool`.
+    const bad_name = parse(arena, "[[mcp]]\nname = \"bad name\"\ncommand = \"b\"\n");
+    try std.testing.expectEqual(Problem.Kind.bad_server, bad_name.problem.?.kind);
+    try std.testing.expectEqual(@as(usize, 0), bad_name.mcp.len);
+    const double = parse(arena, "[[mcp]]\nname = \"a__b\"\ncommand = \"b\"\n");
+    try std.testing.expectEqual(Problem.Kind.bad_server, double.problem.?.kind);
+
+    // Two tables with one name would collide on one exposed name, so the
+    // second is skipped and named.
+    const twice = parse(arena, "[[mcp]]\nname = \"a\"\ncommand = \"b\"\n[[mcp]]\nname = \"a\"\ncommand = \"c\"\n");
+    try std.testing.expectEqual(Problem.Kind.duplicate_server, twice.problem.?.kind);
+    try std.testing.expectEqual(@as(usize, 1), twice.mcp.len);
+    try std.testing.expectEqualStrings("b", twice.mcp[0].command);
+
     // Args that are not a list, and an env that is not an inline table, are
     // refused rather than read as empty.
     const bad_args = parse(arena, "[[mcp]]\nname = \"a\"\ncommand = \"b\"\nargs = \"-y\"\n");
@@ -674,6 +708,8 @@ const config_corpus = [_][]const u8{
     "[[mcp]\nname = \"a\"\n",
     "[[  mcp  ]]\nname = \"a\"\ncommand = \"b\"\n",
     "[[mcp]] # a server\nname = \"a\"\ncommand = \"b\"\n",
+    "[[mcp]]\nname = \"a b\"\ncommand = \"c\"\n",
+    "[[mcp]]\nname = \"a\"\ncommand = \"b\"\n[[mcp]]\nname = \"a\"\ncommand = \"c\"\n",
     "caveman = \"lite\"\n[[mcp]]\nname = \"a\"\ncommand = \"b\"\nponytail = \"off\"\n",
 };
 

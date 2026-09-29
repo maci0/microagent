@@ -358,8 +358,10 @@ pub const Entry = struct {
 
 /// Whether a name can be half of an exposed tool name: the letters, digits,
 /// dot, dash and underscore a tool name may hold, with no `__` in it, because
-/// that pair is what separates the three parts of an exposed name.
-fn validName(name: []const u8) bool {
+/// that pair is what separates the three parts of an exposed name. The config
+/// reader holds a server's name to the same rule, since it is half of every
+/// name that server's tools are offered under.
+pub fn validName(name: []const u8) bool {
     if (name.len == 0 or name.len > max_name_bytes) return false;
     if (std.mem.indexOf(u8, name, "__") != null) return false;
     for (name) |c| {
