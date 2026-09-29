@@ -359,6 +359,20 @@ const json_literal_byte = blk: {
     break :blk table;
 };
 
+const word_bytes = @sizeOf(u64);
+const lane_ones: u64 = 0x0101010101010101;
+const lane_highs: u64 = lane_ones * 0x80;
+
+/// Whether all eight bytes of `word` are ones `json_literal_byte` copies as they are: none below
+/// 0x20, none at or above 0x80, and no quote or backslash. Each test is the exact "does any byte
+/// match" bit trick, so a word with one special byte is refused whole.
+fn allLiteral(word: u64) bool {
+    const below_space = (word -% lane_ones * 0x20) & ~word;
+    const quote = (word ^ lane_ones * '"') -% lane_ones;
+    const backslash = (word ^ lane_ones * '\\') -% lane_ones;
+    return ((below_space | word | quote | backslash) & lane_highs) == 0;
+}
+
 /// Writes `s` as a JSON string. Text reaching here came from outside the
 /// process: a tool result, a file's bytes, a working directory, an argv entry.
 /// Bytes above ASCII are copied when they form a UTF-8 sequence and become
@@ -372,6 +386,9 @@ pub fn writeJsonString(w: *Io.Writer, s: []const u8) !void {
         const c = s[i];
         if (json_literal_byte[c]) {
             i += 1;
+            // Text runs long between escapes, so a word at a time is checked once a byte has
+            // proved this is one. Mostly-escaped or non-ASCII text never gets here.
+            while (i + word_bytes <= s.len and allLiteral(std.mem.readInt(u64, s[i..][0..word_bytes], .little))) i += word_bytes;
             continue;
         }
         if (jsonNeedsEscape(c)) {
@@ -933,6 +950,30 @@ test "every ASCII byte survives escaping" {
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, buf.items(), .{});
     defer parsed.deinit();
     try std.testing.expectEqualSlices(u8, &all, parsed.value.string);
+}
+
+// The word-at-a-time skip must refuse a word holding a special byte at any lane, and accept one
+// that holds none, so each special sits at every offset of a string longer than three words. The
+// reference is std's own escaper, which spells these bytes the same way.
+test "a special byte at any offset escapes the way std.json escapes it" {
+    const specials = [_]u8{ 0x00, 0x08, 0x1f, 0x20, '"', '\\', '/', 0x7e, 0x7f };
+    var text: [40]u8 = undefined;
+    for (specials) |special| {
+        for (0..text.len) |at| {
+            @memset(&text, 'a');
+            text[at] = special;
+
+            var ours = JsonBuf.init(std.testing.allocator);
+            defer ours.list.deinit(std.testing.allocator);
+            try writeJsonString(ours.writer(), &text);
+
+            var reference: Io.Writer.Allocating = .init(std.testing.allocator);
+            defer reference.deinit();
+            try std.json.Stringify.value(@as([]const u8, &text), .{}, &reference.writer);
+
+            try std.testing.expectEqualStrings(reference.written(), ours.items());
+        }
+    }
 }
 
 test "a string that is not UTF-8 still serializes as valid JSON" {

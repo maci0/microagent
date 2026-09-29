@@ -10,8 +10,8 @@
 # comparable within one toolchain. Re-record when the toolchain changes.
 #
 # path	instructions_per_unit
-stream content frame	4101
-stream tool-arg frame	9253
-compaction of a 1 MB conversation	37153055
-build the request body 40 times	113946
-ranged read of a 512 KB line	7543604
+stream content frame	4160
+stream tool-arg frame	9309
+compaction of a 1 MB conversation	31049215
+build the request body 40 times	123841
+ranged read of a 512 KB line	7521158

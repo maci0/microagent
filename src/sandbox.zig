@@ -64,7 +64,8 @@ pub fn resolveWritableRoots(
 }
 
 /// Checks whether `path` is within any allowed root in `writable_roots`.
-/// An empty `writable_roots` slice means no sandbox restriction is active.
+/// An empty `writable_roots` slice means no sandbox restriction is active. A relative `path` is
+/// taken relative to `writable_roots[0]`, which must be the working directory.
 pub fn isPathWritable(io: Io, arena: std.mem.Allocator, path: []const u8, writable_roots: []const []const u8) bool {
     if (writable_roots.len == 0) return true;
     const trimmed = std.mem.trim(u8, path, " \t\r\n");
@@ -73,14 +74,10 @@ pub fn isPathWritable(io: Io, arena: std.mem.Allocator, path: []const u8, writab
     // First resolve lexical path (resolving .. and .)
     const abs_path = if (std.fs.path.isAbsolute(trimmed))
         std.fs.path.resolve(arena, &.{trimmed}) catch return false
-    else blk: {
-        const cwd = std.Io.Dir.cwd().realPathFileAlloc(io, ".", arena) catch {
-            const res = std.fs.path.resolve(arena, &.{ ".", trimmed }) catch return false;
-            break :blk res;
-        };
-        const res = std.fs.path.resolve(arena, &.{ cwd, trimmed }) catch return false;
-        break :blk res;
-    };
+    else
+        // `writable_roots[0]` is the canonical cwd `resolveWritableRoots` took at startup, and
+        // nothing changes directory, so it saves a realpath per call.
+        std.fs.path.resolve(arena, &.{ writable_roots[0], trimmed }) catch return false;
 
     // If file exists on disk (or is a symlink), also check the real path target
     if (std.Io.Dir.cwd().realPathFileAlloc(io, trimmed, arena)) |real| {
@@ -113,122 +110,68 @@ pub fn isPathWritable(io: Io, arena: std.mem.Allocator, path: []const u8, writab
     return false;
 }
 
+const linux = std.os.linux;
+
+/// `LANDLOCK_ACCESS_FS_*` bits, by the ABI version that introduced them: thirteen in v1, `REFER`
+/// in v2, `TRUNCATE` in v3 and `IOCTL_DEV` in v5. A ruleset may only name bits the running
+/// kernel knows.
+const access_execute: u64 = 1 << 0;
+const access_read_file: u64 = 1 << 2;
+const access_read_dir: u64 = 1 << 3;
+const access_abi1: u64 = (1 << 13) - 1;
+const access_refer: u64 = 1 << 13;
+const access_truncate: u64 = 1 << 14;
+const access_ioctl_dev: u64 = 1 << 15;
+/// What `/` is granted: reading and running, never writing.
+const access_read_only: u64 = access_execute | access_read_file | access_read_dir;
+
+const create_ruleset_version: usize = 1 << 0;
+const rule_path_beneath: usize = 1;
+
+fn handledAccess(abi: usize) u64 {
+    var mask = access_abi1;
+    if (abi >= 2) mask |= access_refer;
+    if (abi >= 3) mask |= access_truncate;
+    if (abi >= 5) mask |= access_ioctl_dev;
+    return mask;
+}
+
+/// A syscall's result as the value or the errno, so a caller tests one thing.
+fn checked(rc: usize) ?usize {
+    return if (linux.errno(rc) == .SUCCESS) rc else null;
+}
+
+/// Grants `access` beneath the directory at `path` to the ruleset. A directory that cannot be
+/// opened or a rule the kernel refuses leaves that path with no grant, which is the safe side.
+fn allowBeneath(ruleset_fd: i32, path: [*:0]const u8, access: u64) void {
+    const dir_fd: i32 = @intCast(checked(linux.open(path, .{ .PATH = true, .DIRECTORY = true, .CLOEXEC = true }, 0)) orelse return);
+    defer _ = linux.close(dir_fd);
+    const rule: LandlockPathBeneathAttr = .{ .allowed_access = access, .parent_fd = dir_fd };
+    _ = linux.syscall4(.landlock_add_rule, @intCast(ruleset_fd), rule_path_beneath, @intFromPtr(&rule), 0);
+}
+
 /// Applies Linux Landlock LSM rules to restrict filesystem write access.
 /// Root `/` is set to read-only, while entries in `writable_roots` are set to read-write.
 /// Returns true if Landlock was successfully enforced, false otherwise.
 pub fn applyLandlock(arena: std.mem.Allocator, writable_roots: []const []const u8) bool {
     if (builtin.os.tag != .linux) return false;
 
-    // 1. Query Landlock ABI version
-    const abi_res = std.os.linux.syscall3(
-        std.os.linux.SYS.landlock_create_ruleset,
-        0,
-        0,
-        1, // LANDLOCK_CREATE_RULESET_VERSION
-    );
-    const abi_signed: isize = @bitCast(abi_res);
-    if (abi_signed < 1) return false;
-    const abi: usize = @intCast(abi_signed);
+    const abi = checked(linux.syscall3(.landlock_create_ruleset, 0, 0, create_ruleset_version)) orelse return false;
+    const handled = handledAccess(abi);
 
-    const supported_mask: u64 = if (abi >= 5)
-        0xffff
-    else if (abi >= 3)
-        0x7fff
-    else if (abi >= 2)
-        0x3fff
-    else
-        0x1fff;
+    const attr: LandlockRulesetAttr = .{ .handled_access_fs = handled };
+    const ruleset_fd: i32 = @intCast(checked(linux.syscall3(.landlock_create_ruleset, @intFromPtr(&attr), @sizeOf(LandlockRulesetAttr), 0)) orelse return false);
+    defer _ = linux.close(ruleset_fd);
 
-    const ro_mask: u64 = 0xd & supported_mask;
-    const rw_mask: u64 = supported_mask;
-
-    const attr = LandlockRulesetAttr{
-        .handled_access_fs = supported_mask,
-    };
-    const ruleset_res = std.os.linux.syscall3(
-        std.os.linux.SYS.landlock_create_ruleset,
-        @intFromPtr(&attr),
-        @sizeOf(LandlockRulesetAttr),
-        0,
-    );
-    const ruleset_signed: isize = @bitCast(ruleset_res);
-    if (ruleset_signed < 0) return false;
-    const ruleset_fd: i32 = @intCast(ruleset_signed);
-    defer _ = std.os.linux.close(ruleset_fd);
-
-    const open_flags = std.os.linux.O{
-        .PATH = true,
-        .DIRECTORY = true,
-        .CLOEXEC = true,
-    };
-
-    // Add read-only rule for root /
-    const root_fd_res = std.os.linux.open(
-        "/",
-        open_flags,
-        0,
-    );
-    const root_fd_signed: isize = @bitCast(root_fd_res);
-    if (root_fd_signed >= 0) {
-        const root_fd: i32 = @intCast(root_fd_signed);
-        defer _ = std.os.linux.close(root_fd);
-        const pb = LandlockPathBeneathAttr{
-            .allowed_access = ro_mask,
-            .parent_fd = root_fd,
-        };
-        _ = std.os.linux.syscall4(
-            std.os.linux.SYS.landlock_add_rule,
-            @intCast(ruleset_fd),
-            1, // LANDLOCK_RULE_PATH_BENEATH
-            @intFromPtr(&pb),
-            0,
-        );
-    }
-
-    // Add read-write rules for writable roots
+    allowBeneath(ruleset_fd, "/", access_read_only & handled);
     for (writable_roots) |root_path| {
         if (root_path.len == 0) continue;
         const c_path = arena.dupeZ(u8, root_path) catch continue;
-        const dir_fd_res = std.os.linux.open(
-            c_path.ptr,
-            open_flags,
-            0,
-        );
-        const dir_fd_signed: isize = @bitCast(dir_fd_res);
-        if (dir_fd_signed >= 0) {
-            const dir_fd: i32 = @intCast(dir_fd_signed);
-            defer _ = std.os.linux.close(dir_fd);
-            const pb = LandlockPathBeneathAttr{
-                .allowed_access = rw_mask,
-                .parent_fd = dir_fd,
-            };
-            _ = std.os.linux.syscall4(
-                std.os.linux.SYS.landlock_add_rule,
-                @intCast(ruleset_fd),
-                1,
-                @intFromPtr(&pb),
-                0,
-            );
-        }
+        allowBeneath(ruleset_fd, c_path.ptr, handled);
     }
 
-    const prctl_res = std.os.linux.syscall5(
-        std.os.linux.SYS.prctl,
-        38, // PR_SET_NO_NEW_PRIVS
-        1,
-        0,
-        0,
-        0,
-    );
-    if (@as(isize, @bitCast(prctl_res)) < 0) return false;
-
-    const restrict_res = std.os.linux.syscall2(
-        std.os.linux.SYS.landlock_restrict_self,
-        @intCast(ruleset_fd),
-        0,
-    );
-    if (@as(isize, @bitCast(restrict_res)) < 0) return false;
-    return true;
+    if (checked(linux.prctl(@intFromEnum(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0)) == null) return false;
+    return checked(linux.syscall2(.landlock_restrict_self, @intCast(ruleset_fd), 0)) != null;
 }
 
 test "isPathWritable allows paths within writable roots and denies paths outside" {
@@ -287,4 +230,17 @@ test "resolveWritableRoots resolves cwd, tmp, session_dir, and custom roots" {
     try std.testing.expectEqualStrings("/tmp", roots[1]);
     try std.testing.expectEqualStrings(sdir, roots[2]);
     try std.testing.expectEqualStrings("/var/log", roots[3]);
+}
+
+test "isPathWritable resolves a relative path against the first root" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    const io = std.testing.io;
+
+    const cwd = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", arena);
+    const writable_roots = [_][]const u8{cwd};
+
+    try std.testing.expect(isPathWritable(io, arena, "sub/new-file.txt", &writable_roots));
+    try std.testing.expect(!isPathWritable(io, arena, "../outside.txt", &writable_roots));
 }

@@ -4,7 +4,7 @@
 
 | path | what lives there |
 | --- | --- |
-| `src/` | the agent, one Zig file per concern, each with its tests and fuzz corpora beside the code |
+| `src/` | the agent, one Zig file per concern, each with its tests and fuzz corpora beside the code: `main.zig` (command line, config resolution, the turn loop and the request), `stream.zig` (folding response frames into a turn), `conversation.zig` (the system prompt, message array and compaction), `chat.zig` (value types and the JSON writer), `net.zig`, `tool.zig`, `sandbox.zig`, `session.zig`, `skill.zig`, `style.zig`, `config.zig`, `mcp.zig`, `update.zig` |
 | `bench/` | the benchmark and gauntlet scripts, a loopback stub provider for profiling the harness alone (`stub_provider.py`), the task fixtures under `bench/tasks/`, the instruction gate's baseline, and the committed results (`results.jsonl`, `gauntlet-results.jsonl`) |
 | `integrations/harbor/` | the adapter that runs microagent on [Harbor](integrations/harbor/README.md) benchmarks, and its pinned Python requirements |
 | `docs/` | reference and design docs: [usage](docs/usage.md), [benchmark](docs/benchmark.md), [performance](docs/performance.md), [threat model](docs/threat-model.md), and the logo |

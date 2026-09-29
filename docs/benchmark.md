@@ -49,12 +49,14 @@ release builds are stripped, Debug keeps its symbols.
 | `zig build -Doptimize=ReleaseSafe` (stripped) | 1 596 792 B (1.52 MiB) |
 | `zig build` (Debug, unstripped) | 34 935 202 B (33.32 MiB) |
 
-No runtime, no package manager, no node_modules, no Python. Eleven files under `src/`, 21 739 lines
+No runtime, no package manager, no node_modules, no Python. Fourteen files under `src/`, 24 236 lines
 (`wc -l src/*.zig`):
 
 | file | role |
 | --- | --- |
 | `main.zig` | the agent loop and its wiring |
+| `stream.zig` | folding one provider stream frame into the response, under the response and tool-call ceilings |
+| `conversation.zig` | the system prompt, the message array a run appends to, and its compaction |
 | `tool.zig` | every tool the model can call, and the process runner they share |
 | `chat.zig` | the value types a turn is made of, and the JSON writer request bodies and usage lines go through |
 | `session.zig` | the per-run JSONL session log |
@@ -64,6 +66,7 @@ No runtime, no package manager, no node_modules, no Python. Eleven files under `
 | `style.zig` | reply-style modes appended to the system prompt |
 | `update.zig` | `microagent update`, the checksum-verified self-update |
 | `net.zig` | what the machine-facing modules share: CA bundle, deadlines, output sinks, retry policy |
+| `sandbox.zig` | the configurable workspace sandbox: Landlock and path confinement |
 | `fuzzargv.zig` | the argv shape both command-line fuzzers feed a parser |
 
 ### Startup

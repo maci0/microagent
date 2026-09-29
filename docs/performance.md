@@ -11,7 +11,7 @@ reasons unrelated to the code. `bench/instructions.sh --check` is the gate that 
 ## The short version
 
 The harness is not the bottleneck. A run is 47 s to 720 s, and the harness's own share is under 1%
-per turn: 1.3 ms of CPU before the first byte reaches the provider, and about 4,100 instructions
+per turn: about 110,000 instructions before the first byte reaches the provider, and about 4,200 instructions
 per streamed frame. The model and the tool subprocesses are the run.
 
 So the levers worth pulling are not in the CPU. They are in the bytes on the wire, in what the run
@@ -25,20 +25,20 @@ so a row here that moves is a gate that moved with it:
 
 | path | instructions | per unit |
 | --- | --- | --- |
-| process start, arg parse (`--version`) | 476,025 | n/a |
-| everything before the first request is sent | 1,303,779 | n/a |
-| a streamed content frame (47 B) | n/a | 4,101 |
+| process start, arg parse (`--version`) | 71,792 | n/a |
+| everything before the first request is sent | 108,563 | n/a |
+| a streamed content frame (47 B) | n/a | 4,160 |
 | a streamed tool-argument frame | n/a | 9,253 |
-| compaction of a 1 MB conversation | 37,153,055 | one call |
-| building the request body (the row measures 40 of them) | 113,946 | 2,849 |
-| a ranged read of a 512 KB line | 7,543,604 | one call |
+| compaction of a 1 MB conversation | 31,049,215 | one call |
+| building the request body (the row measures 40 of them) | 123,841 | 3,096 |
+| a ranged read of a 512 KB line | 7,521,158 | one call |
 | the session log's share of a run (ReleaseFast) | 332,061 | once per run |
 | one more turn of the loop (ReleaseFast) | 47,552 | a tool call that runs nothing |
 
 Against a 284 s review and roughly 20,000 frames, the streaming path is on the order of ten
 milliseconds of CPU in total. Changing it is not worth the risk.
 
-Syscalls, which no instruction count carries: 180 for `--version`, 277 for the whole pre-request
+Syscalls, which no instruction count carries: 17 for `--version`, 109 for the whole pre-request
 path, and nothing per turn beyond one session-log write and one stdout write per chunk.
 
 The turn and session rows use the same method (`perf stat -e instructions`, median of three,
@@ -92,6 +92,15 @@ run-to-run noise, so there is no build flag to reach for either.
 | mappings at startup (`--version`) | 86 mmap | **19** | std's start-code allocator maps a 64 KB slab per size class on first use; the run builds its own around a bucket allocator instead. It costs about 1.2% of client instructions on a 3000-turn run, which is the price of the 67 mappings it saves |
 | three 4 MB MCP tool results | 19.1 MB resident | **12.8 MB** | the text was built whole and clamped to 24 KB a moment later, so the copy and the clamp both worked over bytes nobody keeps; it stops at the cap while it is built, and the note names the size it would have had |
 | a 5,000-frame stream's client CPU | 29.0 M instr | **28.0 M instr** | `std.json.parseFromSlice` wrapped every frame in an arena of its own, on top of the per-frame scratch the caller already resets; `parseFromSliceLeaky` parses into that scratch directly |
+| per-thread signal stack | 256 KB zeroed in every thread | **none** | std gives each thread a 256 KB `.tbss` signal stack for its segfault handler whether or not the handler is on, and a release build has it off; the zeroing was 360,541 of 368,781 instructions in `--version` and one more copy per `Io.Threaded` worker |
+| `--version` | 477,472 instr | **71,792 instr** | the signal stack above, then the environment map below |
+| everything before the first request | 1,329,995 instr | **108,563 instr** | the same two changes, plus the two below |
+| peak resident, a run that never connects | 2,164 kB | **1,304 kB** | the signal stack: each thread touched 256 KB of it |
+| syscalls, `--version` | 67 | **17** | the signal stack's `mmap` and `munmap` pairs per thread, and the worker threads' start-up |
+| the environment map | two copies, ~100 allocations each, freed at exit | **one copy in the run arena** | `createMap` regrew its table and allocated twice per variable, and the tool environment was a second copy less the credentials; the map is built once into one buffer, and the credentials are removed from it in place after the key is read |
+| the stock system prompt | escaped per run (about 12 instr per byte) | **escaped at compile time** | a run with no reply style and no skills sends the same 3 KB every time |
+| a JSON string's plain runs | one table lookup per byte | **a word at a time** | after a plain byte, eight bytes are tested at once; compaction of a 1 MB conversation fell 37.2 M to 31.0 M instr, and the byte loop is unchanged for text that is mostly escapes or non-ASCII |
+| the sandbox path check | a `realpath` of `.` per `write` and `edit` | **none** | the working directory is `writable_roots[0]`, taken at startup; a `realpath` is an `openat`, a `readlink` and a `close` |
 
 Four of the rows above are one body of work on one run, and they compound. Between `v0.4.0` and the
 tree that carries them, client instructions for 3000 turns of the always-calls-a-tool loop fall from
@@ -119,7 +128,13 @@ Kept out on the numbers, not on taste:
   the replacement would hand-rewrite the exact bytes the prompt cache depends on.
 - **A stack buffer in front of the per-frame arena.** 1.5% fewer instructions on a 5,000-frame
   stream once the frame parse was leaky, and CPU time inside the noise, for another allocator on
-  the one path carrying the model's output.
+  the one path carrying the model's output. Measured again on a 20,000-frame stream with an 8 KB
+  `std.heap.stackFallback` in front of the arena: 1.8% (107.9 M against 109.9 M), so it stays out.
+- **A vectorized `reportsError`.** `std.mem.indexOf` for `"error":` is a byte loop and shows as a
+  quarter of `streamChat`'s own time in `perf`, so it was rewritten to hop between quotes with
+  `indexOfScalarPos`. On a 20,000-frame stream in ReleaseFast it cost 4.5% more instructions
+  (114.7 M against 109.8 M): a 47-byte frame holds about ten quotes, and ten hops cost more than
+  one short scan.
 - **ReleaseFast release assets.** ReleaseSmall spends 1.7-1.9x the user cycles of ReleaseFast
   (20.6-22.9 M against 11.3-12.4 M on a 5,000-frame stream, 0.65 M against 0.34 M for `--version`),
   but pages in half the binary, so CPU time including the kernel is within about 10% either way and

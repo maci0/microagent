@@ -57,9 +57,9 @@ bin="$work/instructions-test"
 # in a world-writable directory is another account's file to write through, and
 # TMPDIR is where bench/run.sh puts its scratch anyway.
 cat >"$work/rows" <<'ROWS'
-stream content frame|main.test.a long stream costs|20000
-stream tool-arg frame|main.test.streamed argument fragments|2000
-compaction of a 1 MB conversation|main.test.compaction elides|1
+stream content frame|stream.test.a long stream costs|20000
+stream tool-arg frame|stream.test.streamed argument fragments|2000
+compaction of a 1 MB conversation|conversation.test.compaction elides|1
 build the request body 40 times|main.test.one request body|40
 ranged read of a 512 KB line|main.test.a ranged read of a long line|1
 ROWS

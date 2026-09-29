@@ -27,6 +27,19 @@ release, and `microagent update` moves you to it.
   marking `/` read-only and designated roots read-write. In-process canonical path verification additionally
   refuses `write` and `edit` tool calls targeting paths outside writable roots.
 
+### Changed
+
+- Release builds no longer give every thread a 256 KB signal stack, which std zeroed at thread start
+  whether or not the segfault handler was on. `--version` retires 71,792 instructions instead of
+  477,472, the path to the first request 108,563 instead of 1,329,995, and a run that never connects
+  peaks at 1,304 kB resident instead of 2,164 kB.
+- The environment is copied once, into the run arena, and the credentials are removed from that copy
+  after the key is read, where it was copied twice and freed at exit.
+- The stock system prompt is escaped at compile time, and the JSON string writer skips plain text a
+  word at a time. Compaction of a 1 MB conversation retires 31.0 M instructions instead of 37.2 M.
+- The sandbox path check resolves a relative path against the working directory it recorded at startup,
+  saving one `realpath` (open, readlink, close) per `write` or `edit` call.
+
 ## [0.5.0] - 2026-09-29
 
 ### Added
