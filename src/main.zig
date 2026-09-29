@@ -1618,6 +1618,14 @@ fn setValued(
 /// them. `joined` is null for every other argument, and for a short flag: `-p=x`
 /// stays the unknown argument it is, because a single dash never joins.
 ///
+/// A long flag carries a joined value only when the name is one this command
+/// line gives a value to. `--help=1` and `--version=x` are the two spellings a
+/// flag that takes none has no meaning for, and splitting them answered a
+/// request the reader had not made: the value was dropped and the help text or
+/// the version printed, exit 0, over a word that names no flag here. They stay
+/// whole instead, so the same unknown-argument line a word nobody wrote gets is
+/// the one they get, naming the flag they meant.
+///
 /// Both walks of the command line ask this, so the rule that decides which
 /// arguments are a flag with a value lives here once.
 const SplitArg = struct { name: []const u8, joined: ?[]const u8 };
@@ -1628,7 +1636,8 @@ fn splitArg(arg: []const u8) SplitArg {
             // A bare `--` is the flag terminator, which takes no value, so
             // `--=x` is not a terminator with a value joined to it: it is an
             // argument naming no flag, and it is reported as one.
-            if (eq != 2) return .{ .name = arg[0..eq], .joined = arg[eq + 1 ..] };
+            if (eq != 2 and valuedFlag(arg[0..eq]) != null)
+                return .{ .name = arg[0..eq], .joined = arg[eq + 1 ..] };
         }
     }
     return .{ .name = arg, .joined = null };
@@ -1640,9 +1649,10 @@ fn splitArg(arg: []const u8) SplitArg {
 /// with the help text before exiting 2. A reasoning level and a turn ceiling are
 /// refused where they are set, and reported through that usage error; the
 /// environment path reports the same kind of bad value through `configError`.
-/// Every long flag also takes
-/// `--flag=value`, the form `microagent update` already took, so both commands
-/// spell an option the same way. `--help` and `--version` win wherever they
+/// Every long flag that takes a value also takes it as
+/// `--flag=value`. `microagent update` has no flag that takes a value, so it
+/// has no `--flag=value` form either, and a joined word there names no flag
+/// and is said so. `--help` and `--version` win wherever they
 /// appear, and stop the parse there.
 fn parseArgs(buf: []u8, argv: []const []const u8, opts: *Options) ?[]const u8 {
     var i: usize = 0;
@@ -1712,8 +1722,26 @@ const empty_prompt_message = "the prompt is empty: pass the task as an argument 
 /// suggestion is drawn from the flags this program has, so a name nobody wrote
 /// is never echoed back as one to try, and a word far from every flag is left
 /// without one rather than given the least bad of a dozen.
+///
+/// A word with a value written on the wrong side of the `=` is a mistake the
+/// spelling of the flag gives away, and the whole word is too far from every
+/// flag to earn a suggestion of its own: `-p=fix the test` is three letters
+/// from nothing. So the name before the `=` is read first, and it says which
+/// of three mistakes this is: a short flag, whose value is the next word
+/// because a single dash never joins; a flag that takes no value at all; or a
+/// long name spelled wrong, which is answered as one.
 fn unknownArgument(buf: []u8, arg: []const u8) []const u8 {
     const shown = clip(arg);
+    if (std.mem.indexOfScalar(u8, shown, '=')) |eq| {
+        const name = shown[0..eq];
+        if (valuedFlag(name)) |flag|
+            return std.fmt.bufPrint(buf, "unknown argument '{s}'; {s} takes its value as the next word, not after an =", .{ shown, flag.short orelse flag.long }) catch "bad arguments";
+        if (isFlag(name, "-h", "--help") or isFlag(name, "-V", "--version"))
+            return std.fmt.bufPrint(buf, "unknown argument '{s}'; {s} takes no value", .{ shown, name }) catch "bad arguments";
+        if (net.nearestFlag(name, &known_words)) |near|
+            return std.fmt.bufPrint(buf, "unknown argument '{s}'; did you mean {s}?", .{ shown, near }) catch "bad arguments";
+        return std.fmt.bufPrint(buf, "unknown or incomplete argument '{s}'", .{shown}) catch "bad arguments";
+    }
     const near = net.nearestFlag(shown, &known_words) orelse
         return std.fmt.bufPrint(buf, "unknown or incomplete argument '{s}'", .{shown}) catch "bad arguments";
     return std.fmt.bufPrint(buf, "unknown argument '{s}'; did you mean {s}?", .{ shown, near }) catch "bad arguments";
@@ -4351,6 +4379,59 @@ test "a wrong command line names the flag and the value it was given" {
     try std.testing.expectEqualStrings("the prompt is empty: pass the task as an argument or with --print", parseArgs(&buf, &.{""}, &opts).?);
 }
 
+test "a value joined to a flag that takes none names no flag here" {
+    // `--help` and `--version` take no value, so `--help=1` is a word this
+    // command line has no flag for. It used to split the way `--model=x` does,
+    // drop the value and print the help: exit 0 over a word the reader had
+    // misspelled, which is the one outcome a wrong argument may not have.
+    var buf: [512]u8 = undefined;
+    for ([_][]const u8{ "--help=1", "--version=x", "-V=1" }) |typed| {
+        var opts: Options = .{};
+        try std.testing.expect(parseArgs(&buf, &.{typed}, &opts) != null);
+        try std.testing.expectEqual(Action.run, opts.action);
+        // The early pass reads the same words and has to agree, or the help
+        // goes to stdout before the parse has said the line is wrong.
+        try std.testing.expectEqual(@as(?Action, null), earlyAction(&.{typed}));
+    }
+    // A value the wrong side of the `=` from the flag it belongs to is a
+    // mistake the name before the `=` gives away, and each of the three gets
+    // the sentence that names it rather than the generic one: a short flag
+    // takes the next word, a flag that takes no value takes none, and a long
+    // name spelled wrong is a misspelling like any other.
+    for ([_]struct { typed: []const u8, want: []const u8 }{
+        .{
+            .typed = "-p=fix it",
+            .want = "unknown argument '-p=fix it'; -p takes its value as the next word, not after an =",
+        },
+        .{
+            .typed = "-m=x",
+            .want = "unknown argument '-m=x'; -m takes its value as the next word, not after an =",
+        },
+        .{
+            .typed = "--help=1",
+            .want = "unknown argument '--help=1'; --help takes no value",
+        },
+        .{
+            .typed = "--version=x",
+            .want = "unknown argument '--version=x'; --version takes no value",
+        },
+        .{
+            .typed = "--modl=x",
+            .want = "unknown argument '--modl=x'; did you mean --model?",
+        },
+    }) |c| {
+        var one: Options = .{};
+        try std.testing.expectEqualStrings(c.want, parseArgs(&buf, &.{c.typed}, &one).?);
+    }
+
+    // A long flag that does take a value still takes it either way, which is
+    // what the rule in `splitArg` is for: it splits on the flag table, not on
+    // the shape of the word.
+    var valued: Options = .{};
+    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &.{"--model=some/model"}, &valued));
+    try std.testing.expectEqualStrings("some/model", valued.model);
+}
+
 test "a misspelled flag names the one it is closest to" {
     // A misspelling is the whole of the mistake, and the message is the only
     // place a reader is told which flag they meant. Each case is a way a
@@ -4668,7 +4749,11 @@ test "the walk that answers help before reading the environment agrees with the 
     const cases = [_]struct { argv: []const []const u8, want: ?Action, refused: bool }{
         .{ .argv = &.{ "a prompt", "--help" }, .want = .help, .refused = false },
         .{ .argv = &.{ "-V", "--model" }, .want = .version, .refused = false },
-        .{ .argv = &.{"--help=1"}, .want = .help, .refused = false },
+        // A value joined to a flag that takes none names no flag: the walk
+        // steps over it and the parser turns the line down, rather than the
+        // help going to stdout over a word the reader misspelled.
+        .{ .argv = &.{"--help=1"}, .want = null, .refused = true },
+        .{ .argv = &.{"--version=x"}, .want = null, .refused = true },
         // The value of a valued flag is stepped over, so these words are a
         // prompt and not a request for help. The parser says the same.
         .{ .argv = &.{ "-p", "--help" }, .want = null, .refused = false },

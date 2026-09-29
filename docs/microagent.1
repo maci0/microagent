@@ -63,8 +63,11 @@ Tools can be removed and MCP servers added in the config file; see
 and the full reference in
 .IR docs/usage.md .
 .SH OPTIONS
-Every long option also takes
-.BI \-\-flag= value \fR.
+Every long option that takes a value also takes it as
+.BI \-\-flag= value \fR;
+an option that takes none, like
+.BR \-\-help ,
+names no flag when a value is written on, and is a usage error.
 A flag wins over the environment variable for the same option, and over one the
 run could not use.
 .TP
