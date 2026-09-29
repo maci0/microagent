@@ -14,6 +14,11 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- An MCP server's answer is read with the newline scan resuming where it
+  stopped, instead of restarting at the front of the buffer on every 8 KB chunk.
+  A one megabyte `tools/list` answer was searched 128 times over growing
+  prefixes, about 66 MB of the same bytes; three such servers cost 91.1 M
+  instructions before and 75.3 M after.
 - An MCP tool result is built up to the 24 KB ceiling a tool result is clamped
   to, instead of being built whole and clamped a moment later. A server that
   answered with a 4 MB text block cost about 19 MB of peak memory; the same

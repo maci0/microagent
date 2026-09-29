@@ -81,6 +81,7 @@ run-to-run noise, so there is no build flag to reach for either.
 | the same library, system time to the first request | 9.3 ms | **2.0 ms** | the same change: 21 MB of reads become about 1.6 MB, and kernel time is the half that carries it |
 | three MCP servers with 1 MB `tools/list` answers | 12.2 MB resident | **4.5 MB** | a `tools/list` answer was parsed into the run arena, tree and line both, and the buffer it arrived in kept its size; the answer is parsed in a scratch arena now, only the schema bytes are copied out, and that buffer has its own allocator and is handed back |
 | one such server | 8.5 MB | **4.5 MB** | the same change |
+| an MCP answer read in 8 KB chunks, three servers of 1 MB each | 91.1 M instr | **75.3 M instr** | the newline scan restarted at the front of the buffer on every chunk, so a one megabyte line was searched 128 times over growing prefixes, about 66 MB of the same bytes; it resumes where it stopped now |
 | three 4 MB MCP tool results | 19.1 MB resident | **12.8 MB** | the text was built whole and clamped to 24 KB a moment later, so the copy and the clamp both worked over bytes nobody keeps; it stops at the cap while it is built, and the note names the size it would have had |
 
 The two largest wins are not CPU at all. The request-bytes fix is the most valuable change in this
@@ -206,6 +207,15 @@ wall figure is `hyperfine -w 3 -r 20` and it moves with the page cache (11.1 ms 
 run warm, 27.2 against 12.9 loaded and cold); the system time does not, 9.3 ms against 2.0 ms, which
 is the read volume. A library of ordinary size pays nothing either way: 2.9 MB against 2.9 MB with
 none, 5.5 against 5.9 for 200 skills of 4 KB.
+
+The MCP line row is `perf stat -e instructions`, median of three, on the release binary against three
+fake servers whose `tools/list` answer carries 1 MB, with `--max-turns 1`. It is measured with
+`--no-inherit`, and that flag is the whole of the method: without it the same run reads 567 M
+instructions, because `perf stat` counts the servers too and a shell script padding a megabyte with
+`printf` costs far more than the client that reads it. Any row here whose workload spawns something
+needs the flag. No gated row was added for this one: `bench/instructions.sh` drives its rows through
+`--test-filter`, which does not reach tests declared in an imported module, so the number is recorded
+here with the command that produces it rather than in `bench/instructions.baseline`.
 
 The MCP result row is a fake server that answers `tools/call` with a 4 MB text block, three calls in
 one run, peak `VmHWM` sampled the same way: the median of three runs is 19.1 MB before and 12.8 MB

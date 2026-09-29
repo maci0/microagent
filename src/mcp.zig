@@ -129,8 +129,16 @@ pub const Server = struct {
     /// two ways this fails, and both leave the server marked dead by the
     /// caller's error path.
     fn readLine(self: *Server, io: Io, line_arena: std.mem.Allocator, deadline: Io.Timeout) ![]u8 {
+        // Only the bytes appended since the last look can hold the newline, so
+        // the scan resumes where it stopped. Restarting it at the front re-reads
+        // the whole buffer once per chunk, which is quadratic in a line that
+        // arrives in many chunks: a one megabyte `tools/list` answer is 128
+        // reads, and the scans before this add up to about 66 megabytes of the
+        // same bytes. `net.nextLineEnd` is the cursor the streaming reader and
+        // the ranged read keep.
+        var scanned: usize = 0;
         while (true) {
-            if (std.mem.indexOfScalar(u8, self.pending.items, '\n')) |at| {
+            if (net.nextLineEnd(self.pending.items, &scanned)) |at| {
                 const line = try line_arena.dupe(u8, self.pending.items[0..at]);
                 const rest = self.pending.items.len - (at + 1);
                 std.mem.copyForwards(u8, self.pending.items[0..rest], self.pending.items[at + 1 ..]);
