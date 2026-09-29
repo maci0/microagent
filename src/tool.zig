@@ -1861,6 +1861,7 @@ fn credentialRefusal(arena: std.mem.Allocator, tool: chat.Tool, path: []const u8
 fn toolRead(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]const u8 {
     const path = chat.str(args.get("path")) orelse return "error: missing path";
     if (credentialPath(io, arena, path)) |refused| return try credentialRefusal(arena, .read, refused, false);
+    if (blockingPathAt(io, arena, path)) |refused| return refused;
     if (!args.contains("offset") and !args.contains("limit"))
         return std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_read_bytes)) catch |err|
             return readFailed(arena, path, err);
@@ -1878,6 +1879,32 @@ fn toolRead(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap) ![]const
 fn readFailed(arena: std.mem.Allocator, path: []const u8, err: anyerror) []const u8 {
     return std.fmt.allocPrint(arena, "error: cannot read {s}: {s}", .{ shownPath(arena, path), @errorName(err) }) catch
         "error: cannot read the file";
+}
+
+/// The refusal a path gets when opening it would wait rather than fail, or
+/// null when the open that follows it may do so.
+///
+/// `read`, `edit` and `multi_edit` read in this process, so unlike every other
+/// tool in this dispatcher they answer to no timeout: a named pipe blocks in
+/// `open` until a writer opens the other end, and a writer is not something
+/// the run can bring into being. A model that names one of those gets a turn
+/// that stops with nothing on stdout and nothing on stderr, and Ctrl+C is the
+/// only way out, because the interrupt handler kills child process groups and
+/// this is not one.
+///
+/// The other file types are read as they are, and a `stat` that fails is left
+/// to the open that follows, so a broken link and a missing file keep saying
+/// the words `readFailed` has always given them.
+fn blockingPathAt(io: Io, arena: std.mem.Allocator, path: []const u8) ?[]const u8 {
+    const kind = (std.Io.Dir.cwd().statFile(io, path, .{}) catch return null).kind;
+    return switch (kind) {
+        .named_pipe, .unix_domain_socket => std.fmt.allocPrint(
+            arena,
+            "error: cannot read {s}: it is a {s}, not a file, and a read of one waits for another process that may never come",
+            .{ shownPath(arena, path), @tagName(kind) },
+        ) catch "error: cannot read a path that is not a file",
+        else => null,
+    };
 }
 
 /// What a `write` or an `edit` says when the bytes did not land: the same
@@ -2105,6 +2132,7 @@ fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, writable
     if (!sandbox.isPathWritable(io, arena, path, writable_roots)) {
         return outsideSandbox(arena, path);
     }
+    if (blockingPathAt(io, arena, path)) |refused| return refused;
     const old = chat.str(args.get("old_string")) orelse return "error: missing old_string";
     const new = chat.str(args.get("new_string")) orelse return "error: missing new_string";
     const all = if (args.get("replace_all")) |v| v == .bool and v.bool else false;
@@ -2324,6 +2352,7 @@ fn toolMultiEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, wri
             const message = try outsideSandbox(arena, path);
             return refusedAt(arena, n, list.len, message);
         }
+        if (blockingPathAt(io, arena, path)) |refused| return refusedAt(arena, n, list.len, refused);
         const old = chat.str(entry.get("old_string")) orelse return refusedAt(arena, n, list.len, "error: missing old_string");
         const new = chat.str(entry.get("new_string")) orelse return refusedAt(arena, n, list.len, "error: missing new_string");
         const all = if (entry.get("replace_all")) |v| v == .bool and v.bool else false;
@@ -7230,4 +7259,52 @@ test "todo keeps a bounded, printable text for each item" {
     // through it, and the tail the escaper cut is not in the line either.
     try std.testing.expect(std.mem.indexOfScalar(u8, result, 0x1b) == null);
     try std.testing.expect(std.mem.endsWith(u8, result, "\n0 of 1 done"));
+}
+
+// A named pipe blocks in `open` until another process opens the other end, and
+// `read` answers to no timeout, so a call naming one is a turn that never
+// returns. The refusal is the whole answer, it names the path and the type, and
+// `edit` and `multi_edit` answer the same way rather than one of them hanging
+// where the other does not. The FIFO is a real one in a real directory, and the
+// test would sit here forever if the refusal were removed.
+test "a path a read would block on is refused by name, by all three tools" {
+    const io = std.testing.io;
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_path = buf[0..try tmp.dir.realPath(io, &buf)];
+
+    const fifo = try std.fs.path.join(arena, &.{ dir_path, "pipe" });
+    // `mkfifo(2)` has no wrapper in this stdlib; the mode is the file type
+    // `S_IFIFO` with the permissions beside it, and this is the only test that
+    // needs a named pipe, so it makes one itself rather than the tools
+    // carrying a `mknod` for it.
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const linux = std.os.linux;
+    const made = linux.mknod((try arena.dupeZ(u8, fifo)).ptr, 0o010000 | 0o600, 0);
+    if (linux.errno(made) != .SUCCESS) return error.SkipZigTest;
+    const shown = shownPath(arena, fifo);
+
+    const cases = [_][]const u8{
+        try std.json.Stringify.valueAlloc(arena, .{ .path = fifo }, .{}),
+        try std.json.Stringify.valueAlloc(arena, .{ .path = fifo, .old_string = "a", .new_string = "b" }, .{}),
+        try std.json.Stringify.valueAlloc(arena, .{ .edits = &.{.{ .path = fifo, .old_string = "a", .new_string = "b" }} }, .{}),
+    };
+    const names = [_][]const u8{ "read", "edit", "multi_edit" };
+    for (cases, names) |args, name| {
+        const result = try dispatchWith(arena, name, args, &.{}, &.{});
+        try std.testing.expect(std.mem.indexOf(u8, result, "cannot read ") != null);
+        try std.testing.expect(std.mem.indexOf(u8, result, shown) != null);
+        try std.testing.expect(std.mem.indexOf(u8, result, "named_pipe") != null);
+    }
+
+    // The three refusals above are the type, not the spelling of it: a
+    // directory holds no bytes either, and `read` has always said so by name,
+    // so nothing here narrows what a path may be.
+    const dir_result = try dispatch(arena, "read", try std.json.Stringify.valueAlloc(arena, .{ .path = dir_path }, .{}));
+    try std.testing.expect(std.mem.indexOf(u8, dir_result, "IsDir") != null);
 }

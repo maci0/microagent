@@ -284,8 +284,23 @@ pub fn applyLandlock(io: Io, arena: std.mem.Allocator, writable_roots: []const [
         if (allowBeneath(ruleset_fd, c_path.ptr, handled)) |err| rootRefused(io, arena, root_path, @tagName(err));
     }
 
-    if (checked(linux.prctl(@intFromEnum(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0)) == null) return false;
-    return checked(linux.syscall2(.landlock_restrict_self, @intCast(ruleset_fd), 0)) != null;
+    // The last two steps are the ones that make the rules bind, and each has a
+    // cause of its own: a seccomp policy or a container's runtime can refuse
+    // `PR_SET_NO_NEW_PRIVS` on a kernel new enough for Landlock, and
+    // `landlock_restrict_self` fails where the ruleset named a right the
+    // running kernel does not enforce. Both say so rather than handing back a
+    // false the caller reports as a kernel too old, which is a different fix.
+    const no_new_privs = linux.prctl(@intFromEnum(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0);
+    if (checked(no_new_privs) == null) {
+        sandboxNotApplied(io, arena, linux.errno(no_new_privs));
+        return false;
+    }
+    const restricted = linux.syscall2(.landlock_restrict_self, @intCast(ruleset_fd), 0);
+    if (checked(restricted) == null) {
+        sandboxNotApplied(io, arena, linux.errno(restricted));
+        return false;
+    }
+    return true;
 }
 
 /// A writable root the kernel did not grant. The run goes on confined without it, so the line
@@ -303,6 +318,20 @@ fn rootRefused(io: Io, arena: std.mem.Allocator, root_path: []const u8, why: []c
 /// operator reads rather than a copy of it, and so the two refusals in `applyLandlock` can only
 /// ever print the one.
 const root_refusal_text = "microagent: sandbox: {s} was not made writable ({s}); writes under it are refused\n";
+
+/// The kernel refused to confine this process at all, and the reason is its
+/// own. The caller's own line names the two mechanisms and what each needs, so
+/// a bare false is read as a kernel too old; this one says which call was
+/// refused, and an operator reading a seccomp policy or a right the running ABI
+/// does not know has something to go on.
+fn sandboxNotApplied(io: Io, arena: std.mem.Allocator, why: std.posix.E) void {
+    net.note(io, arena, sandbox_not_applied_text, .{@tagName(why)});
+}
+
+/// The line a refused confinement prints. A constant for the reason
+/// `root_refusal_text` is one: the test asserts the wording the operator reads
+/// rather than a copy of it.
+const sandbox_not_applied_text = "microagent: sandbox: the kernel refused to confine this process ({s}); no filesystem rule was enforced at all\n";
 
 /// The device files a child opens for writing whatever the roots are: `/dev/null` for a stdio it
 /// discards, `/dev/tty` for a tool that prompts, `/dev/dtracehelper` for the system libraries.
@@ -347,24 +376,48 @@ extern "c" fn sandbox_free_error(errorbuf: ?[*:0]u8) void;
 
 /// Applies the Seatbelt profile to this process. Children inherit it across `exec`, as Landlock's
 /// rules are, so `bash` and the MCP servers are confined too. Returns whether it took effect.
-fn applySeatbelt(arena: std.mem.Allocator, writable_roots: []const []const u8) bool {
-    const profile = seatbeltProfile(arena, writable_roots) catch return false;
-    const profile_z = arena.dupeZ(u8, profile) catch return false;
+///
+/// Each way this answers false says what stopped it. `sandbox_init` hands back its own words for a
+/// profile it refused, and they are the only description of the failure anyone gets: the caller's
+/// line names Seatbelt and leaves it at that, so a run confined by nothing on a Mac reads as a
+/// platform that cannot confine at all. The message is libSystem's own text and is escaped the way
+/// every other value reaching a terminal is.
+fn applySeatbelt(io: Io, arena: std.mem.Allocator, writable_roots: []const []const u8) bool {
+    const profile = seatbeltProfile(arena, writable_roots) catch |err| {
+        seatbeltRefused(io, arena, @errorName(err));
+        return false;
+    };
+    const profile_z = arena.dupeZ(u8, profile) catch |err| {
+        seatbeltRefused(io, arena, @errorName(err));
+        return false;
+    };
     var message: ?[*:0]u8 = null;
     if (sandbox_init(profile_z.ptr, 0, &message) != 0) {
+        seatbeltRefused(io, arena, if (message) |m| std.mem.span(m) else "no reason given");
         sandbox_free_error(message);
         return false;
     }
     return true;
 }
 
+/// Seatbelt did not confine this process, and `why` is what stopped it: an allocation failure
+/// above, or the words `sandbox_init` itself wrote into its own buffer.
+fn seatbeltRefused(io: Io, arena: std.mem.Allocator, why: []const u8) void {
+    net.note(io, arena, seatbelt_refusal_text, .{chat.safeTextAll(arena, why)});
+}
+
+/// The line a refused Seatbelt profile prints, for the reason
+/// `sandbox_not_applied_text` is a constant.
+const seatbelt_refusal_text = "microagent: sandbox: Seatbelt refused the profile ({s}); the kernel sandbox was not applied\n";
+
 /// Confines this process and everything it starts to writes under `writable_roots`, with the
 /// kernel's own mechanism: Landlock on Linux, Seatbelt on macOS. Returns false where the kernel
-/// does not enforce it, and the caller says so.
+/// does not enforce it, and the caller says so. Every false this returns has already named its
+/// own cause, so the caller's line adds the mechanism rather than the reason.
 pub fn applySandbox(io: Io, arena: std.mem.Allocator, writable_roots: []const []const u8) bool {
     return switch (builtin.os.tag) {
         .linux => applyLandlock(io, arena, writable_roots),
-        .macos => applySeatbelt(arena, writable_roots),
+        .macos => applySeatbelt(io, arena, writable_roots),
         else => false,
     };
 }
@@ -831,4 +884,27 @@ test "a writable root the kernel refuses is named, escaped, with the reason" {
     const line = try std.fmt.allocPrint(arena, root_refusal_text, .{ shown, "EACCES" });
     try std.testing.expect(std.mem.indexOf(u8, line, "\n") == null or std.mem.indexOfScalar(u8, line, '\n').? == line.len - 1);
     for (line) |c| try std.testing.expect(c != 0x1b);
+}
+
+// A run that is confined by nothing is told which call the kernel refused, and
+// the caller's own line names the mechanism rather than the reason. Both lines
+// carry a reason in, one line out, and the Seatbelt one takes the reason
+// through the escaper because `sandbox_init` writes its own words into a buffer
+// this program never wrote.
+test "a refused confinement names what the kernel refused" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    const landlock = try std.fmt.allocPrint(arena, sandbox_not_applied_text, .{"EPERM"});
+    try std.testing.expect(std.mem.indexOf(u8, landlock, "EPERM") != null);
+    try std.testing.expectEqualStrings("\n", landlock[landlock.len - 1 ..]);
+
+    // The bytes libSystem writes can carry an escape sequence, and a line that
+    // clears the screen is the one diagnostic an operator most needs to read.
+    const shown = chat.safeTextAll(arena, "deny file-write*\x1b[2J");
+    const seatbelt = try std.fmt.allocPrint(arena, seatbelt_refusal_text, .{shown});
+    try std.testing.expect(std.mem.indexOf(u8, seatbelt, "deny file-write*") != null);
+    for (seatbelt) |c| try std.testing.expect(c != 0x1b);
+    try std.testing.expectEqualStrings("\n", seatbelt[seatbelt.len - 1 ..]);
 }
