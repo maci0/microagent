@@ -1218,6 +1218,10 @@ fn fillPresetTools(arena: std.mem.Allocator, server: *Server, client_version: []
 /// machine, with a host and no `user:password@` in front of it (the client
 /// would send that as basic authorization, beside the entry's own key).
 pub fn validUrl(url: []const u8) bool {
+    // The url goes into the request line as parsed, so a control byte in one
+    // ends that line and the rest of the value is a request line of the
+    // config's own making. `std.Uri.parse` keeps such a byte in the path.
+    if (net.hasHeaderControlBytes(url)) return false;
     const uri = std.Uri.parse(url) catch return false;
     if (uri.host == null or uri.user != null or uri.password != null) return false;
     return net.urlCarriesKey(url);

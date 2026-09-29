@@ -534,6 +534,11 @@ fn runMain(init: std.process.Init) !u8 {
     // out in the clear, which is a security warning about a value that never
     // reaches the network.
     if (std.Uri.parse(opts.base_url)) |_| {} else |_| return configError(io, "{s} is not a url", .{clip(opts.base_url)});
+    // The url is written into the request line as parsed, so a control byte in
+    // one ends that line and everything after it is a request line of the
+    // caller's own making. The key is held to the same rule above.
+    if (net.hasHeaderControlBytes(opts.base_url))
+        return configError(io, "the base url holds a control character, which cannot go in a request line", .{});
     if (!net.urlCarriesKey(opts.base_url))
         return configError(io, "the API key would go to {s} in the clear; use an https base url, or http on loopback", .{clip(opts.base_url)});
 

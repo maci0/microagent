@@ -144,6 +144,10 @@ fn trustedGithubUrl(url: []const u8) bool {
 fn githubBearer(arena: std.mem.Allocator, env: *std.process.Environ.Map) (std.mem.Allocator.Error!?[]const u8) {
     const tok = std.mem.trim(u8, env.get("GITHUB_TOKEN") orelse return null, net.env_surrounding);
     if (tok.len == 0) return null;
+    // The token rides in an `Authorization` line, so a byte below 0x20 ends
+    // that line and the rest of the value is a header of the environment's own
+    // making. The API key and the MCP key are both held to this rule.
+    if (net.hasHeaderControlBytes(tok)) return null;
     return try std.fmt.allocPrint(arena, "Bearer {s}", .{tok});
 }
 
