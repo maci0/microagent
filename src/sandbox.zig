@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const net = @import("net.zig");
+const chat = @import("chat.zig");
 
 const Io = std.Io;
 
@@ -172,19 +173,35 @@ fn checked(rc: usize) ?usize {
     return if (linux.errno(rc) == .SUCCESS) rc else null;
 }
 
-/// Grants `access` beneath the directory at `path` to the ruleset. A directory that cannot be
-/// opened or a rule the kernel refuses leaves that path with no grant, which is the safe side.
-fn allowBeneath(ruleset_fd: i32, path: [*:0]const u8, access: u64) void {
-    const dir_fd: i32 = @intCast(checked(linux.open(path, .{ .PATH = true, .DIRECTORY = true, .CLOEXEC = true }, 0)) orelse return);
+/// Grants `access` beneath the directory at `path` to the ruleset, and answers whether the
+/// kernel took the rule. A caller that ignores the answer confines a run by a ruleset that is
+/// missing a rule it was built to hold, so the errno comes back rather than the outcome being
+/// dropped: what a missing rule means differs by rule, and the difference is the caller's to
+/// make.
+fn allowBeneath(ruleset_fd: i32, path: [*:0]const u8, access: u64) ?std.posix.E {
+    const opened = linux.open(path, .{ .PATH = true, .DIRECTORY = true, .CLOEXEC = true }, 0);
+    if (linux.errno(opened) != .SUCCESS) return linux.errno(opened);
+    const dir_fd: i32 = @intCast(opened);
     defer _ = linux.close(dir_fd);
     const rule: LandlockPathBeneathAttr = .{ .allowed_access = access, .parent_fd = dir_fd };
-    _ = linux.syscall4(.landlock_add_rule, @intCast(ruleset_fd), rule_path_beneath, @intFromPtr(&rule), 0);
+    const added = linux.syscall4(.landlock_add_rule, @intCast(ruleset_fd), rule_path_beneath, @intFromPtr(&rule), 0);
+    return if (linux.errno(added) == .SUCCESS) null else linux.errno(added);
 }
 
 /// Applies Linux Landlock LSM rules to restrict filesystem write access.
 /// Root `/` is set to read-only, while entries in `writable_roots` are set to read-write.
 /// Returns true if Landlock was successfully enforced, false otherwise.
-pub fn applyLandlock(arena: std.mem.Allocator, writable_roots: []const []const u8) bool {
+///
+/// The read-only grant on `/` is what every other rule is written against: a ruleset that
+/// handled the filesystem accesses but granted no path at all denies all of them, so a run
+/// confined by it cannot read the model, the tool, or its own source. It is therefore a whole
+/// answer rather than one rule's: when the kernel will not take it, nothing is enforced and the
+/// answer is false, which the caller says out loud.
+///
+/// A writable root is a grant the run is promised, not the confinement itself. One the kernel
+/// will not grant leaves the run unable to write there, which is the safe side and no reason to
+/// hand back a run with no confinement at all, so the root is named and the rest are applied.
+pub fn applyLandlock(io: Io, arena: std.mem.Allocator, writable_roots: []const []const u8) bool {
     if (builtin.os.tag != .linux) return false;
 
     const abi = checked(linux.syscall3(.landlock_create_ruleset, 0, 0, create_ruleset_version)) orelse return false;
@@ -194,16 +211,41 @@ pub fn applyLandlock(arena: std.mem.Allocator, writable_roots: []const []const u
     const ruleset_fd: i32 = @intCast(checked(linux.syscall3(.landlock_create_ruleset, @intFromPtr(&attr), @sizeOf(LandlockRulesetAttr), 0)) orelse return false);
     defer _ = linux.close(ruleset_fd);
 
-    allowBeneath(ruleset_fd, "/", access_read_only & handled);
+    if (allowBeneath(ruleset_fd, "/", access_read_only & handled)) |err| {
+        net.note(io, arena, "microagent: sandbox: the kernel refused a read-only rule on / ({s}), so no filesystem rule was enforced at all\n", .{@tagName(err)});
+        return false;
+    }
     for (writable_roots) |root_path| {
         if (root_path.len == 0) continue;
-        const c_path = arena.dupeZ(u8, root_path) catch continue;
-        allowBeneath(ruleset_fd, c_path.ptr, handled);
+        // A root whose name cannot be made a C string is named with the same refusal the
+        // allocation failure below gets: it stays read-only, and the operator is told which
+        // writable root is not one.
+        const c_path = arena.dupeZ(u8, root_path) catch {
+            rootRefused(io, arena, root_path, "OutOfMemory");
+            continue;
+        };
+        if (allowBeneath(ruleset_fd, c_path.ptr, handled)) |err| rootRefused(io, arena, root_path, @tagName(err));
     }
 
     if (checked(linux.prctl(@intFromEnum(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0)) == null) return false;
     return checked(linux.syscall2(.landlock_restrict_self, @intCast(ruleset_fd), 0)) != null;
 }
+
+/// A writable root the kernel did not grant. The run goes on confined without it, so the line
+/// says which root is not writable and why rather than leaving a tool that fails on a write the
+/// operator asked for with nothing to read.
+fn rootRefused(io: Io, arena: std.mem.Allocator, root_path: []const u8, why: []const u8) void {
+    // Escaped once here, the reason the session log escapes a directory: the root comes from the
+    // working directory, the environment, or the config, and each can carry bytes a terminal acts
+    // on.
+    const shown = chat.safeTextAll(arena, root_path);
+    net.writeErr(io, std.fmt.allocPrint(arena, root_refusal_text, .{ shown, why }) catch return);
+}
+
+/// The line a refused writable root prints. A constant so the test asserts the wording the
+/// operator reads rather than a copy of it, and so the two refusals in `applyLandlock` can only
+/// ever print the one.
+const root_refusal_text = "microagent: sandbox: {s} was not made writable ({s}); writes under it are refused\n";
 
 /// The device files a child opens for writing whatever the roots are: `/dev/null` for a stdio it
 /// discards, `/dev/tty` for a tool that prompts, `/dev/dtracehelper` for the system libraries.
@@ -262,9 +304,9 @@ fn applySeatbelt(arena: std.mem.Allocator, writable_roots: []const []const u8) b
 /// Confines this process and everything it starts to writes under `writable_roots`, with the
 /// kernel's own mechanism: Landlock on Linux, Seatbelt on macOS. Returns false where the kernel
 /// does not enforce it, and the caller says so.
-pub fn applySandbox(arena: std.mem.Allocator, writable_roots: []const []const u8) bool {
+pub fn applySandbox(io: Io, arena: std.mem.Allocator, writable_roots: []const []const u8) bool {
     return switch (builtin.os.tag) {
-        .linux => applyLandlock(arena, writable_roots),
+        .linux => applyLandlock(io, arena, writable_roots),
         .macos => applySeatbelt(arena, writable_roots),
         else => false,
     };
@@ -471,4 +513,22 @@ test "seatbeltProfile denies writes, then allows the devices and each root" {
         \\)
         \\
     , profile);
+}
+
+test "a writable root the kernel refuses is named, escaped, with the reason" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    // The line is what an operator reads when a tool refuses a write the run promised, so it
+    // carries the root and the errno, and a root carrying a terminal's own bytes prints as the
+    // characters it is rather than acting on them.
+    try std.testing.expectEqualStrings(
+        "microagent: sandbox: /work/project was not made writable (ENOENT); writes under it are refused\n",
+        try std.fmt.allocPrint(arena, root_refusal_text, .{ "/work/project", "ENOENT" }),
+    );
+    const shown = chat.safeTextAll(arena, "/work\nproject\x1b[2J");
+    const line = try std.fmt.allocPrint(arena, root_refusal_text, .{ shown, "EACCES" });
+    try std.testing.expect(std.mem.indexOf(u8, line, "\n") == null or std.mem.indexOfScalar(u8, line, '\n').? == line.len - 1);
+    for (line) |c| try std.testing.expect(c != 0x1b);
 }

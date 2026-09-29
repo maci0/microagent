@@ -485,7 +485,7 @@ fn runMain(init: std.process.Init) !u8 {
     opts.sandbox = loaded.sandbox;
     if (opts.sandbox.enabled) {
         opts.writable_roots = try sandbox_mod.resolveWritableRoots(io, arena, init.environ_map, opts.sandbox.writable, opts.session_dir);
-        if (!sandbox_mod.applySandbox(arena, opts.writable_roots)) {
+        if (!sandbox_mod.applySandbox(io, arena, opts.writable_roots)) {
             // Not enforced: Landlock needs Linux 5.13 or newer and Seatbelt refused the profile. Saying so is
             // what keeps `enabled = true` from reading as protection `bash` and the MCP servers
             // do not have.
@@ -1958,10 +1958,17 @@ fn writeDefaultConfig(io: Io, arena: std.mem.Allocator, source: ConfigSource) vo
         },
     };
     defer file.close(io);
-    file.writeStreamingAll(io, config_template) catch |err| {
-        net.note(io, arena, "microagent: config {s}: the template could not be written ({s}); the built-in defaults are in force\n", .{ shown, @errorName(err) });
+    if (file.writeStreamingAll(io, config_template)) |_| {} else |err| {
+        // The file was created exclusive, so the run that leaves it behind is
+        // the run that owns the name, and the next run finds a config there
+        // and reads a half-written template as the operator's own settings.
+        // The defaults are not what it would then get. A template is a
+        // convenience, so a failure to write one costs the run nothing: the
+        // partial file is taken back down and the note says why.
+        std.Io.Dir.cwd().deleteFile(io, path) catch {};
+        net.note(io, arena, "microagent: config {s}: the template could not be written ({s}); the built-in defaults are in force and no file was left\n", .{ shown, @errorName(err) });
         return;
-    };
+    }
     net.note(io, arena, "microagent: config {s}: no file there, so the commented template was written; edit it to configure the run\n", .{shown});
 }
 
