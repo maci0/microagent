@@ -48,13 +48,18 @@ SHA256_CMD = if command -v sha256sum >/dev/null 2>&1; then echo sha256sum; \
 # discarded with the runner.
 REPRO_DIR ?= $(CURDIR)/.scratch/repro
 # The compiled toolchain and standard library `check-reproducible` builds
-# against, and the reason the CI job restores a global cache at all. It lives
-# outside REPRO_DIR because that directory is emptied on every one of the nine
-# builds, and a cache emptied with it is a cold build: measured here, compiling
-# one published target costs 4m25s into an empty toolchain cache and 2m52s into a
-# warm one, and nine of the former is most of a job whose ceiling is 40 minutes.
-# It is removed once before the loop so the run does not inherit a previous
-# one's, and by the trap so a failed comparison leaves nothing behind.
+# against. `check-reproducible` names it as ZIG_GLOBAL_CACHE_DIR for its own
+# builds, so the cache the setup-zig action restores is not the one this fills:
+# that one serves `release-assets` and `check-asset-run`, and this directory
+# survives between the nine builds, which is the whole point of it being
+# separate. It lives outside REPRO_DIR because that directory is emptied on
+# every one of the nine builds, and a cache emptied with it is a cold build:
+# measured here, compiling one published target costs 4m25s into an empty
+# toolchain cache and 2m52s into a warm one, and nine of the former is most of
+# a job whose ceiling is 40 minutes. It is removed once before the loop so the
+# run does not inherit a previous one's, and by the trap so a failed comparison
+# leaves nothing behind. Both it and REPRO_DIR are passed from the workflows,
+# which put them under the runner's disk-backed temp rather than the checkout.
 REPRO_GLOBAL ?= $(CURDIR)/.scratch/repro-global
 
 # The linter versions the gate runs. `ruff format` rewrites files and

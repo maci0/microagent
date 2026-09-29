@@ -88,6 +88,14 @@ jobs:
       - name: the readme installs the version this tree declares
         run: make check-readme
 
+      # The man page and `--help` are two renderings of one interface, and the
+      # release ships the page next to the binary, so a flag added to the help
+      # and left out of the page publishes a binary whose page documents an
+      # older one. `make check` runs this and neither workflow did, so it gated
+      # a laptop and not a push. The same target a version bump has to satisfy.
+      - name: the man page documents the flags this build lists
+        run: make check-man
+
       - name: unit tests pass
         run: zig build test --summary all
 
@@ -178,5 +186,9 @@ jobs:
       # job and release.yml run the same check over the same targets.
       - name: the release build is reproducible
         env:
+          # Both scratch roots, because the toolchain cache is a few hundred
+          # megabytes and REPRO_GLOBAL left at its default writes it into the
+          # checkout's .scratch/ while REPRO_DIR goes to the runner's temp.
           REPRO_DIR: ${{ runner.temp }}/microagent-repro
+          REPRO_GLOBAL: ${{ runner.temp }}/microagent-repro-global
         run: make check-reproducible

@@ -64,6 +64,15 @@ jobs:
       - name: the shell, Python and YAML linters are clean
         run: make lint
 
+      # The release ships docs/microagent.1 next to the binary, and this is the
+      # check that says the page names the version build.zig.zon declares and
+      # documents every flag `--help` lists. `make check` runs it, and neither
+      # workflow did, so a tag could publish a binary under a page describing an
+      # older interface. `check-release` above already gates the tag on the
+      # README, which is the same question about a different file.
+      - name: the man page documents the flags this build lists
+        run: make check-man
+
       - name: unit tests pass
         run: zig build test --summary all
 
@@ -99,7 +108,11 @@ jobs:
       # not reproduce.
       - name: the release build is reproducible
         env:
+          # Both scratch roots, because the toolchain cache is a few hundred
+          # megabytes and REPRO_GLOBAL left at its default writes it into the
+          # checkout's .scratch/ while REPRO_DIR goes to the runner's temp.
           REPRO_DIR: ${{ runner.temp }}/microagent-repro
+          REPRO_GLOBAL: ${{ runner.temp }}/microagent-repro-global
         run: make check-reproducible
 
       # The section this tag publishes, read out of CHANGELOG.md by
@@ -181,8 +194,19 @@ jobs:
               exit 1
             fi
           done
-          for target in $(make --no-print-directory release-targets); do
-            name="microagent-${GITHUB_REF_NAME}-${target}"
+          # The sidecars are read by the names `dist/` already carries rather
+          # than by a name rebuilt from the tag and the target list, which is a
+          # second spelling of ASSET_PREFIX: an asset whose name drifts from
+          # that expression is downloaded and compared above, and then has no
+          # sidecar named for it here, so the check passed on an asset no
+          # consumer verifies `update` against. An asset with no sidecar beside
+          # it in dist/ is refused instead.
+          for name in $built; do
+            case "$name" in *.sha256) continue;; esac
+            if [ ! -f "dist/$name.sha256" ]; then
+              echo "dist/$name has no sha256 sidecar beside it, so 'microagent update' cannot verify it" >&2
+              exit 1
+            fi
             # `make sha256-of`, the command `checksums` wrote these sidecars
             # with, rather than a second spelling of which hashing command this
             # host has: `sha256sum` here is not the tool that produced the
