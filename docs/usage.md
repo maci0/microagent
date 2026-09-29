@@ -590,7 +590,7 @@ else's log, and `grep_app`, whose `query` is a literal pattern and `repo` is a r
 public repository the task itself names is a different thing from the tree under review and is what
 these tools are for.
 
-**Mistakes.** A table name that is not one of the twelve above, a value a key cannot take, and a
+**Mistakes.** A table name that is not one of the thirteen above, a value a key cannot take, and a
 config that disables every built-in stop the run before any request, with exit status 2 and a message
 naming the config path and the bad name or key; the message for a bad name lists the valid ones. A
 misspelled name never leaves a tool in a state the file did not ask for. A key the table does not

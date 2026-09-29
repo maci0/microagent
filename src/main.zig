@@ -918,11 +918,13 @@ const help_text =
     \\                         value is not read, only the name) or TERM=dumb
     \\                         leaves the bold out even at a terminal
     \\
-    \\TMPDIR, on macOS        added to the sandbox writable roots whenever
-    \\                         [sandbox] enabled is true, because that is where
-    \\                         the system keeps per-user scratch space. Read on
-    \\                         no other platform, so a run elsewhere is
-    \\                         unaffected by it.
+    \\TMPDIR                   added to the sandbox writable roots whenever
+    \\                         [sandbox] enabled is true and it names an
+    \\                         absolute directory none of the roots above
+    \\                         already covers. On macOS that is where the
+    \\                         system keeps per-user scratch space; a Linux
+    \\                         host exporting it elsewhere gets the same root,
+    \\                         and one exporting it at /tmp gains nothing.
     \\
     \\A variable set to an empty string is not a value: MICROAGENT_MODEL,
     \\MICROAGENT_BASE_URL, MICROAGENT_REASONING_EFFORT, MICROAGENT_TEMPERATURE,
@@ -7026,6 +7028,50 @@ test "the help text and the usage reference name every variable the program read
             std.debug.print("\n" ++ usage_doc_path ++ ": {s} reads empty as off rather than falling through, and one paragraph saying so does not name it\n", .{name});
             return error.TestUnexpectedResult;
         }
+    }
+}
+
+// The names a `[tools.<name>]` table takes, and how many there are. The tables
+// are read by `config_mod`, a name the reference does not carry is one a user
+// cannot configure, and the count in the sentence about a name that is not one
+// of them is prose nobody recomputes: it said twelve while the build had
+// thirteen, so a user reading it could not tell which name the sentence left
+// out. Both are held to the enums here.
+test "the usage reference names every tool a [tools.<name>] table takes, and counts them" {
+    const gpa = std.testing.allocator;
+    const doc = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, usage_doc_path, gpa, .limited(max_usage_doc_bytes));
+    defer gpa.free(doc);
+
+    var count: usize = 0;
+    inline for (@typeInfo(chat_mod.Tool).@"enum".fields) |field| {
+        count += 1;
+        const name: []const u8 = field.name;
+        if (!namesWholeToken(doc, name)) {
+            std.debug.print("\n" ++ usage_doc_path ++ ": does not name the tool {s}, so a user has to read the source to find it\n", .{name});
+            return error.TestUnexpectedResult;
+        }
+    }
+    inline for (@typeInfo(mcp_mod.Preset).@"enum".fields) |field| {
+        count += 1;
+        const name: []const u8 = field.name;
+        if (!namesWholeToken(doc, name)) {
+            std.debug.print("\n" ++ usage_doc_path ++ ": does not name the tool {s}, so a user has to read the source to find it\n", .{name});
+            return error.TestUnexpectedResult;
+        }
+    }
+
+    const count_words = [_][]const u8{ "", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen" };
+    if (count >= count_words.len) return error.TestUnexpectedResult;
+    const anchor = "A table name that is not one of the ";
+    const at = std.mem.indexOf(u8, doc, anchor) orelse {
+        std.debug.print("\n" ++ usage_doc_path ++ ": has no sentence counting the [tools.<name>] tables\n", .{});
+        return error.TestUnexpectedResult;
+    };
+    const spelled = doc[at + anchor.len ..];
+    if (spelled.len < count_words[count].len or !std.mem.startsWith(u8, spelled, count_words[count])) {
+        const word = spelled[0 .. std.mem.indexOfAny(u8, spelled, " ,") orelse spelled.len];
+        std.debug.print("\n" ++ usage_doc_path ++ ": says the tool set holds {s} names, and this build has {d}\n", .{ word, count });
+        return error.TestUnexpectedResult;
     }
 }
 

@@ -136,7 +136,9 @@
 
 # Workspace sandbox confinement. When enabled, restricts filesystem modifications
 # to designated roots (by default: current working directory, /tmp, the session
-# dir, and $TMPDIR on macOS, where that is where scratch space is kept).
+# dir, and $TMPDIR wherever it names an absolute directory none of those covers;
+# on macOS that is where per-user scratch space is kept, and a Linux host
+# exporting it elsewhere gets the same root).
 # On Linux (kernel 5.13+) Landlock, and on macOS a Seatbelt profile, confine both microagent
 # and all spawned child processes (bash, MCP, subcommands). In-process path checks
 # additionally refuse write and edit tool calls targeting paths outside writable roots.
