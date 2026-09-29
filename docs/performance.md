@@ -150,12 +150,35 @@ than profiling it.
 
 ## Open, and deliberately
 
-`conversation_soft_limit` is the one knob left that moves a run's wall time. It is inert at
-benchmark scale (the stride sample's conversations average 72 to 143 KB against a 400 KB limit, so
-it never fires) and binds only on long runs. Its uncached cost does not depend on the limit:
-compaction fires once per half-limit of growth and discards a prompt of about the limit, so the
-product is the conversation's growth and the limit cancels. Deciding it needs a live provider, and
-it is the only thing here that does.
+`conversation_soft_limit` is the one knob left that moves a run's wall time. Its uncached cost does
+not depend on the limit: compaction fires once per half-limit of growth and discards a prompt of
+about the limit, so the product is the conversation's growth and the limit cancels. Deciding it
+needs a live provider, and it is the only thing here that does.
+
+### Compaction is the CPU when tool results are large
+
+The sentence that used to sit here, that compaction is inert at benchmark scale and binds only on
+long runs, is true of the benchmark's conversations (72 to 143 KB against a 400 KB limit) and false
+of a run whose tool results are near the 24 KB ceiling. A loop that calls `read` on a 200 KB file
+every turn, whose result is clamped to 24 KB, costs about 1.7 M client instructions per turn; the
+same loop with a 5 KB result costs 315 k. The difference is not the tool. The profile of the first
+loop puts 16% of its cycles in `json.Scanner.next`, nearly all of it under `compactMessages`, and a
+large share of the arena allocation beside it: each turn adds 24 KB, crosses the 400 KB limit, and
+pays for a scan of the whole conversation to elide a few results.
+
+Two fixes are measured and not taken.
+
+- **Throttling it, or raising the limit, trades CPU for prompt tokens.** A slack of a quarter of the
+  limit would cut the compactions about fivefold and add up to 100 KB of uncached prompt to every
+  turn between them, roughly 25 k tokens a turn. That is money and latency on the wire; the CPU it
+  saves is about half a millisecond a turn. This file's whole ordering says the wire comes first,
+  and the trade goes the other way.
+- **A byte-level rewrite was refused here before**, because it hands the exact bytes the prompt
+  cache depends on to a hand-written scanner. The safer shape of the same idea, not yet built:
+  record the byte range of each tool result over the threshold as `finishTurn` writes it, since
+  that side knows where the value starts and ends, and splice markers into those ranges instead of
+  parsing the conversation to find them. It is a change to the compaction path with its own tests
+  to write, and it is the next thing to try if a run of this shape shows up in the benchmark.
 
 ## Are these fixes still guarded?
 
