@@ -201,6 +201,20 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- The source citation gate fails again. `scripts/check-refs.sh` ended with an
+  `echo` and the `exit 1` on the same line, so the exit was one more argument to
+  the echo: every stale `src/path:line` citation in the tree was printed to
+  stderr and the script returned 0, which is why 57 of them had accumulated in
+  the threat model while `make check` stayed green. The command that repairs
+  them is runnable now too: the documented `check-refs -f` was a goal named
+  `-f`, and `make check-refs FIX=1` is the flag the script takes.
+
+- `make preflight` names `rg` and `ast-grep` when either is absent. The tests
+  that drive the `search` and `ast` tools skip themselves without them and the
+  test runner counts a skip as a pass, so a machine without both reported a
+  green suite that never ran those tests. It is a note rather than a failure,
+  because a stock macOS ships neither and the gate has to keep running there.
+
 - `$TMPDIR` is a sandbox writable root on every platform, not only on macOS.
   The root was added by an OS check, so a Linux host that exports the variable
   somewhere other than `/tmp` (a systemd service with `PrivateTmp`, a CI runner,

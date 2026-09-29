@@ -41,7 +41,12 @@ make OPT=ReleaseFast     # the build the CPU counters are read on
 python3 because CI builds the linters' venv with it).
 `make preflight` names each missing tool with the command that installs it, and
 `make check` runs it first, so a clean clone missing a linter says which one
-instead of stopping at `make: ruff: No such file or directory`.
+instead of stopping at `make: ruff: No such file or directory`. It also names
+`rg` and `ast-grep` when either is absent, as a note rather than a failure: the
+tests that drive the `search` and `ast` tools skip themselves, the runner counts
+a skip as a pass, and a stock macOS ships neither program, so a gate that
+refused to run without them would stop working on a published platform. A local
+run with both on `PATH` is the run that covers those tests.
 
 `ruff` and `yamllint` are format- and rule-sensitive, so the [Makefile](Makefile)
 pins them, and `make lint-versions` names a local install that differs from the
@@ -144,8 +149,9 @@ file names the function behind a claim, and a line number is written by hand
 beside a diff that moves the function. `scripts/check-refs.sh` asks the source
 where each named symbol is defined and fails a citation that points anywhere
 else, or a symbol the file no longer has, so a control citing a deleted
-function fails the gate rather than the reader. `check-refs -f` rewrites a
-stale citation to the line its symbol is on; a citation with no symbol beside
+function fails the gate rather than the reader. `make check-refs FIX=1` rewrites a
+stale citation to the line its symbol is on, which is the repair a diff that moved
+a function needs; a citation with no symbol beside
 it names a line inside a body, and only that line's existence is asked.
 
 `check` does not cover three things. One is the release cross-build: `make
@@ -219,7 +225,9 @@ A handful of tests need a program the host may not have: the `search` and `ast`
 tests delegate to `rg` and `ast-grep`, which a stock macOS ships neither of, and
 one session test is macOS-only. Each of those prints `skipped: ...` on stderr and
 returns `error.SkipZigTest`, which the test runner counts as a pass, so a green
-run on a machine without `rg` says nothing about the search tool. A local run
+run on a machine without `rg` says nothing about the search tool. `make
+preflight` names both programs when they are absent, before the suite spends
+its time. A local run
 with both programs on `PATH` is the run that covers them, and the macOS runners
 are what cover the session one.
 

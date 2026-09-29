@@ -98,6 +98,17 @@ default: build
 # word fell through to the bare `*)` arm for it, printing a dead end where the
 # one remedy the message exists to give was a line above.
 PREFLIGHT_TOOLS := $(ZIG) shellcheck ruff yamllint git python3
+
+# The two programs the `search` and `ast` tools delegate to. A missing one is
+# not a failure here: the tests that drive them skip themselves, the runner
+# counts a skip as a pass, and a stock macOS ships neither, so a gate that
+# refused to run without them would stop working on a published platform. What
+# the gate would otherwise do is report a green suite that never ran those
+# tests, which is the one thing this target exists to keep off a laptop. So it
+# names them, with the command that installs each, and the run continues. The
+# remedies are the ones the tool itself prints, which live beside their spawn in
+# src/tool.zig as ripgrep_install and ast_grep_install.
+PREFLIGHT_SKIPPED_TOOLS := rg ast-grep
 preflight:
 	@set -eu; bad=0; \
 	for tool in $(PREFLIGHT_TOOLS); do \
@@ -120,6 +131,15 @@ preflight:
 	      echo "$$tool is not on PATH" >&2 ;; \
 	  esac; \
 	done; \
+	for tool in $(PREFLIGHT_SKIPPED_TOOLS); do \
+	  command -v "$$tool" >/dev/null 2>&1 && continue; \
+	  case "$$tool" in \
+	    rg) \
+	      echo "note: $$tool is not on PATH: the tests that drive the search tool skip themselves and the runner counts a skip as a pass, so this run says nothing about it; macOS: 'brew install ripgrep'; Debian/Ubuntu: 'apt-get install ripgrep'" >&2 ;; \
+	    ast-grep) \
+	      echo "note: $$tool is not on PATH: the tests that drive the ast tool skip themselves and the runner counts a skip as a pass, so this run says nothing about it; macOS: 'brew install ast-grep'; or 'cargo install ast-grep'" >&2 ;; \
+	  esac; \
+	done; \
 	test "$$bad" -eq 0
 
 # `make check` is what CI runs; run it before pushing.
@@ -133,7 +153,7 @@ help:
 	  'test [FILTER=...]     the whole unit test suite, or only the tests FILTER names' \
 	  'watch [FILTER=...]    the same tests again on every source change, until Ctrl-C' \
 	  'test-sanitize         the same suite under the undefined-behavior sanitizer' \
-	  'preflight             name every tool check and lint need that is not on PATH' \
+	  'preflight             name every tool check and lint need that is not on PATH, and every one whose absence skips tests' \
 	  'fmt                   rewrite every tracked .zig and .py file in format style' \
 	  'fmt-python            rewrite the tracked .py files, which zig fmt does not reach' \
 	  'fmt-check             what check runs over the same files, without rewriting' \
@@ -145,6 +165,7 @@ help:
 	  'lint-yaml             yamllint over every tracked .yml and .yaml file' \
 	  'lint-md               the Markdown checks over every tracked .md file, which no other linter reads' \
 	  'check-refs            every src/path:line citation in a .md file names the line its symbol is on' \
+	  'check-refs FIX=1      rewrite each stale citation to the line its symbol is on' \
 	  'lint-versions         check ruff and yamllint against the versions the gate runs, and that lint-requirements.in names the same' \
 	  'lint-lock             check the Harbor lock carries the manifest pins, a hash each, and nothing else' \
 	  'check-sbom            run the release inventory over stand-in assets and check what a scanner reads' \
@@ -308,6 +329,12 @@ YAML_SOURCES := $(shell git ls-files '*.yml' '*.yaml')
 # tracked file kind nothing else here reads, so a defect in a code fence or a
 # trailing space is checked by no target in this file and the gate passes.
 MD_SOURCES := $(shell git ls-files '*.md')
+# The script's own -f, as a make variable, so the repair a stale citation needs
+# is a target a contributor can run: `make check-refs FIX=1` rewrites each to
+# the line its symbol is on and prints what it moved. Spelled as `make
+# check-refs -f` it would be read as a goal named -f, which is the error make
+# reports for a flag where a target belongs.
+FIX ?=
 # The workflows and composite actions, which `lint-yaml` reads for shape and
 # `lint-ci` reads for the shell in their `run:` steps. Taken from git for the
 # same reason as the lists above: a workflow added outside .github/ would be
@@ -517,7 +544,7 @@ lint-md:
 # so the citation is asked rather than the prose. The gate lives in scripts/ for
 # the reason lint-versions names: a recipe is shell nothing lints.
 check-refs:
-	sh scripts/check-refs.sh $(MD_SOURCES)
+	sh scripts/check-refs.sh $(if $(FIX),-f) $(MD_SOURCES)
 
 # The CI gate, so a formatting, lint or test failure shows up here rather than
 # after a push. Keep these in step with .github/workflows/ci.yml. The release

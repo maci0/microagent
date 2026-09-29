@@ -29,6 +29,8 @@ fi
 
 test "${1:-}" != "" || { echo "usage: check-refs.sh [-f] <file.md> [file.md ...]" >&2; exit 1; }
 
+# because: CDPATH= is a per-command environment prefix, not an assignment
+# shellcheck disable=SC1007
 root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$root"
 
@@ -64,6 +66,9 @@ for file in "$@"; do
     "$file" > "$tmp.refs" 2>/dev/null || true
   while read -r ref; do
     [ -n "$ref" ] || continue
+    # because: the single quotes are the point, they carry the literal backtick
+    # and bracket of the citation rather than a value from the environment
+    # shellcheck disable=SC2016
     if printf '%s' "$ref" | grep -q '`, `'; then
       sym="$(printf '%s' "$ref" | sed 's/^`\([^`]*\)`, `.*/\1/')"
       loc="$(printf '%s' "$ref" | sed 's/^.*`, `\([^`]*\)`$/\1/')"
@@ -91,7 +96,13 @@ for file in "$@"; do
     fi
     if [ "$got" != "$want" ]; then
       if [ "$fix" = 1 ]; then
-        sed -i "s|\`$sym\`, \`$path:$span\`|\`$sym\`, \`$path:$got\`|" "$file"
+        # Not `sed -i`: it edits in place on GNU sed and wants a suffix
+        # argument on BSD, where it fails outright rather than writing the
+        # file, and a stock macOS ships BSD sed. The rewrite then is the only
+        # repair the gate offers, so it has to work on the platform the
+        # release publishes for.
+        sed "s|\`$sym\`, \`$path:$span\`|\`$sym\`, \`$path:$got\`|" "$file" > "$tmp.rewritten"
+        mv "$tmp.rewritten" "$file"
         printf '%s: moved %s from %s:%s to %s:%s\n' "$file" "$sym" "$path" "$want" "$path" "$got" >> "$tmp"
       else
         printf '%s: cites %s at %s:%s, where it is defined on line %s\n' \
@@ -118,5 +129,7 @@ if [ -s "$tmp" ]; then
     exit 0
   fi
   echo "every source citation in the tree is checked against the source:" >&2
-  echo "  docs/threat-model.md: cites toolCallLine at src/tool.zig:709, where it is defined on line 698" >&2  exit 1
+  echo "  docs/threat-model.md: cites toolCallLine at src/tool.zig:709, where it is defined on line 698" >&2
+  echo "  'make check-refs FIX=1' rewrites each to the line its symbol is on" >&2
+  exit 1
 fi
