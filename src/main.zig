@@ -2148,7 +2148,9 @@ fn configSource(env: *const std.process.Environ.Map, arena: std.mem.Allocator, c
 /// the whole `--budget` still in hand and spends it all on a fresh provider
 /// bill, which is the exact outcome the ceiling exists to prevent. `.boot` is
 /// CLOCK_BOOTTIME on Linux and CLOCK_MONOTONIC_RAW on macOS, and both include
-/// the suspend. It stays monotonic either way, so an NTP step or a manual
+/// the suspend: on Darwin the raw clock is `mach_continuous_time`, and
+/// `mach_absolute_time` is the one that stops, which is the reverse of what the
+/// two names suggest. It stays monotonic either way, so an NTP step or a manual
 /// clock change cannot move a deadline, and a tool's own timeout stays on
 /// `.awake` because a child that was not running spent none of its own.
 const budget_clock: Io.Clock = .boot;

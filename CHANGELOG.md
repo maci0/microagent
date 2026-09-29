@@ -279,6 +279,15 @@ release, and `microagent update` moves you to it.
   and `write` replaced the operator's key with whatever the model guessed. Every
   component is now walked, in the order the kernel opens a path in.
 
+- A sandbox writable root is granted under both of the names that reach it. A
+  root was recorded resolved, and `isPathWritable` asks about the path the call
+  named as well as the one it resolves to, so on macOS, where `/tmp` is a link
+  to `/private/tmp` and `$TMPDIR` is a link under `/private/var/folders`, a
+  `write` to `/tmp/out.txt` was refused by the in-process check while the
+  Seatbelt rule and the Landlock rule both covered it. Each root now carries its
+  resolved spelling and the absolute one the run was given when the two differ,
+  and a link out of a granted directory is still refused under either name.
+
 - The source citation gate fails again. `scripts/check-refs.sh` ended with an
   `echo` and the `exit 1` on the same line, so the exit was one more argument to
   the echo: every stale `src/path:line` citation in the tree was printed to

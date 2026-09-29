@@ -16,17 +16,30 @@ const LandlockPathBeneathAttr = extern struct {
 
 /// `path` with symlinks resolved, or as given when it does not exist yet (a root that is not there
 /// grants nothing in the kernel either). macOS keeps `/tmp` and `$TMPDIR` behind symlinks into
-/// `/private`, and both the in-process check and a Seatbelt `subpath` compare resolved paths.
+/// `/private`, and a Seatbelt `subpath` compares resolved paths, so a root is recorded resolved.
 fn canonical(io: Io, arena: std.mem.Allocator, path: []const u8) []const u8 {
     const real = std.Io.Dir.cwd().realPathFileAlloc(io, path, arena) catch return path;
     return std.mem.trimEnd(u8, real, "/\\");
 }
 
-/// Resolves the absolute canonical directory roots that the sandbox permits writing to.
-/// Always includes the current working directory and `/tmp`, and `$TMPDIR` where it names an
-/// absolute directory no root above already covers, which is where macOS keeps per-user scratch
-/// space and where a Linux host that exports it keeps it. If `session_dir` is provided, it is
-/// also included so the run can append its session log.
+/// Records the directory at `resolved` (an absolute path with no `.` or `..` in it) under both of
+/// the names that reach it: the resolved one first, then the spelling the run was given when that
+/// is a different path to the same directory. A tool call names the spelling, not the resolved
+/// path, and `isPathWritable` asks about both, so a root recorded only as `/private/tmp` refuses a
+/// write to `/tmp/out.txt` on a host that keeps one behind the other. The resolved form stays
+/// first: `isPathWritable` resolves a relative path against `writable_roots[0]`, which is the
+/// working directory, and a Seatbelt `subpath` reads a resolved path.
+fn appendRoot(io: Io, arena: std.mem.Allocator, roots: *std.ArrayList([]const u8), resolved: []const u8) !void {
+    const real = canonical(io, arena, resolved);
+    try roots.append(arena, real);
+    if (!std.mem.eql(u8, real, resolved)) try roots.append(arena, resolved);
+}
+
+/// Resolves the absolute directory roots that the sandbox permits writing to. Always includes the
+/// current working directory and `/tmp`, and `$TMPDIR` where it names an absolute directory no root
+/// above already covers, which is where macOS keeps per-user scratch space and where a Linux host
+/// that exports it keeps it. If `session_dir` is provided, it is also included so the run can append
+/// its session log. A root that answers to two names is recorded under both, so see `appendRoot`.
 pub fn resolveWritableRoots(
     io: Io,
     arena: std.mem.Allocator,
@@ -36,12 +49,14 @@ pub fn resolveWritableRoots(
 ) ![]const []const u8 {
     var roots: std.ArrayList([]const u8) = .empty;
 
-    const cwd = std.Io.Dir.cwd().realPathFileAlloc(io, ".", arena) catch blk: {
-        break :blk try std.fs.path.resolve(arena, &.{"."});
-    };
-    try roots.append(arena, std.mem.trimEnd(u8, cwd, "/\\"));
+    // The lexical absolute path of the working directory, so a relative root below it resolves
+    // the same way whether or not the directory is reached through a link, and the recorded roots
+    // carry the resolved form first.
+    const cwd_lexical = try std.fs.path.resolve(arena, &.{"."});
+    try appendRoot(io, arena, &roots, std.mem.trimEnd(u8, cwd_lexical, "/\\"));
+    const cwd = roots.items[0];
 
-    try roots.append(arena, canonical(io, arena, "/tmp"));
+    try appendRoot(io, arena, &roots, "/tmp");
 
     if (session_dir) |sdir| {
         if (sdir.len > 0) {
@@ -51,7 +66,7 @@ pub fn resolveWritableRoots(
             else
                 try std.fs.path.resolve(arena, &.{ cwd, sdir_exp });
             _ = std.Io.Dir.cwd().createDirPath(io, resolved_sdir) catch {};
-            try roots.append(arena, canonical(io, arena, std.mem.trimEnd(u8, resolved_sdir, "/\\")));
+            try appendRoot(io, arena, &roots, std.mem.trimEnd(u8, resolved_sdir, "/\\"));
         }
     }
 
@@ -63,7 +78,7 @@ pub fn resolveWritableRoots(
             try std.fs.path.resolve(arena, &.{expanded})
         else
             try std.fs.path.resolve(arena, &.{ cwd, expanded });
-        try roots.append(arena, canonical(io, arena, std.mem.trimEnd(u8, resolved, "/\\")));
+        try appendRoot(io, arena, &roots, std.mem.trimEnd(u8, resolved, "/\\"));
     }
 
     // `$TMPDIR` goes last, so the coverage test below reads every root added
@@ -79,8 +94,9 @@ pub fn resolveWritableRoots(
         if (env.get("TMPDIR")) |raw| {
             const tmpdir = std.mem.trim(u8, raw, net.env_surrounding);
             if (std.fs.path.isAbsolute(tmpdir)) {
-                const resolved = canonical(io, arena, tmpdir);
-                if (!withinAnyRoot(resolved, roots.items)) try roots.append(arena, resolved);
+                if (!withinAnyRoot(canonical(io, arena, tmpdir), roots.items)) {
+                    try appendRoot(io, arena, &roots, std.mem.trimEnd(u8, tmpdir, "/\\"));
+                }
             }
         }
     }
@@ -117,7 +133,10 @@ pub fn isPathWritable(io: Io, arena: std.mem.Allocator, path: []const u8, writab
     // is what the check reads: a tree carrying `link -> /etc` and a call for `link/passwd` is a
     // path that begins inside a root and leaves it, which the lexical check cannot see because it
     // never looks at what a link points at. Both halves have to hold: the resolved path names
-    // where the bytes land, and the lexical one is the path the call named.
+    // where the bytes land, and the lexical one is the path the call named. A root reached
+    // through a link answers to both spellings, because `appendRoot` records both, so naming a
+    // granted directory the way the caller spells it is inside the root rather than a path that
+    // begins outside every one of them.
     const real = resolvedPrefix(io, arena, abs_path) orelse return false;
     if (!withinAnyRoot(real, writable_roots)) return false;
     return withinAnyRoot(abs_path, writable_roots);
@@ -431,12 +450,75 @@ test "resolveWritableRoots resolves cwd, tmp, session_dir, and custom roots" {
     const roots = try resolveWritableRoots(io, arena, null, &custom, sdir);
 
     try std.testing.expect(roots.len >= 5);
-    // The roots are canonical, and on macOS /tmp and /var are symlinks into
+    // A root is recorded resolved, and on macOS /tmp and /var are symlinks into
     // /private, so the expectation is resolved the same way the root is rather
-    // than spelled: `/private/tmp` on that system, `/tmp` here.
-    try std.testing.expectEqualStrings(canonical(io, arena, "/tmp"), roots[1]);
-    try std.testing.expectEqualStrings(sdir, roots[2]);
-    try std.testing.expectEqualStrings(canonical(io, arena, "/var/log"), roots[3]);
+    // than spelled: `/private/tmp` on that system, `/tmp` here. The roots are
+    // read as a set rather than by index because one that answers to two names
+    // is recorded twice, so a position says nothing about which root is which.
+    for ([_][]const u8{ canonical(io, arena, "/tmp"), sdir, canonical(io, arena, "/var/log") }) |want| {
+        const found = for (roots) |root| {
+            if (std.mem.eql(u8, root, want)) break true;
+        } else false;
+        try std.testing.expect(found);
+    }
+}
+
+// The sandbox grants a directory, and a directory on macOS is reached through
+// `/private` as often as not: `/tmp` is a link to `/private/tmp`, and
+// `$TMPDIR` is a link to `/private/var/folders/...`. A tool call spells the
+// path the way the environment names it, so a root recorded under one name
+// only refuses a write the run was promised, while the kernel rule and the
+// Seatbelt `subpath` are both satisfied. The link below stands in for
+// `/tmp -> /private/tmp` on a host where `/tmp` is a real directory, so the
+// case is the same on every platform.
+test "a root reached through a link is writable under the name the call spells" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var elsewhere = std.testing.tmpDir(.{});
+    defer elsewhere.cleanup();
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const real = buf[0..try tmp.dir.realPath(io, &buf)];
+    var other_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const out = other_buf[0..try elsewhere.dir.realPath(io, &other_buf)];
+
+    try tmp.dir.createDirPath(io, "scratch");
+    try tmp.dir.symLink(io, real, "tmp", .{});
+    try tmp.dir.symLink(io, out, "scratch/escape", .{});
+
+    const spelled = try std.fs.path.join(arena, &.{ real, "tmp" });
+    const roots = try resolveWritableRoots(io, arena, null, &.{spelled}, null);
+
+    // Both names of the directory are in the roots, and the canonical one is
+    // first, which is what the relative-path branch and the profile read.
+    const seen_real = for (roots, 0..) |root, i| {
+        if (std.mem.eql(u8, root, real)) break i;
+    } else roots.len;
+    try std.testing.expect(seen_real < roots.len);
+    const seen_spelled = for (roots) |root| {
+        if (std.mem.eql(u8, root, spelled)) break true;
+    } else false;
+    try std.testing.expect(seen_spelled);
+
+    // A write named through the link, and one named through the resolved path,
+    // are the same write.
+    try std.testing.expect(isPathWritable(io, arena, try std.fs.path.join(arena, &.{ spelled, "out.txt" }), roots));
+    try std.testing.expect(isPathWritable(io, arena, try std.fs.path.join(arena, &.{ real, "scratch", "out.txt" }), roots));
+
+    // The link out of the granted directory is still refused, under either name:
+    // recording both spellings of a root grants the directory, not the paths
+    // that reach it. The roots here are this directory alone, because the run's
+    // own roots include the working directory and the target of the link is a
+    // sibling scratch directory under it, which every other test in this file
+    // is entitled to write to.
+    const granted = [_][]const u8{ real, spelled };
+    try std.testing.expect(!isPathWritable(io, arena, try std.fs.path.join(arena, &.{ spelled, "scratch", "escape", "out.txt" }), &granted));
+    try std.testing.expect(!isPathWritable(io, arena, try std.fs.path.join(arena, &.{ real, "scratch", "escape", "out.txt" }), &granted));
 }
 
 test "resolveWritableRoots adds $TMPDIR where a root does not already cover it" {
