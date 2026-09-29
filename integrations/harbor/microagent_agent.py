@@ -171,21 +171,31 @@ def int_env(name: str, default: str) -> int:
     return checked_int(name, trimmed_env(name) or default)
 
 
-def max_tokens() -> str | None:
-    """The generation ceiling, as the string the container is handed, or None
-    when the operator set none and the binary's own default stands.
+def optional_ceiling(name: str) -> str | None:
+    """A ceiling the binary reads as a number, as the string the container is
+    handed, or None when the operator set none and the binary's own default
+    stands.
 
     Checked for the reason the numeric knobs are, and by the same reader: the
-    binary reads MICROAGENT_MAX_TOKENS as a ceiling and refuses anything that is
-    not a whole number of at least 1, and refusing it there costs a container
-    start and a binary upload before the reason is printed. The value is
-    returned as written rather than as the int it parses to, because it is
-    handed to the container as the string the operator wrote."""
-    value = trimmed_env("MICROAGENT_MAX_TOKENS")
+    binary refuses anything that is not a whole number of at least 1, and
+    refusing it there costs a container start and a binary upload before the
+    reason is printed. The value is returned as written rather than as the int
+    it parses to, because it is handed to the container as the string the
+    operator wrote."""
+    value = trimmed_env(name)
     if not value:
         return None
-    checked_int("MICROAGENT_MAX_TOKENS", value)
+    checked_int(name, value)
     return value
+
+
+def max_tokens() -> str | None:
+    """The generation ceiling the container is handed. Forwarded because a
+    provider can refuse a request whose max_tokens exceeds what the account can
+    still afford: with a low balance the default 65536 is answered with
+    `402 ... you can only afford N`, and the only lever the caller has is to ask
+    for less."""
+    return optional_ceiling("MICROAGENT_MAX_TOKENS")
 
 
 def reasoning_effort() -> str | None:
@@ -287,31 +297,16 @@ def validate_env() -> None:
     reasoning_effort()
     max_tokens()
     base_url()
-    # The stall timeout is a knob with no default of its own, so it is checked
-    # by the reader the rest use: the binary reads it as a ceiling and refuses
-    # anything that is not a whole number of at least 1, and refusing it there
-    # costs a container start and a binary upload before the reason is printed.
     stall_timeout()
-    # The same value read here is the one `run` forwards, so a knob checked for
-    # one timeout and handed another cannot happen.
 
 
 def stall_timeout() -> str | None:
-    """The response-socket stall timeout, as the string the container is
-    handed, or None when the operator set none and the binary's own default
-    stands.
-
-    Read as a whole number of seconds by the same reader as the other numeric
-    knobs, so a mistyped value stops the run at the command line rather than
-    inside a container that has already been brought up and paid for. The value
-    is returned as written rather than as the int it parses to, because it is
-    handed to the container as the string the operator wrote.
+    """The response-socket stall timeout, in whole seconds, the container is
+    handed. A provider that is merely slow hits the 120 s default (NVIDIA NIM
+    took over two minutes to a first token on a large prompt), and the timeout
+    is the caller's to raise, so it has to reach the container.
     """
-    value = trimmed_env("MICROAGENT_STALL_TIMEOUT")
-    if not value:
-        return None
-    checked_int("MICROAGENT_STALL_TIMEOUT", value)
-    return value
+    return optional_ceiling("MICROAGENT_STALL_TIMEOUT")
 
 
 def normalize_model(model_name: str | None) -> str:
@@ -506,19 +501,10 @@ class Microagent(BaseAgent):
             env["MICROAGENT_CA_BUNDLE"] = REMOTE_CA_PATH
         if reasoning:
             env["MICROAGENT_REASONING_EFFORT"] = reasoning
-        # Forwarded because a provider can refuse a request whose max_tokens
-        # exceeds what the account can still afford: with a low balance the
-        # default 65536 is answered with `402 ... you can only afford N`, and
-        # the only lever the caller has is to ask for less. Read through the
-        # same reader `validate_env` checked, so the value refused at the
-        # command line is the one this run would have been given.
+        # Read through the same reader `validate_env` checked, so the value
+        # refused at the command line is the one this run is given.
         if token_ceiling := max_tokens():
             env["MICROAGENT_MAX_TOKENS"] = token_ceiling
-        # A provider that is merely slow hits the 120 s stall default (NVIDIA
-        # NIM took over two minutes to a first token on a large prompt), and the
-        # timeout is the caller's to raise, so it has to reach the container.
-        # Read through the same reader `validate_env` checked, so the value
-        # refused at the command line is the one this run would have been given.
         if stall := stall_timeout():
             env["MICROAGENT_STALL_TIMEOUT"] = stall
 

@@ -36,16 +36,13 @@ pub fn resolveWritableRoots(
 ) ![]const []const u8 {
     var roots: std.ArrayList([]const u8) = .empty;
 
-    // 1. Current working directory
     const cwd = std.Io.Dir.cwd().realPathFileAlloc(io, ".", arena) catch blk: {
         break :blk try std.fs.path.resolve(arena, &.{"."});
     };
     try roots.append(arena, std.mem.trimEnd(u8, cwd, "/\\"));
 
-    // 2. /tmp
     try roots.append(arena, canonical(io, arena, "/tmp"));
 
-    // 3. session_dir if set
     if (session_dir) |sdir| {
         if (sdir.len > 0) {
             const sdir_exp = if (environ_map) |env| net.expandHome(env, arena, sdir) else sdir;
@@ -58,7 +55,6 @@ pub fn resolveWritableRoots(
         }
     }
 
-    // 4. Custom writable paths from config
     for (custom_writable) |w| {
         const trimmed = std.mem.trim(u8, w, " \t\r\n");
         if (trimmed.len == 0) continue;
@@ -70,15 +66,15 @@ pub fn resolveWritableRoots(
         try roots.append(arena, canonical(io, arena, std.mem.trimEnd(u8, resolved, "/\\")));
     }
 
-    // 5. $TMPDIR, last so the coverage test below reads every root added before
-    // it. macOS keeps per-user scratch space under /var/folders, nowhere near
-    // /tmp, and a Linux host that exports it somewhere else needs the same root
-    // for the same reason: a tool that writes to the directory the environment
-    // named is refused by the sandbox otherwise, and the refusal names a path
-    // the operator never wrote. So the value decides, not the system it was set
-    // on. A value that is not absolute names no directory, and one already
-    // covered by a root above is not added a second time, which is what the
-    // unset and the `/tmp` cases are.
+    // `$TMPDIR` goes last, so the coverage test below reads every root added
+    // before it. macOS keeps per-user scratch space under /var/folders, nowhere
+    // near /tmp, and a Linux host that exports it somewhere else needs the same
+    // root for the same reason: a tool that writes to the directory the
+    // environment named is refused by the sandbox otherwise, and the refusal
+    // names a path the operator never wrote. So the value decides, not the
+    // system it was set on. A value that is not absolute names no directory,
+    // and one already covered by a root above is not added a second time,
+    // which is what the unset and the `/tmp` cases are.
     if (environ_map) |env| {
         if (env.get("TMPDIR")) |raw| {
             const tmpdir = std.mem.trim(u8, raw, net.env_surrounding);
@@ -109,7 +105,6 @@ pub fn isPathWritable(io: Io, arena: std.mem.Allocator, path: []const u8, writab
     const trimmed = std.mem.trim(u8, path, " \t\r\n");
     if (trimmed.len == 0) return false;
 
-    // First resolve lexical path (resolving .. and .)
     const abs_path = if (std.fs.path.isAbsolute(trimmed))
         std.fs.path.resolve(arena, &.{trimmed}) catch return false
     else
@@ -347,25 +342,19 @@ test "isPathWritable allows paths within writable roots and denies paths outside
 
     const writable_roots = [_][]const u8{ root, second_root };
 
-    // Path inside tmp root
     const inside = try std.fs.path.join(arena, &.{ root, "file.txt" });
     try std.testing.expect(isPathWritable(io, arena, inside, &writable_roots));
 
-    // Nested inside
     const nested = try std.fs.path.join(arena, &.{ root, "sub", "dir", "file.txt" });
     try std.testing.expect(isPathWritable(io, arena, nested, &writable_roots));
 
-    // Under the second root
     try std.testing.expect(isPathWritable(io, arena, try std.fs.path.join(arena, &.{ second_root, "test.txt" }), &writable_roots));
 
-    // Outside path: /etc/passwd
     try std.testing.expect(!isPathWritable(io, arena, "/etc/passwd", &writable_roots));
 
-    // Traversal attempting to escape
     const escaped = try std.fs.path.join(arena, &.{ root, "..", "outside.txt" });
     try std.testing.expect(!isPathWritable(io, arena, escaped, &writable_roots));
 
-    // Prefix collision: root + "-other" is not under root
     const collision = try std.fmt.allocPrint(arena, "{s}-other/file.txt", .{root});
     try std.testing.expect(!isPathWritable(io, arena, collision, &writable_roots));
 

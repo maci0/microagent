@@ -5810,7 +5810,6 @@ test "write and edit refuse paths outside sandbox writable roots" {
     const root = buf[0..try tmp.dir.realPath(io, &buf)];
     const writable_roots = [_][]const u8{root};
 
-    // Write outside writable_roots
     var write_args: std.json.ObjectMap = .empty;
     try write_args.put(arena, "path", .{ .string = "/etc/notallowed.txt" });
     try write_args.put(arena, "content", .{ .string = "test" });
@@ -5818,7 +5817,6 @@ test "write and edit refuse paths outside sandbox writable roots" {
     try std.testing.expect(std.mem.startsWith(u8, write_res, "refused:"));
     try std.testing.expect(std.mem.indexOf(u8, write_res, "outside the sandbox writable roots") != null);
 
-    // Edit outside writable_roots
     var edit_args: std.json.ObjectMap = .empty;
     try edit_args.put(arena, "path", .{ .string = "/etc/notallowed.txt" });
     try edit_args.put(arena, "old_string", .{ .string = "a" });
