@@ -308,9 +308,12 @@ test "resolveWritableRoots resolves cwd, tmp, session_dir, and custom roots" {
     const roots = try resolveWritableRoots(io, arena, null, &custom, sdir);
 
     try std.testing.expect(roots.len >= 5);
-    try std.testing.expectEqualStrings("/tmp", roots[1]);
+    // The roots are canonical, and on macOS /tmp and /var are symlinks into
+    // /private, so the expectation is resolved the same way the root is rather
+    // than spelled: `/private/tmp` on that system, `/tmp` here.
+    try std.testing.expectEqualStrings(canonical(io, arena, "/tmp"), roots[1]);
     try std.testing.expectEqualStrings(sdir, roots[2]);
-    try std.testing.expectEqualStrings("/var/log", roots[3]);
+    try std.testing.expectEqualStrings(canonical(io, arena, "/var/log"), roots[3]);
 }
 
 test "isPathWritable resolves a relative path against the first root" {
