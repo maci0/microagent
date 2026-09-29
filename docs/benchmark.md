@@ -236,11 +236,14 @@ changed the reader) and `1528a2e` (v0.3.0). Host: AMD Ryzen 9 9950X, Zig 0.16.0,
 | `write` and `writev` calls, 5,000 frames | 5,002 | 38 | 26 |
 | all syscalls, 5,000 frames, threads included | 5,369 | 724 | 1,161 |
 | instructions, 5,000 frames (three runs) | 42.9-43.3 M | 42.9-43.0 M | 29.1-29.3 M |
-| peak RSS, 40,000 frames | 153.9 MB | 14.2 MB | 14.5 MB |
+| peak RSS, 40,000 frames | 155.4 MB | 2.6 MB | 5.0 MB |
 
-Instructions and syscalls are `perf stat -e instructions:u` and `strace -f -c`; RSS is the child's
-`ru_maxrss`. These counters do not move with machine load. Wall time, cycles and CPU time do, and
-the machine was under load when this table was taken, so none is reported here.
+Instructions and syscalls are `perf stat -e instructions:u` and `strace -f -c`; peak RSS is zsh's
+`time` `%M`, the kernel's `ru_maxrss` for the process. Instructions, `write` calls and RSS do not
+move with machine load. The syscall total does: `readv` follows how the stream's chunks land in each
+read, and the same v0.3.0 build made 379 in one run and 836 in another. Wall time, cycles and CPU
+time move with load too, and the machine was under load when this table was taken, so none is
+reported here.
 
 `4d17882` made two changes, both in `streamChat`:
 
@@ -249,12 +252,11 @@ the machine was under load when this table was taken, so none is reported here.
    tick, so streaming latency is unchanged; the syscall count was pure overhead.
 2. **Frames are parsed in a scratch arena reset after each frame.** Before, every frame's
    `std.json.Value` tree lived until process exit, so a long completion grew the heap without bound:
-   40,000 frames cost 154 MB. Text that must survive the reset is copied into the run arena.
+   40,000 frames cost 155 MB. Text that must survive the reset is copied into the run arena.
 
 The instruction drop from `4d17882` to v0.3.0 is the later switch from a `std.json.Value` tree to
 declared frame shapes ([performance.md](performance.md#what-was-changed-and-what-it-bought)).
-v0.3.0 makes more syscalls than `4d17882` (836 `readv` and 122 `munmap` of its 1,161); that is
-not yet explained.
+v0.3.0's peak RSS is about twice `4d17882`'s on the same stream; that is not yet explained.
 
 Regression tests (`zig build test`): `a long stream costs the largest frame, not the sum of frames`
 folds 20 000 frames through `applyFrame` with the per-frame reset and asserts the scratch arena's
@@ -270,6 +272,7 @@ export MICROAGENT_API_KEY=stub MICROAGENT_BASE_URL=http://127.0.0.1:18901/v1 \
   MICROAGENT_CONFIG= MICROAGENT_SKILLS= MICROAGENT_SESSION_DIR=
 strace -f -c microagent -p "say words" >/dev/null
 perf stat -e instructions:u microagent -p "say words" >/dev/null
+zsh -c 'TIMEFMT=%M; time microagent -p "say words" >/dev/null'   # peak RSS, KB
 ```
 
 ### Fault injection
