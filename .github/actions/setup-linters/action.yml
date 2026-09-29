@@ -18,7 +18,9 @@ runs:
     # managed (PEP 668), so pip refuses to install into it without
     # --break-system-packages, which is the flag the runner image exists to not
     # need. Its bin directory goes on PATH for the rest of the job, so the
-    # Makefile's bare `ruff` and `yamllint` are these.
+    # Makefile's bare `ruff` and `yamllint` are these, and `make lint-pins`
+    # reads the metadata of this venv's packages, which is where the pins in
+    # lint-requirements.txt are checked against what the linters declare.
     #
     # The wheels are cached, keyed on the file that names them, so a push that
     # changes no lint pin installs nothing. The venv itself is not cached: it

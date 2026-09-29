@@ -15,7 +15,7 @@ BIN := zig-out/bin/microagent
 export LC_ALL := C
 export TZ := UTC
 
-.PHONY: default help preflight version build small musl test test-sanitize test-one watch fmt fmt-check fmt-python lint lint-versions lint-lock zig-version required-zig-version release-targets check-targets check-assets check-asset-run check-binary check-changelog check-changelog-sections check-changelog-links check-unreleased check-readme check-release check-reproducible lint-shell lint-python lint-yaml check bench gauntlet instructions overhead install release-assets checksums clean
+.PHONY: default help preflight version build small musl test test-sanitize test-one watch fmt fmt-check fmt-python lint lint-versions lint-lock lint-pins zig-version required-zig-version release-targets check-targets check-assets check-asset-run check-binary check-changelog check-changelog-sections check-unreleased check-readme check-release check-reproducible lint-shell lint-python lint-yaml check bench gauntlet instructions overhead install release-assets checksums clean
 
 # The targets `microagent update` asks for, in the names release.yml publishes.
 # ci.yml rehearses the same list on every push and release.yml publishes it, so
@@ -62,6 +62,13 @@ REPRO_GLOBAL ?= $(CURDIR)/.scratch/repro-global
 RUFF_VERSION := 0.16.4
 YAMLLINT_VERSION := 1.38.0
 
+# The same two pins as name==version, for the check that reads what the
+# linters declare rather than what the gate names: the roots it does not ask
+# anything to require. Spelled from the versions above rather than written
+# again, so a bump moves both or neither.
+RUFF_PIN := ruff==$(RUFF_VERSION)
+YAMLLINT_PIN := yamllint==$(YAMLLINT_VERSION)
+
 # The default target is the build, so a bare `make` in a fresh clone is the
 # first thing in the README and it has to do what the README says.
 default: build
@@ -74,7 +81,7 @@ default: build
 # that is absent, with the command that installs it, before any of that runs.
 # The versions are the ones the rest of this file pins, so a tool that is
 # present but wrong is still `lint-versions` to catch.
-PREFLIGHT_TOOLS := $(ZIG) shellcheck ruff yamllint git
+PREFLIGHT_TOOLS := $(ZIG) shellcheck ruff yamllint git python3
 preflight:
 	@set -eu; bad=0; \
 	for tool in $(PREFLIGHT_TOOLS); do \
@@ -91,6 +98,8 @@ preflight:
 	      echo "$$tool is not on PATH: 'uv tool install yamllint==$(YAMLLINT_VERSION)'" >&2 ;; \
 	    git) \
 	      echo "$$tool is not on PATH: every linter's file list is read from it with 'git ls-files', so a clone without it lints nothing" >&2 ;; \
+	    python3) \
+	      echo "$$tool is not on PATH: lint-pins reads the linters' own package metadata with it, and so does setup-linters, which builds the CI venv" >&2 ;; \
 	    *) \
 	      echo "$$tool is not on PATH" >&2 ;; \
 	  esac; \
@@ -121,6 +130,7 @@ help:
 	  'lint-yaml             yamllint over every tracked .yml and .yaml file' \
 	  'lint-versions         check ruff and yamllint against the versions the gate runs, and that every pin is hashed' \
 	  'lint-lock             check the Harbor lock carries the manifest pins, a hash each, and nothing else' \
+	  'lint-pins             check the linter pins against what ruff and yamllint declare, and nothing else' \
 	  'zig-version           check the local zig against the version the release is built with' \
 	  'bench AGENTS=...      three coding tasks through each harness' \
 	  'gauntlet AGENTS=...   the same gauntlet review on a fresh clone, per harness' \
@@ -301,12 +311,12 @@ fmt-python:
 # repeating the targets, so a linter added here reaches a push and a tag.
 # .github/dependabot.yml is the other thing to keep in step, since it decides
 # what opens a bump for these.
-lint: lint-versions lint-lock lint-shell lint-python lint-yaml
+lint: lint-versions lint-lock lint-pins lint-shell lint-python lint-yaml
 
 HARBOR_DIR := integrations/harbor
 
 # The gate's own checks live in scripts/, not in recipes here, so shellcheck
-# reads them: a recipe is shell nothing lints, and these two are the code that
+# reads them: a recipe is shell nothing lints, and these are the code that
 # decides whether the linters are the versions the gate means. The versions and
 # the Harbor directory stay here, so this file is still the one place each is
 # written down; the scripts take them as arguments.
@@ -317,6 +327,14 @@ lint-versions:
 # is scripts/lint-lock.sh's to say.
 lint-lock:
 	@sh scripts/lint-lock.sh $(HARBOR_DIR)/requirements.txt
+
+# lint-requirements.txt is hashed and installed with --require-hashes like the
+# Harbor lock, and is the one dependency set here that is hand-written rather
+# than generated, so nothing checks its transitive pins against what the
+# linters declare. The two roots are what the gate runs, and are the pins the
+# check does not ask anything to require.
+lint-pins:
+	@sh scripts/lint-pins.sh lint-requirements.txt $(RUFF_PIN) $(YAMLLINT_PIN)
 
 # A different zig is a different compiler, and a compiler decides the bytes:
 # codegen, inlining and linker layout all move between releases. setup-zig

@@ -12,7 +12,11 @@
 #
 # The transitive pins are what yamllint asks for, not a preference: pathspec
 # and pyyaml are what it imports, so a resolution that moved them would lint
-# with a dependency set nobody wrote down.
+# with a dependency set nobody wrote down. They are hand-written, so
+# `make lint-pins` asks yamllint's own package metadata whether every pin here
+# is something it requires, whether it requires a pin that is not here, and
+# whether a pin is below the bound it asks for; without that, a yamllint bump
+# that changed any of the three installs cleanly and fails somewhere else.
 ruff==0.16.4 \
     --hash=sha256:df4075f71ddac40b9934af60c3ec8a53047dd5a5fdc43224e6e4e8e9a27cb6f7 \
     --hash=sha256:0c95538517af68004306b0fb3214ff2f2af67a65092aee77cd9eb86db6656604 \

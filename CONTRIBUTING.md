@@ -10,7 +10,7 @@
 | `docs/` | reference and design docs: [usage](docs/usage.md), [benchmark](docs/benchmark.md), [performance](docs/performance.md), [threat model](docs/threat-model.md), and the logo |
 | `reviews/` | this project's own [gauntlet](https://github.com/maci0/gauntlet) review prompts; run them with `gauntlet --prompt-dir reviews`, which replaces gauntlet's embedded set |
 | `.github/` | the `ci` and `release` workflows, the shared `setup-zig` and `setup-linters` actions, and the Dependabot config |
-| `scripts/` | the gate's own checks as shell files, so shellcheck reads them: the linter version pins (`lint-versions.sh`) and the Harbor lock against its manifest (`lint-lock.sh`) |
+| `scripts/` | the gate's own checks: the linter version pins (`lint-versions.sh`), the Harbor lock against its manifest (`lint-lock.sh`), and the linter pins against what the linters declare (`lint-pins.sh`, which asks the question in Python, one language per file) |
 
 At the root: `build.zig` and `build.zig.zon` (the build and the version), the
 [Makefile](Makefile) (every command below), `README.md`, `CHANGELOG.md`, this
@@ -36,9 +36,10 @@ make small      # the ReleaseSmall binary
 
 ### Linters
 
-`make check` also needs `shellcheck`, `ruff`, `yamllint` and `git` on `PATH`
-(git because every linter reads its file list with `git ls-files`). `make
-preflight` names each missing tool with the command that installs it, and
+`make check` also needs `shellcheck`, `ruff`, `yamllint`, `git` and `python3` on
+`PATH` (git because every linter reads its file list with `git ls-files`;
+python3 because `make lint-pins` reads the linters' package metadata with it).
+`make preflight` names each missing tool with the command that installs it, and
 `make check` runs it first, so a clean clone missing a linter says which one
 instead of stopping at `make: ruff: No such file or directory`.
 
@@ -63,7 +64,11 @@ which pins them and the packages `yamllint` imports with one sha256 per
 published artifact. It installs with `--require-hashes` into a venv on `PATH`,
 so the job never writes into the runner image's externally managed Python.
 `make lint-versions` fails when that file and the Makefile disagree on a
-version.
+version, and `make lint-pins` fails when the file and the linters' own package
+metadata disagree: a pin nothing imports, a package a linter requires that the
+file does not pin, or a pin below a bound one asks for. That file is the one
+dependency set here that is hand-written rather than generated, so nothing else
+looks at it.
 
 `zig fmt` covers the Zig and `build.zig.zon`, and needs nothing else.
 
@@ -94,7 +99,7 @@ make check-unreleased       # the [Unreleased] entry has the five sections, once
 
 `make check` runs, in order: `preflight`, `zig-version`, `check-targets`,
 `check-unreleased`, `fmt-check`, `lint` (`lint-versions`, `lint-lock`,
-shellcheck, `ruff check`, `ruff format --check`, yamllint), `zig build test`,
+`lint-pins`, shellcheck, `ruff check`, `ruff format --check`, yamllint), `zig build test`,
 `zig build test-sanitize`, and `check-binary` (a `ReleaseSmall` build whose
 binary it then starts). These are the checks
 [.github/workflows/ci.yml](.github/workflows/ci.yml) runs, on the same Zig

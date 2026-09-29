@@ -16,6 +16,15 @@ release, and `microagent update` moves you to it.
 
 ### Added
 
+- `make lint-pins` checks lint-requirements.txt against the metadata of the
+  installed linters, and `make lint` runs it. That file is hashed and installed
+  with `--require-hashes` like the Harbor lock, and is the one dependency set
+  here that is hand-written rather than generated, so a yamllint bump could
+  leave a pin nothing imports, or a pin below a bound the new yamllint asks for,
+  and both install cleanly: the first is a package in the lint venv that no
+  linter loads, the second fails at import inside the lint job. The check asks
+  the same two questions `make lint-lock` asks of the Harbor lock, from the
+  linters' own package metadata rather than a generated file.
 - `make check-asset-run` builds the published release asset for the host it runs
   on and starts it, and `make check-binary` builds and starts the host binary.
   Both were inline steps in the push workflow with no local command behind them,
