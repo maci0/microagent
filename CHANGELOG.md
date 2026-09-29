@@ -30,6 +30,13 @@ release, and `microagent update` moves you to it.
   Measured: 24.3 MB to 4.6 MB peak resident, and 9.3 ms to 2.0 ms of system
   time to the first request. A library of ordinary size pays nothing either
   way.
+- An MCP server's `tools/list` answer is no longer kept twice over. The answer
+  was parsed into the run's arena and the buffer it arrived in kept the size of
+  the largest line for the rest of the run, so a server with a 1 MB schema cost
+  about 8.5 MB resident and three of them about 12 MB. The answer is parsed in
+  a scratch arena now, only the schema bytes the request carries are copied
+  out, and the buffer is freed when the line is out: 4.5 MB for one server and
+  for three.
 
 ## [0.2.0] - 2026-09-29
 

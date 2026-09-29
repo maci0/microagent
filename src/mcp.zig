@@ -38,6 +38,17 @@ pub const tool_prefix = "mcp__";
 /// the biggest frame there is; past this the connection is not one this run
 /// can follow, and the server is skipped rather than grown for.
 const max_frame_bytes: usize = 4 * 1024 * 1024;
+/// The buffer a line is split out of is grown to hold the largest line a
+/// server sends, and it keeps that capacity for the run. A `tools/list` answer
+/// is the one line that is ever large, so the excess is handed back once the
+/// line is out and the remainder is small.
+const pending_keep_bytes: usize = 64 * 1024;
+
+/// That buffer's own allocator, rather than the run arena: an arena cannot
+/// hand memory back, so the ladder of buffers a megabyte line is read through
+/// would stay in the run for its whole life. This one frees as it grows past
+/// each step and when the line is out.
+const pending_allocator = std.heap.page_allocator;
 /// How long a server has to answer `initialize` and `tools/list`. A process
 /// that starts and then says nothing is the ordinary way a server is broken,
 /// and a run that waits on it forever is worse than one that skips it.
@@ -92,6 +103,9 @@ pub const Server = struct {
     fn reap(self: *Server, io: Io) void {
         std.posix.kill(-self.pgid, .KILL) catch {};
         self.child.kill(io);
+        // The buffer is this allocator's, not the arena's, so it is handed
+        // back here rather than with the run.
+        self.pending.deinit(pending_allocator);
     }
 
     fn send(self: *Server, io: Io, arena: std.mem.Allocator, id: ?u64, method: []const u8, params_json: []const u8) !void {
@@ -113,13 +127,15 @@ pub const Server = struct {
     /// the deadline and `error.ServerGone` from its end of the pipe are the
     /// two ways this fails, and both leave the server marked dead by the
     /// caller's error path.
-    fn readLine(self: *Server, io: Io, arena: std.mem.Allocator, deadline: Io.Timeout) ![]u8 {
+    fn readLine(self: *Server, io: Io, line_arena: std.mem.Allocator, deadline: Io.Timeout) ![]u8 {
         while (true) {
             if (std.mem.indexOfScalar(u8, self.pending.items, '\n')) |at| {
-                const line = try arena.dupe(u8, self.pending.items[0..at]);
+                const line = try line_arena.dupe(u8, self.pending.items[0..at]);
                 const rest = self.pending.items.len - (at + 1);
                 std.mem.copyForwards(u8, self.pending.items[0..rest], self.pending.items[at + 1 ..]);
                 self.pending.shrinkRetainingCapacity(rest);
+                if (self.pending.capacity > pending_keep_bytes and rest <= pending_keep_bytes)
+                    self.pending.shrinkAndFree(pending_allocator, rest);
                 return line;
             }
             if (self.pending.items.len > max_frame_bytes) return error.FrameTooLong;
@@ -139,18 +155,23 @@ pub const Server = struct {
                 // A read may return zero bytes without ending the stream, so
                 // the loop re-reads either way; a positive read is appended
                 // and the scan above runs again.
-                if (n > 0) try self.pending.appendSlice(arena, chunk[0..n]);
+                if (n > 0) try self.pending.appendSlice(pending_allocator, chunk[0..n]);
             }
         }
     }
 
     /// One request and its answer, with the notifications and server requests
-    /// in between skipped. The answer is parsed into `arena`, which the
-    /// caller owns for the length of the turn.
+    /// in between skipped. The answer's line and parsed tree are allocated
+    /// from `scratch`, which the caller may drop as soon as it has copied what
+    /// it keeps: a `tools/list` answer is the largest document this program
+    /// reads, and its parsed tree is several times the size of its text.
+    /// `arena` holds the request, the buffer the answer arrives in, and every
+    /// note about it, all of which outlive the scratch.
     fn request(
         self: *Server,
         io: Io,
         arena: std.mem.Allocator,
+        scratch: std.mem.Allocator,
         method: []const u8,
         params_json: []const u8,
         timeout: Io.Timeout,
@@ -160,12 +181,12 @@ pub const Server = struct {
         self.next_id += 1;
         try self.send(io, arena, id, method, params_json);
         while (true) {
-            const line = self.readLine(io, arena, deadline) catch |err| {
+            const line = self.readLine(io, scratch, deadline) catch |err| {
                 self.last_error = @errorName(err);
                 self.dead = true;
                 return err;
             };
-            const value = std.json.parseFromSliceLeaky(std.json.Value, arena, line, .{}) catch |err| {
+            const value = std.json.parseFromSliceLeaky(std.json.Value, scratch, line, .{}) catch |err| {
                 self.last_error = try std.fmt.allocPrint(arena, "not JSON ({s})", .{@errorName(err)});
                 continue;
             };
@@ -261,7 +282,11 @@ pub const Servers = struct {
         try pb.writer().writeAll("}");
 
         net.writeErr(io, try std.fmt.allocPrint(arena, "\u{23fa} {s}\n", .{chat.safeText(arena, call_.tool.exposed, 120)}));
-        const result = server.request(io, arena, "tools/call", pb.items(), timeout) catch |err| {
+        // The answer is parsed in a scratch arena and only the text built from
+        // it is kept, for the reason the handshake gives.
+        var scratch_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer scratch_state.deinit();
+        const result = server.request(io, arena, scratch_state.allocator(), "tools/call", pb.items(), timeout) catch |err| {
             if (err == error.ServerRefused)
                 return std.fmt.allocPrint(arena, "error: MCP server {s} refused {s}: {s}", .{ server.name, call_.tool.exposed, server.last_error });
             return std.fmt.allocPrint(arena, "error: MCP server {s} did not answer {s} ({s})", .{ server.name, call_.tool.exposed, @errorName(err) });
@@ -463,6 +488,14 @@ fn spawnOne(
 /// set when any of them fails.
 fn handshake(io: Io, arena: std.mem.Allocator, server: *Server, client_version: []const u8) bool {
     const timeout = net.durationMs(handshake_timeout_ms);
+    // Both answers are parsed here and nothing but the tool table survives
+    // them, so they are parsed in an arena that is handed back at the end of
+    // the handshake rather than in the run's. A megabyte of schema text turns
+    // into several megabytes of parsed values, and the run does not read any
+    // of them: it copies the schema bytes into the request as they came.
+    var scratch_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer scratch_state.deinit();
+    const scratch = scratch_state.allocator();
     // The version is this build's own, from build.zig.zon: it holds no byte
     // that needs escaping in a JSON string, so it is written as it is.
     var params_buf: [256]u8 = undefined;
@@ -470,7 +503,7 @@ fn handshake(io: Io, arena: std.mem.Allocator, server: *Server, client_version: 
         protocol_version,
         client_version,
     }) catch "{\"protocolVersion\":\"" ++ protocol_version ++ "\",\"capabilities\":{},\"clientInfo\":{\"name\":\"microagent\"}}";
-    const initialized = server.request(io, arena, "initialize", init_params, timeout) catch return false;
+    const initialized = server.request(io, arena, scratch, "initialize", init_params, timeout) catch return false;
     if (initialized != .object) {
         server.last_error = "initialize answered with no result object";
         return false;
@@ -479,7 +512,7 @@ fn handshake(io: Io, arena: std.mem.Allocator, server: *Server, client_version: 
         server.last_error = @errorName(err);
         return false;
     };
-    const listed = server.request(io, arena, "tools/list", "", timeout) catch return false;
+    const listed = server.request(io, arena, scratch, "tools/list", "", timeout) catch return false;
     const object = switch (listed) {
         .object => |o| o,
         else => {
@@ -497,16 +530,23 @@ fn handshake(io: Io, arena: std.mem.Allocator, server: *Server, client_version: 
             .object => |o| o,
             else => continue,
         };
+        // The name is the one slice of the answer the tool table keeps, so it
+        // is copied out of the arena the answer is parsed in.
         const name = chat.str(entry.get("name")) orelse continue;
+        const kept_name = arena.dupe(u8, name) catch return false;
         if (!validName(name)) {
             net.note(io, arena, "microagent: MCP server {s} offers a tool named {s}, which cannot be spelled in a tool name; it is skipped\n", .{ chat.safeTextAll(arena, server.name), chat.safeText(arena, name, 120) });
             continue;
         }
         const description = chat.str(entry.get("description")) orelse "";
-        const schema = schemaJson(arena, entry.get("inputSchema")) catch return false;
-        const exposed = std.fmt.allocPrint(arena, "{s}{s}__{s}", .{ tool_prefix, server.name, name }) catch return false;
+        // Stringify grows through a ladder of buffers and only the last one is
+        // the schema the request carries, so it is built in the scratch arena
+        // and copied once into the run's.
+        const schema_text = schemaJson(scratch, entry.get("inputSchema")) catch return false;
+        const schema = arena.dupe(u8, schema_text) catch return false;
+        const exposed = std.fmt.allocPrint(arena, "{s}{s}__{s}", .{ tool_prefix, server.name, kept_name }) catch return false;
         found.append(arena, .{
-            .name = name,
+            .name = kept_name,
             .exposed = exposed,
             .description = if (description.len == 0)
                 std.fmt.allocPrint(arena, "MCP tool '{s}' from server '{s}'", .{ name, server.name }) catch return false
@@ -634,6 +674,52 @@ test "every server is started before any of them is asked to initialize" {
     try std.testing.expectEqual(@as(usize, 2), servers.items.len);
     try std.testing.expect(servers.resolve("mcp__waiter__echo") != null);
     try std.testing.expect(servers.resolve("mcp__starter__echo") != null);
+}
+
+// A tools/list answer is the largest document this program reads, and its
+// parsed tree is several times the size of its text. What the run keeps is the
+// schema bytes the request carries, copied out of the answer; the line the
+// answer arrived in and the tree it was parsed into are handed back. The two
+// counters below fail if either comes back: the run arena would hold the tree,
+// and the pending buffer would keep the answer's size for the whole run.
+test "a tools/list answer is parsed in a scratch arena and its buffer is handed back" {
+    const gpa = std.testing.allocator;
+    var scratch_state = std.heap.ArenaAllocator.init(gpa);
+    defer scratch_state.deinit();
+    const scratch = scratch_state.allocator();
+    var run_state = std.heap.ArenaAllocator.init(gpa);
+    defer run_state.deinit();
+    const run = run_state.allocator();
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+
+    const pad = try scratch.alloc(u8, 400 * 1024);
+    @memset(pad, 'x');
+    const script = try std.fmt.allocPrint(scratch,
+        \\while IFS= read -r line; do
+        \\  case "$line" in
+        \\    *'"method":"initialize"'*) printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"{s}","capabilities":{{}},"serverInfo":{{"name":"big","version":"1"}}}}}}' ;;
+        \\    *'"method":"tools/list"'*) printf '{{"jsonrpc":"2.0","id":2,"result":{{"tools":[{{"name":"echo","inputSchema":{{"type":"object","description":"{s}"}}}}]}}}}\n' ;;
+        \\  esac
+        \\done
+        \\
+    , .{ protocol_version, pad });
+    try tmp.dir.writeFile(io, .{ .sub_path = "big.sh", .data = script });
+    const path = try std.fs.path.join(scratch, &.{ base, "big.sh" });
+
+    const entries = [_]Entry{.{ .name = "big", .command = "/bin/sh", .args = &.{path} }};
+    var env: std.process.Environ.Map = .init(scratch);
+    var servers = connect(io, run, &env, &entries, "test");
+    defer servers.shutdown(io);
+
+    try std.testing.expectEqual(@as(usize, 1), servers.items.len);
+    try std.testing.expect(servers.resolve("mcp__big__echo") != null);
+    try std.testing.expectEqual(@as(usize, 0), servers.items[0].pending.capacity);
+    try std.testing.expect(run_state.queryCapacity() < 1024 * 1024);
 }
 
 test "a server that cannot be started, or that exits, is skipped" {

@@ -72,6 +72,8 @@ returns the socket after each response is read.
 | MCP server startup, 3 servers | 1.513 s | **0.506 s** | every server is spawned before any is asked to initialize, so their boots overlap: the run waits for the slowest server instead of the sum |
 | a 200 x 100 KB skill library | 24.3 MB resident | **4.6 MB** | the listing read every `SKILL.md` whole and kept the text in the run arena, because the name and description it lists are slices of it; it reads the head of the file now, and a `skill` call reads the body |
 | the same library, system time to the first request | 9.3 ms | **2.0 ms** | the same change: 21 MB of reads become about 1.6 MB, and kernel time is the half that carries it |
+| three MCP servers with 1 MB `tools/list` answers | 12.2 MB resident | **4.5 MB** | a `tools/list` answer was parsed into the run arena, tree and line both, and the buffer it arrived in kept its size; the answer is parsed in a scratch arena now, only the schema bytes are copied out, and that buffer has its own allocator and is handed back |
+| one such server | 8.5 MB | **4.5 MB** | the same change |
 
 The two largest wins are not CPU at all. The request-bytes one is the single most valuable change in
 the file and it is invisible to every counter the harness prints: `cached_tokens` reports what was
@@ -189,6 +191,12 @@ not the sum. Its guard is a test, not a clock: the waiter server refuses to answ
 server has run, so a sequential connect drops it and the test sees one server where it expects two.
 On a machine where `/bin/sh` has no fractional `sleep` the waiter's bounded wait spins instead of
 sleeping and the guard still works, only faster to give up.
+
+The MCP row is the same shape: a fake server that answers `tools/list` with an `inputSchema`
+carrying 1 MB of padding, one and three servers, peak `VmHWM` sampled as above. Its guard is also a
+counter: `a tools/list answer is parsed in a scratch arena and its buffer is handed back` asserts
+the run arena holds under 1 MB after connecting (it held 3.4 MB) and that the pending buffer's
+capacity is zero (it kept the answer's size). The measured run arena after connecting is 0.6 MB.
 
 The skill rows are measured with `MICROAGENT_SKILLS` pointed at a directory of generated `SKILL.md`
 files. The resident figures are peak `VmHWM` from `/proc/<pid>/status`, sampled every 20 ms through a
