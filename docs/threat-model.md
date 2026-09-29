@@ -57,7 +57,7 @@ source tree and the host. The one asset worth stealing on its own is the API key
 | --- | --- | --- |
 | Command line, agent mode | prompt, flags, API key in `argv` | `parseArgs`, `src/main.zig:997`; `main`, `src/main.zig:251`; the flag table at `src/main.zig:917` holds every valued flag the run accepts: `-p/--print`, `-m/--model`, `-b/--base-url`, `-k/--api-key`, `--ca-bundle`, `--config`, `--reasoning-effort`, `--budget`, `--max-spend-tokens`, `--max-turns`, `--max-tokens`, `--stall-timeout` |
 | `--ca-bundle <file>` | the PEM file whose certificates vouch for the provider and for GitHub | `net.caBundlePath`, `src/net.zig:105`; `loadCaBundle`, `src/net.zig:39`; applied at `src/main.zig:341` and `src/update.zig:939` |
-| `--config <file>`, `MICROAGENT_CONFIG`, `~/.microagent/config.toml` | reply-style levels, skill roots and `[[mcp]]` tables: what the prompt says and what the run starts | `styleConfigPath`, `src/main.zig:1433`; `loadConfig`, `src/main.zig:1309`; `config.parse`, `src/config.zig:95`; cap `max_config_bytes` (64 KB), `src/main.zig:131` |
+| `--config <file>`, `MICROAGENT_CONFIG`, `~/.microagent/config.toml` | reply-style levels, skill roots, `[[mcp]]` tables and denied shell commands: what the prompt says, what the run starts and what shell execution refuses | `styleConfigPath`, `src/main.zig:1433`; `loadConfig`, `src/main.zig:1309`; `config.parse`, `src/config.zig:95`; cap `max_config_bytes` (64 KB), `src/main.zig:131` |
 | `[[mcp]]` tables in that config | programs the run starts over stdio, and the tools they offer | `connect`, `src/mcp.zig:403`; `handshake`, `src/mcp.zig:489` |
 | `skills` in that config, `MICROAGENT_SKILLS`, `~/.microagent/skills` | `SKILL.md` bodies the model may load, as prompt text | `roots`, `src/skill.zig:134`; `discover`, `src/skill.zig:180`; `call`, `src/skill.zig:363`; cap `max_skill_bytes`, `src/skill.zig:40` |
 | Command line, `update` | `--check`, `--repo` | `parseArgs`, `src/update.zig:848`; `run`, `src/update.zig:885`; dispatched from `main` at `src/main.zig:264` |
@@ -270,7 +270,8 @@ command.
   credentials file is refused on the same name rule the other tools apply
   (`credentialInCommand`, `src/tool.zig:871`, applied at `src/tool.zig:888`). That rule
   reads the command's words, not a parsed shell, so a file reached through indirection is
-  not caught.
+  not caught. A command matching a configured command filter (`deny_commands` in config) is
+  refused before execution (`deniedInCommand`, `src/tool.zig:887`).
 - `read`, `write` and `edit` accept absolute paths and do not confine writes to the working
   tree (`toolRead`, `src/tool.zig:1156`; `toolWrite`, `src/tool.zig:1280`; `toolEdit`,
   `src/tool.zig:1355`). Each refuses a path the credential tables name, and nothing else.

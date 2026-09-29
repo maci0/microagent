@@ -53,6 +53,8 @@ pub const Config = struct {
     skills: ?[]const []const u8 = null,
     /// The MCP servers the file declared, in the order the tables appear.
     mcp: []const mcp_mod.Entry = &.{},
+    /// Commands denied from running via the bash tool.
+    deny_commands: []const []const u8 = &.{},
     /// The first line the reader could not use, if any.
     problem: ?Problem = null,
 
@@ -87,7 +89,7 @@ pub const Problem = struct {
 };
 
 /// The section the lines after a header belong to.
-const Section = enum { top, style, mcp, other };
+const Section = enum { top, style, commands, mcp, other };
 
 /// Reads the document. Never fails: a document this reader cannot follow
 /// whole is read as far as it can be, and the first line it could not use is
@@ -114,6 +116,8 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8) Config {
             };
             if (std.mem.eql(u8, header.name, "style")) {
                 section = .style;
+            } else if (std.mem.eql(u8, header.name, "commands") or std.mem.eql(u8, header.name, "command_filter")) {
+                section = .commands;
             } else if (std.mem.eql(u8, header.name, "mcp") and header.array) {
                 servers.append(arena, .{}) catch {
                     section = .other;
@@ -144,6 +148,7 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8) Config {
         switch (section) {
             .style => styleOnly(&config, key, value_text),
             .top => topKey(&config, arena, key, value_text),
+            .commands => commandsOnly(&config, arena, key, value_text),
             .mcp => if (open) |server| serverKey(&config, arena, server, key, value_text),
             .other => {},
         }
@@ -182,7 +187,7 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8) Config {
 }
 
 /// A key at the top of the file, outside any table: the style levels may sit
-/// here, and so may `skills`.
+/// here, and so may `skills` and `deny_commands` (or `command_filter`).
 fn topKey(config: *Config, arena: std.mem.Allocator, key: []const u8, value_text: []const u8) void {
     if (levelKey(config, key, value_text)) return;
     if (std.mem.eql(u8, key, "skills")) {
@@ -191,7 +196,48 @@ fn topKey(config: *Config, arena: std.mem.Allocator, key: []const u8, value_text
         config.skills = dirs;
         return;
     }
+    if (std.mem.eql(u8, key, "deny_commands") or std.mem.eql(u8, key, "command_filter") or std.mem.eql(u8, key, "denied_commands")) {
+        const list = parseCommandList(arena, value_text) orelse
+            return config.note(.{ .key = key, .kind = .bad_value });
+        addDenyCommands(config, arena, list);
+        return;
+    }
     config.note(.{ .key = key, .kind = .unknown_key });
+}
+
+/// A key under `[commands]` or `[command_filter]`.
+fn commandsOnly(config: *Config, arena: std.mem.Allocator, key: []const u8, value_text: []const u8) void {
+    if (std.mem.eql(u8, key, "deny") or std.mem.eql(u8, key, "deny_commands") or std.mem.eql(u8, key, "denied") or std.mem.eql(u8, key, "filter") or std.mem.eql(u8, key, "command_filter")) {
+        const list = parseCommandList(arena, value_text) orelse
+            return config.note(.{ .key = key, .kind = .bad_value });
+        addDenyCommands(config, arena, list);
+        return;
+    }
+    config.note(.{ .key = key, .kind = .unknown_key });
+}
+
+fn parseCommandList(arena: std.mem.Allocator, raw: []const u8) ?[]const []const u8 {
+    if (stringArray(arena, raw)) |arr| return arr;
+    const single = unquote(raw);
+    const trimmed = std.mem.trim(u8, single, " \t\r\n");
+    if (trimmed.len > 0 and trimmed[0] != '[' and trimmed[0] != '{') {
+        const items = arena.alloc([]const u8, 1) catch return null;
+        items[0] = trimmed;
+        return items;
+    }
+    return null;
+}
+
+fn addDenyCommands(config: *Config, arena: std.mem.Allocator, list: []const []const u8) void {
+    if (list.len == 0) return;
+    if (config.deny_commands.len == 0) {
+        config.deny_commands = list;
+    } else {
+        var merged: std.ArrayList([]const u8) = .empty;
+        merged.appendSlice(arena, config.deny_commands) catch return;
+        merged.appendSlice(arena, list) catch return;
+        config.deny_commands = merged.items;
+    }
 }
 
 /// A key under `[style]`: the same two levels the top of the file takes, and
@@ -539,6 +585,35 @@ test "skills are a list of directories, and absent is not the same as empty" {
     try std.testing.expectEqual(@as(usize, 2), comma.skills.?.len);
     try std.testing.expectEqualStrings("./a,b", comma.skills.?[0]);
     try std.testing.expectEqualStrings("./c", comma.skills.?[1]);
+}
+
+test "command filter parses from deny_commands, command_filter, or [commands] deny" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    const top = parse(arena, "deny_commands = [\"sudo\", \"su\"]\n");
+    try std.testing.expect(top.problem == null);
+    try std.testing.expectEqual(@as(usize, 2), top.deny_commands.len);
+    try std.testing.expectEqualStrings("sudo", top.deny_commands[0]);
+    try std.testing.expectEqualStrings("su", top.deny_commands[1]);
+
+    const alias = parse(arena, "command_filter = [\"shutdown\", \"reboot\"]\n");
+    try std.testing.expect(alias.problem == null);
+    try std.testing.expectEqual(@as(usize, 2), alias.deny_commands.len);
+    try std.testing.expectEqualStrings("shutdown", alias.deny_commands[0]);
+    try std.testing.expectEqualStrings("reboot", alias.deny_commands[1]);
+
+    const single = parse(arena, "deny_commands = \"sudo\"\n");
+    try std.testing.expect(single.problem == null);
+    try std.testing.expectEqual(@as(usize, 1), single.deny_commands.len);
+    try std.testing.expectEqualStrings("sudo", single.deny_commands[0]);
+
+    const tabled = parse(arena, "[commands]\ndeny = [\"sudo\", \"rm -rf\"]\n");
+    try std.testing.expect(tabled.problem == null);
+    try std.testing.expectEqual(@as(usize, 2), tabled.deny_commands.len);
+    try std.testing.expectEqualStrings("sudo", tabled.deny_commands[0]);
+    try std.testing.expectEqualStrings("rm -rf", tabled.deny_commands[1]);
 }
 
 test "an MCP server is one [[mcp]] table, and a broken one is named and skipped" {

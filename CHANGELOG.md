@@ -14,6 +14,13 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+### Added
+
+- Command filter in configuration: `deny_commands = [...]` (or `[commands] deny = [...]`)
+  in `config.toml` configures a list of command names or sequences to deny. Any `bash`
+  command containing one of the denied commands (e.g. `sudo`, `/usr/bin/sudo`, `su`,
+  `rm -rf`) is refused before execution, returning `refused: command contains '...', which is denied by configuration`.
+
 ## [0.5.0] - 2026-09-29
 
 ### Added

@@ -6,7 +6,7 @@ Everything a run reads and everything it writes. The [README](../README.md) is t
 - [Flags and environment](#flags-and-environment)
 - [How values resolve](#how-values-resolve)
 - [Providers and keys](#providers-and-keys)
-- [Config file](#config-file): [reply style](#reply-style), [skills](#skills), [MCP servers](#mcp-servers)
+- [Config file](#config-file): [reply style](#reply-style), [skills](#skills), [MCP servers](#mcp-servers), [command filter](#command-filter)
 - [Tools](#tools)
 - [Output](#output): [stdout](#stdout), [exit status](#exit-status), [session log](#session-log)
 - [Failure handling](#failure-handling)
@@ -274,7 +274,7 @@ output text.
 
 ## Config file
 
-One TOML file carries the reply style, the skill roots and the MCP servers. It is `--config`, else
+One TOML file carries the reply style, the skill roots, the MCP servers, and denied shell commands. It is `--config`, else
 `MICROAGENT_CONFIG`, else `~/.microagent/config.toml`. A named path may start with `~` or `~/`, which
 is the home directory: a shell expands the tilde in a command line before the flag is read, but a
 value that came out of `MICROAGENT_CONFIG` never went through one, so microagent expands it here.
@@ -383,13 +383,30 @@ machine](#what-leaves-the-machine) has the whole list.
 Server and tool names may hold only letters, digits, dot, dash and underscore, and a name holding
 `__` is refused: the double underscore separates the three parts of an exposed name.
 
+### Command filter
+
+Denied commands for the `bash` tool. Any command containing one of the configured words or sequences is refused before execution, returning `refused: command contains '...', which is denied by configuration` to the model.
+
+```toml
+deny_commands = ["sudo", "su", "shutdown", "reboot"]
+```
+
+The filter can also be declared under a `[commands]` table:
+
+```toml
+[commands]
+deny = ["sudo", "rm -rf"]
+```
+
+Matching inspects command words and basenames (for example, denying `sudo` matches both `sudo apt install` and `/usr/bin/sudo ls` without false-positiving on safe names like `run_sudoku.py`), as well as multi-word sequences (such as `rm -rf`).
+
 ## Tools
 
 Seven built-in tools, each a thin wrapper over a program you already have:
 
 | tool | what it does |
 | --- | --- |
-| `bash` | `/bin/sh -c`, 120 s default timeout (the model may ask for up to 600 s), output capped at 24 KB. A command naming a credentials file is refused, and the child inherits no provider credential. |
+| `bash` | `/bin/sh -c`, 120 s default timeout (the model may ask for up to 600 s), output capped at 24 KB. A command naming a credentials file or matching the command filter is refused, and the child inherits no provider credential. |
 | `read` | read a file, with optional line offset and limit. Refuses credentials (`.env`, key and keystore files, anything under `.secrets` or `.ssh`), including a symlink to one. |
 | `write` | create or overwrite a file, creating parents. Refuses a credentials path, and a call with no `content`. |
 | `edit` | exact string replacement. Refuses a credentials path, an ambiguous match unless `replace_all`, and an edit that would leave `old_string` matchable in the result, so a repeated call cannot apply the change twice. |

@@ -43,3 +43,10 @@ ponytail = "full"
 # name = "git"
 # command = "mcp-server-git"
 # args = ["--repository", "."]
+
+# Denied shell commands for the `bash` tool. Any command containing one of these
+# command names or sequences (e.g. `sudo`, `/usr/bin/sudo`, `rm -rf`) is refused
+# before execution. Can be a list of strings (`deny_commands = [...]`) or written
+# under `[commands]` (`deny = [...]`).
+#
+# deny_commands = ["sudo", "su", "shutdown", "reboot"]

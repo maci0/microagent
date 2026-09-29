@@ -259,6 +259,8 @@ const Options = struct {
     /// file, connected once before the first request, and shut down when the
     /// run ends.
     mcp: mcp_mod.Servers = .{},
+    /// Commands denied from running via the bash tool.
+    deny_commands: []const []const u8 = &.{},
     /// What the command line asked for. `--help` and `--version` stop the
     /// parse where they appear, before any option value is needed.
     action: Action = .run,
@@ -408,6 +410,7 @@ fn runMain(init: std.process.Init) !u8 {
     var msgs: std.ArrayList(u8) = .empty;
     defer msgs.deinit(gpa);
     const loaded = loadConfig(io, init, init.arena.allocator(), opts.config);
+    opts.deny_commands = loaded.deny_commands;
     // Built before the skills and the servers, because a tool subprocess and
     // an MCP server both inherit the environment it withholds the provider
     // key from. Built once for the run: a tool subprocess is spawned once per
@@ -1486,6 +1489,8 @@ const LoadedConfig = struct {
     skills: ?[]const []const u8,
     /// The MCP servers the config file declared.
     mcp: []const mcp_mod.Entry,
+    /// Commands denied from running via the bash tool.
+    deny_commands: []const []const u8,
     source: ?[]const u8,
 };
 
@@ -1519,6 +1524,7 @@ fn loadConfig(io: Io, init: std.process.Init, arena: std.mem.Allocator, config: 
         .style = parsed.style,
         .skills = parsed.skills,
         .mcp = parsed.mcp,
+        .deny_commands = parsed.deny_commands,
         .source = source.path,
     };
 }
@@ -2234,7 +2240,7 @@ fn runTurn(
     // above, so the record itself is the same either way; only the moment it
     // lands is not.
     session_mod.writeRecord(io, arena, session, model_ms, &result);
-    try finishTurn(io, arena, gpa, msgs, &result, usage, budget, tool_env, progress, opts.skills, mcp);
+    try finishTurn(io, arena, gpa, msgs, &result, usage, budget, tool_env, progress, opts.skills, mcp, opts.deny_commands);
     if (result.calls.items.len != 0) return .wants_tools;
     // No tool call ends the loop, but only an answer ends the run. A refusal, a
     // provider that stopped generating, a response cut at `max_tokens` and a
@@ -3648,6 +3654,7 @@ fn dispatchCall(
     call: chat_mod.ToolCall,
     ceiling_ms: ?u64,
     tool_env: ?*const std.process.Environ.Map,
+    deny_commands: []const []const u8,
 ) ![]const u8 {
     if (std.mem.startsWith(u8, call.name, mcp_mod.tool_prefix)) {
         const remote = mcp.resolve(call.name) orelse
@@ -3660,7 +3667,7 @@ fn dispatchCall(
     }
     if (std.mem.eql(u8, call.name, skill_mod.tool_name))
         return skill_mod.call(io, arena, call.args.items, skills);
-    return tool_mod.runTool(io, arena, call, ceiling_ms, tool_env);
+    return tool_mod.runTool(io, arena, call, ceiling_ms, tool_env, deny_commands);
 }
 
 /// Appends the assistant message and, for every tool call it requested, runs
@@ -3677,6 +3684,7 @@ fn finishTurn(
     progress: *Progress,
     skills: skill_mod.Skills,
     mcp: *mcp_mod.Servers,
+    deny_commands: []const []const u8,
 ) !void {
     try msgs.appendSlice(gpa, ",");
     try msgs.appendSlice(gpa, try assistantMessage(arena, result));
@@ -3711,7 +3719,7 @@ fn finishTurn(
             // loads from belongs to the run, and a run that found no skills
             // never advertised the name, so a call to it here is the model
             // asking for a tool the schema did not offer.
-            break :blk dispatchCall(io, arena, skills, mcp, call, budget.toolCeilingMs(io), tool_env) catch |err|
+            break :blk dispatchCall(io, arena, skills, mcp, call, budget.toolCeilingMs(io), tool_env, deny_commands) catch |err|
                 // A tool that fails outright (rather than reporting its own
                 // failure as text) is named here, so a result reading
                 // `error: OutOfMemory` says which of the calls ran out.
@@ -4893,11 +4901,11 @@ test "a skill call is served from the run's skill set" {
     var call: chat_mod.ToolCall = .{ .id = try arena.dupe(u8, ""), .name = try arena.dupe(u8, skill_mod.tool_name) };
     try call.args.appendSlice(arena, "{\"name\":\"pdf\"}");
     var mcp: mcp_mod.Servers = .{};
-    try std.testing.expectEqualStrings("use qpdf\n", try dispatchCall(io, arena, skills, &mcp, call, null, null));
+    try std.testing.expectEqualStrings("use qpdf\n", try dispatchCall(io, arena, skills, &mcp, call, null, null, &.{}));
 
     // The same call on a run with no skills is the set's own refusal, not the
     // tool module's `unknown tool`.
-    const out = try dispatchCall(io, arena, .{}, &mcp, call, null, null);
+    const out = try dispatchCall(io, arena, .{}, &mcp, call, null, null, &.{});
     try std.testing.expect(std.mem.startsWith(u8, out, "error: unknown skill 'pdf'"));
 }
 

@@ -635,7 +635,7 @@ fn firstLines(arena: std.mem.Allocator, text: []const u8, limit: usize) ![]const
 /// is compared, the gutter line is written, and only then is a name matched. A
 /// payload that is not an object, or a name that is not one of the seven,
 /// answers with an error string and no tool runs.
-pub fn runTool(io: Io, arena: std.mem.Allocator, call: chat.ToolCall, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map) ![]const u8 {
+pub fn runTool(io: Io, arena: std.mem.Allocator, call: chat.ToolCall, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map, deny_commands: []const []const u8) ![]const u8 {
     const parsed = std.json.parseFromSlice(std.json.Value, arena, call.args.items, .{}) catch
         return "error: tool arguments are not valid JSON";
     const args = switch (parsed.value) {
@@ -650,7 +650,7 @@ pub fn runTool(io: Io, arena: std.mem.Allocator, call: chat.ToolCall, ceiling_ms
     const tool = chat.Tool.fromName(call.name) orelse return unknownTool(arena, call.name);
     noteToolCall(io, arena, tool, args);
     return switch (tool) {
-        .bash => toolBash(io, arena, args, ceiling_ms, environ_map),
+        .bash => toolBash(io, arena, args, ceiling_ms, environ_map, deny_commands),
         .read => toolRead(io, arena, args),
         .write => toolWrite(io, arena, args),
         .edit => toolEdit(io, arena, args),
@@ -868,7 +868,75 @@ fn credentialInCommand(command: []const u8) ?[]const u8 {
     return null;
 }
 
-fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map) ![]const u8 {
+/// True when `word` matches `entry`, checking case-insensitive equality or
+/// the leaf basename when `entry` is a command name with no path separator.
+fn wordMatches(word: []const u8, entry: []const u8) bool {
+    if (std.ascii.eqlIgnoreCase(word, entry)) return true;
+    if (std.mem.indexOfScalar(u8, entry, std.fs.path.sep) == null) {
+        const leaf = std.fs.path.basename(word);
+        if (std.ascii.eqlIgnoreCase(leaf, entry)) return true;
+    }
+    return false;
+}
+
+/// Checks whether a command contains or executes a command in `deny_list`.
+/// Returns the matched filter string, or null if allowed.
+pub fn deniedInCommand(command: []const u8, deny_list: []const []const u8) ?[]const u8 {
+    if (deny_list.len == 0) return null;
+    const trimmed_cmd = std.mem.trim(u8, command, " \t\r\n");
+    if (trimmed_cmd.len == 0) return null;
+
+    for (deny_list) |raw_entry| {
+        const entry = std.mem.trim(u8, raw_entry, " \t\r\n");
+        if (entry.len == 0) continue;
+
+        // Tokenize the deny entry into words
+        var entry_tokens: [16][]const u8 = undefined;
+        var entry_count: usize = 0;
+        var e_iter = std.mem.tokenizeAny(u8, entry, command_word_separators);
+        while (e_iter.next()) |ew| {
+            if (entry_count < entry_tokens.len) {
+                entry_tokens[entry_count] = ew;
+                entry_count += 1;
+            }
+        }
+        if (entry_count == 0) continue;
+
+        if (entry_count == 1) {
+            // Single word entry: match against any command word token or its basename
+            var words = std.mem.tokenizeAny(u8, command, command_word_separators);
+            while (words.next()) |word| {
+                if (wordMatches(word, entry_tokens[0])) return raw_entry;
+            }
+        } else {
+            // Multi-word entry: match against verbatim case-insensitive substring
+            if (std.ascii.indexOfIgnoreCase(command, entry) != null) return raw_entry;
+
+            // Or match against a sliding sequence of command word tokens
+            var words = std.mem.tokenizeAny(u8, command, command_word_separators);
+            var match_idx: usize = 0;
+            while (words.next()) |word| {
+                if (match_idx == 0) {
+                    if (wordMatches(word, entry_tokens[0])) {
+                        match_idx = 1;
+                    }
+                } else {
+                    if (wordMatches(word, entry_tokens[match_idx])) {
+                        match_idx += 1;
+                        if (match_idx == entry_count) return raw_entry;
+                    } else if (wordMatches(word, entry_tokens[0])) {
+                        match_idx = 1;
+                    } else {
+                        match_idx = 0;
+                    }
+                }
+            }
+        }
+    }
+    return null;
+}
+
+fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map, deny_commands: []const []const u8) ![]const u8 {
     const command = chat.str(args.get("command")) orelse return "error: missing command";
     // `bash` is the one tool with no path argument to check, and it can read
     // every file the three guarded tools refuse: `cat .env` and
@@ -876,6 +944,9 @@ fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_
     // re-sent to the provider on every later turn. So the same name check runs
     // over the command's own words.
     if (credentialInCommand(command)) |path| return credentialRefusal(arena, .bash, path, false);
+    if (deniedInCommand(command, deny_commands)) |denied| {
+        return std.fmt.allocPrint(arena, "refused: command contains '{s}', which is denied by configuration", .{denied});
+    }
     const timeout_ms: u64 = bashTimeoutMs(requestedTimeoutMs(args.get("timeout_ms")), ceiling_ms);
     const capture_limit = max_tool_output * 4;
     // A command that runs to its own timeout has usually already said what is
@@ -1852,12 +1923,16 @@ pub fn toolResult(arena: std.mem.Allocator, output: []const u8) ![]const u8 {
 /// no run budget and this process's environment. It is the entry point the
 /// tests drive, so a tool's real dispatch path is the one under test.
 pub fn dispatch(arena: std.mem.Allocator, name: []const u8, args: []const u8) ![]const u8 {
+    return dispatchFiltered(arena, name, args, &.{});
+}
+
+pub fn dispatchFiltered(arena: std.mem.Allocator, name: []const u8, args: []const u8, deny_commands: []const []const u8) ![]const u8 {
     var call: chat.ToolCall = .{
         .id = try arena.dupe(u8, ""),
         .name = try arena.dupe(u8, name),
     };
     try call.args.appendSlice(arena, args);
-    return runTool(std.testing.io, arena, call, null, null);
+    return runTool(std.testing.io, arena, call, null, null, deny_commands);
 }
 
 /// The line range a `read` with `offset` and `limit` returns: every line in
@@ -2443,7 +2518,7 @@ test "a real tool result over the cap stays a string the body can carry" {
     // Five bytes per line, so the cap does not land on a character boundary: a
     // plain cut here leaves half an e-acute in the string.
     try args.put(arena, "command", .{ .string = "i=0; while [ $i -lt 5000 ]; do printf '\\303\\251a\\303\\251'; i=$((i+1)); done" });
-    const output = try toolBash(std.testing.io, arena, args, null, null);
+    const output = try toolBash(std.testing.io, arena, args, null, null, &.{});
     try std.testing.expect(output.len > max_tool_output);
 
     const result = try toolResult(arena, output);
@@ -4612,7 +4687,7 @@ fn bashCall(arena: std.mem.Allocator, command: []const u8, timeout_ms: i64) ![]c
     const keys = [_][]const u8{ "command", "timeout_ms" };
     const values = [_]std.json.Value{ .{ .string = command }, .{ .integer = timeout_ms } };
     const args = std.json.ObjectMap.init(arena, &keys, &values) catch return error.TestUnexpectedResult;
-    return toolBash(std.testing.io, arena, args, null, null);
+    return toolBash(std.testing.io, arena, args, null, null, &.{});
 }
 
 // `bash` is the tool with no path argument, so it is the one a model reaches a
@@ -4782,6 +4857,52 @@ test "bash refuses a command naming a credentials file" {
     };
     for (allowed) |command| {
         try std.testing.expectEqual(@as(?[]const u8, null), credentialInCommand(command));
+    }
+}
+
+test "bash refuses a command matching the configured command filter" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const deny_list = [_][]const u8{ "sudo", "su", "rm -rf", "reboot" };
+
+    const refused = [_][]const u8{
+        "sudo apt update",
+        "sudo make install",
+        "/usr/bin/sudo ls",
+        "/bin/sudo whoami",
+        "echo hi && sudo make",
+        "FOO=1 sudo bar",
+        "(sudo whoami)",
+        "sh -c 'sudo test'",
+        "su - root",
+        "sudo su",
+        "rm -rf /",
+        "rm -rf /tmp/scratch",
+        "/bin/rm -rf /tmp",
+        "systemctl reboot",
+    };
+    for (refused) |cmd| {
+        try std.testing.expect(deniedInCommand(cmd, &deny_list) != null);
+        const args = try std.fmt.allocPrint(arena, "{{\"command\":\"{s}\"}}", .{cmd});
+        const out = try dispatchFiltered(arena, "bash", args, &deny_list);
+        try std.testing.expect(std.mem.startsWith(u8, out, "refused:"));
+        try std.testing.expect(std.mem.indexOf(u8, out, "denied by configuration") != null);
+    }
+
+    const allowed = [_][]const u8{
+        "python3 run_sudoku.py",
+        "cat pseudocode.txt",
+        "git status",
+        "cargo test",
+        "rm -r /tmp/safe",
+        "reboot_service.sh",
+        "issue_tracker.py",
+        "echo hi",
+    };
+    for (allowed) |cmd| {
+        try std.testing.expectEqual(@as(?[]const u8, null), deniedInCommand(cmd, &deny_list));
     }
 }
 
