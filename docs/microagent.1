@@ -25,7 +25,18 @@ Two bare arguments are a usage error rather than a prompt. A bare
 .B help
 prints the built-in usage text when the prompt is still empty. A bare
 .B \-\-
-ends the flags, so a task beginning with a dash is passed after it.
+ends the flags, so a task beginning with a dash is passed after it. A bare
+.B update
+is the subcommand when it is the first argument, and a task of that name
+otherwise; it follows a flag or a
+.BR \-\- .
+.PP
+A word that names no flag is answered with the one it is closest to, so
+.B \-\-modl
+says did you mean
+.BR \-\-model ?
+A word close to none of them is reported plainly, since naming the least bad of
+a dozen is worse than naming none.
 .PP
 Tools: bash, read, write, edit, multi_edit, search, ast, git, todo, and the
 .B skill
@@ -192,6 +203,16 @@ skills.
 Set to 1 to trace a stuck stream on stderr and print the configuration the run
 resolved: model, base url, ceilings, the config file read, the skill roots, and
 the name of the source the api key came from, never the key.
+.TP
+.BR NO_COLOR ", " TERM=dumb
+The tool gutter draws the tool name in bold on a terminal and in plain text
+everywhere else.
+.B NO_COLOR
+set to anything but an empty string, or
+.B TERM=dumb
+, leaves the bold out even at a terminal. The value of
+.B NO_COLOR
+is not read, only the name, and an empty value is not a setting.
 .SH FILES
 .TP
 .I ~/.microagent/config.toml

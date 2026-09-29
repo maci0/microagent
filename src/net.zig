@@ -130,6 +130,102 @@ pub fn caBundlePath(env: *const std.process.Environ.Map) []const u8 {
     return "";
 }
 
+/// Whether this program may draw escape sequences for a reader. False for a
+/// pipe, a file, `TERM=dumb`, and `NO_COLOR` set to anything but an empty
+/// string, which is the opt-out every other tool honors: a terminal is where
+/// bold is emphasis, and everywhere else the two bytes are text.
+///
+/// `NO_COLOR` is read for its presence and not for its value, so `NO_COLOR=0`
+/// and `NO_COLOR=false` still turn color off. That is the convention the
+/// variable's own site documents, and it is the reading that cannot surprise a
+/// user who set the name in a terminal profile expecting it to work. The
+/// exception is an empty value, which a wrapper that populates the environment
+/// from a file leaves behind with the name set and nothing behind it; an empty
+/// value is not a setting, the same rule every other variable here follows.
+pub fn colorEnabled(env: *const std.process.Environ.Map) bool {
+    if (env.get("NO_COLOR")) |v| {
+        if (std.mem.trim(u8, v, env_surrounding).len > 0) return false;
+    }
+    if (env.get("TERM")) |t| {
+        if (std.mem.eql(u8, t, "dumb")) return false;
+    }
+    return true;
+}
+
+/// The candidate closest to `word`, or null when nothing is close enough to be
+/// worth naming to a reader. The threshold scales with the length of the word,
+/// so a dropped letter in a long flag is a suggestion and a two-letter word is
+/// not: at one fixed distance `--m` would be "close" to every flag in a table,
+/// and naming the least bad of them is worse than naming none.
+///
+/// Both commands answer a misspelling the same way, and the candidates are the
+/// caller's because each command has its own flags: naming `--reasoning-effort`
+/// to `microagent update` would send a reader looking for a flag that subcommand
+/// does not have.
+pub fn nearestFlag(word: []const u8, candidates: []const []const u8) ?[]const u8 {
+    if (word.len < 3) return null;
+    var best: ?[]const u8 = null;
+    var best_distance: usize = 0;
+    for (candidates) |candidate| {
+        const d = flagDistance(word, candidate) orelse continue;
+        if (best == null or d < best_distance) {
+            best_distance = d;
+            best = candidate;
+        }
+    }
+    return best;
+}
+
+/// The edits that separate a mistyped word from a flag, or null when they are
+/// too far apart for a suggestion to be worth anything. Two rules, both needed:
+///
+/// At most two edits, because a word that differs from every flag by three
+/// letters is not a misspelling of any of them. `nope` is three substitutions
+/// from `model` and four from `print`, and answering either sends a reader
+/// toward a flag they did not half-type.
+///
+/// At most a third of the longer of the two, so the rule scales with the name:
+/// `--api-ke` is two edits from `--api-key` and a third of its length, and is
+/// suggested, while two edits in a five-letter name is most of the name and is
+/// not. A short flag and a long one are both measured this way, so `-m` is
+/// suggested for `--m` and `--m` is suggested for `-m`, and neither is suggested
+/// for a word three letters away.
+fn flagDistance(word: []const u8, candidate: []const u8) ?usize {
+    const c = if (std.mem.startsWith(u8, candidate, "--")) candidate[2..] else candidate;
+    const w = if (std.mem.startsWith(u8, word, "--")) word[2..] else word;
+    if (c.len == 0 or w.len == 0) return null;
+    // A word that starts a candidate and stops is a truncated flag, and costs
+    // one edit whatever tail is missing: `--reasoning` is a prefix of exactly
+    // one flag, and measuring the missing half would put it level with
+    // `--config`, which is what it is not.
+    if (std.mem.startsWith(u8, c, w)) return 1;
+    const d = editDistance(w, c);
+    const longer = @max(w.len, c.len);
+    if (d > 2 or d * 3 > longer) return null;
+    return d;
+}
+
+/// Levenshtein distance over two rows, so a long word costs two allocations of
+/// its own length rather than a square of it.
+fn editDistance(a: []const u8, b: []const u8) usize {
+    if (a.len == 0) return b.len;
+    if (b.len == 0) return a.len;
+    const gpa = std.heap.page_allocator;
+    const prev = gpa.alloc(u8, b.len + 1) catch return a.len + b.len;
+    defer gpa.free(prev);
+    const cur = gpa.alloc(u8, b.len + 1) catch return a.len + b.len;
+    defer gpa.free(cur);
+    for (0..b.len + 1) |j| prev[j] = @intCast(j);
+    for (a, 0..) |ca, i| {
+        cur[0] = @intCast(i + 1);
+        for (b, 0..) |cb, j| {
+            const cost: u8 = if (ca == cb) 0 else 1;
+            cur[j + 1] = @min(@min(cur[j] + 1, prev[j + 1] + 1), prev[j] + cost);
+        }
+        @memcpy(prev, cur);
+    }
+    return prev[b.len];
+}
 /// `$HOME`, trimmed, or null when it is not set or holds nothing but
 /// whitespace. Every path built under it is a path no filesystem holds when
 /// the value carries the newline a wrapper that populates the environment from
@@ -643,6 +739,39 @@ test "the CA bundle comes from the project's variable first, then the system one
     try std.testing.expectEqualStrings("/tmp/bundle.pem", caBundlePath(&env));
     try env.put("MICROAGENT_CA_BUNDLE", "  ");
     try std.testing.expectEqualStrings("/etc/ssl/certs/ca-certificates.crt", caBundlePath(&env));
+}
+
+test "color is on until NO_COLOR or a dumb TERM says otherwise" {
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    try std.testing.expect(colorEnabled(&env));
+
+    // NO_COLOR is read for its presence, so a value that reads as false in any
+    // other tool still turns color off here. A user who set the name in a
+    // terminal profile meant it to work, whatever they put behind it.
+    try env.put("NO_COLOR", "1");
+    try std.testing.expect(!colorEnabled(&env));
+    try env.put("NO_COLOR", "0");
+    try std.testing.expect(!colorEnabled(&env));
+    try env.put("NO_COLOR", "false");
+    try std.testing.expect(!colorEnabled(&env));
+
+    // An empty value is the name with nothing behind it, which is what a
+    // wrapper that populates the environment from a file leaves behind, and it
+    // is not a setting.
+    try env.put("NO_COLOR", "");
+    try std.testing.expect(colorEnabled(&env));
+    try env.put("NO_COLOR", "  ");
+    try std.testing.expect(colorEnabled(&env));
+
+    // A dumb terminal renders no escapes, so the two bytes would be text, and
+    // it answers whether or not NO_COLOR is set.
+    try env.put("TERM", "dumb");
+    try std.testing.expect(!colorEnabled(&env));
+    try env.put("TERM", "xterm-256color");
+    try std.testing.expect(colorEnabled(&env));
+    try env.put("NO_COLOR", "1");
+    try std.testing.expect(!colorEnabled(&env));
 }
 
 test "a CA bundle that names no certificate leaves the client scanning the system store" {

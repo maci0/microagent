@@ -393,8 +393,10 @@ fn runMain(init: std.process.Init) !u8 {
     debug_enabled = debugEnabled(init.environ_map);
 
     // `microagent update` is a subcommand, not a prompt: it is dispatched
-    // before the agent's own flags so it never needs an API key.
-    if (args.items.len > 1 and std.mem.eql(u8, args.items[1], "update")) {
+    // before the agent's own flags so it never needs an API key. Only in first
+    // position, which is why the help text has to say so: anywhere else the word
+    // is a task, the way `help` is a task after `-p`.
+    if (args.items.len > 1 and subcommandArg(args.items[1])) {
         return update_mod.run(io, gpa, init.arena.allocator(), init.environ_map, args.items[2..]);
     }
 
@@ -789,9 +791,14 @@ const help_text =
     \\variable is named on stderr rather than stopping it. A bare -- ends the
     \\flags, so a task that begins with a dash is passed after it. A bare "help"
     \\asks for this text while the prompt is still empty; any other bare word, or
-    \\a value of --print, is a task. A
+    \\a value of --print, is a task, and so is the word "update" anywhere but
+    \\first: as the first argument it is the subcommand below, and a task of
+    \\that name is written after a flag or a --. A
     \\second bare word is the one thing this does not read as a task: two prompts
-    \\are a usage error.
+    \\are a usage error. A word that names no flag is answered with the one it
+    \\is closest to, so --modl says did you mean --model?; a word close to none
+    \\of them is reported plainly, because naming the least bad of a dozen is
+    \\worse than naming none.
     \\
     \\session log:
     \\  MICROAGENT_SESSION_DIR where the per-response JSONL session log goes
@@ -861,10 +868,16 @@ const help_text =
     \\                         0, off, no, false and an empty value all leave
     \\                         it off.
     \\
+    \\NO_COLOR, TERM=dumb     the tool gutter draws its name in bold on a
+    \\                         terminal, and in plain text everywhere else, so
+    \\                         NO_COLOR set to anything but an empty string (the
+    \\                         value is not read, only the name) or TERM=dumb
+    \\                         leaves the bold out even at a terminal
+    \\
     \\A variable set to an empty string is not a value: MICROAGENT_MODEL,
     \\MICROAGENT_BASE_URL, MICROAGENT_REASONING_EFFORT, MICROAGENT_BUDGET_SECONDS,
     \\MICROAGENT_MAX_SPEND_TOKENS, MICROAGENT_MAX_TURNS, MICROAGENT_MAX_TOKENS,
-    \\MICROAGENT_STALL_TIMEOUT and MDEBUG keep their defaults, and
+    \\MICROAGENT_STALL_TIMEOUT, MDEBUG and NO_COLOR keep their defaults, and
     \\MICROAGENT_CA_BUNDLE and MICROAGENT_API_KEY fall through to whatever
     \\comes next.
     \\MICROAGENT_CONFIG, MICROAGENT_SESSION_DIR and MICROAGENT_SKILLS are the
@@ -941,6 +954,30 @@ test "the help text names the default model and the two config-only provider key
     try std.testing.expect(std.mem.indexOf(u8, help_text, "config key") != null);
     // No provider is named as a default, because there is none.
     try std.testing.expect(std.mem.indexOf(u8, help_text, "openrouter") == null);
+}
+
+test "the help text says the one bare word that is a subcommand, not a task" {
+    // `update` as the first argument is dispatched before the prompt is read,
+    // so `microagent update` installs rather than answering a one-word task.
+    // The help text told the reader the opposite, that any bare word but `help`
+    // is a task, and that is the sentence a reader acts on. The test holds the
+    // text to the dispatch, and the dispatch to the text.
+    const gpa = std.testing.allocator;
+    const doc = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, usage_doc_path, gpa, .limited(max_usage_doc_bytes));
+    defer gpa.free(doc);
+    const claim = "is the subcommand";
+    if (std.mem.indexOf(u8, help_text, claim) == null) {
+        std.debug.print("\n--help does not say that a first argument of \"update\" is the subcommand\n", .{});
+        return error.TestUnexpectedResult;
+    }
+    if (std.mem.indexOf(u8, doc, claim) == null) {
+        std.debug.print("\n" ++ usage_doc_path ++ ": does not say that a first argument of \"update\" is the subcommand\n", .{});
+        return error.TestUnexpectedResult;
+    }
+    // The dispatch itself, so the sentence cannot describe a word the binary
+    // no longer reserves.
+    const argv = [_][]const u8{ "update", "--check" };
+    try std.testing.expect(subcommandArg(argv[0]));
 }
 
 test "the help text names the spend alarm the run prints" {
@@ -1386,7 +1423,7 @@ fn parseArgs(buf: []u8, argv: []const []const u8, opts: *Options) ?[]const u8 {
         } else if (arg.len == 0) {
             return empty_prompt_message;
         } else {
-            return std.fmt.bufPrint(buf, "unknown or incomplete argument '{s}'", .{clip(arg)}) catch "bad arguments";
+            return unknownArgument(buf, arg);
         }
     }
     return null;
@@ -1396,6 +1433,50 @@ fn parseArgs(buf: []u8, argv: []const []const u8, opts: *Options) ?[]const u8 {
 /// `--print=`. Saying it is an unknown argument would describe a flag nobody
 /// wrote, so both spellings of the mistake get this one sentence.
 const empty_prompt_message = "the prompt is empty: pass the task as an argument or with --print";
+
+/// A word that names no flag, naming the one it is closest to when there is one.
+/// A misspelling is the whole of the mistake, and `unknown argument '--modl'`
+/// sends a reader to the source to find the flag they meant; the same line
+/// naming `--model` is the difference between a fix and a search. The
+/// suggestion is drawn from the flags this program has, so a name nobody wrote
+/// is never echoed back as one to try, and a word far from every flag is left
+/// without one rather than given the least bad of a dozen.
+fn unknownArgument(buf: []u8, arg: []const u8) []const u8 {
+    const shown = clip(arg);
+    const near = net.nearestFlag(shown, &known_words) orelse
+        return std.fmt.bufPrint(buf, "unknown or incomplete argument '{s}'", .{shown}) catch "bad arguments";
+    return std.fmt.bufPrint(buf, "unknown argument '{s}'; did you mean {s}?", .{ shown, near }) catch "bad arguments";
+}
+
+/// Every word this command line reads as a request rather than a task: the
+/// valued flags in both spellings, the two that take no value, and the two bare
+/// words. A near miss in any of them is answered from this list. The list is
+/// written out rather than built from `valued_flags`, because a misspelling is
+/// the one place a reader has to see a name spelled the way it is spelled here;
+/// the test below is what holds the two together, and it fails on a flag added
+/// to the parser and not here.
+const known_words = [_][]const u8{
+    "--print",
+    "--model",
+    "--base-url",
+    "--api-key",
+    "--ca-bundle",
+    "--config",
+    "--reasoning-effort",
+    "--budget",
+    "--max-spend-tokens",
+    "--max-turns",
+    "--max-tokens",
+    "--stall-timeout",
+    "--help",
+    "--version",
+    "-p",
+    "-m",
+    "-b",
+    "-k",
+    help_word,
+    "update",
+};
 
 /// The action `--help` or `--version` asks for, or null when the command line
 /// asks for neither. Read over the same arguments, and with the same rules,
@@ -1437,6 +1518,13 @@ fn earlyAction(argv: []const []const u8) ?Action {
 /// The one bare word that asks for the help text rather than naming a task.
 /// `update` answers to `--help` and `-h` only, so the word is spelled here.
 const help_word = "help";
+
+/// The one bare word that names a subcommand rather than a task, and only in
+/// first position: the prompt parser never sees it, so a task of that name has
+/// to arrive after a flag or a `--`.
+fn subcommandArg(arg: []const u8) bool {
+    return std.mem.eql(u8, arg, "update");
+}
 
 fn isFlag(name: []const u8, short: []const u8, long: []const u8) bool {
     return std.mem.eql(u8, name, short) or std.mem.eql(u8, name, long);
@@ -1530,6 +1618,8 @@ const env_vars = [_][]const u8{
     "MICROAGENT_SESSION_DIR",
     "GITHUB_TOKEN",
     "MDEBUG",
+    "NO_COLOR",
+    "TERM",
     "HOME",
 };
 
@@ -1556,6 +1646,7 @@ const empty_is_unset_vars = [_][]const u8{
     "MICROAGENT_MAX_TOKENS",
     "MICROAGENT_STALL_TIMEOUT",
     "MDEBUG",
+    "NO_COLOR",
 };
 
 /// Every variable this program reads a credential out of, and which a tool
@@ -3874,6 +3965,74 @@ test "a wrong command line names the flag and the value it was given" {
     try std.testing.expectEqualStrings("prompt given twice: 'one' and 'two'", parseArgs(&buf, &.{ "-p", "one", "--print=two" }, &joined).?);
     // An empty word is an empty prompt, not an argument nobody knows.
     try std.testing.expectEqualStrings("the prompt is empty: pass the task as an argument or with --print", parseArgs(&buf, &.{""}, &opts).?);
+}
+
+test "a misspelled flag names the one it is closest to" {
+    // A misspelling is the whole of the mistake, and the message is the only
+    // place a reader is told which flag they meant. Each case is a way a
+    // misspelling actually arrives: a dropped letter, a transposition, a
+    // truncated name, and a short flag written long.
+    var buf: [512]u8 = undefined;
+    for ([_]struct { typed: []const u8, want: []const u8 }{
+        .{ .typed = "--modl", .want = "--model" },
+        .{ .typed = "--max-turs", .want = "--max-turns" },
+        .{ .typed = "--confg", .want = "--config" },
+        .{ .typed = "--helpp", .want = "--help" },
+        .{ .typed = "--api-ke", .want = "--api-key" },
+        .{ .typed = "--budgets", .want = "--budget" },
+        // A truncated long name is a prefix of exactly one flag, and that is
+        // what names it: measured by edit distance, `--reasoning` is as far
+        // from `--reasoning-effort` as it is from `--config`.
+        .{ .typed = "--reasoning", .want = "--reasoning-effort" },
+        .{ .typed = "--upda", .want = "update" },
+    }) |c| {
+        var one: Options = .{};
+        try std.testing.expectEqualStrings(
+            std.fmt.bufPrint(&buf, "unknown argument '{s}'; did you mean {s}?", .{ c.typed, c.want }) catch unreachable,
+            parseArgs(&buf, &.{c.typed}, &one).?,
+        );
+    }
+
+    // A word far from every flag is left without a suggestion, because naming
+    // the least bad of a dozen is worse than naming none: `--nope` is three
+    // substitutions from `--model` and four from `--print`, and neither is what
+    // anyone who typed it meant.
+    for ([_][]const u8{ "--nope", "--zzzzzzz", "-x", "-q" }) |typed| {
+        var one: Options = .{};
+        try std.testing.expectEqualStrings(
+            std.fmt.bufPrint(&buf, "unknown or incomplete argument '{s}'", .{typed}) catch unreachable,
+            parseArgs(&buf, &.{typed}, &one).?,
+        );
+    }
+}
+
+test "every flag the parser reads is a word a misspelling can be answered from" {
+    // The list is written out, and a flag added to the parser without being
+    // added here is a flag whose misspelling gets no suggestion, silently. The
+    // two answer messages are the only place a reader learns the spelling.
+    for (valued_flags) |flag| {
+        for ([_][]const u8{ flag.long, flag.short orelse "" }) |word| {
+            if (word.len == 0) continue;
+            var found = false;
+            for (known_words) |known| {
+                if (std.mem.eql(u8, known, word)) found = true;
+            }
+            if (!found) {
+                std.debug.print("\n{s} is a flag the parser reads and known_words does not name, so a misspelling of it gets no suggestion\n", .{word});
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
+    for ([_][]const u8{ "--help", "--version", help_word, "update" }) |word| {
+        var found = false;
+        for (known_words) |known| {
+            if (std.mem.eql(u8, known, word)) found = true;
+        }
+        if (!found) {
+            std.debug.print("\n{s} is a word the parser reads and known_words does not name\n", .{word});
+            return error.TestUnexpectedResult;
+        }
+    }
 }
 
 // An `argv` entry is whatever bytes the shell passed, so a diagnostic that

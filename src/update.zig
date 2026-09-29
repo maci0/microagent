@@ -460,7 +460,8 @@ const usage_text =
     \\stdout is the release page URL with --check, else one "Installed <tag> to
     \\<path>" line (nothing when already current); notes go to stderr. Exit 0:
     \\checked, installed or current. Exit 1: failed. Exit 2: usage error, with the
-    \\reason and this text on stderr.
+    \\reason and this text on stderr. A misspelled flag is answered with the one
+    \\it is closest to, so --chek says did you mean --check?
     \\
 ;
 
@@ -487,6 +488,24 @@ fn parseArgs(args: []const []const u8) Parsed {
     return parsed;
 }
 
+/// The three words this subcommand reads, and the two spellings of each, so a
+/// misspelling is answered with the flag rather than left to the reader to find.
+/// The list is written out rather than built from `parseArgs` for the reason the
+/// agent's is: this is the one line a reader sees when they typed a flag wrong,
+/// and a name spelled here has to be the name they should type. The test below
+/// holds the two together.
+const known_words = [_][]const u8{ "--check", "-c", "--help", "-h", "--version", "-V" };
+
+/// A word this subcommand has no flag for, naming the one it is closest to when
+/// there is one. Same rule and same wording as the agent's, so a reader who has
+/// mistyped one flag does not have to learn two error messages.
+fn unknownArgument(arena: std.mem.Allocator, arg: []const u8) []const u8 {
+    const shown = quoteUntrusted(arena, arg);
+    const near = net.nearestFlag(shown, &known_words) orelse
+        return std.fmt.allocPrint(arena, "unknown argument '{s}'", .{shown}) catch "unknown argument";
+    return std.fmt.allocPrint(arena, "unknown argument '{s}'; did you mean {s}?", .{ shown, near }) catch "unknown argument";
+}
+
 /// Subcommand entry, called by main with the arguments after `update`.
 /// Returns the process exit code.
 pub fn run(
@@ -506,7 +525,7 @@ pub fn run(
             return 0;
         },
         .unknown => |arg| {
-            say(io, "microagent update: unknown argument '{s}'", .{quoteUntrusted(arena, arg)});
+            say(io, "microagent update: {s}", .{unknownArgument(arena, arg)});
             net.writeErr(io, usage_text);
             return 2;
         },
@@ -684,6 +703,40 @@ test "update: the command line reads --check, -h and -V, and refuses the rest" {
         try std.testing.expect(parseArgs(args) == .unknown);
     }
     try std.testing.expectEqualStrings("--nope", parseArgs(&.{ "--check", "--nope" }).unknown);
+}
+
+test "update: a misspelled flag names the one it is closest to" {
+    // The same rule and the same wording as the agent's, so a reader who has
+    // mistyped one flag does not have to learn two error messages. A word far
+    // from every flag is left without a suggestion: `--nope` is three
+    // substitutions from `--check` and naming it sends a reader nowhere.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    try std.testing.expectEqualStrings("unknown argument '--chek'; did you mean --check?", unknownArgument(arena, "--chek"));
+    try std.testing.expectEqualStrings("unknown argument '--hep'; did you mean --help?", unknownArgument(arena, "--hep"));
+    // A short flag is one or two letters, so there is no misspelling of one far
+    // enough from it to be worth naming, and `-chek` gets no suggestion rather
+    // than the `--check` whose letters it is missing.
+    try std.testing.expectEqualStrings("unknown argument '-chek'", unknownArgument(arena, "-chek"));
+    try std.testing.expectEqualStrings("unknown argument '--nope'", unknownArgument(arena, "--nope"));
+    try std.testing.expectEqualStrings("unknown argument 'x'", unknownArgument(arena, "x"));
+}
+
+test "update: every flag the parser reads is one a misspelling can be answered from" {
+    // A flag added to `parseArgs` and not to `known_words` gets no suggestion,
+    // silently, and the message is the only place a reader learns the spelling.
+    for (known_words) |word| {
+        var named_by_parser = false;
+        for ([_][]const u8{ "--check", "-c", "--help", "-h", "--version", "-V" }) |parsed| {
+            if (std.mem.eql(u8, parsed, word)) named_by_parser = true;
+        }
+        if (!named_by_parser) {
+            std.debug.print("\n{s} is in known_words and no flag of parseArgs reads it\n", .{word});
+            return error.TestUnexpectedResult;
+        }
+    }
 }
 
 const args_corpus = [_][]const u8{

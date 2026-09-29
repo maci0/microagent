@@ -635,7 +635,7 @@ pub fn runTool(
     // handler here fails the build rather than answering `unknown tool` to a
     // model the schema had just advertised it to.
     const tool = chat.Tool.fromName(call.name) orelse return unknownTool(arena, call.name);
-    noteToolCall(io, arena, tool, args);
+    noteToolCall(io, arena, tool, args, environ_map);
     return switch (tool) {
         .bash => toolBash(io, arena, args, ceiling_ms, environ_map, deny_commands),
         .read => toolRead(io, arena, args),
@@ -676,11 +676,13 @@ const max_gutter_line_bytes = 5 + 40 + 1 + 1 + 120 + 1 + bold_name_bytes;
 /// The name is drawn bold only when stderr is a terminal: a captured run, which
 /// is every gauntlet review and every log file, gets the same line with no
 /// escape bytes in it, because a reader that is not a terminal would show them
-/// as text.
-fn noteToolCall(io: Io, arena: std.mem.Allocator, tool: chat.Tool, args: std.json.ObjectMap) void {
+/// as text. A terminal that asked for no color with `NO_COLOR`, or a `TERM` of
+/// `dumb`, is a terminal that gets the plain line too: the two bytes are
+/// emphasis to a reader that can render them and noise to one that cannot.
+fn noteToolCall(io: Io, arena: std.mem.Allocator, tool: chat.Tool, args: std.json.ObjectMap, environ_map: ?*const std.process.Environ.Map) void {
     var buf: [max_gutter_line_bytes]u8 = undefined;
-    const bold = Io.File.stderr().isTty(io) catch false;
-    net.writeErr(io, toolCallLine(arena, &buf, tool, args, bold) catch return);
+    const bold = if (environ_map) |env| net.colorEnabled(env) else true;
+    net.writeErr(io, toolCallLine(arena, &buf, tool, args, bold and (Io.File.stderr().isTty(io) catch false)) catch return);
 }
 
 /// The path of a `multi_edit` call's first edit, which is what its gutter line shows: the call has

@@ -57,7 +57,7 @@ release modes; the three, their memory and their instruction counts are in
 
 A run prints the model's answer to stdout and a usage line after each response; tool calls show on
 stderr as a one-line gutter such as `⏺ read: src/main.zig`, with the tool name in bold when
-stderr is a terminal:
+stderr is a terminal and `NO_COLOR` is unset:
 
 ```json
 {"type":"usage","usage":{"prompt_tokens":910,"cached_tokens":832,"completion_tokens":18,"reasoning_tokens":0,"total_tokens":928}}

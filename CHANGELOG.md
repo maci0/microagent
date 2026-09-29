@@ -16,6 +16,21 @@ release, and `microagent update` moves you to it.
 
 ### Added
 
+- A misspelled flag names the one it is closest to. `microagent --modl` said
+  `unknown or incomplete argument '--modl'`, which sends a reader to the source
+  to find the flag they meant; it now says `did you mean --model?`, and
+  `microagent update --chek` says `did you mean --check?`. Both commands use
+  one rule and one wording, and a word close to none of a command's flags is
+  still reported plainly, because naming the least bad of a dozen is worse than
+  naming none.
+
+- `NO_COLOR` and `TERM=dumb` turn the tool gutter's bold off. The gutter already
+  drew its name in bold only when stderr was a terminal, but a terminal that has
+  asked for no color still got the two escape bytes, and `NO_COLOR` is the opt-out
+  every other tool honors. The name is read for its presence and not its value,
+  so `NO_COLOR=0` and `NO_COLOR=false` both turn it off; an empty value is the
+  name with nothing behind it, and is not a setting.
+
 - Repository instructions are read at start-up: `AGENTS.md` in the working
   directory, or whatever `agents_files` names, appended to the system prompt
   between a `--- begin repository instructions: <path> ---` marker and a

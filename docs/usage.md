@@ -95,9 +95,14 @@ MICROAGENT_MAX_TURNS=0 with --max-turns 5 is a run with five turns, and the
 variable is named on stderr rather than stopping it. A bare -- ends the
 flags, so a task that begins with a dash is passed after it. A bare "help"
 asks for this text while the prompt is still empty; any other bare word, or
-a value of --print, is a task. A
+a value of --print, is a task, and so is the word "update" anywhere but
+first: as the first argument it is the subcommand below, and a task of
+that name is written after a flag or a --. A
 second bare word is the one thing this does not read as a task: two prompts
-are a usage error.
+are a usage error. A word that names no flag is answered with the one it is
+closest to, so --modl says did you mean --model?; a word close to none of them
+is reported plainly, because naming the least bad of a dozen is worse than
+naming none.
 
 session log:
   MICROAGENT_SESSION_DIR where the per-response JSONL session log goes
@@ -167,10 +172,16 @@ MDEBUG=1                 trace a stuck stream on stderr, and print the
                          0, off, no, false and an empty value all leave
                          it off.
 
+NO_COLOR, TERM=dumb     the tool gutter draws its name in bold on a
+                         terminal, and in plain text everywhere else, so
+                         NO_COLOR set to anything but an empty string (the
+                         value is not read, only the name) or TERM=dumb
+                         leaves the bold out even at a terminal
+
 A variable set to an empty string is not a value: MICROAGENT_MODEL,
 MICROAGENT_BASE_URL, MICROAGENT_REASONING_EFFORT, MICROAGENT_BUDGET_SECONDS,
 MICROAGENT_MAX_SPEND_TOKENS, MICROAGENT_MAX_TURNS, MICROAGENT_MAX_TOKENS,
-MICROAGENT_STALL_TIMEOUT and MDEBUG keep their defaults, and
+MICROAGENT_STALL_TIMEOUT, MDEBUG and NO_COLOR keep their defaults, and
 MICROAGENT_CA_BUNDLE and MICROAGENT_API_KEY fall through to whatever
 comes next.
 MICROAGENT_CONFIG, MICROAGENT_SESSION_DIR and MICROAGENT_SKILLS are the
@@ -645,6 +656,8 @@ Counters are cumulative for the run, which is the shape gauntlet's usage reader 
 from. Tool activity goes to stderr as a one-line gutter (`⏺ read: src/main.zig`, the name in bold
 when stderr is a terminal and plain when it is a pipe or a file), with control
 characters in a path or command written as `\xNN` so a line stays one line.
+`NO_COLOR` set to anything but an empty string, or `TERM=dumb`, leaves the bold out even at a
+terminal.
 
 `cached_tokens` is the part of the prompt the provider served from its cache, read from whichever of
 `prompt_tokens_details.cached_tokens`, `prompt_cache_hit_tokens` or `cache_read_input_tokens` the
