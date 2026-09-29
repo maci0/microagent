@@ -201,8 +201,9 @@ pub fn open(io: Io, arena: std.mem.Allocator, session_dir: []const u8, model: []
     // reaching a prune placed after the open. The clock a wrong machine reads
     // is the ordinary way to get there, and every pre-1970 stamp is zero, so
     // every later run collides on the same names.
-    pruneSessions(io, arena, session_dir);
-    const stamp = logStamp(Io.Clock.real.now(io).nanoseconds);
+    const now_ns = Io.Clock.real.now(io).nanoseconds;
+    pruneSessions(io, arena, session_dir, now_ns);
+    const stamp = logStamp(now_ns);
     const file = createSessionLog(io, arena, session_dir, stamp) orelse {
         net.note(io, arena, "microagent: no session log could be opened under {s}; the rest of this run is not recorded\n", .{shown});
         return null;
@@ -211,7 +212,7 @@ pub fn open(io: Io, arena: std.mem.Allocator, session_dir: []const u8, model: []
     // a machine that keeps ending its turn here settles on one more than the
     // window the store is kept at. Pruning again with the log in place ends it
     // on the number rather than one past it.
-    pruneSessions(io, arena, session_dir);
+    pruneSessions(io, arena, session_dir, now_ns);
     return .{ .file = file, .cwd = cwd, .model = model, .dir = session_dir };
 }
 
@@ -240,6 +241,30 @@ fn recordStampMs(now_ns: i96) i64 {
 /// ever deleted from, so a machine running gauntlet loops accumulated one file
 /// per review forever; a monitor reads the recent runs, not the whole history.
 const max_session_logs = 200;
+
+/// How long a log is kept whatever the count says, in nanoseconds. The count
+/// alone is not a retention period: it bounds the store on a machine that runs
+/// often and bounds nothing at all on one that runs a few times a week, where
+/// two hundred logs is four years of the working directory each record names.
+/// Thirty days is well past the gap a monitor polling a running session has,
+/// and a log older than it describes a run no reader is following.
+const max_session_log_age_ns: u128 = 30 * 24 * 60 * 60 * std.time.ns_per_s;
+
+/// Whether a log's name is further in the past than the age window allows,
+/// against the clock reading the run that is pruning.
+///
+/// A clock at or before the epoch expires nothing: `logStamp` clamps a stamp
+/// written by such a machine to zero, and a store of zero-stamped logs is a
+/// machine whose clock is wrong rather than one whose logs are old. A stamp
+/// past the reading is a clock that was set back between two runs, not a log
+/// from the future, so it is not expired either: a wrong clock in that
+/// direction must not empty a store that is under the count window.
+fn stampExpired(stamp: u128, now_ns: i128) bool {
+    if (now_ns <= 0) return false;
+    const now: u128 = @intCast(now_ns);
+    if (stamp > now) return false;
+    return now - stamp > max_session_log_age_ns;
+}
 
 fn allDigits(text: []const u8) bool {
     if (text.len == 0) return false;
@@ -290,12 +315,20 @@ fn logName(name: []const u8) ?LogName {
     };
 }
 
-/// Deletes the oldest logs past `max_session_logs`. The oldest is read off the
+/// Deletes the oldest logs past `max_session_logs`, and every log older than
+/// `max_session_log_age_ns` whatever the count says. The oldest is read off the
 /// numbers the name carries rather than off its bytes: `-` sorts below every
 /// digit and a short stamp sorts below a long one, so a lexicographic sort puts
 /// a re-run's `<stamp>-1.jsonl` ahead of the `<stamp>.jsonl` that was written
 /// before it, and hands the retention window the wrong file of the pair. Only
 /// this program's own `<digits>[-<digits>].jsonl` files are touched.
+///
+/// `now_ns` is the run's own clock reading, taken by the caller so the two
+/// prunes `open` makes and the name this run writes all read one instant. The
+/// age window is the half that is a retention period rather than a size: the
+/// count is a bound on a busy machine and nothing at all on an idle one, and
+/// what a log names is the directory the run worked in, which carries the
+/// account name of whoever ran it.
 ///
 /// A walk that fails part way through leaves a list of only the names it
 /// reached, and pruning from that list is not a smaller prune: the entries
@@ -313,8 +346,8 @@ fn logName(name: []const u8) ?LogName {
 /// creates the log: `createFileAbsolute` is a `cwd`-relative create, not a
 /// checked one, so `MICROAGENT_SESSION_DIR=logs/x` names a store the run really
 /// opens where it was asked for.
-fn pruneSessions(io: Io, arena: std.mem.Allocator, session_dir: []const u8) void {
-    pruneSessionsTo(io, arena, session_dir, max_session_logs);
+fn pruneSessions(io: Io, arena: std.mem.Allocator, session_dir: []const u8, now_ns: i128) void {
+    pruneSessionsTo(io, arena, session_dir, max_session_logs, now_ns);
 }
 
 /// The note for a list the walk could not finish, however far it got: a read
@@ -333,10 +366,12 @@ fn partialList(io: Io, arena: std.mem.Allocator, shown: []const u8, seen: usize,
     });
 }
 
-/// The pruner, with the window it keeps as an argument rather than a constant,
-/// so the fuzz harness can put a handful of names over a window of two and
-/// check what the delete loop does with them.
-fn pruneSessionsTo(io: Io, arena: std.mem.Allocator, session_dir: []const u8, keep: usize) void {
+/// The pruner, with the window it keeps and the clock it measures the age
+/// window against as arguments rather than constants, so the fuzz harness can
+/// put a handful of names over a window of two and check what the delete loop
+/// does with them, and a test can name a store a hundred days old without
+/// waiting for it.
+fn pruneSessionsTo(io: Io, arena: std.mem.Allocator, session_dir: []const u8, keep: usize, now_ns: i128) void {
     // Escaped once for the two notes below, for the reason `createSessionLog`
     // gives: the directory is a variable or a path under `$HOME`.
     const shown = chat.safeTextAll(arena, session_dir);
@@ -383,8 +418,10 @@ fn pruneSessionsTo(io: Io, arena: std.mem.Allocator, session_dir: []const u8, ke
             };
         }
     }
-    if (found.items.len <= keep) return;
-
+    // Sorted oldest first, so the count window and the age window are both
+    // monotone along the list and the logs to delete are one prefix of it: the
+    // first entry that is neither over the count nor past the age ends the
+    // walk, and nothing after it is deletable.
     std.mem.sort(Found, found.items, {}, struct {
         fn lessThan(_: void, a: Found, b: Found) bool {
             if (a.key.olderThan(b.key)) return true;
@@ -393,17 +430,27 @@ fn pruneSessionsTo(io: Io, arena: std.mem.Allocator, session_dir: []const u8, ke
         }
     }.lessThan);
 
+    var deleting: usize = 0;
     var i: usize = 0;
+    while (i < found.items.len) : (i += 1) {
+        // `i + keep` rather than `found.items.len - keep`, so a `keep` past the
+        // size of the store underflows into a window that deletes all of it.
+        const over_count = i + keep < found.items.len;
+        if (!over_count and !stampExpired(found.items[i].key.stamp, now_ns)) break;
+        deleting += 1;
+    }
+    if (deleting == 0) return;
+
     var failed: usize = 0;
     var first_err: ?anyerror = null;
-    while (i < found.items.len - keep) : (i += 1) {
-        dir.deleteFile(io, found.items[i].path) catch |err| {
+    for (found.items[0..deleting]) |f| {
+        dir.deleteFile(io, f.path) catch |err| {
             failed += 1;
             if (first_err == null) first_err = err;
         };
     }
-    if (failed != 0) net.note(io, arena, "microagent: {d} of {d} session logs under {s} could not be deleted ({s}); the store is over its {d}-log limit and stays that way until they can be\n", .{
-        failed, found.items.len - keep, shown, @errorName(first_err.?), keep,
+    if (failed != 0) net.note(io, arena, "microagent: {d} of {d} session logs under {s} could not be deleted ({s}); the store stays over its {d}-log limit and holds logs past the {d}-day age window until they can be\n", .{
+        failed, deleting, shown, @errorName(first_err.?), keep, max_session_log_age_ns / (24 * 60 * 60 * std.time.ns_per_s),
     });
 }
 
@@ -858,7 +905,7 @@ test "the session store keeps the most recent logs and drops the rest" {
     // program ever wrote is the first one the retention window removes.
     try store.tmp.dir.writeFile(io, .{ .sub_path = "1-.jsonl", .data = "keep me too" });
 
-    pruneSessions(io, arena, dir_path);
+    pruneSessions(io, arena, dir_path, test_now_ns);
 
     try std.testing.expectEqual(max_session_logs, try countSessionLogs(io, arena, dir_path));
     try store.tmp.dir.access(io, "notes.jsonl", .{});
@@ -867,6 +914,56 @@ test "the session store keeps the most recent logs and drops the rest" {
     const newest = try std.fmt.allocPrint(arena, "{d}.jsonl", .{total});
     try store.tmp.dir.access(io, newest, .{});
     try std.testing.expectError(error.FileNotFound, store.tmp.dir.access(io, "1.jsonl", .{}));
+}
+
+// A record's `cwd` is the directory the run worked in, which on most machines
+// is under `$HOME` and names the account that ran it. The count window is a
+// size, not a period: two hundred logs is a fortnight on a machine in a
+// review loop and four years on one that runs a few times a week, so a store
+// nobody prunes holds the working directory of every run the machine has ever
+// done. This is the age half of the window, on a store well under the count.
+test "the session store drops a log the age window has passed" {
+    var store = try StoreFixture.init(std.testing.allocator);
+    defer store.deinit();
+    const io = store.io();
+    const arena = store.arena();
+    const dir_path = try store.path();
+
+    // Three logs a fortnight apart, so the oldest is past the window, the
+    // middle is not, and the newest is this run.
+    const day_ns: u128 = 24 * 60 * 60 * std.time.ns_per_s;
+    const now_ns: i128 = @intCast(40 * day_ns);
+    const ages = [_]u128{ 39, 20, 1 };
+    for (ages) |age| {
+        const name = try std.fmt.allocPrint(arena, "{d}.jsonl", .{now_ns - @as(i128, @intCast(age * day_ns))});
+        try store.tmp.dir.writeFile(io, .{ .sub_path = name, .data = "{}" });
+    }
+    try std.testing.expectEqual(@as(usize, 3), try countSessionLogs(io, arena, dir_path));
+
+    pruneSessions(io, arena, dir_path, now_ns);
+
+    // The count was never the thing at issue: the store held three logs against
+    // a limit of two hundred, and the one that went is the one past the age.
+    try std.testing.expectEqual(@as(usize, 2), try countSessionLogs(io, arena, dir_path));
+    try std.testing.expectError(error.FileNotFound, store.tmp.dir.access(io, try std.fmt.allocPrint(arena, "{d}.jsonl", .{now_ns - @as(i128, @intCast(ages[0] * day_ns))}), .{}));
+    try store.tmp.dir.access(io, try std.fmt.allocPrint(arena, "{d}.jsonl", .{now_ns - @as(i128, @intCast(ages[2] * day_ns))}), .{});
+}
+
+// The window is a period a run measures against its own clock, and the two
+// wrong clocks are the ones a machine reaches it with. Both leave the store
+// as they found it.
+test "a wrong clock expires nothing and the age window is thirty days wide" {
+    const day_ns: u128 = 24 * 60 * 60 * std.time.ns_per_s;
+    try std.testing.expectEqual(@as(u128, 30 * day_ns), max_session_log_age_ns);
+    // Just inside the window, and just outside it.
+    try std.testing.expect(!stampExpired(30 * day_ns, @intCast(60 * day_ns)));
+    try std.testing.expect(stampExpired(29 * day_ns, @intCast(60 * day_ns)));
+    // A clock before the epoch is a machine whose stamp is clamped to zero,
+    // not one whose logs are old.
+    try std.testing.expect(!stampExpired(0, -1_000_000_000));
+    // A clock set back between two runs leaves a stamp past the reading, and
+    // that is a wrong clock rather than a log from the future.
+    try std.testing.expect(!stampExpired(90 * day_ns, @intCast(60 * day_ns)));
 }
 
 // `MICROAGENT_SESSION_DIR=logs/x` names a store through the working directory,
@@ -889,7 +986,7 @@ test "a store named relative to the working directory is pruned where it is" {
         log.close(io);
     }
 
-    pruneSessions(io, arena, relative);
+    pruneSessions(io, arena, relative, test_now_ns);
 
     try std.testing.expectEqual(max_session_logs, try countSessionLogs(io, arena, relative));
 }
@@ -1005,7 +1102,7 @@ test "the session store prunes by stamp, not by the bytes of the name" {
     rerun.close(io);
     try std.testing.expectEqual(max_session_logs + 1, try countSessionLogs(io, arena, dir_path));
 
-    pruneSessions(io, arena, dir_path);
+    pruneSessions(io, arena, dir_path, test_now_ns);
 
     try std.testing.expectEqual(max_session_logs, try countSessionLogs(io, arena, dir_path));
     // The first of the pair is what goes; the run behind it is still the one a
@@ -1065,7 +1162,7 @@ test "a log named from a clock before 1970 is still one the pruner counts" {
         const filler = createSessionLog(io, arena, dir_path, @intCast(i + 3)) orelse return error.TestUnexpectedResult;
         filler.close(io);
     }
-    pruneSessions(io, arena, dir_path);
+    pruneSessions(io, arena, dir_path, test_now_ns);
 
     // The zero-stamped log is the oldest of the store, so it is the one the
     // window takes, and what is left is the limit rather than the limit plus
@@ -1092,7 +1189,7 @@ test "the session store prunes the logs a re-run wrote beside the first" {
     }
     try std.testing.expectEqual(max_session_logs * 2, try countSessionLogs(io, arena, dir_path));
 
-    pruneSessions(io, arena, dir_path);
+    pruneSessions(io, arena, dir_path, test_now_ns);
 
     try std.testing.expectEqual(max_session_logs, try countSessionLogs(io, arena, dir_path));
     // The oldest stamp is gone entirely, the newest is still there in both of
@@ -1114,6 +1211,12 @@ fn countSessionLogs(io: Io, arena: std.mem.Allocator, session_dir: []const u8) !
     defer dir.close(io);
     return countLogsIn(dir, io, arena);
 }
+
+/// The clock the store tests prune against. The tests write stamps of a few
+/// hundred nanoseconds, so a reading a few hundred seconds past the epoch
+/// leaves every one of them well inside the age window, and the count window
+/// stays the thing each of those tests is about. The age window has its own.
+const test_now_ns: i128 = @as(i128, max_session_logs + 1) * std.time.ns_per_s;
 
 fn countLogsIn(dir: Io.Dir, io: Io, arena: std.mem.Allocator) !usize {
     var walker = try dir.walk(arena);
@@ -1144,7 +1247,7 @@ test "a log in a subdirectory is pruned where it is, not by its bare name" {
         try store.tmp.dir.writeFile(io, .{ .sub_path = name, .data = "log" });
     }
 
-    pruneSessions(io, arena, dir_path);
+    pruneSessions(io, arena, dir_path, test_now_ns);
 
     // The oldest is the nested one, and it goes where it is: counted, deleted,
     // and the root's own `1.jsonl` is still a name the store holds. That root
@@ -1176,7 +1279,7 @@ test "a store that cannot be opened is named, and deletes nothing" {
     // store that cannot be pruned costs the run nothing but its disk; what
     // changed is that the run is told, so an operator watching the directory
     // fill knows to look.
-    pruneSessions(io, arena, missing);
+    pruneSessions(io, arena, missing, test_now_ns);
     try std.testing.expectError(error.FileNotFound, store.tmp.dir.access(io, "not-a-store", .{}));
 }
 
@@ -1290,7 +1393,11 @@ fn fuzzStoreNames(_: void, smith: *std.testing.Smith) !void {
         try written.append(gpa, .{ .name = line, .key = logName(line) });
     }
 
-    pruneSessionsTo(io, arena, dir_path, keep);
+    // A clock at the epoch expires nothing, so the two properties this fuzzer
+    // reads are the count window's alone. The age window prunes the same
+    // prefix, and `the session store drops a log the age window has passed`
+    // is the test on it.
+    pruneSessionsTo(io, arena, dir_path, keep, 0);
 
     // A name no run of this program wrote is not its to delete, whatever the
     // walk found beside it and wherever in the window it would have sorted.

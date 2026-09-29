@@ -16,6 +16,13 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- The session store kept its 200 newest logs and nothing else, which is a size
+  and not a period. On a machine that runs a few times a week, two hundred
+  logs is four years, and every record names the directory the run worked in,
+  which is under `$HOME` and carries the account name. A log older than 30 days
+  is now dropped whatever the count says. A clock at or before the epoch, or one
+  set back between two runs, expires nothing: both are a machine whose clock is
+  wrong rather than one whose logs are old.
 - The README named version 0.3.0 after 0.4.0 shipped, in both the install
   snippet and the status line. A reader who copied the snippet installed 0.3.0,
   and the status line was a release behind. `make check-readme` now refuses a

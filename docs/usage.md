@@ -413,10 +413,11 @@ from a failed invocation.
 Each run appends one JSONL record per model response to `~/.microagent/sessions/<unix-ns>.jsonl`, so
 a monitor can follow a run while it is going. `MICROAGENT_SESSION_DIR` moves the store and an empty
 value turns it off. A run that finds its name taken writes `-1`, `-2`, ... beside it rather than over
-it. The store keeps the 200 most recent runs and prunes older ones.
+it. The store keeps the 200 most recent runs and prunes older ones, and it drops any log older than 30
+days whatever the count says, so a machine that runs rarely does not keep every run it has ever done.
 
 ```json
-{"ts":1790608347342,"cwd":"/home/maci/Desktop/Projects/microagent","model":"deepseek/deepseek-v4-flash","finish_reason":"stop","served_model":"deepseek/deepseek-v4-flash-0726","fingerprint":"fp_9c1e","elapsed_ms":1448,"usage":{"prompt_tokens":998,"cached_tokens":896,"completion_tokens":19,"reasoning_tokens":16,"total_tokens":1017}}
+{"ts":1790608347342,"cwd":"/home/you/Desktop/Projects/microagent","model":"deepseek/deepseek-v4-flash","finish_reason":"stop","served_model":"deepseek/deepseek-v4-flash-0726","fingerprint":"fp_9c1e","elapsed_ms":1448,"usage":{"prompt_tokens":998,"cached_tokens":896,"completion_tokens":19,"reasoning_tokens":16,"total_tokens":1017}}
 ```
 
 | key | meaning |
