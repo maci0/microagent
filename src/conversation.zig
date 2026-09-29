@@ -32,7 +32,9 @@ const elision_marker = "[earlier tool output elided: {d} bytes]";
 const min_marker_bytes = "[earlier tool output elided: 0 bytes]".len;
 
 pub const system_prompt =
-    "You are microagent, a coding agent working on the repository in the current directory.\n" ++
+    "You are microagent, a coding agent working on the repository in the current directory. " ++
+    "Every `bash` call already starts there, with no shell carried over from the last one: run " ++
+    "commands as they are, and never prefix a `cd` to a path you have not listed.\n" ++
     "Work in order: (1) `search` (ripgrep) for the relevant code and the tests that cover it; " ++
     "(2) reproduce the failure with `bash` before changing anything, running exactly the code or " ++
     "example the task quotes; (3) make the smallest correct change: `edit` for a precise text " ++
