@@ -654,20 +654,28 @@ fn unknownTool(arena: std.mem.Allocator, name: []const u8) error{OutOfMemory}![]
 /// The gutter line, without the stream it is written to, so the one-line shape
 /// is a value a test can hold rather than a stream it has to capture. Every
 /// field is bounded, so the line fits a buffer of this length whatever the
-/// model sent: the marker, the name, one space, the detail and the newline.
-/// The name is a variant, so its budget is the widest tag rather than a number
-/// a caller could pass past; the detail is the model's own bytes and is what
-/// the second bound is for.
-const max_gutter_line_bytes = 5 + 40 + 1 + 120 + 1;
+/// model sent: the marker, the name, the colon, one space, the detail, the
+/// newline, and the two escapes when the name is drawn bold. The name is a
+/// variant, so its budget is the widest tag rather than a number a caller could
+/// pass past; the detail is the model's own bytes and is what the second bound
+/// is for.
+const bold_name_bytes = "\u{1b}[1m".len + "\u{1b}[0m".len;
+const max_gutter_line_bytes = 5 + 40 + 1 + 1 + 120 + 1 + bold_name_bytes;
 
 /// A one-line tool gutter on stderr, the shape gauntlet recognizes. The detail
 /// is the provider's own text and may carry a newline or an escape sequence,
 /// either of which breaks the one-line-per-call shape a reader parses, so
 /// control characters are written as their `\xNN` escapes, and an invisible or
 /// bidi character as its `\uXXXX` escape.
+///
+/// The name is drawn bold only when stderr is a terminal: a captured run, which
+/// is every gauntlet review and every log file, gets the same line with no
+/// escape bytes in it, because a reader that is not a terminal would show them
+/// as text.
 fn noteToolCall(io: Io, arena: std.mem.Allocator, tool: chat.Tool, args: std.json.ObjectMap) void {
     var buf: [max_gutter_line_bytes]u8 = undefined;
-    net.writeErr(io, toolCallLine(arena, &buf, tool, args) catch return);
+    const bold = Io.File.stderr().isTty(io) catch false;
+    net.writeErr(io, toolCallLine(arena, &buf, tool, args, bold) catch return);
 }
 
 /// The path of a `multi_edit` call's first edit, which is what its gutter line shows: the call has
@@ -680,7 +688,7 @@ fn firstEditPath(args: std.json.ObjectMap) []const u8 {
     return chat.str(first.object.get("path")) orelse "";
 }
 
-fn toolCallLine(arena: std.mem.Allocator, buf: []u8, tool: chat.Tool, args: std.json.ObjectMap) ![]const u8 {
+fn toolCallLine(arena: std.mem.Allocator, buf: []u8, tool: chat.Tool, args: std.json.ObjectMap, bold: bool) ![]const u8 {
     // The interesting argument is not the same one for every tool: a structural
     // search is identified by its pattern, a bash call by its command, a git
     // call by its subcommand, which `toolGit` reads as `cmd`.
@@ -697,11 +705,9 @@ fn toolCallLine(arena: std.mem.Allocator, buf: []u8, tool: chat.Tool, args: std.
     // that is not text as U+FFFD. A tool argument is whatever the model decided
     // to send, and the model decides that from files in the tree, so the gutter
     // line is a boundary like any other.
-    return std.fmt.bufPrint(
-        buf,
-        "\u{23fa} {s} {s}\n",
-        .{ tool.name(), chat.safeText(arena, detail, 120) },
-    );
+    const shown = chat.safeText(arena, detail, 120);
+    if (bold) return std.fmt.bufPrint(buf, "\u{23fa} \u{1b}[1m{s}\u{1b}[0m: {s}\n", .{ tool.name(), shown });
+    return std.fmt.bufPrint(buf, "\u{23fa} {s}: {s}\n", .{ tool.name(), shown });
 }
 
 /// Bytes a terminal acts on rather than prints: the C0 controls, DEL, the C1
@@ -2443,6 +2449,22 @@ test "lines longer than a read come back whole, whatever they straddle" {
     try std.testing.expectEqual(want.len, (try readLines(std.testing.io, arena, path, 1, std.math.maxInt(usize))).len);
 }
 
+// The name is drawn bold only when the line is going to a terminal, so a
+// captured run reads as `bash: ls -la` and an operator's terminal reads the
+// name in bold. The escapes are the difference between the two spellings, and
+// the line is one shape either way.
+test "the gutter bolds the tool name only when asked" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var buf: [max_gutter_line_bytes]u8 = undefined;
+
+    var args: std.json.ObjectMap = .empty;
+    try args.put(arena, "command", .{ .string = "ls -la" });
+    try std.testing.expectEqualStrings("\u{23fa} \u{1b}[1mbash\u{1b}[0m: ls -la\n", try toolCallLine(arena, &buf, .bash, args, true));
+    try std.testing.expectEqualStrings("\u{23fa} bash: ls -la\n", try toolCallLine(arena, &buf, .bash, args, false));
+}
+
 test "the tool gutter stays one line whatever the model sent" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -2456,8 +2478,8 @@ test "the tool gutter stays one line whatever the model sent" {
     var args: std.json.ObjectMap = .empty;
     try args.put(arena, "command", .{ .string = "rg -n 'foo'\nnext line\u{1b}[31mred\xff" });
     try std.testing.expectEqualStrings(
-        "\u{23fa} bash rg -n 'foo'\\x0anext line\\x1b[31mred\u{fffd}\n",
-        try toolCallLine(arena, &buf, .bash, args),
+        "\u{23fa} bash: rg -n 'foo'\\x0anext line\\x1b[31mred\u{fffd}\n",
+        try toolCallLine(arena, &buf, .bash, args, false),
     );
 
     // The argument named depends on the tool, and an argument that is not text
@@ -2472,8 +2494,8 @@ test "the tool gutter stays one line whatever the model sent" {
         var one: std.json.ObjectMap = .empty;
         try one.put(arena, c.key, .{ .string = c.detail });
         try std.testing.expectEqualStrings(
-            try std.fmt.allocPrint(arena, "\u{23fa} {s} {s}\n", .{ c.tool.name(), c.detail }),
-            try toolCallLine(arena, &buf, c.tool, one),
+            try std.fmt.allocPrint(arena, "\u{23fa} {s}: {s}\n", .{ c.tool.name(), c.detail }),
+            try toolCallLine(arena, &buf, c.tool, one, false),
         );
 
         // A number where the name is would have been read as the detail, and
@@ -2481,8 +2503,8 @@ test "the tool gutter stays one line whatever the model sent" {
         var numbered: std.json.ObjectMap = .empty;
         try numbered.put(arena, c.key, .{ .integer = 7 });
         try std.testing.expectEqualStrings(
-            try std.fmt.allocPrint(arena, "\u{23fa} {s} \n", .{c.tool.name()}),
-            try toolCallLine(arena, &buf, c.tool, numbered),
+            try std.fmt.allocPrint(arena, "\u{23fa} {s}: \n", .{c.tool.name()}),
+            try toolCallLine(arena, &buf, c.tool, numbered, false),
         );
     }
 
@@ -2494,7 +2516,7 @@ test "the tool gutter stays one line whatever the model sent" {
     try long_args.put(arena, "command", .{ .string = "日" ** 300 });
     for (chat.tools()) |tool| {
         try std.testing.expect(tool.name().len <= 40);
-        const long_line = try toolCallLine(arena, &buf, tool, long_args);
+        const long_line = try toolCallLine(arena, &buf, tool, long_args, false);
         try std.testing.expect(long_line.len <= max_gutter_line_bytes);
         try std.testing.expect(std.unicode.utf8ValidateSlice(long_line));
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, long_line, "\n"));
@@ -2611,7 +2633,7 @@ fn fuzzToolCall(_: void, smith: *std.testing.Smith) !void {
     // on stderr.
     const line = if (chat.Tool.fromName(name)) |tool| blk: {
         var buf: [max_gutter_line_bytes]u8 = undefined;
-        break :blk try toolCallLine(arena, &buf, tool, args);
+        break :blk try toolCallLine(arena, &buf, tool, args, false);
     } else try unknownTool(arena, name);
     try std.testing.expect(line.len <= max_gutter_line_bytes + 32);
     try std.testing.expect(std.unicode.utf8ValidateSlice(line));
@@ -5525,12 +5547,12 @@ test "a multi_edit gutter line names the first file it touches" {
     try edits.append(.{ .object = edit });
     var args: std.json.ObjectMap = .empty;
     try args.put(arena, "edits", .{ .array = edits });
-    try std.testing.expectEqualStrings("\u{23fa} multi_edit src/a.zig\n", try toolCallLine(arena, &buf, .multi_edit, args));
+    try std.testing.expectEqualStrings("\u{23fa} multi_edit: src/a.zig\n", try toolCallLine(arena, &buf, .multi_edit, args, false));
 
     // A call with no usable list still gets a line, with nothing after the name.
     var bare: std.json.ObjectMap = .empty;
     try bare.put(arena, "edits", .{ .string = "x" });
-    try std.testing.expectEqualStrings("\u{23fa} multi_edit \n", try toolCallLine(arena, &buf, .multi_edit, bare));
+    try std.testing.expectEqualStrings("\u{23fa} multi_edit: \n", try toolCallLine(arena, &buf, .multi_edit, bare, false));
 }
 
 test "todo numbers the list it is given and counts what is done" {

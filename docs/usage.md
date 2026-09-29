@@ -610,7 +610,8 @@ stdout carries the model's own text, one JSON usage line per response, and nothi
 ```
 
 Counters are cumulative for the run, which is the shape gauntlet's usage reader takes its maximum
-from. Tool activity goes to stderr as a one-line gutter (`⏺ read src/main.zig`), with control
+from. Tool activity goes to stderr as a one-line gutter (`⏺ read: src/main.zig`, the name in bold
+when stderr is a terminal and plain when it is a pipe or a file), with control
 characters in a path or command written as `\xNN` so a line stays one line.
 
 `cached_tokens` is the part of the prompt the provider served from its cache, read from whichever of

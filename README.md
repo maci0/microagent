@@ -56,7 +56,8 @@ release modes; the three, their memory and their instruction counts are in
 [docs/benchmark.md](docs/benchmark.md#memory-footprint).
 
 A run prints the model's answer to stdout and a usage line after each response; tool calls show on
-stderr as a one-line gutter such as `⏺ read src/main.zig`:
+stderr as a one-line gutter such as `⏺ read: src/main.zig`, with the tool name in bold when
+stderr is a terminal:
 
 ```json
 {"type":"usage","usage":{"prompt_tokens":910,"cached_tokens":832,"completion_tokens":18,"reasoning_tokens":0,"total_tokens":928}}
