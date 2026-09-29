@@ -24,6 +24,7 @@ const chat_mod = @import("chat.zig");
 const fuzzargv = @import("fuzzargv.zig");
 const net = @import("net.zig");
 const session_mod = @import("session.zig");
+const skill_mod = @import("skill.zig");
 const style_mod = @import("style.zig");
 const tool_mod = @import("tool.zig");
 const update_mod = @import("update.zig");
@@ -230,6 +231,11 @@ const Options = struct {
     /// Reply-style config to read. Set by --config or MICROAGENT_CONFIG, else
     /// $HOME/.microagent/config.toml. A missing file is not an error.
     config: []const u8 = "",
+    /// The skills this run found, discovered once before the first request:
+    /// the listing in the system prompt and the `skill` tool's schema entry
+    /// both come from here, so the model is offered exactly the skills the run
+    /// can load. Empty means the tool is not advertised at all.
+    skills: skill_mod.Skills = .{},
     /// What the command line asked for. `--help` and `--version` stop the
     /// parse where they appear, before any option value is needed.
     action: Action = .run,
@@ -332,13 +338,24 @@ pub fn main(init: std.process.Init) !void {
     var msgs: std.ArrayList(u8) = .empty;
     defer msgs.deinit(gpa);
     const loaded = loadStyle(io, init, init.arena.allocator(), opts.config);
-    traceConfig(io, init.arena.allocator(), opts, loaded, key.source);
-    const reply_style = try loaded.style.ruleset(init.arena.allocator());
-    const prompt = if (reply_style.len == 0)
-        system_prompt
-    else
-        try std.fmt.allocPrint(init.arena.allocator(), "{s}\n\n{s}", .{ system_prompt, reply_style });
-    try openConversation(gpa, &msgs, prompt, opts.prompt);
+    // Discovered before the trace and before the first request: the listing is
+    // part of the system prompt, so a skill added between the two reads would
+    // otherwise be advertised without a body to load.
+    const arena = init.arena.allocator();
+    opts.skills = skill_mod.discover(io, arena, skill_mod.roots(init.environ_map, arena));
+    traceConfig(io, arena, opts, loaded, key.source);
+    const reply_style = try loaded.style.ruleset(arena);
+    const skill_block = try opts.skills.prompt(arena);
+    // One string, so a run with no styles and no skills sends exactly the
+    // system prompt it sent before either feature existed.
+    var conversation: std.ArrayList(u8) = .empty;
+    try conversation.appendSlice(arena, system_prompt);
+    if (reply_style.len != 0) {
+        try conversation.appendSlice(arena, "\n\n");
+        try conversation.appendSlice(arena, reply_style);
+    }
+    try conversation.appendSlice(arena, skill_block);
+    try openConversation(gpa, &msgs, conversation.items, opts.prompt);
 
     // Built once for the run: a tool subprocess is spawned once per call, and
     // each one would otherwise inherit the provider key.
@@ -349,7 +366,6 @@ pub fn main(init: std.process.Init) !void {
         // The endpoint is the one thing every failure below shares, and it is
         // not in the error: a DNS failure, a refused connection and a truncated
         // stream all arrive here as a bare name.
-        const arena = init.arena.allocator();
         const msg = try std.fmt.allocPrint(arena, "microagent: the run against {s} failed: {s}\n", .{
             displayUrl(arena, opts.base_url),
             @errorName(err),
@@ -456,6 +472,15 @@ const help_text =
     \\  MICROAGENT_SESSION_DIR where the per-response JSONL session log goes
     \\                         (default ~/.microagent/sessions; empty writes none)
     \\
+    \\skills (MICROAGENT_SKILLS, a colon-separated list of directories, default
+    \\$HOME/.microagent/skills; empty turns them off):
+    \\  a skill is a directory holding SKILL.md, with an optional frontmatter
+    \\  block naming it and saying when it applies. The run lists what it found
+    \\  in the system prompt, and the model loads one body at a time with the
+    \\  `skill` tool, so a skill the task never needs costs the listing alone.
+    \\  Skills are instructions the operator installed: nothing under the
+    \\  working directory is read unless MICROAGENT_SKILLS names it.
+    \\
     \\subcommand:
     \\  update [--check] [--repo owner/name]
     \\                         replace this binary with the latest GitHub
@@ -496,8 +521,8 @@ const help_text =
     \\MICROAGENT_STALL_TIMEOUT and MDEBUG keep their defaults, and
     \\MICROAGENT_CA_BUNDLE, the four api key variables and
     \\MICROAGENT_CAVEMAN/PONYTAIL fall through to whatever comes next.
-    \\MICROAGENT_CONFIG and MICROAGENT_SESSION_DIR are the two where empty means
-    \\off: no style file, no session log. HOME is trimmed like the rest, and an
+    \\MICROAGENT_CONFIG, MICROAGENT_SESSION_DIR and MICROAGENT_SKILLS are the
+    \\three where empty means off: no style file, no session log, no skills. HOME is trimmed like the rest, and an
     \\empty one is no home rather than a path off the root.
     \\
 ;
@@ -1155,6 +1180,7 @@ const env_vars = [_][]const u8{
     "MICROAGENT_MAX_SPEND_TOKENS",
     "MICROAGENT_REASONING_EFFORT",
     "MICROAGENT_CONFIG",
+    "MICROAGENT_SKILLS",
     "MICROAGENT_CA_BUNDLE",
     "SSL_CERT_FILE",
     "MICROAGENT_CAVEMAN",
@@ -1307,6 +1333,7 @@ fn traceConfig(io: Io, arena: std.mem.Allocator, opts: Options, style: LoadedSty
         \\[mdebug] ca_bundle={s} session_dir={s}
         \\[mdebug] style_config={s}
         \\[mdebug] caveman={s} ponytail={s}
+        \\[mdebug] skills={d}
         \\[mdebug] api key from {s}
         \\
     , .{
@@ -1322,6 +1349,7 @@ fn traceConfig(io: Io, arena: std.mem.Allocator, opts: Options, style: LoadedSty
         traceText(arena, style.source orelse "none"),
         style.style.caveman.name(),
         style.style.ponytail.name(),
+        opts.skills.items.len,
         chat_mod.safeTextAll(arena, key_source),
     });
 }
@@ -1895,7 +1923,7 @@ fn runTurn(
     // above, so the record itself is the same either way; only the moment it
     // lands is not.
     session_mod.writeRecord(io, arena, session, model_ms, &result);
-    try finishTurn(io, arena, gpa, msgs, &result, usage, budget, tool_env, progress);
+    try finishTurn(io, arena, gpa, msgs, &result, usage, budget, tool_env, progress, opts.skills);
     if (result.calls.items.len != 0) return .wants_tools;
     // No tool call ends the loop, but only an answer ends the run. A refusal, a
     // provider that stopped generating, a response cut at `max_tokens` and a
@@ -1959,8 +1987,10 @@ fn incompleteAnswer(arena: std.mem.Allocator, result: *const chat_mod.ChatResult
 /// is 3.8 KB, and the rest is the model, the stream flags and the token
 /// ceiling. The credential is a header, not a field, so it is not in this. A
 /// reservation rather than a bound, and the buffer still grows if it does not
-/// cover the body, which a long model name would do.
-const body_scaffolding_bytes = tools_json.len + 1024;
+/// cover the body, which a long model name would do. The optional `skill`
+/// entry is reserved too, because which tools a run advertises is fixed before
+/// the first turn.
+const body_scaffolding_bytes = tools_json.len + skill_mod.tool_json.len + 1024;
 
 /// The request body, with `messages` last.
 ///
@@ -1982,7 +2012,19 @@ fn buildBody(arena: std.mem.Allocator, opts: Options, messages: []const u8) ![]u
     try w.print("{{\"model\":", .{});
     try chat_mod.writeJsonString(w, opts.model);
     try w.writeAll(",\"tools\":");
-    try w.writeAll(tools_json);
+    // The last byte of the constant is the array's closing bracket, so a run
+    // that found skills writes everything before it, a comma and the entry.
+    // The bytes a run with no skills sends are the constant itself, which is
+    // what keeps the request prefix the provider caches identical to what it
+    // was before skills existed.
+    if (opts.skills.items.len == 0) {
+        try w.writeAll(tools_json);
+    } else {
+        try w.writeAll(tools_json[0 .. tools_json.len - 1]);
+        try w.writeAll(",");
+        try w.writeAll(skill_mod.tool_json);
+        try w.writeAll("]");
+    }
     try w.writeAll(",\"stream\":true,\"stream_options\":{\"include_usage\":true}");
     try w.print(",\"max_tokens\":{d}", .{opts.max_tokens});
     if (opts.reasoning_effort) |effort| {
@@ -3187,6 +3229,24 @@ fn dropWritten(out_buf: *std.ArrayList(u8), len: usize) void {
     out_buf.shrinkRetainingCapacity(kept);
 }
 
+/// One tool call, to whichever half of the tool surface answers for its name:
+/// the run's skill set for `skill`, and the tool module for the seven built
+/// ins. Everything else about a call -- the argument check, the gutter line,
+/// the cap -- belongs to the half that runs it, which is why this is a name
+/// comparison and not a second dispatch table.
+fn dispatchCall(
+    io: Io,
+    arena: std.mem.Allocator,
+    skills: skill_mod.Skills,
+    call: chat_mod.ToolCall,
+    ceiling_ms: ?u64,
+    tool_env: ?*const std.process.Environ.Map,
+) ![]const u8 {
+    if (std.mem.eql(u8, call.name, skill_mod.tool_name))
+        return skill_mod.call(io, arena, call.args.items, skills);
+    return tool_mod.runTool(io, arena, call, ceiling_ms, tool_env);
+}
+
 /// Appends the assistant message and, for every tool call it requested, runs
 /// the tool and appends its result.
 fn finishTurn(
@@ -3199,6 +3259,7 @@ fn finishTurn(
     budget: Budget,
     tool_env: *const std.process.Environ.Map,
     progress: *Progress,
+    skills: skill_mod.Skills,
 ) !void {
     try msgs.appendSlice(gpa, ",");
     try msgs.appendSlice(gpa, try assistantMessage(arena, result));
@@ -3218,7 +3279,7 @@ fn finishTurn(
         // 400 instead of on the answer.
         const output = if (budget.expired(io))
             try std.fmt.allocPrint(arena, "error: not run, the run's time budget is exhausted", .{})
-        else
+        else blk: {
             // The ceiling is read here rather than once for the turn, because a
             // turn's calls run in sequence: a reading taken before the first of
             // them is already stale by the time the second starts, and the
@@ -3228,11 +3289,17 @@ fn finishTurn(
             // run's own, and a tool that takes no time at all costs nothing to
             // re-read: a `git status` spends its reading on the same syscall
             // the process spawn beside it already makes.
-            tool_mod.runTool(io, arena, call, budget.toolCeilingMs(io), tool_env) catch |err|
+            //
+            // `skill` is the one name the tool module does not hold: the set it
+            // loads from belongs to the run, and a run that found no skills
+            // never advertised the name, so a call to it here is the model
+            // asking for a tool the schema did not offer.
+            break :blk dispatchCall(io, arena, skills, call, budget.toolCeilingMs(io), tool_env) catch |err|
                 // A tool that fails outright (rather than reporting its own
                 // failure as text) is named here, so a result reading
                 // `error: OutOfMemory` says which of the calls ran out.
                 try std.fmt.allocPrint(arena, "error: {s}: {s}", .{ call.name, @errorName(err) });
+        };
         // A tool result is capped at `max_tool_output`, so the message holding
         // it is bounded before the first byte is written. Reserving that now
         // keeps a full-size result from walking the doubling ladder, which on
@@ -4314,6 +4381,63 @@ test "conversation and tool schema serialize as one valid request body" {
     try std.testing.expect(std.mem.indexOf(u8, parameterDescription(tools.items, "bash", "timeout_ms"), bash_timeout) != null);
     const git_limit = try std.fmt.allocPrint(gpa, "default {d}", .{tool_mod.git_default_limit});
     try std.testing.expect(std.mem.indexOf(u8, parameterDescription(tools.items, "git", "limit"), git_limit) != null);
+}
+
+// A run that found skills advertises one more tool than the built-in list, and
+// a run that found none sends the constant schema byte for byte. Both halves
+// matter: the first is how the model learns a skill exists, the second is the
+// request prefix a provider caches, which a stray entry would change on every
+// run.
+test "skills add one tool to the schema and change nothing when there are none" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var msgs: std.ArrayList(u8) = .empty;
+    try msgs.appendSlice(arena, "[");
+    try appendMessage(arena, &msgs, "system", system_prompt);
+    try appendMessage(arena, &msgs, "user", "hi");
+
+    const with_skills: Options = .{ .model = "m", .skills = .{ .items = &.{
+        .{ .name = "pdf", .description = "fills forms", .path = "/pdf/SKILL.md" },
+    } } };
+    const body = try buildBody(arena, with_skills, msgs.items);
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena, body, .{});
+    const tools = parsed.value.object.get("tools").?.array;
+    try std.testing.expectEqual(chat_mod.tools().len + 1, tools.items.len);
+    const last = tools.items[tools.items.len - 1].object.get("function").?.object;
+    try std.testing.expectEqualStrings(skill_mod.tool_name, last.get("name").?.string);
+
+    const plain = try buildBody(arena, .{ .model = "m" }, msgs.items);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "\"skill\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, plain, tools_json) != null);
+}
+
+// The routing half: a `skill` call reaches the run's set rather than the tool
+// module's seven names, and a body on disk comes back. Without this the name
+// comparison could be dropped and the call would read `unknown tool 'skill'`
+// to a model the schema had just advertised it to.
+test "a skill call is served from the run's skill set" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "pdf");
+    try tmp.dir.writeFile(io, .{ .sub_path = "pdf/SKILL.md", .data = "---\nname: pdf\ndescription: d\n---\nuse qpdf\n" });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+    const skills = skill_mod.discover(io, arena, &.{.{ .path = root, .named = true }});
+
+    var call: chat_mod.ToolCall = .{ .id = try arena.dupe(u8, ""), .name = try arena.dupe(u8, skill_mod.tool_name) };
+    try call.args.appendSlice(arena, "{\"name\":\"pdf\"}");
+    try std.testing.expectEqualStrings("use qpdf\n", try dispatchCall(io, arena, skills, call, null, null));
+
+    // The same call on a run with no skills is the set's own refusal, not the
+    // tool module's `unknown tool`.
+    const out = try dispatchCall(io, arena, .{}, call, null, null);
+    try std.testing.expect(std.mem.startsWith(u8, out, "error: unknown skill 'pdf'"));
 }
 
 /// The description one property of one tool's schema carries, which is where a
@@ -7539,13 +7663,15 @@ test "the help text and the README name every variable the program reads" {
         }
     }
 
-    // The two that read empty as off are named in the same paragraph as the
+    // The three that read empty as off are named in the same paragraph as the
     // exception, which is why they are not in the list above: an empty
-    // MICROAGENT_CONFIG means no style file rather than the default one, and
-    // an empty MICROAGENT_SESSION_DIR means no session log rather than one
-    // under $HOME. Requiring them here is what keeps a fourth convention from
-    // starting, where a variable is settled in a paragraph and in no list.
-    for ([_][]const u8{ "MICROAGENT_CONFIG", "MICROAGENT_SESSION_DIR" }) |name| {
+    // MICROAGENT_CONFIG means no style file rather than the default one, an
+    // empty MICROAGENT_SESSION_DIR means no session log rather than one
+    // under $HOME, and an empty MICROAGENT_SKILLS means no skills rather than
+    // the default directory. Requiring them here is what keeps a fourth
+    // convention from starting, where a variable is settled in a paragraph and
+    // in no list.
+    for ([_][]const u8{ "MICROAGENT_CONFIG", "MICROAGENT_SESSION_DIR", "MICROAGENT_SKILLS" }) |name| {
         if (!namesWholeToken(help_rule, name) or !namesWholeToken(readme_rule, name)) {
             std.debug.print("\n" ++ readme_path ++ ": {s} reads empty as off rather than falling through, and one paragraph saying so does not name it\n", .{name});
             return error.TestUnexpectedResult;

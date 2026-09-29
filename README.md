@@ -117,6 +117,13 @@ session log:
   MICROAGENT_SESSION_DIR where the per-response JSONL session log goes
                          (default ~/.microagent/sessions; empty writes none)
 
+skills (MICROAGENT_SKILLS, a colon-separated list of directories, default
+$HOME/.microagent/skills; empty turns them off):
+  a skill is a directory holding SKILL.md, with an optional frontmatter
+  block naming it and saying when it applies. The run lists what it found
+  in the system prompt, and the model loads one body at a time with the
+  `skill` tool, so a skill the task never needs costs the listing alone.
+
 subcommand:
   update [--check] [--repo owner/name]
                          replace this binary with the latest GitHub
@@ -158,8 +165,9 @@ string is not a value:
 api key variables fall through to whatever comes next, `MICROAGENT_CA_BUNDLE` falls through to
 `SSL_CERT_FILE`, and
 `MICROAGENT_CAVEMAN`/`MICROAGENT_PONYTAIL` fall through to the config file.
-Two variables are the exception: `MICROAGENT_CONFIG` and `MICROAGENT_SESSION_DIR`
-read empty as off, so no style file and no session log.
+Three variables are the exception: `MICROAGENT_CONFIG`,
+`MICROAGENT_SESSION_DIR` and `MICROAGENT_SKILLS` read empty as off, so no style
+file, no session log and no skills.
 
 Every variable is trimmed before it is read, `HOME` included, and one holding
 nothing but whitespace reads as the empty case above. A wrapper that populates the
@@ -234,6 +242,34 @@ harness sent before styles existed.
 the ceilings, the level each style key took, the style config file that was read, and the name of
 the variable or file the API key came from. The key itself is never printed. Precedence spans three
 sources per option, so this is how you tell which one answered.
+
+### Skills
+
+A skill is a directory holding a `SKILL.md`: an optional frontmatter block naming it and saying when
+it applies, then the instructions. The run lists what it found in the system prompt and advertises a
+`skill` tool, and the model loads one body at a time when a task matches one. Splitting the listing
+from the body is the point: a body is kilobytes and the conversation re-sends every turn, so a skill
+the task never needs costs the one line it is listed as.
+
+```
+~/.microagent/skills/pdf/SKILL.md
+---
+name: pdf
+description: Fill, split and extract text from PDF files
+---
+Use `pdftotext` for extraction and `qpdf` for splitting...
+```
+
+The name defaults to the directory name, the description to the body's first non-empty line, and a
+name may hold only letters, digits, dot, dash and underscore — it is what the model spells back in a
+tool call. A file without frontmatter still works; anything else in the block is ignored. The
+listing is bounded, and skills past that bound are counted rather than named.
+
+The roots are `MICROAGENT_SKILLS` (a colon-separated list, resolved against the working directory,
+empty turns skills off) else `$HOME/.microagent/skills`. The working directory is deliberately not a
+root: a `SKILL.md` in a repository under review was written by whoever wrote that repository, and a
+skill body is prompt text the model is told to follow. Naming a repository's directory in
+`MICROAGENT_SKILLS` is the operator saying those bytes are instructions.
 
 ### Output contract
 

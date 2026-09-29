@@ -14,6 +14,24 @@ release, and `microagent update` moves you to it.
 
 ### Added
 
+- Skills: a run reads a `SKILL.md` from each directory under
+  `$HOME/.microagent/skills`, or under the `:`-separated directories
+  `MICROAGENT_SKILLS` names, lists what it found in the system prompt, and
+  advertises a `skill` tool the model calls to load one body. The split is the
+  point: a body is kilobytes and the conversation re-sends every turn, so a
+  skill the task never needs costs the one line it is listed as. A skill is a
+  directory with an optional frontmatter block naming it and saying when it
+  applies; the name defaults to the directory name, the description to the
+  body's first non-empty line, and a name may hold only letters, digits, dot,
+  dash and underscore, because it is what the model spells back in a tool
+  call. A name the run rewrote would be one the model has to guess. The working
+  directory is deliberately not a source: a `SKILL.md` in a repository under
+  review was written by whoever wrote that repository, and a skill body is
+  prompt text the model is told to follow, so naming a repository's directory
+  in `MICROAGENT_SKILLS` is the operator saying those bytes are instructions. A
+  run that finds no skills advertises exactly the schema and sends exactly the
+  system prompt it sent before this existed, which keeps the request prefix a
+  provider caches unchanged.
 - A session record carries the model that answered, beside the one the run asked
   for. `model` is what the request named, and a gateway routes a name like
   `deepseek/deepseek-v4-flash` to whichever snapshot it holds this week, so two
