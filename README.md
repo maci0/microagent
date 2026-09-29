@@ -5,8 +5,9 @@ loops. One binary, one loop, OpenAI-compatible APIs only.
 
 - **Small.** ~840 KB stripped (`-Doptimize=ReleaseSmall`), no runtime, no node, no python.
 - **Fast.** ~2.5 ms to start, so a gauntlet loop spends its time in the model, not the harness.
-- **No features you did not ask for.** No subagents, no plugins, no MCP, no TUI. Streaming chat
-  completions, seven tools, done.
+- **No features you did not ask for.** No subagents, no plugins, no TUI, and nothing that runs
+  unless a config names it. Streaming chat completions, seven built-in tools, plus whatever MCP
+  servers and skills the operator installed.
 
 ## Build
 
@@ -79,6 +80,9 @@ The flags, abridged; `microagent --help` is the full text.
                        response's generated tokens, at least 1
                        (env MICROAGENT_MAX_TOKENS, default 65536)
     --config <file>    reply-style TOML config (env MICROAGENT_CONFIG)
+    --mcp-config <file>
+                       MCP server registry, JSON (env MICROAGENT_MCP_CONFIG,
+                       default ~/.microagent/mcp.json; empty uses none)
     --ca-bundle <file>
                        PEM file to trust instead of the system store
                        (env MICROAGENT_CA_BUNDLE, SSL_CERT_FILE). Needed in
@@ -124,6 +128,13 @@ $HOME/.microagent/skills; empty turns them off):
   in the system prompt, and the model loads one body at a time with the
   `skill` tool, so a skill the task never needs costs the listing alone.
 
+MCP servers (--mcp-config, MICROAGENT_MCP_CONFIG, default
+$HOME/.microagent/mcp.json; empty uses none):
+  a registry of the shape other MCP clients use,
+  {"mcpServers":{"name":{"command":"...","args":[...],"env":{...}}}}. Each
+  server is run over stdio, its tools are offered as mcp__<server>__<tool>,
+  and a server that cannot start or answer is reported and skipped.
+
 subcommand:
   update [--check] [--repo owner/name]
                          replace this binary with the latest GitHub
@@ -165,9 +176,9 @@ string is not a value:
 api key variables fall through to whatever comes next, `MICROAGENT_CA_BUNDLE` falls through to
 `SSL_CERT_FILE`, and
 `MICROAGENT_CAVEMAN`/`MICROAGENT_PONYTAIL` fall through to the config file.
-Three variables are the exception: `MICROAGENT_CONFIG`,
-`MICROAGENT_SESSION_DIR` and `MICROAGENT_SKILLS` read empty as off, so no style
-file, no session log and no skills.
+Four variables are the exception: `MICROAGENT_CONFIG`, `MICROAGENT_SESSION_DIR`,
+`MICROAGENT_SKILLS` and `MICROAGENT_MCP_CONFIG` read empty as off, so no style
+file, no session log, no skills and no MCP servers.
 
 Every variable is trimmed before it is read, `HOME` included, and one holding
 nothing but whitespace reads as the empty case above. A wrapper that populates the
@@ -270,6 +281,29 @@ empty turns skills off) else `$HOME/.microagent/skills`. The working directory i
 root: a `SKILL.md` in a repository under review was written by whoever wrote that repository, and a
 skill body is prompt text the model is told to follow. Naming a repository's directory in
 `MICROAGENT_SKILLS` is the operator saying those bytes are instructions.
+
+### MCP servers
+
+An MCP server is a child process speaking JSON-RPC over stdio. The registry is the shape the rest of
+the ecosystem already uses, so a server block copies from another client:
+
+```json
+{"mcpServers": {"fs": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]}}}
+```
+
+The file is `--mcp-config`, else `MICROAGENT_MCP_CONFIG`, else `~/.microagent/mcp.json`; an absent
+file means no servers, and an empty variable means the same rather than falling back to the default.
+Every server is started before the first request, asked for its tool list, and its tools are
+advertised to the model as `mcp__<server>__<tool>` with the server's own `inputSchema`, so the model
+sees them beside the built-ins. A call is a `tools/call`; the text the server returns is the tool
+result, on the same deadline as any other tool. A server that cannot be started, that exits during
+the handshake, or that refuses a call is reported on stderr and skipped — one broken entry costs the
+run that entry, not the run. The server's own stderr is inherited, which is where an MCP server
+writes its diagnostics. The server's environment is the scrubbed one tool subprocesses get, plus
+whatever the entry's `env` adds, so a provider key is never handed to it.
+
+A server name and a tool name may hold only letters, digits, dot, dash and underscore, and a name
+holding `__` is refused: the double underscore is what separates the three parts of an exposed name.
 
 ### Output contract
 

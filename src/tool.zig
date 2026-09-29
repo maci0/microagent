@@ -46,7 +46,7 @@ const bash_exit_note = "\n(exit: )";
 /// that runs what the model wrote. `max_tool_output * 4` is how much of each of
 /// a child's streams is kept before `clamp` trims the result to
 /// `max_tool_output` for the model.
-const tool_timeout_ms: u64 = 60_000;
+pub const tool_timeout_ms: u64 = 60_000;
 /// Ceiling on the `timeout_ms` a model may ask `bash` for. The value is model
 /// output, so it arrives with the same trust as a path or a command string: an
 /// unbounded one leaves a build running with no deadline, and the process-group

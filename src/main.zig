@@ -22,6 +22,7 @@ const Io = std.Io;
 const build_options = @import("build_options");
 const chat_mod = @import("chat.zig");
 const fuzzargv = @import("fuzzargv.zig");
+const mcp_mod = @import("mcp.zig");
 const net = @import("net.zig");
 const session_mod = @import("session.zig");
 const skill_mod = @import("skill.zig");
@@ -236,6 +237,14 @@ const Options = struct {
     /// both come from here, so the model is offered exactly the skills the run
     /// can load. Empty means the tool is not advertised at all.
     skills: skill_mod.Skills = .{},
+    /// The MCP server registry to read. Set by --mcp-config or
+    /// MICROAGENT_MCP_CONFIG, else `$HOME/.microagent/mcp.json`. An absent
+    /// file is not an error and means no servers.
+    mcp_config: []const u8 = "",
+    /// The servers this run connected to, each a child process whose tools are
+    /// in the request schema. Connected once before the first request and shut
+    /// down when the run ends.
+    mcp: mcp_mod.Servers = .{},
     /// What the command line asked for. `--help` and `--version` stop the
     /// parse where they appear, before any option value is needed.
     action: Action = .run,
@@ -338,11 +347,23 @@ pub fn main(init: std.process.Init) !void {
     var msgs: std.ArrayList(u8) = .empty;
     defer msgs.deinit(gpa);
     const loaded = loadStyle(io, init, init.arena.allocator(), opts.config);
+    // Built before the skills and the servers, because a tool subprocess and
+    // an MCP server both inherit the environment it withholds the provider
+    // key from. Built once for the run: a tool subprocess is spawned once per
+    // call, and each one would otherwise inherit the provider key.
+    var tool_env = try childEnviron(gpa, init.environ_map);
+    defer tool_env.deinit();
     // Discovered before the trace and before the first request: the listing is
     // part of the system prompt, so a skill added between the two reads would
     // otherwise be advertised without a body to load.
     const arena = init.arena.allocator();
     opts.skills = skill_mod.discover(io, arena, skill_mod.roots(init.environ_map, arena));
+    // The servers are connected before the first request for the same reason:
+    // their tools are in the schema the request carries. A server that fails
+    // to start or to answer is reported and skipped, so this cannot fail the
+    // run, and the ones that did connect are shut down with the run.
+    opts.mcp = mcp_mod.connect(io, arena, &tool_env, mcpConfigPath(init.environ_map, arena, opts.mcp_config), version);
+    defer opts.mcp.shutdown(io);
     traceConfig(io, arena, opts, loaded, key.source);
     const reply_style = try loaded.style.ruleset(arena);
     const skill_block = try opts.skills.prompt(arena);
@@ -357,12 +378,7 @@ pub fn main(init: std.process.Init) !void {
     try conversation.appendSlice(arena, skill_block);
     try openConversation(gpa, &msgs, conversation.items, opts.prompt);
 
-    // Built once for the run: a tool subprocess is spawned once per call, and
-    // each one would otherwise inherit the provider key.
-    var tool_env = try childEnviron(gpa, init.environ_map);
-    defer tool_env.deinit();
-
-    const ended = run(&client, io, gpa, init.arena.allocator(), opts, &msgs, &tool_env) catch |err| {
+    const ended = run(&client, io, gpa, init.arena.allocator(), opts, &msgs, &tool_env, &opts.mcp) catch |err| {
         // The endpoint is the one thing every failure below shares, and it is
         // not in the error: a DNS failure, a refused connection and a truncated
         // stream all arrive here as a bare name.
@@ -426,6 +442,10 @@ const help_text =
 ++ (std.fmt.comptimePrint("\n                         (env MICROAGENT_MAX_TOKENS, default {d})\n", .{default_max_tokens})) ++
     \\      --config <file>    reply-style TOML config (env MICROAGENT_CONFIG,
     \\                         default ~/.microagent/config.toml)
+    \\      --mcp-config <file>
+    \\                         MCP server registry, JSON (env
+    \\                         MICROAGENT_MCP_CONFIG, default
+    \\                         ~/.microagent/mcp.json; empty uses none)
     \\      --ca-bundle <file>
     \\                         PEM file to trust instead of the system store
     \\                         (env MICROAGENT_CA_BUNDLE, SSL_CERT_FILE). Needed in
@@ -481,6 +501,14 @@ const help_text =
     \\  Skills are instructions the operator installed: nothing under the
     \\  working directory is read unless MICROAGENT_SKILLS names it.
     \\
+    \\MCP servers (--mcp-config, MICROAGENT_MCP_CONFIG, default
+    \\$HOME/.microagent/mcp.json; empty uses none):
+    \\  a JSON registry of the shape other MCP clients use,
+    \\  {"mcpServers":{"name":{"command":"...","args":[...],"env":{...}}}}.
+    \\  Each server is run over stdio and its tools are offered to the model as
+    \\  mcp__<server>__<tool>, on the same deadline as any other tool. A server
+    \\  that cannot start or answer is reported on stderr and skipped.
+    \\
     \\subcommand:
     \\  update [--check] [--repo owner/name]
     \\                         replace this binary with the latest GitHub
@@ -521,8 +549,9 @@ const help_text =
     \\MICROAGENT_STALL_TIMEOUT and MDEBUG keep their defaults, and
     \\MICROAGENT_CA_BUNDLE, the four api key variables and
     \\MICROAGENT_CAVEMAN/PONYTAIL fall through to whatever comes next.
-    \\MICROAGENT_CONFIG, MICROAGENT_SESSION_DIR and MICROAGENT_SKILLS are the
-    \\three where empty means off: no style file, no session log, no skills. HOME is trimmed like the rest, and an
+    \\MICROAGENT_CONFIG, MICROAGENT_SESSION_DIR, MICROAGENT_SKILLS and
+    \\MICROAGENT_MCP_CONFIG are the four where empty means off: no style file, no
+    \\session log, no skills, no MCP servers. HOME is trimmed like the rest, and an
     \\empty one is no home rather than a path off the root.
     \\
 ;
@@ -868,6 +897,7 @@ const ValuedOption = enum {
     api_key,
     ca_bundle,
     config,
+    mcp_config,
     reasoning_effort,
     budget,
     max_spend_tokens,
@@ -898,6 +928,7 @@ const valued_flags = [_]ValuedFlag{
     .{ .short = "-k", .long = "--api-key", .noun = "a key", .option = .api_key },
     .{ .short = null, .long = "--ca-bundle", .noun = "a file", .option = .ca_bundle },
     .{ .short = null, .long = "--config", .noun = "a file", .option = .config },
+    .{ .short = null, .long = "--mcp-config", .noun = "a file", .option = .mcp_config },
     .{ .short = null, .long = "--reasoning-effort", .noun = "a level", .option = .reasoning_effort },
     .{ .short = null, .long = "--budget", .noun = "a number of seconds", .option = .budget },
     .{ .short = null, .long = "--max-spend-tokens", .noun = "a number", .option = .max_spend_tokens },
@@ -934,6 +965,7 @@ fn setValued(
         .api_key => opts.api_key = value,
         .ca_bundle => opts.ca_bundle = value,
         .config => opts.config = value,
+        .mcp_config => opts.mcp_config = value,
         .reasoning_effort => return reasoningEffort(buf, value, &opts.reasoning_effort),
         .budget => return optionalCeiling(buf, "--budget", value, &opts.budget_s),
         .max_spend_tokens => return optionalCeiling(buf, "--max-spend-tokens", value, &opts.max_spend_tokens),
@@ -1181,6 +1213,7 @@ const env_vars = [_][]const u8{
     "MICROAGENT_REASONING_EFFORT",
     "MICROAGENT_CONFIG",
     "MICROAGENT_SKILLS",
+    "MICROAGENT_MCP_CONFIG",
     "MICROAGENT_CA_BUNDLE",
     "SSL_CERT_FILE",
     "MICROAGENT_CAVEMAN",
@@ -1334,6 +1367,7 @@ fn traceConfig(io: Io, arena: std.mem.Allocator, opts: Options, style: LoadedSty
         \\[mdebug] style_config={s}
         \\[mdebug] caveman={s} ponytail={s}
         \\[mdebug] skills={d}
+        \\[mdebug] mcp_servers={d} mcp_tools={d}
         \\[mdebug] api key from {s}
         \\
     , .{
@@ -1350,6 +1384,8 @@ fn traceConfig(io: Io, arena: std.mem.Allocator, opts: Options, style: LoadedSty
         style.style.caveman.name(),
         style.style.ponytail.name(),
         opts.skills.items.len,
+        opts.mcp.items.len,
+        opts.mcp.toolCount(),
         chat_mod.safeTextAll(arena, key_source),
     });
 }
@@ -1370,6 +1406,22 @@ fn traceText(arena: std.mem.Allocator, value: []const u8) []const u8 {
 /// silence there is a misconfiguration nothing reports.
 fn configReadWorthReporting(named: bool, err: anyerror) bool {
     return named or err != error.FileNotFound;
+}
+
+/// Where the MCP server registry is read from: --mcp-config, else
+/// MICROAGENT_MCP_CONFIG, else `$HOME/.microagent/mcp.json`. Null when there
+/// is nothing to read: an empty variable and a home that is not there both
+/// mean no servers, which is a run with the seven built-in tools and no note.
+fn mcpConfigPath(env: *const std.process.Environ.Map, arena: std.mem.Allocator, flag: []const u8) ?[]const u8 {
+    if (flag.len > 0) return std.fs.path.resolve(arena, &.{flag}) catch flag;
+    if (env.get("MICROAGENT_MCP_CONFIG")) |raw| {
+        const path = std.mem.trim(u8, raw, net.env_surrounding);
+        if (path.len == 0) return null;
+        return std.fs.path.resolve(arena, &.{path}) catch path;
+    }
+    const home = net.homeDir(env) orelse return null;
+    const path = std.fs.path.join(arena, &.{ home, ".microagent", "mcp.json" }) catch return null;
+    return std.fs.path.resolve(arena, &.{path}) catch path;
 }
 
 /// The file the style config is read from, and whether anything named it. A
@@ -1648,6 +1700,7 @@ fn run(
     opts: Options,
     msgs: *std.ArrayList(u8),
     tool_env: *const std.process.Environ.Map,
+    mcp: *mcp_mod.Servers,
 ) !TurnEnd {
     const started = Io.Timestamp.now(io, budget_clock).nanoseconds;
     const budget = Budget.of(started, opts.budget_s);
@@ -1696,7 +1749,7 @@ fn run(
             // way any other does. A model that answers it finished, and one
             // that asks for more tools was cut off mid-work, which is a
             // different exit status from a finished run.
-            return try runTurn(client, io, turn_arena, gpa, opts, msgs, &session, &usage, budget.withGraceNs(final_push_grace_s), tool_env, &progress);
+            return try runTurn(client, io, turn_arena, gpa, opts, msgs, &session, &usage, budget.withGraceNs(final_push_grace_s), tool_env, &progress, mcp);
         }
         // The ceiling is announced on the turn it applies to, before it is
         // spent, so a truncated answer is never the last thing on stdout with no
@@ -1706,7 +1759,7 @@ fn run(
         try compactMessages(io, gpa, msgs, turn_arena, &compaction_floor);
         // `.wants_tools` keeps the loop going, and `.cut_off` is the budget
         // ending the run mid-turn, so neither is a finished run.
-        switch (try runTurn(client, io, turn_arena, gpa, opts, msgs, &session, &usage, budget, tool_env, &progress)) {
+        switch (try runTurn(client, io, turn_arena, gpa, opts, msgs, &session, &usage, budget, tool_env, &progress, mcp)) {
             // The tool results are already appended, so the next request
             // carries them and the loop asks again. Returning here ended the
             // run on the first turn that asked for a tool, which is every turn
@@ -1897,6 +1950,7 @@ fn runTurn(
     budget: Budget,
     tool_env: *const std.process.Environ.Map,
     progress: *Progress,
+    mcp: *mcp_mod.Servers,
 ) !TurnEnd {
     const body = try buildBody(arena, opts, msgs.items);
     // Stamped on `model_clock`, which `elapsedMs` below is read on: the two
@@ -1923,7 +1977,7 @@ fn runTurn(
     // above, so the record itself is the same either way; only the moment it
     // lands is not.
     session_mod.writeRecord(io, arena, session, model_ms, &result);
-    try finishTurn(io, arena, gpa, msgs, &result, usage, budget, tool_env, progress, opts.skills);
+    try finishTurn(io, arena, gpa, msgs, &result, usage, budget, tool_env, progress, opts.skills, mcp);
     if (result.calls.items.len != 0) return .wants_tools;
     // No tool call ends the loop, but only an answer ends the run. A refusal, a
     // provider that stopped generating, a response cut at `max_tokens` and a
@@ -1989,8 +2043,20 @@ fn incompleteAnswer(arena: std.mem.Allocator, result: *const chat_mod.ChatResult
 /// reservation rather than a bound, and the buffer still grows if it does not
 /// cover the body, which a long model name would do. The optional `skill`
 /// entry is reserved too, because which tools a run advertises is fixed before
-/// the first turn.
+/// the first turn; MCP entries are not, because their size is whatever the
+/// servers sent, and the buffer grows for them.
 const body_scaffolding_bytes = tools_json.len + skill_mod.tool_json.len + 1024;
+
+/// The entries a run adds to the built-in seven: the `skill` entry when skills
+/// were found, and one entry per MCP tool. Comma-separated and without the
+/// surrounding brackets, and empty when the run adds nothing.
+fn extraToolsJson(arena: std.mem.Allocator, opts: Options) ![]const u8 {
+    var parts: std.ArrayList([]const u8) = .empty;
+    if (opts.skills.items.len != 0) try parts.append(arena, skill_mod.tool_json);
+    const remote = try opts.mcp.toolsJson(arena);
+    if (remote.len != 0) try parts.append(arena, remote);
+    return std.mem.join(arena, ",", parts.items);
+}
 
 /// The request body, with `messages` last.
 ///
@@ -2013,16 +2079,17 @@ fn buildBody(arena: std.mem.Allocator, opts: Options, messages: []const u8) ![]u
     try chat_mod.writeJsonString(w, opts.model);
     try w.writeAll(",\"tools\":");
     // The last byte of the constant is the array's closing bracket, so a run
-    // that found skills writes everything before it, a comma and the entry.
-    // The bytes a run with no skills sends are the constant itself, which is
-    // what keeps the request prefix the provider caches identical to what it
-    // was before skills existed.
-    if (opts.skills.items.len == 0) {
+    // that adds a tool writes everything before it, a comma and the run's own
+    // entries. The bytes a run with nothing to add sends are the constant
+    // itself, which is what keeps the request prefix the provider caches
+    // identical to what it was before either feature existed.
+    const extra = try extraToolsJson(arena, opts);
+    if (extra.len == 0) {
         try w.writeAll(tools_json);
     } else {
         try w.writeAll(tools_json[0 .. tools_json.len - 1]);
         try w.writeAll(",");
-        try w.writeAll(skill_mod.tool_json);
+        try w.writeAll(extra);
         try w.writeAll("]");
     }
     try w.writeAll(",\"stream\":true,\"stream_options\":{\"include_usage\":true}");
@@ -3238,13 +3305,27 @@ fn dispatchCall(
     io: Io,
     arena: std.mem.Allocator,
     skills: skill_mod.Skills,
+    mcp: *mcp_mod.Servers,
     call: chat_mod.ToolCall,
     ceiling_ms: ?u64,
     tool_env: ?*const std.process.Environ.Map,
 ) ![]const u8 {
+    if (std.mem.startsWith(u8, call.name, mcp_mod.tool_prefix)) {
+        const remote = mcp.resolve(call.name) orelse
+            return std.fmt.allocPrint(arena, "error: unknown tool '{s}'", .{chat_mod.safeText(arena, call.name, 40)});
+        return mcp_mod.Servers.call(io, arena, remote, call.args.items, toolCeiling(ceiling_ms));
+    }
     if (std.mem.eql(u8, call.name, skill_mod.tool_name))
         return skill_mod.call(io, arena, call.args.items, skills);
     return tool_mod.runTool(io, arena, call, ceiling_ms, tool_env);
+}
+
+/// The ceiling one tool call runs under, as an `Io.Timeout`: the run's own
+/// remaining budget when it set one, and the tool module's read-only ceiling
+/// when it did not. An MCP call is a subprocess round trip with no other
+/// bound, so it answers to the same deadline every other tool does.
+fn toolCeiling(ceiling_ms: ?u64) Io.Timeout {
+    return net.durationMs(ceiling_ms orelse tool_mod.tool_timeout_ms);
 }
 
 /// Appends the assistant message and, for every tool call it requested, runs
@@ -3260,6 +3341,7 @@ fn finishTurn(
     tool_env: *const std.process.Environ.Map,
     progress: *Progress,
     skills: skill_mod.Skills,
+    mcp: *mcp_mod.Servers,
 ) !void {
     try msgs.appendSlice(gpa, ",");
     try msgs.appendSlice(gpa, try assistantMessage(arena, result));
@@ -3294,7 +3376,7 @@ fn finishTurn(
             // loads from belongs to the run, and a run that found no skills
             // never advertised the name, so a call to it here is the model
             // asking for a tool the schema did not offer.
-            break :blk dispatchCall(io, arena, skills, call, budget.toolCeilingMs(io), tool_env) catch |err|
+            break :blk dispatchCall(io, arena, skills, mcp, call, budget.toolCeilingMs(io), tool_env) catch |err|
                 // A tool that fails outright (rather than reporting its own
                 // failure as text) is named here, so a result reading
                 // `error: OutOfMemory` says which of the calls ran out.
@@ -4432,12 +4514,51 @@ test "a skill call is served from the run's skill set" {
 
     var call: chat_mod.ToolCall = .{ .id = try arena.dupe(u8, ""), .name = try arena.dupe(u8, skill_mod.tool_name) };
     try call.args.appendSlice(arena, "{\"name\":\"pdf\"}");
-    try std.testing.expectEqualStrings("use qpdf\n", try dispatchCall(io, arena, skills, call, null, null));
+    var mcp: mcp_mod.Servers = .{};
+    try std.testing.expectEqualStrings("use qpdf\n", try dispatchCall(io, arena, skills, &mcp, call, null, null));
 
     // The same call on a run with no skills is the set's own refusal, not the
     // tool module's `unknown tool`.
-    const out = try dispatchCall(io, arena, .{}, call, null, null);
+    const out = try dispatchCall(io, arena, .{}, &mcp, call, null, null);
     try std.testing.expect(std.mem.startsWith(u8, out, "error: unknown skill 'pdf'"));
+}
+
+// An MCP server's tools are in the schema the same way a skill is: appended to
+// the constant, with the server's own inputSchema copied verbatim. A run with
+// no servers sends the constant, which the test above already holds.
+test "MCP tools join the schema with the server's own inputSchema" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var msgs: std.ArrayList(u8) = .empty;
+    try msgs.appendSlice(arena, "[");
+    try appendMessage(arena, &msgs, "system", system_prompt);
+    try appendMessage(arena, &msgs, "user", "hi");
+
+    // Only the tool list is read, so the pipe fields are never touched, and
+    // the list is never shut down: there is no child behind it.
+    const items = try arena.alloc(mcp_mod.Server, 1);
+    items[0] = .{
+        .name = "srv",
+        .child = undefined,
+        .pgid = 0,
+        .to_server = undefined,
+        .from_server = undefined,
+        .tools = &.{.{
+            .name = "echo",
+            .exposed = "mcp__srv__echo",
+            .description = "Echo text back",
+            .schema = "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}}}",
+        }},
+    };
+    const servers: mcp_mod.Servers = .{ .items = items };
+    const body = try buildBody(arena, .{ .model = "m", .mcp = servers }, msgs.items);
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena, body, .{});
+    const tools = parsed.value.object.get("tools").?.array;
+    try std.testing.expectEqual(chat_mod.tools().len + 1, tools.items.len);
+    const last = tools.items[tools.items.len - 1].object.get("function").?.object;
+    try std.testing.expectEqualStrings("mcp__srv__echo", last.get("name").?.string);
+    try std.testing.expect(last.get("parameters").?.object.get("properties") != null);
 }
 
 /// The description one property of one tool's schema carries, which is where a
@@ -7663,15 +7784,16 @@ test "the help text and the README name every variable the program reads" {
         }
     }
 
-    // The three that read empty as off are named in the same paragraph as the
+    // The four that read empty as off are named in the same paragraph as the
     // exception, which is why they are not in the list above: an empty
     // MICROAGENT_CONFIG means no style file rather than the default one, an
     // empty MICROAGENT_SESSION_DIR means no session log rather than one
-    // under $HOME, and an empty MICROAGENT_SKILLS means no skills rather than
-    // the default directory. Requiring them here is what keeps a fourth
-    // convention from starting, where a variable is settled in a paragraph and
-    // in no list.
-    for ([_][]const u8{ "MICROAGENT_CONFIG", "MICROAGENT_SESSION_DIR", "MICROAGENT_SKILLS" }) |name| {
+    // under $HOME, an empty MICROAGENT_SKILLS means no skills rather than the
+    // default directory, and an empty MICROAGENT_MCP_CONFIG means no servers
+    // rather than the default registry. Requiring them here is what keeps a
+    // fifth convention from starting, where a variable is settled in a
+    // paragraph and in no list.
+    for ([_][]const u8{ "MICROAGENT_CONFIG", "MICROAGENT_SESSION_DIR", "MICROAGENT_SKILLS", "MICROAGENT_MCP_CONFIG" }) |name| {
         if (!namesWholeToken(help_rule, name) or !namesWholeToken(readme_rule, name)) {
             std.debug.print("\n" ++ readme_path ++ ": {s} reads empty as off rather than falling through, and one paragraph saying so does not name it\n", .{name});
             return error.TestUnexpectedResult;
