@@ -18,6 +18,17 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+
+// A Linux build links no C library, so the published binary is one static
+// file with no loader and no libc to match on the host. A build that turns
+// `link_libc` on fails here rather than shipping a binary that needs one.
+// macOS is exempt: every program there links libSystem, since Apple keeps its
+// syscall ABI private.
+comptime {
+    if (builtin.os.tag == .linux and builtin.link_libc)
+        @compileError("microagent links no libc on Linux; drop whatever turned link_libc on");
+}
+
 const Io = std.Io;
 
 const build_options = @import("build_options");
@@ -3022,12 +3033,13 @@ fn applyDeclared(
     // A frame the shapes cannot hold is the slow path's job. An allocation that
     // failed is not a frame that would not parse, so it is not answered with
     // "that is not JSON": the run cannot pay for another parse, and the two
-    // failures leave the run in very different states.
-    const parsed = std.json.parseFromSlice(StreamFrame, scratch, payload, .{ .ignore_unknown_fields = true }) catch |err| switch (err) {
+    // failures leave the run in very different states. Leaky, because the
+    // caller resets `scratch` after every frame: the arena `parseFromSlice`
+    // wraps around it was one more allocator per frame and nothing freed it.
+    const frame = std.json.parseFromSliceLeaky(StreamFrame, scratch, payload, .{ .ignore_unknown_fields = true }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return false,
     };
-    const frame = parsed.value;
 
     try chat_mod.recordServed(gpa, result, frame.model, frame.system_fingerprint);
 
@@ -3322,7 +3334,7 @@ fn applyFrame(
     // to land in, because a struct field cannot be spelled that one.
     if (!reportsError(payload) and try applyDeclared(scratch, gpa, payload, result, calls, out_buf, unparsable)) return;
 
-    const parsed = std.json.parseFromSlice(std.json.Value, scratch, payload, .{}) catch |err| switch (err) {
+    const root = std.json.parseFromSliceLeaky(std.json.Value, scratch, payload, .{}) catch |err| switch (err) {
         // Counted as unreadable only when it really was: a frame that would not
         // parse is the provider's, and an allocation that failed is this
         // machine's, and telling the operator to look at the provider for the
@@ -3333,7 +3345,6 @@ fn applyFrame(
             return;
         },
     };
-    const root = parsed.value;
     if (root != .object) {
         unparsable.* += 1;
         return;

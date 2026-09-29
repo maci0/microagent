@@ -53,6 +53,14 @@ release, and `microagent update` moves you to it.
 
 ### Changed
 
+- A Linux build that links libc now fails to compile. The Linux binaries have
+  never linked a C library (the `musl` in `x86_64-linux-musl` is the target
+  triple, not a linked libc), and nothing held them to it: a `linkLibC` or a
+  dependency that turned it on would have shipped a binary that needs one.
+- A streamed frame is parsed straight into the per-frame scratch allocator.
+  `std.json.parseFromSlice` built an arena of its own around that scratch for
+  every frame, which the caller resets anyway: 29.0 M to 28.0 M instructions
+  on a 5,000-frame stream.
 - The constant half of every request, the one that carries the tool schemas, is
   built once per run rather than once per turn. It is a pure function of the
   options, and nothing the loop does changes any of them, so each turn was

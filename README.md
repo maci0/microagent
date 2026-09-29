@@ -21,8 +21,8 @@ Agent CLIs are built for a person at a terminal: a TUI, a node or python runtime
 plugins, session state. None of that helps when a script calls the agent in a loop or drops it into
 a container that has nothing installed. microagent is the other shape:
 
-- **Nothing to install.** One Zig binary with no runtime. The Linux build is static musl, so it runs
-  in any Linux container of its architecture.
+- **Nothing to install.** One Zig binary with no runtime. On Linux it links no C library at
+  all, so the one static file runs in any Linux container of its architecture.
 - **Starts in milliseconds.** The harness is under 1% of a turn; the model and the tools are the
   run. Kimi and opencode burn three quarters of a second of CPU just to print their version.
 - **Script-shaped output.** stdout is the answer plus one JSON usage line per response. Everything

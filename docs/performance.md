@@ -91,6 +91,7 @@ run-to-run noise, so there is no build flag to reach for either.
 | one compaction's closing byte | a 400 KB copy | **appended in place** | the conversation was copied whole to add the `]` `std.json` needs for a complete document, once per compaction; the byte is appended to the buffer and taken back before the rewrite |
 | mappings at startup (`--version`) | 86 mmap | **19** | std's start-code allocator maps a 64 KB slab per size class on first use; the run builds its own around a bucket allocator instead. It costs about 1.2% of client instructions on a 3000-turn run, which is the price of the 67 mappings it saves |
 | three 4 MB MCP tool results | 19.1 MB resident | **12.8 MB** | the text was built whole and clamped to 24 KB a moment later, so the copy and the clamp both worked over bytes nobody keeps; it stops at the cap while it is built, and the note names the size it would have had |
+| a 5,000-frame stream's client CPU | 29.0 M instr | **28.0 M instr** | `std.json.parseFromSlice` wrapped every frame in an arena of its own, on top of the per-frame scratch the caller already resets; `parseFromSliceLeaky` parses into that scratch directly |
 
 Four of the rows above are one body of work on one run, and they compound. Between `v0.4.0` and the
 tree that carries them, client instructions for 3000 turns of the always-calls-a-tool loop fall from
@@ -116,6 +117,19 @@ Kept out on the numbers, not on taste:
   concurrently.
 - **A byte-level compaction rewrite.** Compaction is 4.7 ms per megabyte, about 0.02% of a run, and
   the replacement would hand-rewrite the exact bytes the prompt cache depends on.
+- **A stack buffer in front of the per-frame arena.** 1.5% fewer instructions on a 5,000-frame
+  stream once the frame parse was leaky, and CPU time inside the noise, for another allocator on
+  the one path carrying the model's output.
+- **ReleaseFast release assets.** ReleaseSmall spends 1.7-1.9x the user cycles of ReleaseFast
+  (20.6-22.9 M against 11.3-12.4 M on a 5,000-frame stream, 0.65 M against 0.34 M for `--version`),
+  but pages in half the binary, so CPU time including the kernel is within about 10% either way and
+  lower for ReleaseSmall at startup. Switching would cost 0.8 MB (0.91 MB to 1.71 MB) to save cycles
+  that are under 1% of a turn.
+- **Skipping the system CA store rescan.** With no `--ca-bundle`, the HTTP client parses every
+  certificate in the system store before the first https request: 121 certificates, 5.9 M
+  instructions and 0.7 ms of CPU on this machine, once per run and with no peak-memory cost. There
+  is no cheaper source of the same trust decision.
+
 The escaper tests written for the word-at-a-time attempt were kept, because they cover a real edge:
 the escaper takes a byte's width from its lead byte, and an escapable byte or a multi-byte character
 landing at an arbitrary offset produces invalid JSON when that is wrong.

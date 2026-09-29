@@ -424,7 +424,7 @@ controlled experiment.
 ### Terminal-Bench 2
 
 The external benchmark for a coding harness: 89 containerized tasks with their own verifiers, driven
-through Harbor. microagent runs inside the task container as a static musl binary (`make musl`), so
+through Harbor. microagent runs inside the task container as a static binary with no C library (`make musl`), so
 its own shell and file tools operate on the task's real files. Adapter and instructions:
 [integrations/harbor/README.md](../integrations/harbor/README.md). Comparisons with opencode are in
 [Head to head with opencode](#head-to-head-with-opencode).
