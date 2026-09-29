@@ -148,6 +148,12 @@ or
 to disable. Environment
 .BR MICROAGENT_REASONING_EFFORT .
 .TP
+.BI \-\-temperature " n"
+The sampling the provider draws from, 0 to 2. Left out, the field is absent
+and the provider samples at its own default, so two runs of one conversation
+are two answers; 0 is the one setting under which they are alike. Environment
+.BR MICROAGENT_TEMPERATURE .
+.TP
 .BR \-h ", " \-\-help
 Print the built-in usage text and exit. Also reached by a bare
 .BR help .
@@ -198,7 +204,7 @@ says.
 .BR MICROAGENT_MAX_TURNS ", " MICROAGENT_MAX_TOKENS ", " MICROAGENT_STALL_TIMEOUT ", " MICROAGENT_BUDGET_SECONDS ", " MICROAGENT_MAX_SPEND_TOKENS
 The ceilings and timeouts above.
 .TP
-.BR MICROAGENT_REASONING_EFFORT ", " GITHUB_TOKEN
+.BR MICROAGENT_REASONING_EFFORT ", " MICROAGENT_TEMPERATURE ", " GITHUB_TOKEN
 As above.
 .TP
 .BR MICROAGENT_CONFIG ", " MICROAGENT_SESSION_DIR ", " MICROAGENT_SKILLS

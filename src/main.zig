@@ -116,6 +116,12 @@ const default_max_tokens: u32 = 65_536;
 /// never returns never reaches that check: a host that accepted the connection
 /// and then said nothing hung a benchmark trial for twenty-five minutes.
 const default_stall_timeout_s: u32 = 120;
+/// The ends of the range a `temperature` may sit in: 0 is the greedy decode,
+/// which is the one setting two runs of the same conversation and model answer
+/// alike under, and 2 is the top of the OpenAI-compatible range. A value past
+/// either is refused before a turn is spent on the refusal.
+const min_temperature: f64 = 0;
+const max_temperature: f64 = 2;
 /// Bytes one read of the completion stream asks for. A read lands straight in
 /// the pending buffer, so this is the growth step of that buffer, not a separate
 /// buffer: every byte of every response passed through one copy fewer because of
@@ -203,6 +209,12 @@ const Options = struct {
     /// in a gauntlet loop with a per-review timeout that is the difference
     /// between finishing a review and being killed at the ceiling.
     reasoning_effort: ?[]const u8 = null,
+    /// Sent as `temperature`, the sampling the provider draws from. Null by
+    /// default: an unset field is the provider's own default, which is not a
+    /// number this program can report or a run can reproduce. A run that sets
+    /// it can say what it asked for, and 0 is the one setting under which two
+    /// runs of the same conversation and the same model answer alike.
+    temperature: ?f64 = null,
     /// Stop starting turns once this much time has passed on the monotonic
     /// clock, so a run ends deliberately inside a caller's per-review timeout
     /// instead of being killed in the middle of one. A clock step inside the
@@ -428,6 +440,7 @@ fn runMain(init: std.process.Init) !u8 {
     const env_base_url = envValue(init.environ_map, base_url_var);
     if (env_base_url) |v| opts.base_url = v;
     reasoningEffortFromEnv(init.environ_map, "MICROAGENT_REASONING_EFFORT", &opts.reasoning_effort, &env_problem);
+    temperatureFromEnv(init.environ_map, "MICROAGENT_TEMPERATURE", &opts.temperature, &env_problem);
     ceilingFromEnv(usize, init.environ_map, "MICROAGENT_MAX_TURNS", .max_turns, &opts.max_turns, &env_problem);
     ceilingFromEnv(u32, init.environ_map, "MICROAGENT_MAX_TOKENS", .max_tokens, &opts.max_tokens, &env_problem);
     ceilingFromEnv(u32, init.environ_map, "MICROAGENT_STALL_TIMEOUT", .stall_timeout, &opts.stall_timeout_s, &env_problem);
@@ -796,6 +809,11 @@ const help_text =
     \\                         reasoning.effort sent to the provider: minimal,
     \\                         low, medium, high, or none to disable (env
     \\                         MICROAGENT_REASONING_EFFORT)
+    \\      --temperature <n>   temperature sent to the provider, 0 to 2. Left
+    \\                         out, the provider samples at its own default, so
+    \\                         two runs of one conversation are two answers;
+    \\                         0 is the one setting that repeats
+    \\                         (env MICROAGENT_TEMPERATURE)
     \\  -h, --help             this text ("help" as the only argument too)
     \\  -V, --version          version
     \\
@@ -895,7 +913,8 @@ const help_text =
     \\                         unaffected by it.
     \\
     \\A variable set to an empty string is not a value: MICROAGENT_MODEL,
-    \\MICROAGENT_BASE_URL, MICROAGENT_REASONING_EFFORT, MICROAGENT_BUDGET_SECONDS,
+    \\MICROAGENT_BASE_URL, MICROAGENT_REASONING_EFFORT, MICROAGENT_TEMPERATURE,
+    \\MICROAGENT_BUDGET_SECONDS,
     \\MICROAGENT_MAX_SPEND_TOKENS, MICROAGENT_MAX_TURNS, MICROAGENT_MAX_TOKENS,
     \\MICROAGENT_STALL_TIMEOUT, MDEBUG and NO_COLOR keep their defaults, and
     \\MICROAGENT_CA_BUNDLE and MICROAGENT_API_KEY fall through to whatever
@@ -1084,6 +1103,45 @@ fn reasoningEffort(buf: []u8, value: []const u8, out: *?[]const u8) ?[]const u8 
         "reasoning effort is not one of: " ++ reasoning_effort_names;
 }
 
+/// The range a temperature is accepted in: 0 is the only setting under which
+/// two runs of one conversation answer alike, and 2 is the highest the
+/// OpenAI-compatible API documents. A number outside it, or one no provider
+/// accepts at all, is refused here rather than sent to find out with a turn.
+fn temperature(buf: []u8, value: []const u8, out: *?f64) ?[]const u8 {
+    const v = std.mem.trim(u8, value, net.env_surrounding);
+    // The comparison rather than a range check, so `nan` fails it too: every
+    // comparison with `nan` is false, so a value parseFloat accepts and no
+    // provider does is refused on the same line as one out of range.
+    const n = std.fmt.parseFloat(f64, v) catch
+        return temperatureMessage(buf, value);
+    if (!(n >= min_temperature and n <= max_temperature)) return temperatureMessage(buf, value);
+    out.* = n;
+    return null;
+}
+
+/// The sentence one refused temperature is reported with, for the flag path and
+/// the environment path, so a value spelled on a command line and the same
+/// value spelled in a variable are answered the same way.
+fn temperatureMessage(buf: []u8, value: []const u8) []const u8 {
+    return std.fmt.bufPrint(buf, "--temperature wants a number between {d} and {d}, got '{s}'", .{
+        min_temperature, max_temperature, clip(value),
+    }) catch "--temperature wants a number between 0 and 2";
+}
+
+/// The temperature the environment named, checked where it is read and
+/// recorded rather than reported, for the reason the reasoning level above is.
+fn temperatureFromEnv(
+    env: *const std.process.Environ.Map,
+    name: []const u8,
+    out: *?f64,
+    problem: *?EnvProblem,
+) void {
+    const v = envValue(env, name) orelse return;
+    if (temperature(&.{}, v, out) != null) {
+        if (problem.* == null) problem.* = .{ .option = .temperature, .name = name, .value = v };
+    }
+}
+
 /// A ceiling from a flag or a variable, checked the same way on both paths:
 /// a number, and at least one. Zero is refused because a run with no turns
 /// sends no request, prints no answer and no usage line, and exits 0, which a
@@ -1174,6 +1232,10 @@ fn envProblemMessage(buf: []u8, problem: EnvProblem) []const u8 {
         .reasoning_effort => {
             var unused: ?[]const u8 = null;
             return reasoningEffort(buf, problem.value, &unused) orelse reasoning_effort_names;
+        },
+        .temperature => {
+            var unused: ?f64 = null;
+            return temperature(buf, problem.value, &unused) orelse problem.name;
         },
         .budget, .max_spend_tokens => {
             var unused: ?u64 = null;
@@ -1290,6 +1352,7 @@ const ValuedOption = enum {
     ca_bundle,
     config,
     reasoning_effort,
+    temperature,
     budget,
     max_spend_tokens,
     max_turns,
@@ -1320,6 +1383,7 @@ const valued_flags = [_]ValuedFlag{
     .{ .short = null, .long = "--ca-bundle", .noun = "a file", .option = .ca_bundle },
     .{ .short = null, .long = "--config", .noun = "a file", .option = .config },
     .{ .short = null, .long = "--reasoning-effort", .noun = "a level", .option = .reasoning_effort },
+    .{ .short = null, .long = "--temperature", .noun = "a number", .option = .temperature },
     .{ .short = null, .long = "--budget", .noun = "a number of seconds", .option = .budget },
     .{ .short = null, .long = "--max-spend-tokens", .noun = "a number", .option = .max_spend_tokens },
     .{ .short = null, .long = "--max-turns", .noun = "a number", .option = .max_turns },
@@ -1357,6 +1421,7 @@ fn setValued(
         .ca_bundle => opts.ca_bundle = value,
         .config => opts.config = value,
         .reasoning_effort => return reasoningEffort(buf, value, &opts.reasoning_effort),
+        .temperature => return temperature(buf, value, &opts.temperature),
         .budget => return optionalCeiling(buf, "--budget", value, &opts.budget_s),
         .max_spend_tokens => return optionalCeiling(buf, "--max-spend-tokens", value, &opts.max_spend_tokens),
         .max_turns => return ceiling(usize, buf, "--max-turns", value, &opts.max_turns),
@@ -1483,6 +1548,7 @@ const known_words = [_][]const u8{
     "--ca-bundle",
     "--config",
     "--reasoning-effort",
+    "--temperature",
     "--budget",
     "--max-spend-tokens",
     "--max-turns",
@@ -1631,6 +1697,7 @@ const env_vars = [_][]const u8{
     "MICROAGENT_BUDGET_SECONDS",
     "MICROAGENT_MAX_SPEND_TOKENS",
     "MICROAGENT_REASONING_EFFORT",
+    "MICROAGENT_TEMPERATURE",
     "MICROAGENT_CONFIG",
     "MICROAGENT_SKILLS",
     "MICROAGENT_CA_BUNDLE",
@@ -1661,6 +1728,7 @@ const empty_is_unset_vars = [_][]const u8{
     "MICROAGENT_MODEL",
     base_url_var,
     "MICROAGENT_REASONING_EFFORT",
+    "MICROAGENT_TEMPERATURE",
     "MICROAGENT_BUDGET_SECONDS",
     "MICROAGENT_MAX_SPEND_TOKENS",
     "MICROAGENT_MAX_TURNS",
@@ -1863,7 +1931,7 @@ fn traceConfig(
     if (!debug_enabled) return;
     net.note(io, arena,
         \\[mdebug] model={s} base_url={s}
-        \\[mdebug] max_turns={d} max_tokens={d} budget_s={s} max_spend_tokens={s} reasoning_effort={s}
+        \\[mdebug] max_turns={d} max_tokens={d} budget_s={s} max_spend_tokens={s} reasoning_effort={s} temperature={s}
         \\[mdebug] ca_bundle={s} session_dir={s}
         \\[mdebug] config={s} system_prompt_extra_bytes={d}
         \\[mdebug] skills={d} skill_roots={s}
@@ -1879,6 +1947,7 @@ fn traceConfig(
         if (opts.budget_s) |b| std.fmt.allocPrint(arena, "{d}", .{b}) catch "?" else "unset",
         if (opts.max_spend_tokens) |m| std.fmt.allocPrint(arena, "{d}", .{m}) catch "?" else "unset",
         traceText(arena, opts.reasoning_effort orelse "unset"),
+        traceText(arena, if (opts.temperature) |t| std.fmt.allocPrint(arena, "{d:.6}", .{t}) catch "?" else "unset"),
         traceText(arena, if (opts.ca_bundle.len == 0) "unset" else opts.ca_bundle),
         traceText(arena, if (opts.session_dir.len == 0) "off" else opts.session_dir),
         traceText(arena, loaded.source orelse "none"),
@@ -2674,12 +2743,24 @@ fn bodyPrefix(arena: std.mem.Allocator, opts: Options) ![]u8 {
             try w.writeAll("}");
         }
     }
+    // Six decimals, so the field is a JSON number on every value the parser
+    // accepts rather than a spelling some of them would reach as `1e0`.
+    if (opts.temperature) |t| try w.print(",\"temperature\":{d:.6}", .{t});
     try w.writeAll(",\"messages\":");
     return jb.items();
 }
 
 /// The two bytes that close the conversation array and the request object.
 const body_close = "]}";
+
+/// Whether this run sends a request field a provider may not accept:
+/// `reasoning` and `temperature`. Both are optional settings of the operator's
+/// choosing, and one that answers HTTP 400 for either of them is answered for
+/// the whole request, so the turn is sent once more without both rather than
+/// failing a run whose task the model never got to see.
+fn optionalRequestFields(opts: Options) bool {
+    return opts.reasoning_effort != null or opts.temperature != null;
+}
 
 /// The request body as one buffer, for the callers that need the bytes in hand:
 /// the tests that read a body back, and anything comparing two of them. The
@@ -2911,7 +2992,7 @@ fn streamChatOnce(
         if (response.head.status != .ok) {
             // The one retry the declaration above is for, on the status that
             // carries the refusal.
-            if (response.head.status == .bad_request and !dropped_optional and opts.reasoning_effort != null) {
+            if (response.head.status == .bad_request and !dropped_optional and optionalRequestFields(opts)) {
                 dropped_optional = true;
                 // The count is the attempt within one request body, so a body
                 // that changed restarts it. Carrying it over spent one of the
@@ -2921,6 +3002,7 @@ fn streamChatOnce(
                 attempt = 0;
                 var plain = opts;
                 plain.reasoning_effort = null;
+                plain.temperature = null;
                 prefix_now = try bodyPrefix(arena, plain);
                 net.note(io, arena, "microagent: {s} refused the optional request fields (HTTP 400); retrying once without them\n", .{shown_url});
                 continue;
@@ -5388,6 +5470,57 @@ test "reasoning effort is only sent when asked for" {
     const none: Options = .{ .model = "m", .reasoning_effort = "none" };
     const body_none = try buildBody(gpa, none, msgs.items);
     try std.testing.expect(std.mem.indexOf(u8, body_none, "\"reasoning\":{\"enabled\":false}") != null);
+}
+
+// A run that sends no sampling field is a run whose answers the provider
+// varies on its own, and a run that sends one has to send a JSON number the
+// provider reads back as the number it was given: `0` is written `0.000000`,
+// which is the same value and is spelled the same way on every machine.
+test "the sampling field is sent only when asked for, and as a JSON number" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const gpa = arena_state.allocator();
+
+    var msgs: std.ArrayList(u8) = .empty;
+    try msgs.appendSlice(gpa, "[{\"role\":\"user\",\"content\":\"hi\"}]");
+
+    const plain: Options = .{ .model = "m" };
+    try std.testing.expect(std.mem.indexOf(u8, try buildBody(gpa, plain, msgs.items), "\"temperature\"") == null);
+
+    const greedy: Options = .{ .model = "m", .temperature = 0 };
+    const body = try buildBody(gpa, greedy, msgs.items);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"temperature\":0.000000") != null);
+
+    const half: Options = .{ .model = "m", .temperature = 0.5 };
+    try std.testing.expect(std.mem.indexOf(u8, try buildBody(gpa, half, msgs.items), "\"temperature\":0.500000") != null);
+
+    // A provider that refuses the field answers 400 for the whole request, so
+    // the retry is keyed on a run that sent one.
+    try std.testing.expect(!optionalRequestFields(plain));
+    try std.testing.expect(optionalRequestFields(greedy));
+    try std.testing.expect(optionalRequestFields(.{ .model = "m", .reasoning_effort = "low" }));
+}
+
+test "a temperature is a number in range, or a message naming both" {
+    var buf: [256]u8 = undefined;
+    var out: ?f64 = null;
+
+    try std.testing.expect(temperature(&buf, "0", &out) == null);
+    try std.testing.expectEqual(@as(?f64, 0), out);
+    try std.testing.expect(temperature(&buf, " 1.5\r\n", &out) == null);
+    try std.testing.expectEqual(@as(?f64, 1.5), out.?);
+    try std.testing.expect(temperature(&buf, "2", &out) == null);
+    try std.testing.expectEqual(@as(?f64, 2), out.?);
+
+    // The two a provider would answer 400 for, and `nan`, which no comparison
+    // is true of and so fails the same range check the out-of-range values do.
+    for ([_][]const u8{ "2.1", "-0.1", "warm", "nan", "inf", "" }) |bad| {
+        out = null;
+        const message = temperature(&buf, bad, &out);
+        try std.testing.expect(message != null);
+        try std.testing.expect(std.mem.indexOf(u8, message.?, "between 0 and 2") != null);
+        try std.testing.expect(out == null);
+    }
 }
 
 test "only weather-shaped statuses are retried" {

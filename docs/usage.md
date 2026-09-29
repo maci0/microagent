@@ -86,6 +86,11 @@ usage: microagent [options] "<prompt>"
                          reasoning.effort sent to the provider: minimal,
                          low, medium, high, or none to disable (env
                          MICROAGENT_REASONING_EFFORT)
+      --temperature <n>   temperature sent to the provider, 0 to 2. Left
+                         out, the provider samples at its own default, so
+                         two runs of one conversation are two answers;
+                         0 is the one setting that repeats
+                         (env MICROAGENT_TEMPERATURE)
   -h, --help             this text ("help" as the only argument too)
   -V, --version          version
 
@@ -185,7 +190,8 @@ TMPDIR, on macOS        added to the sandbox writable roots whenever
                          unaffected by it.
 
 A variable set to an empty string is not a value: MICROAGENT_MODEL,
-MICROAGENT_BASE_URL, MICROAGENT_REASONING_EFFORT, MICROAGENT_BUDGET_SECONDS,
+MICROAGENT_BASE_URL, MICROAGENT_REASONING_EFFORT, MICROAGENT_TEMPERATURE,
+MICROAGENT_BUDGET_SECONDS,
 MICROAGENT_MAX_SPEND_TOKENS, MICROAGENT_MAX_TURNS, MICROAGENT_MAX_TOKENS,
 MICROAGENT_STALL_TIMEOUT, MDEBUG and NO_COLOR keep their defaults, and
 MICROAGENT_CA_BUNDLE and MICROAGENT_API_KEY fall through to whatever
@@ -210,7 +216,7 @@ variable is the run's, and the message stops the run as a bad argument would. `-
 
 A variable set to an empty string is not a value:
 `MICROAGENT_MODEL`, `MICROAGENT_BASE_URL`, `MICROAGENT_REASONING_EFFORT`,
-`MICROAGENT_BUDGET_SECONDS`, `MICROAGENT_MAX_SPEND_TOKENS`, `MICROAGENT_MAX_TURNS`,
+`MICROAGENT_TEMPERATURE`, `MICROAGENT_BUDGET_SECONDS`, `MICROAGENT_MAX_SPEND_TOKENS`, `MICROAGENT_MAX_TURNS`,
 `MICROAGENT_MAX_TOKENS`, `MICROAGENT_STALL_TIMEOUT` and `MDEBUG` keep their defaults,
 `MICROAGENT_API_KEY` falls through to the config file's `api_key`, and `MICROAGENT_CA_BUNDLE` falls
 through to `SSL_CERT_FILE`.
@@ -740,9 +746,9 @@ reads a log back.
 - **Transient failures retry.** A 408, 409, 425, 429, any 5xx, or a connection that dies before the
   request reached the provider is retried twice, with 1 s and 2 s of backoff (or the provider's
   `Retry-After`, capped at 120 s), before the run exits non-zero. Any other rejection (401, 404) fails
-  at once. A 400 does too, with one exception: when `--reasoning-effort` is set, the request is sent
-  once more without the `reasoning` field, since some providers refuse that field rather than the
-  request.
+  at once. A 400 does too, with one exception: when `--reasoning-effort` or `--temperature` is set,
+  the request is sent once more without the `reasoning` and `temperature` fields, since some
+  providers refuse those fields rather than the request.
 - **A sent turn is never re-sent.** When the whole turn was sent and no response arrives, the
   provider may already have generated and billed the completion, so the run ends with the connection
   error on stderr rather than paying twice. A failure the provider reports is named in its own words;

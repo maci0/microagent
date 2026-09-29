@@ -16,6 +16,14 @@ release, and `microagent update` moves you to it.
 
 ### Added
 
+- `--temperature <n>` and `MICROAGENT_TEMPERATURE` set the sampling the
+  provider draws from, 0 to 2, and the field is sent only when one of them is
+  given. A run that sends none is a run whose answers the provider varies on
+  its own, so two runs of one conversation are two answers; 0 is the one
+  setting under which they are alike. A provider that answers 400 for the
+  field gets the turn once more without it, the same way `reasoning` already
+  was.
+
 - A misspelled flag names the one it is closest to. `microagent --modl` said
   `unknown or incomplete argument '--modl'`, which sends a reader to the source
   to find the flag they meant; it now says `did you mean --model?`, and
