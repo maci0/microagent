@@ -39,6 +39,14 @@ pub const tool_name = "skill";
 /// conversation re-sends it on every later turn.
 const max_skill_bytes: usize = 256 * 1024;
 
+/// How much of a `SKILL.md` the listing reads. A listing needs the name and
+/// description the frontmatter holds and the first body line, all of them at
+/// the top of the file; the body itself is read when a `skill` call loads it.
+/// Reading whole files instead kept every skill's body resident for the run --
+/// 200 skills of 100 KB measured about 20 MB -- for text the listing never
+/// looked at past this point.
+const skill_head_bytes: usize = 8 * 1024;
+
 /// How much of the assembled skill list reaches the system prompt. The listing
 /// is what every turn pays for, so it is bounded like the tool output that
 /// carries a body: past it the remaining skills are counted rather than named.
@@ -185,11 +193,16 @@ pub fn discover(io: Io, arena: std.mem.Allocator, root_list: []const Root) Skill
         }) |entry| {
             if (entry.kind != .directory) continue;
             const rel = std.fs.path.join(arena, &.{ entry.name, "SKILL.md" }) catch continue;
-            const text = dir.readFileAlloc(io, rel, arena, .limited(max_skill_bytes)) catch |err| {
+            const stat = dir.statFile(io, rel, .{}) catch |err| {
                 if (err != error.FileNotFound)
                     net.note(io, arena, "microagent: skill {s}: {s}; it is skipped\n", .{ chat.safeTextAll(arena, entry.name), @errorName(err) });
                 continue;
             };
+            if (stat.size > max_skill_bytes) {
+                net.note(io, arena, "microagent: skill {s} is skipped: it is larger than the {d} bytes a skill may hold\n", .{ chat.safeTextAll(arena, entry.name), max_skill_bytes });
+                continue;
+            }
+            const text = readHead(io, arena, dir, rel, entry.name, stat.size) orelse continue;
             const name = skillName(arena, entry.name, text) orelse {
                 net.note(io, arena, "microagent: skill {s} is skipped: a name may hold only letters, digits, dot, dash and underscore\n", .{chat.safeTextAll(arena, entry.name)});
                 continue;
@@ -208,6 +221,36 @@ pub fn discover(io: Io, arena: std.mem.Allocator, root_list: []const Root) Skill
     }
     sortByName(found.items);
     return .{ .items = found.items };
+}
+
+/// The head of one `SKILL.md`: up to `skill_head_bytes` of it, which is all
+/// the listing reads and all it keeps. A read that fails is named and the
+/// skill is left out, the way a whole-file read that failed used to be.
+fn readHead(
+    io: Io,
+    arena: std.mem.Allocator,
+    dir: std.Io.Dir,
+    rel: []const u8,
+    dir_name: []const u8,
+    size: u64,
+) ?[]const u8 {
+    var file = dir.openFile(io, rel, .{}) catch |err| {
+        if (err != error.FileNotFound)
+            net.note(io, arena, "microagent: skill {s}: {s}; it is skipped\n", .{ chat.safeTextAll(arena, dir_name), @errorName(err) });
+        return null;
+    };
+    defer file.close(io);
+    const head = arena.alloc(u8, @intCast(@min(size, skill_head_bytes))) catch return null;
+    var got: usize = 0;
+    while (got < head.len) {
+        const n = file.readStreaming(io, &.{head[got..]}) catch |err| {
+            net.note(io, arena, "microagent: skill {s}: {s}; it is skipped\n", .{ chat.safeTextAll(arena, dir_name), @errorName(err) });
+            return null;
+        };
+        if (n == 0) break;
+        got += n;
+    }
+    return head[0..got];
 }
 
 /// Sorted by name, so the listing a provider sees is the same for the same
@@ -452,6 +495,46 @@ test "skills are discovered from a root, sorted, and a directory without one is 
 
     // The body comes back without the frontmatter that named it.
     try std.testing.expectEqualStrings("alpha body\n", try load(io, arena, set.get("alpha").?));
+}
+
+// The listing reads a skill's head and keeps it; the body is read when the
+// model loads the skill. The counter below is what fails if a whole-file read
+// comes back: a 200 KB file against a 64 KB bound is not a close call on any
+// machine, and it does not move with load.
+test "a large skill is listed from its head, and loads whole" {
+    const gpa = std.testing.allocator;
+    var scratch_state = std.heap.ArenaAllocator.init(gpa);
+    defer scratch_state.deinit();
+    const scratch = scratch_state.allocator();
+    var run_state = std.heap.ArenaAllocator.init(gpa);
+    defer run_state.deinit();
+    const arena = run_state.allocator();
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+
+    // A body larger than the head the listing reads, and under the cap a skill
+    // may hold, so the body is read only by a load.
+    const body = try scratch.alloc(u8, 200 * 1024);
+    @memset(body, 'x');
+    const text = try std.fmt.allocPrint(scratch, "---\nname: big\ndescription: a large skill\n---\n# Heading\n{s}\n", .{body});
+    try tmp.dir.createDirPath(io, "big");
+    try tmp.dir.writeFile(io, .{ .sub_path = "big/SKILL.md", .data = text });
+
+    const root_list = [_]Root{.{ .path = root, .named = true }};
+    const set = discover(io, arena, &root_list);
+    try std.testing.expectEqual(@as(usize, 1), set.items.len);
+    try std.testing.expectEqualStrings("big", set.items[0].name);
+    try std.testing.expectEqualStrings("a large skill", set.items[0].description);
+    try std.testing.expect(run_state.queryCapacity() < 64 * 1024);
+
+    // And the body is whole when the model asks for it.
+    const loaded = try load(io, arena, set.get("big").?);
+    try std.testing.expect(loaded.len > 200 * 1024);
+    try std.testing.expect(std.mem.startsWith(u8, loaded, "# Heading\n"));
 }
 
 test "the prompt lists every skill and is empty when there is none" {
