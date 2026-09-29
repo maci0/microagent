@@ -1762,12 +1762,17 @@ fn toolAst(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
     return runSearchTool(io, arena, argv.items, "ast-grep", ast_grep_install, ceiling_ms, environ_map);
 }
 
-/// The fewest characters of literal text a pattern must carry for its
-/// replacement to be read against it. `=` and `(` are punctuation every
-/// replacement is full of, so a skeleton that short says nothing about whether
-/// the pattern can match its own output; `return` and `foo()` are the text the
-/// match is anchored on, so a replacement carrying one is a replacement the
-/// pattern can match again.
+/// The fewest bytes of literal text a pattern must carry for its replacement to
+/// be read against it. `=` and `(` are punctuation every replacement is full
+/// of, so a skeleton that short says nothing about whether the pattern can match
+/// its own output; `return` and `foo()` are the text the match is anchored on,
+/// so a replacement carrying one is a replacement the pattern can match again.
+///
+/// Bytes, not characters, and the count is a byte count on purpose: the
+/// skeleton is a substring tested against the replacement, and every one of
+/// them is a byte string, so a non-ASCII pattern is anchored by at least as
+/// many bytes as it has characters and the gate is never the one thing that let
+/// a re-matching rewrite through.
 const ast_skeleton_min = 3;
 
 /// The literal text of `pattern`: every byte that is not part of a
@@ -1783,11 +1788,9 @@ fn patternSkeleton(arena: std.mem.Allocator, pattern: []const u8) !?[]const u8 {
     var i: usize = 0;
     while (i < pattern.len) {
         const name_at = i + 1;
-        if (pattern[i] == '$' and name_at < pattern.len and
-            (std.ascii.isAlphabetic(pattern[name_at]) or pattern[name_at] == '_'))
-        {
+        if (pattern[i] == '$' and name_at < pattern.len and startsMetavarName(pattern[name_at])) {
             i = name_at;
-            while (i < pattern.len and (std.ascii.isAlphanumeric(pattern[i]) or pattern[i] == '_')) i += 1;
+            while (i < pattern.len and continuesMetavarName(pattern[i])) i += 1;
             continue;
         }
         try out.append(arena, pattern[i]);
@@ -1796,6 +1799,24 @@ fn patternSkeleton(arena: std.mem.Allocator, pattern: []const u8) !?[]const u8 {
     const literal = std.mem.trim(u8, out.items, " \t\r\n");
     if (literal.len == 0) return null;
     return literal;
+}
+
+/// The first byte of a metavariable name. A language whose identifiers are not
+/// ASCII spells a metavariable `$café` or `$日本` the same way it spells every
+/// other name, and ast-grep accepts both. Reading those bytes as punctuation
+/// left the `$` and the name in the skeleton, so a pattern of nothing but
+/// `$日本` read as literal text and escaped the refusal the skeleton is read
+/// for: a rewrite anchored on a pattern that matches every node applied again
+/// on the next turn, which is the outcome this function exists to prevent.
+fn startsMetavarName(c: u8) bool {
+    return c >= 0x80 or std.ascii.isAlphabetic(c) or c == '_';
+}
+
+/// The rest of a metavariable name, and a byte above ASCII is one: UTF-8 spells
+/// every byte of a non-ASCII identifier above 0x7f, so a whole character is
+/// consumed however many bytes it is made of.
+fn continuesMetavarName(c: u8) bool {
+    return c >= 0x80 or std.ascii.isAlphanumeric(c) or c == '_';
 }
 
 /// Why a rewrite of `pattern` to `rewrite` is refused, or null when it is
@@ -4633,6 +4654,17 @@ test "an ast rewrite whose output still matches its pattern is refused" {
     try std.testing.expectEqualStrings("a", (try patternSkeleton(arena, "a$b")).?);
     try std.testing.expectEqualStrings("()", (try patternSkeleton(arena, "($A)")).?);
     try std.testing.expect((try patternSkeleton(arena, "$A $B")) == null);
+    // A name is not ASCII-only: a pattern of nothing but a non-ASCII
+    // metavariable matches every node, exactly as `$A` does, and reading its
+    // bytes as punctuation is what let it past the refusal above.
+    try std.testing.expect((try patternSkeleton(arena, "$日本")) == null);
+    try std.testing.expect((try patternSkeleton(arena, "$café $A")) == null);
+    try std.testing.expectEqualStrings("foo()", (try patternSkeleton(arena, "foo($café)")).?);
+    try std.testing.expectEqualStrings("привет()", (try patternSkeleton(arena, "привет($имя)")).?);
+    try std.testing.expectEqualStrings(
+        "error: the pattern $日本 is metavariables alone, so it matches whatever its own rewrite produced and a second run of this rewrite would apply again; match on the literal text around the metavariable, or use `edit`",
+        (try astRewriteRefusal(arena, "$日本", "[$日本]")).?,
+    );
 }
 
 // A pattern and its replacement are both the model's, and an ast-grep rewrite
