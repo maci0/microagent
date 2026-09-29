@@ -122,6 +122,11 @@ const default_stall_timeout_s: u32 = 120;
 /// it, and the frames are split out of `pending` in place.
 const stream_read_chunk: usize = 8 * 1024;
 
+/// The most of a repository's instructions this run follows. They ride on every
+/// request of the run, so a file past this is read up to the cap and the note
+/// names the size it was cut from.
+const max_agents_bytes: usize = 16 * 1024;
+
 /// Ceiling on one line of the completion stream, the bytes between newlines
 /// that `pending` holds for a frame that has not finished arriving.
 /// `max_response_bytes` bounds what a finished frame may add to the turn, so it
@@ -507,7 +512,15 @@ fn runMain(init: std.process.Init) !u8 {
     defer opts.mcp.shutdown(io);
     traceConfig(io, arena, opts, loaded, skill_roots, key.source);
     const skill_block = try opts.skills.prompt(arena);
-    const system_text = try systemText(arena, loaded.system_prompt_extra, skill_block, opts.disabled_tools);
+    const agents = readAgentsFile(io, arena, loaded.agents_file, loaded.agents_file_named);
+    const agents_block = if (agents) |text|
+        try std.fmt.allocPrint(arena, "\n\nThe repository's own instructions, from {s}, which this run follows within the task above:\n{s}", .{
+            chat_mod.safeTextAll(arena, loaded.agents_file),
+            text,
+        })
+    else
+        "";
+    const system_text = try systemText(arena, loaded.system_prompt_extra, agents_block, skill_block, opts.disabled_tools);
     try conversation_mod.openConversation(gpa, &msgs, system_text, opts.prompt);
 
     const ended = run(&client, io, gpa, init.arena.allocator(), opts, &msgs, tool_env, &opts.mcp) catch |err| {
@@ -529,18 +542,51 @@ fn runMain(init: std.process.Init) !u8 {
     return 0;
 }
 
-/// The system prompt: one string, so a run with no addendum, no skills and every
-/// tool on sends exactly the prompt it sent before any of them existed. A run
+/// The repository's own instructions, read from the working directory when the
+/// run starts, or null when the config turned the read off, the file is not
+/// there, or it cannot be read. Repository text is not the operator's, so the
+/// block it becomes says where it came from; a file larger than the cap is
+/// followed up to the cap rather than not at all, and the note names the size
+/// it was cut from.
+fn readAgentsFile(io: Io, arena: std.mem.Allocator, path: []const u8, named: bool) ?[]const u8 {
+    if (path.len == 0) return null;
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_agents_bytes + 1)) catch |err| {
+        // A named file that is not there is the operator's own spelling of a
+        // setting that did nothing, and the run says so. The default name is
+        // silent there, because most repositories have no such file; a file
+        // that is there and unreadable is said either way, because it exists.
+        if (named or err != error.FileNotFound) {
+            net.note(io, arena, "microagent: the repository instructions {s} could not be read ({s}); this run follows the system prompt alone\n", .{
+                chat_mod.safeTextAll(arena, path),
+                @errorName(err),
+            });
+        }
+        return null;
+    };
+    if (bytes.len <= max_agents_bytes) return bytes;
+    const whole = bytes[0..chat_mod.partialTailLen(bytes[0..max_agents_bytes])];
+    net.note(io, arena, "microagent: the repository instructions {s} are larger than {d} bytes; the first {d} are followed\n", .{
+        chat_mod.safeTextAll(arena, path),
+        max_agents_bytes,
+        whole.len,
+    });
+    return whole;
+}
+
+/// The system prompt: one string, so a run with no addendum, no repository
+/// instructions, no skills and every tool on sends exactly the prompt it sent
+/// before any of them existed. A run
 /// that turned built-in tools off ends it with one line naming them, so the
 /// model does not learn of them from a refusal.
-fn systemText(arena: std.mem.Allocator, extra: []const u8, skill_block: []const u8, disabled: std.EnumSet(chat_mod.Tool)) ![]const u8 {
-    if (extra.len == 0 and skill_block.len == 0 and disabled.count() == 0) return conversation_mod.system_prompt;
+fn systemText(arena: std.mem.Allocator, extra: []const u8, agents_block: []const u8, skill_block: []const u8, disabled: std.EnumSet(chat_mod.Tool)) ![]const u8 {
+    if (extra.len == 0 and agents_block.len == 0 and skill_block.len == 0 and disabled.count() == 0) return conversation_mod.system_prompt;
     var text: std.ArrayList(u8) = .empty;
     try text.appendSlice(arena, conversation_mod.system_prompt);
     if (extra.len != 0) {
         try text.appendSlice(arena, "\n\n");
         try text.appendSlice(arena, extra);
     }
+    try text.appendSlice(arena, agents_block);
     try text.appendSlice(arena, skill_block);
     if (disabled.count() != 0) {
         try text.appendSlice(arena, "\n\nDisabled tools: ");
@@ -6464,19 +6510,19 @@ test "the system prompt names the tools that are off, and only then" {
     const arena = state.allocator();
 
     // Nothing to add: the compile-time prompt itself, not a copy of it.
-    const stock = try systemText(arena, "", "", .initEmpty());
+    const stock = try systemText(arena, "", "", "", .initEmpty());
     try std.testing.expectEqual(conversation_mod.system_prompt.ptr, stock.ptr);
 
     var off: std.EnumSet(chat_mod.Tool) = .initEmpty();
     off.insert(.git);
     off.insert(.ast);
-    const text = try systemText(arena, "", "", off);
+    const text = try systemText(arena, "", "", "", off);
     try std.testing.expect(std.mem.startsWith(u8, text, conversation_mod.system_prompt));
     try std.testing.expectEqualStrings("\n\nDisabled tools: ast, git.", text[conversation_mod.system_prompt.len..]);
 
     // The addendum follows the stock prompt after a blank line, and it and the
     // skills keep their place ahead of the line.
-    const extended = try systemText(arena, "be brief", "\n\nSkills: x", off);
+    const extended = try systemText(arena, "be brief", "", "\n\nSkills: x", off);
     try std.testing.expect(std.mem.startsWith(u8, extended, conversation_mod.system_prompt ++ "\n\nbe brief"));
     try std.testing.expect(std.mem.indexOf(u8, extended, "be brief").? < std.mem.indexOf(u8, extended, "Skills: x").?);
     try std.testing.expect(std.mem.endsWith(u8, extended, "\n\nDisabled tools: ast, git."));

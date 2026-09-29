@@ -54,6 +54,14 @@ const mcp_mod = @import("mcp.zig");
 /// request, so a value past this is a pasted file and not an addendum.
 pub const max_system_prompt_extra_bytes: usize = 16 * 1024;
 
+/// The file the run reads repository instructions from when the config named
+/// none. Every other coding agent reads this name, so a repository that carries
+/// one carries it for this run too.
+pub const agents_file_default = "AGENTS.md";
+
+/// The longest path `agents_file` may be. A path past this is not a path.
+pub const max_agents_path_bytes: usize = 1024;
+
 const Lines = std.mem.SplitIterator(u8, .scalar);
 
 const Server = struct {
@@ -79,6 +87,16 @@ const Server = struct {
 pub const Config = struct {
     /// Text appended to the system prompt after a blank line, empty for none.
     system_prompt_extra: []const u8 = "",
+    /// The repository's own instructions, read from the working directory when
+    /// the run starts. `AGENTS.md` is the name every other coding agent uses;
+    /// an empty value turns the read off, which is the operator's way of not
+    /// following a file the repository supplies.
+    agents_file: []const u8 = agents_file_default,
+    /// Whether `agents_file` above was written in the file or is the default. A
+    /// named path that is not there is said on stderr; the default is not,
+    /// because most repositories have no such file and a note per run about it
+    /// would be noise.
+    agents_file_named: bool = false,
     /// The provider settings the file named, empty when it named none. Each is
     /// one of the sources a run draws from, and the weakest: a `--flag` beats
     /// the environment variable, which beats the file. `api_key` is a secret
@@ -326,7 +344,8 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8) Config {
 }
 
 /// A key at the top of the file, outside any table: `system_prompt_extra`,
-/// `model`, `base_url`, `api_key`, `skills` and `deny_commands`. `lines` is what
+/// `agents_file`, `model`, `base_url`, `api_key`, `skills` and `deny_commands`.
+/// `lines` is what
 /// follows this one, for the value that runs over several.
 fn topKey(config: *Config, arena: std.mem.Allocator, lines: *Lines, key: []const u8, value_text: []const u8) void {
     if (std.mem.eql(u8, key, "system_prompt_extra")) {
@@ -334,6 +353,15 @@ fn topKey(config: *Config, arena: std.mem.Allocator, lines: *Lines, key: []const
             return config.note(.{ .key = key, .kind = .bad_value });
         if (text.len > max_system_prompt_extra_bytes) return config.note(.{ .key = key, .kind = .bad_value });
         config.system_prompt_extra = text;
+        return;
+    }
+    if (std.mem.eql(u8, key, "agents_file")) {
+        topString(config, key, value_text, &config.agents_file);
+        if (config.agents_file.len > max_agents_path_bytes)
+            return config.note(.{ .key = key, .kind = .bad_value });
+        // Named, so a path that is not there is the operator's own spelling of
+        // a setting that did nothing, and the run says so.
+        config.agents_file_named = true;
         return;
     }
     if (std.mem.eql(u8, key, "model")) return topString(config, key, value_text, &config.model);
