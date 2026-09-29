@@ -684,15 +684,8 @@ fn promptString(arena: std.mem.Allocator, lines: *Lines, value_text: []const u8)
         return if (delim[0] == '"') unescape(arena, text) else text;
     }
     if (value_text.len >= 2 and value_text[0] == '"') {
-        var i: usize = 1;
-        while (i < value_text.len) : (i += 1) {
-            if (value_text[i] == '\\') {
-                i += 1;
-            } else if (value_text[i] == '"') {
-                return unescape(arena, value_text[1..i]);
-            }
-        }
-        return null;
+        const end = closingQuote(value_text) orelse return null;
+        return unescape(arena, value_text[1..end]);
     }
     if (value_text.len >= 2 and value_text[0] == '\'') {
         const end = std.mem.indexOfScalarPos(u8, value_text, 1, '\'') orelse return null;
@@ -829,7 +822,7 @@ fn completedValue(arena: std.mem.Allocator, lines: *Lines, first: []const u8) ?[
     var joined: std.ArrayList(u8) = .empty;
     joined.appendSlice(arena, first) catch return null;
     while (true) {
-        const next = std.mem.trimEnd(u8, lines.peek() orelse return null, "\r");
+        const next = std.mem.trim(u8, lines.peek() orelse return null, " \t\r");
         if (next.len == 0 or next[0] == '[') return null;
         _ = lines.next();
         joined.append(arena, '\n') catch return null;

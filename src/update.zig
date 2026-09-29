@@ -253,6 +253,14 @@ fn fail(io: std.Io, comptime fmt: []const u8, args: anytype) u8 {
     return 1;
 }
 
+/// The outcome of a download that could not be started or waited for. These
+/// are the failures of this process rather than of the network, so the line
+/// says which and the caller is not asked to retry.
+fn giveUp(io: std.Io, what: []const u8, err: anyerror) Outcome {
+    _ = fail(io, "could not download {s} ({s})", .{ what, @errorName(err) });
+    return .{ .body = null, .retry = false };
+}
+
 /// The reason a status is worth reading past the number. `not_found` is
 /// answered differently for each of the three downloads, so the sentence names
 /// what is not there rather than the release, which the caller already named:
@@ -356,10 +364,7 @@ fn fetchOnce(
     limit: usize,
 ) Outcome {
     var capped: Capped = undefined;
-    capped.start(allocator, limit) catch |err| {
-        _ = fail(io, "could not download {s} ({s})", .{ what, @errorName(err) });
-        return .{ .body = null, .retry = false };
-    };
+    capped.start(allocator, limit) catch |err| return giveUp(io, what, err);
     defer capped.body.deinit();
 
     const Timed = union(enum) {
@@ -370,18 +375,9 @@ fn fetchOnce(
     var select: std.Io.Select(Timed) = .init(io, &slots);
     defer select.cancelDiscard();
     const timeout_ms = fetchTimeoutMs(limit);
-    select.concurrent(.answered, exchange, .{ client, &capped, url, bearer }) catch |err| {
-        _ = fail(io, "could not download {s} ({s})", .{ what, @errorName(err) });
-        return .{ .body = null, .retry = false };
-    };
-    select.concurrent(.expired, std.Io.Timeout.sleep, .{ net.durationMs(timeout_ms), io }) catch |err| {
-        _ = fail(io, "could not download {s} ({s})", .{ what, @errorName(err) });
-        return .{ .body = null, .retry = false };
-    };
-    const answer = select.await() catch |err| {
-        _ = fail(io, "could not download {s} ({s})", .{ what, @errorName(err) });
-        return .{ .body = null, .retry = false };
-    };
+    select.concurrent(.answered, exchange, .{ client, &capped, url, bearer }) catch |err| return giveUp(io, what, err);
+    select.concurrent(.expired, std.Io.Timeout.sleep, .{ net.durationMs(timeout_ms), io }) catch |err| return giveUp(io, what, err);
+    const answer = select.await() catch |err| return giveUp(io, what, err);
     switch (answer) {
         .answered => |result| {
             const received = result catch |err| {

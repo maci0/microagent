@@ -54,7 +54,7 @@ pub fn resolveWritableRoots(
     // the same way whether or not the directory is reached through a link, and the recorded roots
     // carry the resolved form first.
     const cwd_lexical = try std.fs.path.resolve(arena, &.{"."});
-    try appendRoot(io, arena, &roots, std.mem.trimEnd(u8, cwd_lexical, "/\\"));
+    try appendRoot(io, arena, &roots, trimTrailingSep(cwd_lexical));
     const cwd = roots.items[0];
 
     try appendRoot(io, arena, &roots, "/tmp");
@@ -80,7 +80,7 @@ pub fn resolveWritableRoots(
                     chat.safeTextAll(arena, resolved_sdir), @errorName(err),
                 });
             };
-            try appendRoot(io, arena, &roots, std.mem.trimEnd(u8, resolved_sdir, "/\\"));
+            try appendRoot(io, arena, &roots, trimTrailingSep(resolved_sdir));
         }
     }
 

@@ -222,7 +222,13 @@ pub fn discover(io: Io, arena: std.mem.Allocator, root_list: []const Root) Skill
             continue;
         };
         appendRootSkills(io, arena, dir, root.path, &found) catch |err| switch (err) {
-            error.OutOfMemory => return .{ .items = found.items },
+            // The roots already walked are still handed back in the order the
+            // sort puts them in: an unsorted list is the one thing `sortByName`
+            // exists to stop, and it does not matter that the run is ending.
+            error.OutOfMemory => {
+                sortByName(found.items);
+                return .{ .items = found.items };
+            },
         };
     }
     sortByName(found.items);

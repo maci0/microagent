@@ -367,6 +367,15 @@ pub const Server = struct {
         if (timeout.toDurationFromNow(io)) |left| {
             const left_ms = std.math.cast(u64, @divTrunc(left.raw.nanoseconds, std.time.ns_per_ms)) orelse 0;
             timeout_ms = @min(timeout_ms, left_ms);
+            // A caller clock with under a millisecond left resolves to a whole
+            // zero, which `race` reads as an expiry. Nothing has been sent, so
+            // the server has not gone quiet: answering `error.Timeout` here
+            // keeps the caller's own deadline from marking a server that
+            // answered every other call dead for the rest of the run.
+            if (timeout_ms == 0) {
+                self.last_error = @errorName(error.Timeout);
+                return error.Timeout;
+            }
         }
         return self.race(io, scratch, http, id, method, params_json, timeout_ms) catch |err| {
             switch (err) {
@@ -509,6 +518,7 @@ pub const Server = struct {
     ) !std.json.Value {
         var pending: std.ArrayList(u8) = .empty;
         var event: std.ArrayList(u8) = .empty;
+        var data_seen = false;
         var scanned: usize = 0;
         var total: usize = 0;
         // Every way out of this function that is not the answer leaves the
@@ -532,7 +542,7 @@ pub const Server = struct {
             while (net.nextLineEnd(pending.items, &scanned)) |at| {
                 const line = std.mem.trimEnd(u8, pending.items[start..at], "\r");
                 start = at + 1;
-                if (try self.sseLine(scratch, &event, line, id)) |result| {
+                if (try self.sseLine(scratch, &event, &data_seen, line, id)) |result| {
                     // The stream may stay open past its answer, and the rest of
                     // it is not read, so the connection is not reused.
                     stopped_early.* = true;
@@ -562,23 +572,31 @@ pub const Server = struct {
         // A last line with no newline, and a last event with no blank line
         // after it, are still what the server said.
         const tail = std.mem.trimEnd(u8, pending.items, "\r");
-        if (tail.len != 0) if (try self.sseLine(scratch, &event, tail, id)) |result| return result;
-        if (try self.sseLine(scratch, &event, "", id)) |result| return result;
+        if (tail.len != 0) if (try self.sseLine(scratch, &event, &data_seen, tail, id)) |result| return result;
+        if (try self.sseLine(scratch, &event, &data_seen, "", id)) |result| return result;
         return error.StreamEndedWithoutAnswer;
     }
 
     /// One line of an event stream. `data` lines are joined into the event,
     /// which ends at a blank line; comments and the other fields are not
     /// needed. Returns the result when the finished event answers `id`.
-    fn sseLine(self: *Server, scratch: std.mem.Allocator, event: *std.ArrayList(u8), line: []const u8, id: u64) !?std.json.Value {
+    fn sseLine(self: *Server, scratch: std.mem.Allocator, event: *std.ArrayList(u8), seen: *bool, line: []const u8, id: u64) !?std.json.Value {
         if (line.len != 0) {
             const data = std.mem.cutPrefix(u8, line, "data:") orelse return null;
-            if (event.items.len != 0) try event.append(scratch, '\n');
+            // Whether a `data:` line has been seen, not whether the event holds
+            // bytes: an empty `data:` is a line of the event, and joining the
+            // next one to it without the separator would drop the line break
+            // the event says sits there.
+            if (seen.*) try event.append(scratch, '\n');
+            seen.* = true;
             try event.appendSlice(scratch, std.mem.trimStart(u8, data, " "));
             return null;
         }
-        if (event.items.len == 0) return null;
-        defer event.clearRetainingCapacity();
+        if (!seen.*) return null;
+        defer {
+            event.clearRetainingCapacity();
+            seen.* = false;
+        }
         return self.answerFor(scratch, event.items, id);
     }
 };

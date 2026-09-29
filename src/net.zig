@@ -505,7 +505,11 @@ fn popComponent(prefix: []const u8) []const u8 {
 /// second copy overwrite the first.
 fn linkRest(buf: []u8, dir_end: []const u8, target: []const u8, after: []const u8) error{NameTooLong}![]const u8 {
     const head_empty = dir_end.len == 0 and target.len == 0;
-    const lead_sep: usize = if (dir_end.len == 0 or (target.len == 0 and after.len == 0)) 0 else 1;
+    // The same rule `joinOnto` states: a prefix that already ends in the
+    // separator is not given a second one. The rooted prefix is the separator
+    // on its own, and a doubled leading separator names something a host may
+    // resolve differently from the single one.
+    const lead_sep: usize = if (dir_end.len == 0 or dir_end[dir_end.len - 1] == path_sep) 0 else if (target.len == 0 and after.len == 0) 0 else 1;
     const tail_sep: usize = if (after.len == 0 or head_empty) 0 else 1;
     const n = dir_end.len + lead_sep + target.len + tail_sep + after.len;
     if (n > buf.len) return error.NameTooLong;
@@ -774,9 +778,11 @@ pub fn nowSeconds(io: Io) i64 {
 /// Whether a transport failure is worth another attempt. The set is the
 /// failures a second connection can answer: the name did not resolve, the
 /// route to it is down, the connection was refused, reset or dropped, the TLS
-/// handshake did not complete. A failed allocation repeats, and everything
-/// else the client can name is a decision it or the URL already made, so three
-/// attempts separated by a backoff only delay the same refusal.
+/// handshake did not complete. Everything else the client can name is a
+/// decision it or the URL already made, so three attempts separated by a
+/// backoff only delay the same refusal. A failed allocation is the run's own
+/// memory rather than the path to the server, and is not among them: a second
+/// attempt has to be handed the same buffer, which is what ran out.
 ///
 /// What a request had already put on the wire is the caller's question, not
 /// this one's: the run declines to resend a turn the provider may have billed

@@ -345,8 +345,8 @@ const lane_highs: u64 = lane_ones * 0x80;
 /// match" bit trick, so a word with one special byte is refused whole.
 fn allLiteral(word: u64) bool {
     const below_space = (word -% lane_ones * 0x20) & ~word;
-    const quote = (word ^ lane_ones * '"') -% lane_ones;
-    const backslash = (word ^ lane_ones * '\\') -% lane_ones;
+    const quote = ((word ^ lane_ones * '"') -% lane_ones) & ~word;
+    const backslash = ((word ^ lane_ones * '\\') -% lane_ones) & ~word;
     return ((below_space | word | quote | backslash) & lane_highs) == 0;
 }
 
