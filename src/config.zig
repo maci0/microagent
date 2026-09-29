@@ -166,20 +166,7 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8) Config {
 /// A key at the top of the file, outside any table: the style levels may sit
 /// here, and so may `skills`.
 fn topKey(config: *Config, arena: std.mem.Allocator, key: []const u8, value_text: []const u8) void {
-    if (std.mem.eql(u8, key, "caveman")) {
-        if (style_mod.parseCaveman(unquote(value_text))) |level| {
-            config.style.caveman = level;
-            return;
-        }
-        return config.note(.{ .key = key, .kind = .bad_value });
-    }
-    if (std.mem.eql(u8, key, "ponytail")) {
-        if (style_mod.parsePonytail(unquote(value_text))) |level| {
-            config.style.ponytail = level;
-            return;
-        }
-        return config.note(.{ .key = key, .kind = .bad_value });
-    }
+    if (levelKey(config, key, value_text)) return;
     if (std.mem.eql(u8, key, "skills")) {
         const dirs = stringArray(arena, value_text) orelse
             return config.note(.{ .key = key, .kind = .bad_value });
@@ -193,23 +180,22 @@ fn topKey(config: *Config, arena: std.mem.Allocator, key: []const u8, value_text
 /// nothing else, so `skills` there is a misspelling rather than a second way
 /// to name the directories.
 fn styleOnly(config: *Config, key: []const u8, value_text: []const u8) void {
+    if (levelKey(config, key, value_text)) return;
+    config.note(.{ .key = key, .kind = .unknown_key });
+}
+
+/// The two level keys, which the top of the file and `[style]` both accept.
+/// True when the key was one of them, so the caller knows whether to read on.
+fn levelKey(config: *Config, key: []const u8, value_text: []const u8) bool {
     if (std.mem.eql(u8, key, "caveman")) {
-        if (style_mod.parseCaveman(unquote(value_text))) |level| {
-            config.style.caveman = level;
-            return;
-        }
-        return config.note(.{ .key = key, .kind = .bad_value });
+        if (style_mod.parseCaveman(unquote(value_text))) |level| config.style.caveman = level else config.note(.{ .key = key, .kind = .bad_value });
+        return true;
     }
     if (std.mem.eql(u8, key, "ponytail")) {
-        if (style_mod.parsePonytail(unquote(value_text))) |level| {
-            config.style.ponytail = level;
-            return;
-        }
-        return config.note(.{ .key = key, .kind = .bad_value });
+        if (style_mod.parsePonytail(unquote(value_text))) |level| config.style.ponytail = level else config.note(.{ .key = key, .kind = .bad_value });
+        return true;
     }
-    // `[skills]` and `[[mcp]]` have their own spellings; anything else under a
-    // table this reader owns is a key it does not have.
-    config.note(.{ .key = key, .kind = .unknown_key });
+    return false;
 }
 
 /// One line inside an open `[[mcp]]` table.

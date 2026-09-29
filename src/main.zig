@@ -3332,19 +3332,15 @@ fn dispatchCall(
     if (std.mem.startsWith(u8, call.name, mcp_mod.tool_prefix)) {
         const remote = mcp.resolve(call.name) orelse
             return std.fmt.allocPrint(arena, "error: unknown tool '{s}'", .{chat_mod.safeText(arena, call.name, 40)});
-        return mcp_mod.Servers.call(io, arena, remote, call.args.items, toolCeiling(ceiling_ms));
+        // An MCP call is a subprocess round trip with no other bound, so it
+        // answers to the same deadline every other tool does: the run's own
+        // remaining budget when it set one, and the read-only ceiling when it
+        // did not.
+        return mcp_mod.Servers.call(io, arena, remote, call.args.items, net.durationMs(ceiling_ms orelse tool_mod.tool_timeout_ms));
     }
     if (std.mem.eql(u8, call.name, skill_mod.tool_name))
         return skill_mod.call(io, arena, call.args.items, skills);
     return tool_mod.runTool(io, arena, call, ceiling_ms, tool_env);
-}
-
-/// The ceiling one tool call runs under, as an `Io.Timeout`: the run's own
-/// remaining budget when it set one, and the tool module's read-only ceiling
-/// when it did not. An MCP call is a subprocess round trip with no other
-/// bound, so it answers to the same deadline every other tool does.
-fn toolCeiling(ceiling_ms: ?u64) Io.Timeout {
-    return net.durationMs(ceiling_ms orelse tool_mod.tool_timeout_ms);
 }
 
 /// Appends the assistant message and, for every tool call it requested, runs

@@ -37,7 +37,7 @@ pub const tool_name = "skill";
 /// Ceiling on one `SKILL.md` read whole. A skill is instructions, not a
 /// corpus: a body past this is refused rather than loaded, because the
 /// conversation re-sends it on every later turn.
-pub const max_skill_bytes: usize = 256 * 1024;
+const max_skill_bytes: usize = 256 * 1024;
 
 /// How much of the assembled skill list reaches the system prompt. The listing
 /// is what every turn pays for, so it is bounded like the tool output that
@@ -195,7 +195,7 @@ pub fn discover(io: Io, arena: std.mem.Allocator, root_list: []const Root) Skill
                 continue;
             };
             const path = std.fs.path.join(arena, &.{ root.path, entry.name, "SKILL.md" }) catch continue;
-            if (findByName(found.items, name)) |_| {
+            if ((Skills{ .items = found.items }).get(name)) |_| {
                 net.note(io, arena, "microagent: skill {s} is already loaded from another directory; the first one wins\n", .{chat.safeTextAll(arena, name)});
                 continue;
             }
@@ -208,14 +208,6 @@ pub fn discover(io: Io, arena: std.mem.Allocator, root_list: []const Root) Skill
     }
     sortByName(found.items);
     return .{ .items = found.items };
-}
-
-/// Whether a loaded set holds this name, for the duplicate check above.
-fn findByName(items: []const Skill, name: []const u8) ?*const Skill {
-    for (items) |*skill| {
-        if (std.mem.eql(u8, skill.name, name)) return skill;
-    }
-    return null;
 }
 
 /// Sorted by name, so the listing a provider sees is the same for the same

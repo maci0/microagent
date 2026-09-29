@@ -439,7 +439,7 @@ pub const calendar_months = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "J
 /// one. The obsolete RFC 850 and asctime forms are not read either: RFC 9110
 /// has every sender use this one, and a value this does not read falls back to
 /// the backoff schedule, which is where every unreadable value goes.
-pub fn httpDateEpochSeconds(raw: []const u8) ?i64 {
+fn httpDateEpochSeconds(raw: []const u8) ?i64 {
     const comma = std.mem.indexOfScalar(u8, raw, ',') orelse return null;
     var parts = std.mem.tokenizeScalar(u8, raw[comma + 1 ..], ' ');
     const day_text = parts.next() orelse return null;

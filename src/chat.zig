@@ -731,7 +731,7 @@ pub fn safeText(arena: std.mem.Allocator, s: []const u8, max: usize) []const u8 
 }
 
 /// How many bytes the `\uXXXX` escape of one code point is.
-pub const codepoint_escape_bytes: usize = 6;
+const codepoint_escape_bytes: usize = 6;
 
 /// The longest `safeText` can be for a byte of input. A C0 control is one byte
 /// and becomes four. The shortest code point `isInvisibleFormat` names is two
