@@ -218,8 +218,7 @@ const max_host_len: usize = 253;
 fn hostTrusted(host: []const u8) bool {
     var lower: [max_host_len]u8 = undefined;
     if (host.len == 0 or host.len > lower.len) return false;
-    for (host, 0..) |c, i| lower[i] = std.ascii.toLower(c);
-    const h = lower[0..host.len];
+    const h = std.ascii.lowerString(&lower, host);
     if (std.mem.eql(u8, h, "github.com")) return true;
     if (std.mem.endsWith(u8, h, ".github.com")) return true;
     if (std.mem.endsWith(u8, h, ".githubusercontent.com")) return true;
@@ -230,10 +229,7 @@ fn hostTrusted(host: []const u8) bool {
 /// Userinfo and lookalikes such as `github.com.evil.com` are refused.
 fn trustedGithubUrl(url: []const u8) bool {
     const prefix = "https://";
-    if (url.len < prefix.len) return false;
-    for (prefix, 0..) |c, i| {
-        if (std.ascii.toLower(url[i]) != c) return false;
-    }
+    if (!std.ascii.startsWithIgnoreCase(url, prefix)) return false;
     const rest = url[prefix.len..];
     if (std.mem.indexOfAny(u8, rest, "@\\ \t\r\n") != null) return false;
     const slash = std.mem.findScalar(u8, rest, '/') orelse rest.len;
@@ -259,10 +255,8 @@ fn trustedGithubUrl(url: []const u8) bool {
 /// check that uses it rather than as wide as the allowlist.
 fn bearerFor(url: []const u8, bearer: ?[]const u8) ?[]const u8 {
     const api = "https://api.github.com/";
-    if (bearer == null or url.len < api.len) return null;
-    for (api, 0..) |c, i| {
-        if (std.ascii.toLower(url[i]) != c) return null;
-    }
+    if (bearer == null) return null;
+    if (!std.ascii.startsWithIgnoreCase(url, api)) return null;
     return bearer;
 }
 
@@ -303,10 +297,7 @@ fn checksumMatches(asset: []const u8, sidecar: []const u8, basename: []const u8)
     const got = std.fmt.bytesToHex(digest, .lower);
     // A byte that is not a hex digit cannot fold onto one of `got`'s, so the
     // comparison is the whole of the check.
-    for (hex, 0..) |c, i| {
-        if (std.ascii.toLower(c) != got[i]) return false;
-    }
-    return true;
+    return std.ascii.eqlIgnoreCase(hex, &got);
 }
 
 /// The one decision, from the release lookup's inputs to the verdict every

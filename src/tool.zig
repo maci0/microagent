@@ -2966,8 +2966,7 @@ fn fuzzCredentialPath(_: void, smith: *std.testing.Smith) !void {
     // resolves `.ENV` to the same bytes `.env` is. So the answer cannot move
     // when only the case of the bytes moves, which is the property that keeps
     // the rule from being a rule only on the filesystem that spells it exactly.
-    const lowered = try arena.dupe(u8, text);
-    for (lowered) |*c| c.* = std.ascii.toLower(c.*);
+    const lowered = std.ascii.lowerString(try arena.dupe(u8, text), text);
     try std.testing.expectEqual(refused, isCredentialPath(lowered));
 
     // The same bytes read as a `bash` command. The word a refusal names is

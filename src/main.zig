@@ -3804,8 +3804,7 @@ fn fuzzBaseUrl(_: void, smith: *std.testing.Smith) !void {
         try std.testing.expect(isLoopbackHost(host));
         var lower: [256]u8 = undefined;
         if (host.len > lower.len) return error.TestUnexpectedResult;
-        for (host, 0..) |c, i| lower[i] = std.ascii.toLower(c);
-        const h = lower[0..host.len];
+        const h = std.ascii.lowerString(&lower, host);
         if (std.mem.eql(u8, std.mem.trim(u8, h, "[]"), "::1")) return;
         if (std.mem.eql(u8, h, "localhost") or std.mem.endsWith(u8, h, ".localhost")) return;
         // A dotted quad, and `127` is the whole of the range: a name that only
