@@ -245,12 +245,32 @@ fn runSearchTool(
     var got: Partial = .{ .stdout = &.{}, .stderr = &.{}, .dropped = .{ false, false } };
     const res = runCapped(io, arena, argv, max_tool_output * 4, net.durationMs(boundedMs(tool_timeout_ms, ceiling_ms)), environ_map, &got) catch |err|
         return failedOutput(arena, got, try missingProgram(arena, what, install, err));
-    if (res.stdout.len > 0) return withCaptureNote(arena, res.stdout, res.partial());
-    // The cap drains either stream, so a stderr cut short is as much a prefix
-    // of the warning as a stdout one is of the matches, and the marker is what
-    // says so. Marking only the stream that usually wins leaves a tool that
-    // writes its findings nowhere and its warnings to stderr unmarked.
-    if (res.stderr.len > 0) return withCaptureNote(arena, res.stderr, res.partial());
+    // Both streams and the exit status, for the reason `captureResult` gives:
+    // returning stdout alone reported a search that had failed as one that had
+    // succeeded. `rg` over a tree holding a directory this process cannot read
+    // writes its matches to stdout, `Permission denied` to stderr, and exits 2,
+    // so the model was handed a clean-looking list of matches with no sign that
+    // part of the tree was never walked, and it reasoned about the whole tree
+    // from the part that was. A `git` that printed a log and then `fatal: bad
+    // object` failed the same way. `captureResult` keeps the clean call
+    // zero-copy, so passing the streams through costs a search that worked
+    // nothing.
+    // Both streams and the exit status, for the reason `captureResult` gives:
+    // returning stdout alone reported a search that had failed as one that had
+    // succeeded. `rg` over a tree holding a directory this process cannot read
+    // writes its matches to stdout, `Permission denied` to stderr, and exits 2,
+    // so the model was handed a clean-looking list of matches with no sign that
+    // part of the tree was never walked, and it reasoned about the whole tree
+    // from the part that was. A `git` that printed a log and then `fatal: bad
+    // object` failed the same way. `captureResult` keeps the clean call
+    // zero-copy, so passing the streams through costs a search that worked
+    // nothing.
+    if (res.stdout.len != 0 or res.stderr.len != 0) return captureResult(arena, .{
+        .stdout = res.stdout,
+        .stderr = res.stderr,
+        .at_limit = res.partial().atCaptureLimit(),
+        .term = res.term,
+    });
     return std.fmt.allocPrint(arena, "(no matches)", .{});
 }
 
@@ -503,12 +523,34 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
         return failedOutput(arena, got, try missingProgram(arena, try std.fmt.allocPrint(arena, "git {s}", .{cmd}), git_install, err));
     const text = if (res.stdout.len > 0) res.stdout else res.stderr;
     if (text.len == 0) return std.fmt.allocPrint(arena, "(git {s}: no output)", .{cmd});
-    // The line cap below is the one git is cut by, and it only says so when it
-    // is the one that cut. A capture the byte cap ended short of the line cap
-    // is marked here for the reason `runSearchTool` marks one: a half-read
-    // commit reads as the whole one otherwise, and the model narrows its next
-    // `git log` against a history it never saw.
-    return withCaptureNote(arena, try firstLines(arena, text, limit), res.partial());
+    return gitResult(arena, res, limit);
+}
+
+/// What a finished `git` call assembles, split out of the tool so the shape a
+/// caller has to be able to rely on is testable without a repository this
+/// process could be moved into. `git` runs in the process's own working
+/// directory, so a real `git` that printed some commits and then failed
+/// halfway cannot be staged from a test at all.
+///
+/// The line cap applies to whichever stream carries the commits, and both
+/// streams and the exit status go out beside it, for the reason
+/// `runSearchTool` gives. A `git log` that printed a hundred commits and then
+/// `fatal: bad object` on stderr used to reach the model as that hundred
+/// commits alone, with no sign that the history it is reading stops there;
+/// picking one stream and dropping the other is what made the truncated history
+/// look like the whole one.
+fn gitResult(arena: std.mem.Allocator, res: Captured, limit: usize) ![]const u8 {
+    // The line cap is the one git is cut by, and it only says so when it is the
+    // one that cut. A capture the byte cap ended short of the line cap is
+    // marked by `captureResult` for the reason `runSearchTool` marks one: a
+    // half-read commit reads as the whole one otherwise, and the model narrows
+    // its next `git log` against a history it never saw.
+    return captureResult(arena, .{
+        .stdout = if (res.stdout.len > 0) try firstLines(arena, res.stdout, limit) else "",
+        .stderr = if (res.stdout.len > 0) res.stderr else try firstLines(arena, res.stderr, limit),
+        .at_limit = res.partial().atCaptureLimit(),
+        .term = res.term,
+    });
 }
 
 /// The command line one `git` call runs, with the subcommand and every flag
@@ -3132,6 +3174,76 @@ test "search and ast skip the files read refuses, and git refuses one by name" {
     }
 }
 
+// A search that could not read part of the tree used to report the part it
+// could, and nothing else. ripgrep writes its matches to stdout, the reason to
+// stderr, and exits 2, so returning stdout alone handed the model a clean list
+// of matches over a tree it never finished walking, and it narrowed the next
+// search against a whole repository that had an unreadable directory in it.
+// The test runs the real ripgrep over a real tree with a directory it cannot
+// read, because what has to be proven is the bytes the model receives, not the
+// argv that produced them.
+test "a search that could not read part of the tree says so beside the matches it did find" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    try tmp.dir.writeFile(io, .{ .sub_path = "readable.txt", .data = "needle\n" });
+    try tmp.dir.createDirPath(io, "locked");
+    try tmp.dir.writeFile(io, .{ .sub_path = "locked/hidden.txt", .data = "needle\n" });
+    // The unreadable directory is what makes ripgrep exit 2, and a root-owned
+    // run cannot undo it, so the permission is restored on the way out rather
+    // than left for `tmp.cleanup` to walk into.
+    const perm = std.Io.File.Permissions;
+    var locked = try tmp.dir.openDir(io, "locked", .{});
+    defer locked.close(io);
+    var locked_file = try locked.openFile(io, ".", .{ .allow_directory = true });
+    defer locked_file.close(io);
+    defer locked_file.setPermissions(io, perm.fromMode(0o755)) catch {};
+    try locked_file.setPermissions(io, perm.fromMode(0o000));
+
+    const found = try dispatch(arena, "search", try std.fmt.allocPrint(arena, "{{\"pattern\":\"needle\",\"path\":\"{s}\"}}", .{root}));
+
+    // The match from the directory that was readable still comes back: a
+    // search that reports the failure and drops the work is not a fix either.
+    try std.testing.expect(std.mem.indexOf(u8, found, "readable.txt") != null);
+    // The two things that say the search was partial. The exit status is the
+    // one that cannot be worked around by a backend that stays quiet, so it is
+    // required rather than merely expected.
+    try std.testing.expect(std.mem.indexOf(u8, found, "Permission denied") != null);
+    try std.testing.expect(std.mem.indexOf(u8, found, "exited 2") != null);
+}
+
+// A search that worked says so by saying nothing: no status, no stream beside
+// the matches, and no copy. The path above is only safe as long as the
+// ordinary one is still the whole result, because a note on every call is a
+// note the model learns to skip.
+test "a search that read the whole tree reports the matches and nothing else" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    try tmp.dir.writeFile(io, .{ .sub_path = "readable.txt", .data = "needle\n" });
+
+    const found = try dispatch(arena, "search", try std.fmt.allocPrint(arena, "{{\"pattern\":\"needle\",\"path\":\"{s}\"}}", .{root}));
+    try std.testing.expect(std.mem.indexOf(u8, found, "readable.txt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, found, "exited") == null);
+    try std.testing.expect(std.mem.indexOf(u8, found, "truncated") == null);
+}
+
 // A search returns the same bytes a `read` refuses, and the system prompt
 // sends the model to `search` first, so a guard that only the `read` tool
 // carries is a guard a single well-formed `search` walks around. The globs
@@ -3468,6 +3580,63 @@ test "a git line limit is a ceiling, so zero is one line and a huge one is no tr
     try lines.put(arena, "limit", .{ .integer = 1 });
     const text = try firstLines(arena, "one\ntwo\nthree\n", gitLineLimit(lines));
     try std.testing.expectEqualStrings("one\n... [output truncated at 1 lines]", text);
+}
+
+// A `git` that printed its history and then failed halfway used to report only
+// the history. The tool picks one stream and drops the other, so a `git log`
+// whose hundredth commit was the last thing git could read came back as those
+// hundred commits with nothing to say the history stops there, and the model
+// read a truncated repository as the whole one. The exit status and the
+// stderr that explains it are both part of the answer now.
+//
+// `git` runs in the process's own working directory, which is this repository
+// and not one a test could stage a broken object in, so the subprocess half is
+// given as the bytes a subprocess would have produced rather than produced
+// here. What the test pins is the shape the model receives.
+test "a git call that printed its history and then failed says where the history stops" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const partial: Captured = .{
+        .stdout = @constCast("commit aaa\n    first\ncommit bbb\n    second\n"),
+        .stderr = @constCast("fatal: bad object deadbeef\n"),
+        .term = .{ .exited = 128 },
+        .dropped = .{ false, false },
+    };
+    const out = try gitResult(arena, partial, git_default_limit);
+    try std.testing.expect(std.mem.indexOf(u8, out, "commit bbb") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "fatal: bad object deadbeef") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "exited 128") != null);
+
+    // A `git` that worked is still the history alone: a status on every call
+    // is a status the model learns to stop reading, and the search test above
+    // says the same about the other two tools.
+    const clean: Captured = .{
+        .stdout = @constCast("commit aaa\n    first\n"),
+        .stderr = "",
+        .term = .{ .exited = 0 },
+        .dropped = .{ false, false },
+    };
+    const whole = try gitResult(arena, clean, git_default_limit);
+    try std.testing.expectEqualStrings("commit aaa\n    first\n", whole);
+
+    // The line cap still cuts the stream that carries the commits, and the cut
+    // is the one the model is told about rather than a silently shorter log.
+    const capped = try gitResult(arena, partial, 1);
+    try std.testing.expect(std.mem.indexOf(u8, capped, "output truncated at 1 lines") != null);
+    try std.testing.expect(std.mem.indexOf(u8, capped, "fatal: bad object deadbeef") != null);
+
+    // A failure that wrote nothing at all is the exit status on its own, which
+    // is what `captureResult` assembles and what the old `git {s}: no output`
+    // line said nothing about.
+    const silent: Captured = .{
+        .stdout = "",
+        .stderr = "",
+        .term = .{ .exited = 1 },
+        .dropped = .{ false, false },
+    };
+    try std.testing.expect(std.mem.indexOf(u8, try gitResult(arena, silent, git_default_limit), "exited 1") != null);
 }
 
 test "git tool refuses a missing or unknown subcommand" {
