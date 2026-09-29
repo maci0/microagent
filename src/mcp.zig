@@ -124,6 +124,13 @@ pub const Tool = struct {
 /// A connected server, and what it offers.
 pub const Server = struct {
     name: []const u8,
+    /// Where every byte this server keeps is allocated: the run's, never a
+    /// call's. The tool table, the session id and the note on a failure are
+    /// read back on later turns, and a turn's arena is handed back at the top
+    /// of the next one, so a field written from a turn arena is a pointer into
+    /// memory the arena has already handed out again. Every other buffer here
+    /// is a call's and dies with it.
+    run_arena: std.mem.Allocator,
     transport: Transport,
     next_id: u64 = 1,
     tools: []const Tool,
@@ -227,7 +234,7 @@ pub const Server = struct {
                     return err;
                 };
             },
-            .http => |*http| _ = try self.post(io, arena, arena, http, id, method, params_json, net.durationMs(http.timeout_ms)),
+            .http => |*http| _ = try self.post(io, arena, http, id, method, params_json, net.durationMs(http.timeout_ms)),
         }
     }
 
@@ -281,12 +288,12 @@ pub const Server = struct {
     /// from `scratch`, which the caller may drop as soon as it has copied what
     /// it keeps: a `tools/list` answer is the largest document this program
     /// reads, and its parsed tree is several times the size of its text.
-    /// `arena` holds the request, the buffer the answer arrives in, and every
-    /// note about it, all of which outlive the scratch.
+    /// `scratch` holds the request and the buffer the answer arrives in, both
+    /// dead once the answer is parsed. The note about a failure outlives the
+    /// call, so it is written from `self.run_arena` and not from here.
     fn request(
         self: *Server,
         io: Io,
-        arena: std.mem.Allocator,
         scratch: std.mem.Allocator,
         method: []const u8,
         params_json: []const u8,
@@ -295,18 +302,18 @@ pub const Server = struct {
         const id = self.next_id;
         self.next_id += 1;
         switch (self.transport) {
-            .http => |*http| return (try self.post(io, arena, scratch, http, id, method, params_json, timeout)).?,
+            .http => |*http| return (try self.post(io, scratch, http, id, method, params_json, timeout)).?,
             .stdio => {},
         }
         const deadline = timeout.toDeadline(io);
-        try self.send(io, arena, id, method, params_json);
+        try self.send(io, scratch, id, method, params_json);
         while (true) {
             const line = readLine(&self.transport.stdio, io, scratch, deadline) catch |err| {
                 self.last_error = @errorName(err);
                 self.dead = true;
                 return err;
             };
-            if (try self.answerFor(arena, scratch, line, id)) |result| return result;
+            if (try self.answerFor(scratch, line, id)) |result| return result;
         }
     }
 
@@ -314,15 +321,15 @@ pub const Server = struct {
     /// frame is anything else (a notification, a server request, another id,
     /// bytes that are not JSON). `error.ServerRefused`, with `last_error` set,
     /// when it is the server's error answer.
-    fn answerFor(self: *Server, arena: std.mem.Allocator, scratch: std.mem.Allocator, frame: []const u8, id: u64) !?std.json.Value {
+    fn answerFor(self: *Server, scratch: std.mem.Allocator, frame: []const u8, id: u64) !?std.json.Value {
         const value = std.json.parseFromSliceLeaky(std.json.Value, scratch, frame, .{}) catch |err| {
-            self.last_error = try std.fmt.allocPrint(arena, "not JSON ({s})", .{@errorName(err)});
+            self.last_error = try std.fmt.allocPrint(self.run_arena, "not JSON ({s})", .{@errorName(err)});
             return null;
         };
-        return self.answerIn(arena, value, id);
+        return self.answerIn(value, id);
     }
 
-    fn answerIn(self: *Server, arena: std.mem.Allocator, value: std.json.Value, id: u64) !?std.json.Value {
+    fn answerIn(self: *Server, value: std.json.Value, id: u64) !?std.json.Value {
         const object = switch (value) {
             .object => |o| o,
             else => return null,
@@ -334,7 +341,7 @@ pub const Server = struct {
         };
         if (answer_id != id) return null;
         if (object.get("error")) |err_value| {
-            self.last_error = try describeError(arena, err_value);
+            self.last_error = try describeError(self.run_arena, err_value);
             return error.ServerRefused;
         }
         return object.get("result") orelse {
@@ -354,7 +361,6 @@ pub const Server = struct {
     fn post(
         self: *Server,
         io: Io,
-        arena: std.mem.Allocator,
         scratch: std.mem.Allocator,
         http: *Http,
         id: ?u64,
@@ -367,7 +373,7 @@ pub const Server = struct {
             const left_ms = std.math.cast(u64, @divTrunc(left.raw.nanoseconds, std.time.ns_per_ms)) orelse 0;
             timeout_ms = @min(timeout_ms, left_ms);
         }
-        return self.race(io, arena, scratch, http, id, method, params_json, timeout_ms) catch |err| {
+        return self.race(io, scratch, http, id, method, params_json, timeout_ms) catch |err| {
             switch (err) {
                 // These two say why themselves.
                 error.ServerRefused, error.HttpStatus => {},
@@ -383,7 +389,6 @@ pub const Server = struct {
     fn race(
         self: *Server,
         io: Io,
-        arena: std.mem.Allocator,
         scratch: std.mem.Allocator,
         http: *Http,
         id: ?u64,
@@ -401,7 +406,7 @@ pub const Server = struct {
         // Both tasks are joined before this returns, so nothing is left
         // writing into `self` or the arenas.
         defer select.cancelDiscard();
-        try select.concurrent(.answered, exchange, .{ self, arena, scratch, http, id, method, params_json });
+        try select.concurrent(.answered, exchange, .{ self, scratch, http, id, method, params_json });
         try select.concurrent(.expired, Io.Timeout.sleep, .{ net.durationMs(timeout_ms), io });
         return switch (try select.await()) {
             .answered => |answer| answer,
@@ -412,11 +417,11 @@ pub const Server = struct {
     /// One POST. A request (`id` set) returns its answer, read from a JSON
     /// body or from an event stream; a notification returns null once the
     /// server has accepted it. Everything the answer is built from is in
-    /// `scratch`, and what is kept (the session id, the note on a failure) is in
-    /// `arena`. It has no deadline of its own: `post` cancels it.
+    /// `scratch`; what is kept (the session id, the note on a failure) is
+    /// written from `self.run_arena`, because it is read on a later turn.
+    /// It has no deadline of its own: `post` cancels it.
     fn exchange(
         self: *Server,
-        arena: std.mem.Allocator,
         scratch: std.mem.Allocator,
         http: *Http,
         id: ?u64,
@@ -466,11 +471,11 @@ pub const Server = struct {
 
         const status = response.head.status;
         if ((id != null and status != .ok) or (id == null and status.class() != .success)) {
-            self.last_error = try std.fmt.allocPrint(arena, "HTTP {d}", .{@intFromEnum(status)});
+            self.last_error = try std.fmt.allocPrint(self.run_arena, "HTTP {d}", .{@intFromEnum(status)});
             connection.closing = true;
             return error.HttpStatus;
         }
-        if (http.session_id.len == 0) http.session_id = try sessionId(arena, response.head);
+        if (http.session_id.len == 0) http.session_id = try sessionId(self.run_arena, response.head);
         const content_type = response.head.content_type orelse "";
         const is_sse = std.ascii.startsWithIgnoreCase(content_type, "text/event-stream");
         const is_json = std.ascii.startsWithIgnoreCase(content_type, "application/json");
@@ -493,7 +498,7 @@ pub const Server = struct {
         const reader = response.reader(&transfer);
         var stopped_early = false;
         defer connection.closing = connection.closing or stopped_early;
-        return try self.readAnswer(arena, scratch, reader, is_sse, want, &stopped_early);
+        return try self.readAnswer(scratch, reader, is_sse, want, &stopped_early);
     }
 
     /// Reads the response body until `id` is answered, as a whole JSON value
@@ -501,7 +506,6 @@ pub const Server = struct {
     /// than a cut, because a cut result is half a JSON document.
     fn readAnswer(
         self: *Server,
-        arena: std.mem.Allocator,
         scratch: std.mem.Allocator,
         reader: *Io.Reader,
         is_sse: bool,
@@ -533,7 +537,7 @@ pub const Server = struct {
             while (net.nextLineEnd(pending.items, &scanned)) |at| {
                 const line = std.mem.trimEnd(u8, pending.items[start..at], "\r");
                 start = at + 1;
-                if (try self.sseLine(arena, scratch, &event, line, id)) |result| {
+                if (try self.sseLine(scratch, &event, line, id)) |result| {
                     // The stream may stay open past its answer, and the rest of
                     // it is not read, so the connection is not reused.
                     stopped_early.* = true;
@@ -548,30 +552,30 @@ pub const Server = struct {
         }
         if (!is_sse) {
             const value = std.json.parseFromSliceLeaky(std.json.Value, scratch, pending.items, .{}) catch |err| {
-                self.last_error = try std.fmt.allocPrint(arena, "not JSON ({s})", .{@errorName(err)});
+                self.last_error = try std.fmt.allocPrint(self.run_arena, "not JSON ({s})", .{@errorName(err)});
                 return error.ServerRefused;
             };
             switch (value) {
                 // A batch answers a request with an array of frames.
                 .array => |frames| for (frames.items) |frame| {
-                    if (try self.answerIn(arena, frame, id)) |result| return result;
+                    if (try self.answerIn(frame, id)) |result| return result;
                 },
-                else => if (try self.answerIn(arena, value, id)) |result| return result,
+                else => if (try self.answerIn(value, id)) |result| return result,
             }
             return error.StreamEndedWithoutAnswer;
         }
         // A last line with no newline, and a last event with no blank line
         // after it, are still what the server said.
         const tail = std.mem.trimEnd(u8, pending.items, "\r");
-        if (tail.len != 0) if (try self.sseLine(arena, scratch, &event, tail, id)) |result| return result;
-        if (try self.sseLine(arena, scratch, &event, "", id)) |result| return result;
+        if (tail.len != 0) if (try self.sseLine(scratch, &event, tail, id)) |result| return result;
+        if (try self.sseLine(scratch, &event, "", id)) |result| return result;
         return error.StreamEndedWithoutAnswer;
     }
 
     /// One line of an event stream. `data` lines are joined into the event,
     /// which ends at a blank line; comments and the other fields are not
     /// needed. Returns the result when the finished event answers `id`.
-    fn sseLine(self: *Server, arena: std.mem.Allocator, scratch: std.mem.Allocator, event: *std.ArrayList(u8), line: []const u8, id: u64) !?std.json.Value {
+    fn sseLine(self: *Server, scratch: std.mem.Allocator, event: *std.ArrayList(u8), line: []const u8, id: u64) !?std.json.Value {
         if (line.len != 0) {
             const data = std.mem.cutPrefix(u8, line, "data:") orelse return null;
             if (event.items.len != 0) try event.append(scratch, '\n');
@@ -580,7 +584,7 @@ pub const Server = struct {
         }
         if (event.items.len == 0) return null;
         defer event.clearRetainingCapacity();
-        return self.answerFor(arena, scratch, event.items, id);
+        return self.answerFor(scratch, event.items, id);
     }
 };
 
@@ -730,7 +734,7 @@ pub const Servers = struct {
         // it is kept, for the reason the handshake gives.
         var scratch_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer scratch_state.deinit();
-        const result = server.request(io, arena, scratch_state.allocator(), "tools/call", pb.items(), timeout) catch |err| {
+        const result = server.request(io, scratch_state.allocator(), "tools/call", pb.items(), timeout) catch |err| {
             if (err == error.ServerRefused or err == error.HttpStatus)
                 return std.fmt.allocPrint(arena, "error: MCP server {s} refused {s}: {s}", .{ server.name, tool_call.tool.exposed, server.last_error });
             return std.fmt.allocPrint(arena, "error: MCP server {s} did not answer {s} ({s})", .{ server.name, tool_call.tool.exposed, @errorName(err) });
@@ -1417,6 +1421,7 @@ fn openRemote(
         entry.api_key;
     var server: Server = .{
         .name = entry.name,
+        .run_arena = arena,
         .transport = .{ .http = .{
             .client = client,
             .uri = uri.?,
@@ -1493,6 +1498,7 @@ fn spawnOne(
     const pgid: std.posix.pid_t = @intCast(child.id.?);
     var server: Server = .{
         .name = entry.name,
+        .run_arena = arena,
         .transport = .{ .stdio = .{
             .child = child,
             .pgid = pgid,
@@ -1548,7 +1554,7 @@ fn handshake(io: Io, arena: std.mem.Allocator, server: *Server, client_version: 
         wire_version,
         client_version,
     }) catch "{\"protocolVersion\":\"" ++ protocol_version ++ "\",\"capabilities\":{},\"clientInfo\":{\"name\":\"microagent\"}}";
-    const initialized = server.request(io, arena, scratch, "initialize", init_params, timeout) catch return false;
+    const initialized = server.request(io, scratch, "initialize", init_params, timeout) catch return false;
     if (initialized != .object) {
         server.last_error = "initialize answered with no result object";
         return false;
@@ -1558,8 +1564,12 @@ fn handshake(io: Io, arena: std.mem.Allocator, server: *Server, client_version: 
         .stdio => {},
     }
     server.send(io, arena, null, "notifications/initialized", "") catch return false;
-    const listed = server.request(io, arena, scratch, "tools/list", "", timeout) catch return false;
-    server.tools = buildTools(io, arena, scratch, server, listed) orelse {
+    const listed = server.request(io, scratch, "tools/list", "", timeout) catch return false;
+    // The tool table is read on every later turn and by every request's
+    // schema, so it is built from the run's allocator rather than from the
+    // arena this handshake was handed: on a preset that first call arrives
+    // with a turn's arena, and that arena is reset at the top of the next turn.
+    server.tools = buildTools(io, server.run_arena, scratch, server, listed) orelse {
         server.last_error = "tools/list answered with no result object";
         return false;
     };
@@ -1690,7 +1700,7 @@ fn fuzzTools(_: void, smith: *std.testing.Smith) !void {
         break :blk try std.json.parseFromSliceLeaky(std.json.Value, arena, jb.items(), .{});
     };
 
-    const server: Server = .{ .name = "srv", .transport = .{ .stdio = undefined }, .tools = &.{} };
+    const server: Server = .{ .name = "srv", .run_arena = arena, .transport = .{ .stdio = undefined }, .tools = &.{} };
     const built = buildTools(std.testing.io, arena, scratch, &server, parsed) orelse {
         // A non-object answer is refused, and a refusal leaves the table empty
         // rather than holding what a previous connection offered.
@@ -2662,6 +2672,7 @@ test "a lazy server is handshaken by its first call, not before it" {
     }};
     var storage: [1]Server = .{.{
         .name = "fake",
+        .run_arena = arena,
         .transport = .{ .http = .{
             .client = &client,
             .uri = try std.Uri.parse(try fake.url(arena)),
@@ -2683,6 +2694,69 @@ test "a lazy server is handshaken by its first call, not before it" {
     try std.testing.expectEqual(@as(usize, 4), fake.seen.items.len);
     try std.testing.expect(std.mem.indexOf(u8, fake.seen.items[2], "\"method\":\"tools/list\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, fake.seen.items[3], "\"method\":\"tools/call\"") != null);
+}
+
+// A lazy server's first call arrives with the arena of the turn that made it,
+// and that arena is reset at the top of the next turn. What the handshake
+// leaves in the server is read back on every later turn, and by the schema of
+// every request, so it is built from the run's allocator. This poisons the
+// turn's arena once the call is done and reads the table again the way the
+// next turn does: a table built from the turn arena is a pointer into memory
+// the arena has already handed out, and the name the model sends no longer
+// resolves.
+test "a lazy server's tool table outlives the turn arena it was fetched with" {
+    const gpa = std.testing.allocator;
+    var run_state = std.heap.ArenaAllocator.init(gpa);
+    defer run_state.deinit();
+    const run = run_state.allocator();
+    const io = std.testing.io;
+
+    const fake = try FakeMcp.start(gpa, io, .normal);
+    defer fake.finish();
+    var client: std.http.Client = .{ .allocator = gpa, .io = io };
+    defer client.deinit();
+
+    const advertised = [_]Tool{.{
+        .name = "echo",
+        .exposed = "mcp__fake__echo",
+        .description = "from the table in this binary",
+        .schema = "{\"type\":\"object\"}",
+    }};
+    var storage: [1]Server = .{.{
+        .name = "fake",
+        .run_arena = run,
+        .transport = .{ .http = .{
+            .client = &client,
+            .uri = try std.Uri.parse(try fake.url(run)),
+            .timeout_ms = 10_000,
+        } },
+        .tools = &advertised,
+        .lazy = true,
+        .client_version = "test",
+    }};
+    var servers: Servers = .{ .items = &storage };
+    defer servers.shutdown(io);
+
+    // The arena a turn hands the tool calls it runs, reset at the top of every
+    // turn and reused for whatever the next one allocates first.
+    var turn_state = std.heap.ArenaAllocator.init(gpa);
+    defer turn_state.deinit();
+    const turn = turn_state.allocator();
+
+    const resolved = servers.resolve("mcp__fake__echo") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("pong", try Servers.call(io, turn, resolved, "{\"text\":\"hi\"}", net.durationMs(10_000)));
+    try std.testing.expect(!storage[0].lazy);
+
+    const span = @max(@sizeOf(Tool) * storage[0].tools.len, 64);
+    _ = turn_state.reset(.{ .retain_with_limit = 0 });
+    const poison = try turn.alloc(u8, span);
+    @memset(poison, 0xff);
+
+    const again = servers.resolve("mcp__fake__echo") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("mcp__fake__echo", again.tool.exposed);
+    try std.testing.expectEqualStrings("echo", again.tool.name);
+    try std.testing.expect(std.mem.indexOf(u8, again.tool.schema, "\"properties\"") != null);
+    try std.testing.expectEqual(@as(usize, 1), servers.toolCount());
 }
 
 test "the key is sent as a bearer token in Authorization and raw in any other header" {
@@ -2881,10 +2955,10 @@ fn fuzzBody(_: void, smith: *std.testing.Smith) !void {
         var state = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer state.deinit();
         const arena = state.allocator();
-        var server: Server = .{ .name = "fuzz", .transport = undefined, .tools = &.{} };
+        var server: Server = .{ .name = "fuzz", .run_arena = arena, .transport = undefined, .tools = &.{} };
         var reader: Io.Reader = .fixed(bytes);
         var stopped_early = false;
-        const answer = server.readAnswer(arena, arena, &reader, is_sse, 1, &stopped_early) catch continue;
+        const answer = server.readAnswer(arena, &reader, is_sse, 1, &stopped_early) catch continue;
         if (answer == .object) _ = try resultText(arena, "fuzz", answer);
     }
 }

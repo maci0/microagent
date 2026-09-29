@@ -4964,6 +4964,7 @@ test "MCP tools join the schema with the server's own inputSchema" {
     const items = try arena.alloc(mcp_mod.Server, 1);
     items[0] = .{
         .name = "srv",
+        .run_arena = arena,
         .transport = undefined,
         .tools = &.{.{
             .name = "echo",
@@ -7448,7 +7449,7 @@ test "the built-in schema is the constant unless the config turned a tool off" {
     // A skill and a server's tools still follow the built-ins, and the array
     // is one array: a comma between the two halves and one closing bracket.
     const items = try arena.alloc(mcp_mod.Server, 1);
-    items[0] = .{ .name = "srv", .transport = undefined, .tools = &.{.{
+    items[0] = .{ .name = "srv", .run_arena = arena, .transport = undefined, .tools = &.{.{
         .name = "echo",
         .exposed = "mcp__srv__echo",
         .description = "Echo",
