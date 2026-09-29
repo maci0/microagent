@@ -21,7 +21,9 @@
 # Every disable in a body has to be preceded by a `# because:` line saying what
 # it silences, the same rule `make lint-shell` enforces in the scripts: a
 # reason written beside the scripts does not travel with a step copied out of
-# them.
+# them. A reason is spent by the disable it precedes, so two disables in a row
+# need two of them. Without that, the second silenced itself in silence and the
+# gate reported a body with an unreasoned suppression as a clean one.
 #
 # Usage: lint-ci-shell.sh <workflow.yaml> [workflow.yaml ...]
 set -eu
@@ -54,35 +56,51 @@ prelude="$(printf ': "${%s:=}"\n' $RUNNER_VARS)"
 # The lines every extracted file spends before its first line of body: the
 # shell declaration and the prelude. The report is translated back to the
 # workflow by adding this to the number shellcheck prints, so it has to be the
-# same number the extractor wrote.
+# same number the extractor wrote. The prelude is written with a trailing
+# newline of its own: command substitution drops the one `printf` emitted, so
+# without it the last declaration and the first line of body share a line, the
+# file is one line shorter than this count says, and the report names every
+# finding a line past where it is.
 prelude_lines="$(printf '%s\n' "$prelude" | wc -l | tr -d ' ')"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-# Every file gets a number of its own rather than a name of its own, so the
-# blocks of one workflow cannot overwrite another's and a manifest row is keyed
-# by something with no dot in it to misparse.
+# A body is named for the file it came from and its position in that file, so
+# two workflows cannot overwrite each other's bodies and a manifest row is keyed
+# by something that cannot collide or be misparsed. The name carries both halves
+# rather than one number counted across files: awk is a fresh process per file,
+# so its own block counter starts at one every time, and numbering from the
+# file's position in the argument list let the second workflow's first body
+# overwrite the first workflow's. Every body after that was linted or not
+# depending on how many bodies the file before it happened to have, which is
+# why the manifest ended up describing one workflow and the checker was handed
+# the last one's bodies under the names of all of them.
 : > "$tmp/manifest"
 index=0
 for yaml in "$@"; do
   test -f "$yaml" || { echo "no $yaml" >&2; exit 1; }
   index="$((index + 1))"
-  awk -v dir="$tmp" -v src="$yaml" -v first="$index" -v prelude="$prelude" -v head="$((prelude_lines + 1))" '
-    function emit(start) {
-      n = first - 1 + (++blocks);
-      out = sprintf("%s/%06d.sh", dir, n);
-      printf "# shellcheck shell=bash\n%s", prelude > out;
-      # The line a body line has to be shifted by to name the workflow line it
-      # came from: the key line it follows, less the lines the file spends
-      # above that.
-      printf "%06d\t%s\t%d\n", n, src, start - head > (dir "/manifest");
+  awk -v dir="$tmp" -v src="$yaml" -v first="$index" -v prelude="$prelude" -v head="$((prelude_lines + 2))" '
+    function open_out() {
+      n = sprintf("%06d.%06d", first, ++blocks);
+      out = sprintf("%s/%s.sh", dir, n);
+      printf "# shellcheck shell=bash\n%s\n", prelude > out;
+    }
+    # The line a body line has to be shifted by to name the workflow line it
+    # came from: the workflow line its first body line is on, less the lines
+    # the file spends above that. `base` is that first line, which is the key
+    # line itself for a one-line body and a line inside the block for a block
+    # scalar, so it is recorded when it is known rather than guessed at the key.
+    function manifest(base) {
+      printf "%s\t%s\t%d\n", n, src, base - head >> (dir "/manifest");
     }
     # A one-line body: the value after `run: ` with no block indicator.
     /^[[:space:]]*(- )?run: [^|>[:space:]]/ {
       body = $0;
       sub(/^[[:space:]]*(- )?run: /, "", body);
-      emit(FNR);
+      open_out();
+      manifest(FNR);
       gsub(/\$\{\{[^}]*\}\}/, "github_expr", body);
       print body > out;
       close(out);
@@ -92,7 +110,7 @@ for yaml in "$@"; do
     # which is what a YAML block is, and stops at the first line that is not.
     /^[[:space:]]*(- )?run: [|>][[:space:]]*(-?[0-9]*|[-+]?[[:space:]]*#.*)?[[:space:]]*$/ {
       prefix = match($0, /[^ ]/) - 1;
-      emit(FNR);
+      open_out();
       inblock = 1;
       started = 0;
       next;
@@ -101,6 +119,10 @@ for yaml in "$@"; do
       line = $0;
       indent = match(line, /[^ ]/) - 1;
       if (line !~ /^[[:space:]]*$/ && indent <= prefix) {
+        # A block whose every line is blank wrote a file and no body. It still
+        # owes a manifest row, or the row count and the file count disagree and
+        # the report has no shift for a file shellcheck did open.
+        if (!started) manifest(FNR);
         inblock = 0;
         next;
       }
@@ -108,6 +130,7 @@ for yaml in "$@"; do
         if (line ~ /^[[:space:]]*$/) next;
         strip = indent;
         started = 1;
+        manifest(FNR);
       }
       if (line ~ /^[[:space:]]*$/) { print "" > out; next; }
       print substr(line, strip + 1) > out;
@@ -132,7 +155,7 @@ awk -F'\t' '
     sub("[.]sh$", "", name);
     return where[name];
   }
-  /^[[:space:]]*#[[:space:]]*shellcheck[= ]disable=/ { if (!marked) print origin() ": " $0; next }
+  /^[[:space:]]*#[[:space:]]*shellcheck[= ]disable=/ { if (!marked) print origin() ": " $0; marked = 0; next }
   /^[[:space:]]*#/ { if (why($0)) marked = 1; next }
   { marked = 0 }
 ' "$tmp/manifest" "$tmp"/*.sh > "$tmp/reasons"
