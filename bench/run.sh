@@ -17,8 +17,6 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bench/monotonic.sh"
 # shellcheck source=bench/portable.sh
 . "$root/bench/portable.sh"
-# shellcheck source=bench/harness.sh
-. "$root/bench/harness.sh"
 tasks_dir="$root/bench/tasks"
 # The tree's own gitignored .scratch/, for the reason the Makefile builds
 # `check-reproducible` there rather than under ${TMPDIR:-/tmp}: /tmp is a

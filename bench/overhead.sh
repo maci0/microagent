@@ -9,8 +9,6 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bench/monotonic.sh"
 # shellcheck source=bench/portable.sh
 . "$root/bench/portable.sh"
-# shellcheck source=bench/harness.sh
-. "$root/bench/harness.sh"
 agents=${*:-microagent claude gemini codex crush grok kimi opencode cursor-agent clanker dsh}
 prompt="Reply with exactly: pong"
 
