@@ -15,12 +15,14 @@ const LandlockPathBeneathAttr = extern struct {
     parent_fd: i32,
 };
 
+const path_sep: []const u8 = &[_]u8{std.fs.path.sep};
+
 /// `path` with symlinks resolved, or as given when it does not exist yet (a root that is not there
 /// grants nothing in the kernel either). macOS keeps `/tmp` and `$TMPDIR` behind symlinks into
 /// `/private`, and a Seatbelt `subpath` compares resolved paths, so a root is recorded resolved.
 fn canonical(io: Io, arena: std.mem.Allocator, path: []const u8) []const u8 {
     const real = std.Io.Dir.cwd().realPathFileAlloc(io, path, arena) catch return path;
-    return std.mem.trimEnd(u8, real, "/\\");
+    return std.mem.trimEnd(u8, real, path_sep);
 }
 
 /// Records the directory at `resolved` (an absolute path with no `.` or `..` in it) under both of
@@ -132,9 +134,13 @@ fn isUnderRoot(path: []const u8, root: []const u8) bool {
 /// A root keeps its trailing separator only when that separator is the whole path. `/` names the
 /// root directory and trimming it away would leave an empty root, which the coverage test reads
 /// as covering nothing while the operator who wrote `writable = ["/"]` meant the whole tree.
+/// Only the host's own separator is trimmed. `\` is a separator on Windows and an ordinary byte
+/// in a Linux or macOS file name, so a root configured as `/srv/data\` keeps the backslash and
+/// stays the directory that was written down; trimming it would grant `/srv/data`'s whole
+/// subtree over a root the operator named more narrowly than that.
 fn trimTrailingSep(path: []const u8) []const u8 {
     if (path.len == 1 and path[0] == std.fs.path.sep) return path;
-    return std.mem.trimEnd(u8, path, "/\\");
+    return std.mem.trimEnd(u8, path, path_sep);
 }
 
 /// Checks whether `path` is within any allowed root in `writable_roots`.
@@ -407,6 +413,35 @@ test "isPathWritable allows paths within writable roots and denies paths outside
     try std.testing.expect(!isPathWritable(io, arena, "  \t\r\n", &writable_roots));
     try std.testing.expect(!isPathWritable(io, arena, "", &writable_roots));
     try std.testing.expect(isPathWritable(io, arena, "/etc/passwd", &.{}));
+}
+
+test "a root keeps a backslash, which is a name byte and not a separator here" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = buf[0..try tmp.dir.realPath(io, &buf)];
+    try tmp.dir.createDirPath(io, "data");
+    const dir = try std.fs.path.join(arena, &.{ root, "data" });
+    const spelled = try std.fmt.allocPrint(arena, "{s}{c}", .{ dir, '\\' });
+
+    // Trimmed as a separator the root would be the directory itself and would
+    // cover its whole subtree, which is a wider grant than the operator wrote
+    // down. Left as a name byte it names no directory that is there, so every
+    // path is refused and the check fails closed.
+    try std.testing.expect(!isPathWritable(io, arena, spelled, &.{spelled}));
+    try std.testing.expect(!isPathWritable(io, arena, try std.fs.path.join(arena, &.{ spelled, "out.txt" }), &.{spelled}));
+    try std.testing.expect(!isPathWritable(io, arena, try std.fs.path.join(arena, &.{ dir, "out.txt" }), &.{spelled}));
+    try std.testing.expect(!isPathWritable(io, arena, try std.fs.path.join(arena, &.{ root, "out.txt" }), &.{spelled}));
+
+    // The same directory is writable under the root that names it, so the four
+    // refusals above read the backslash and not an empty root list.
+    try std.testing.expect(isPathWritable(io, arena, try std.fs.path.join(arena, &.{ dir, "out.txt" }), &.{dir}));
+    try std.testing.expect(!isPathWritable(io, arena, try std.fs.path.join(arena, &.{ root, "out.txt" }), &.{dir}));
 }
 
 // A ruleset may only name bits the running kernel knows, so the mask is the

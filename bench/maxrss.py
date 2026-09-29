@@ -79,6 +79,15 @@ def main() -> int:
     if len(sys.argv) < 2:
         print(__doc__.strip(), file=sys.stderr)
         return 2
+    # Refused before the fork, not after it. `/proc` and the ptrace constants
+    # this measures with are Linux's, and on a host without them the read at
+    # the exit stop raises, so the traced child is never continued and is left
+    # stopped in the process table holding whatever it was launched with. The
+    # caller turns a nonzero exit into a `-` for the column; it cannot reap a
+    # process this script no longer knows about.
+    if not sys.platform.startswith("linux"):
+        print("maxrss.py: /proc is Linux only; no number to report", file=sys.stderr)
+        return 1
     print(peak_rss_kb(sys.argv[1:]))
     return 0
 

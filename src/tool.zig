@@ -1948,7 +1948,14 @@ fn readLines(io: Io, arena: std.mem.Allocator, path: []const u8, offset: usize, 
             line += 1;
             if (line >= offset) {
                 if (taken >= limit) return buf.items;
-                try buf.appendSlice(arena, rest.items[start..pos]);
+                // A CRLF line is shown with the carriage return dropped. It is
+                // an invisible byte at the end of the line: the model reads the
+                // line as ending where the carriage return is not visible, and
+                // sends `old_string` back without it, which is what `edit`
+                // matches. Showing it would be showing something no one in the
+                // conversation can see or reproduce.
+                const end = if (pos > start and rest.items[pos - 1] == '\r') pos - 1 else pos;
+                try buf.appendSlice(arena, rest.items[start..end]);
                 try buf.append(arena, '\n');
                 taken += 1;
             }
@@ -2121,12 +2128,46 @@ const Edited = union(enum) {
     refused: []const u8,
 };
 
+/// `text` with every bare newline turned into a CRLF. A carriage return the
+/// text already has is one the caller sent on purpose and is left where it is.
+fn toCrlf(arena: std.mem.Allocator, text: []const u8) error{OutOfMemory}![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(arena);
+    var rest = text;
+    while (std.mem.indexOfScalar(u8, rest, '\n')) |at| {
+        try out.appendSlice(arena, rest[0..at]);
+        try out.appendSlice(arena, "\r\n");
+        rest = rest[at + 1 ..];
+    }
+    try out.appendSlice(arena, rest);
+    return out.items;
+}
+
 /// Replaces `old` with `new` in `raw`, once or everywhere with `all`, and writes nothing. `raw` is
 /// the caller's own buffer for the file and is rewritten in place whenever the replacements are
 /// short enough to fit behind the read cursor, so a caller holding it keeps holding it. The
 /// refusals are the ones an edit that could be issued twice has to make: see the comments below.
-fn applyEdit(arena: std.mem.Allocator, path: []const u8, raw: []u8, old: []const u8, new: []const u8, all: bool) error{OutOfMemory}!Edited {
+fn applyEdit(arena: std.mem.Allocator, path: []const u8, raw: []u8, old_in: []const u8, new_in: []const u8, all: bool) error{OutOfMemory}!Edited {
+    var old = old_in;
+    var new = new_in;
     if (old.len == 0) return .{ .refused = "error: old_string is empty" };
+
+    // A CRLF file holds the same text with a carriage return in front of every
+    // newline, and `read` shows such a line without one, so what the model
+    // sends back is the LF spelling of text the file does not hold. Matching
+    // that against the bytes on disk finds nothing and the model is told the
+    // text is absent from a file it was just shown. The file decides which
+    // ending the replacement is written in, not the host it is read on: a CRLF
+    // file on Linux stays CRLF, and the replacement goes in with the line
+    // endings the lines around it already have. Text that already carries a
+    // carriage return is left exactly as it came, which is a model quoting the
+    // bytes it read rather than the lines it was shown.
+    if (std.mem.indexOf(u8, raw, "\r\n") != null and
+        std.mem.indexOf(u8, old, "\r") == null and std.mem.indexOf(u8, new, "\r") == null)
+    {
+        old = try toCrlf(arena, old);
+        new = try toCrlf(arena, new);
+    }
     // An edit is a tool call the model can issue twice: a turn that was cut
     // before the result reached it, a re-read to check the change landed, a
     // retry after a transport fault. Every other shape is already safe, because
@@ -2898,7 +2939,11 @@ fn expectedLines(arena: std.mem.Allocator, raw: []const u8, offset: usize, limit
     while (lines.next()) |line| : (n += 1) {
         if (n < offset) continue;
         if (taken >= limit) break;
-        try buf.appendSlice(arena, line);
+        // The carriage return of a CRLF line is dropped, as `readLines` drops
+        // it: this is the reference the fuzz corpus is checked against, so the
+        // two have to read the rule the same way or the fuzz fails on the first
+        // seed that carries one.
+        try buf.appendSlice(arena, if (line.len > 0 and line[line.len - 1] == '\r') line[0 .. line.len - 1] else line);
         try buf.append(arena, '\n');
         taken += 1;
     }
@@ -2910,6 +2955,57 @@ fn expectedLines(arena: std.mem.Allocator, raw: []const u8, offset: usize, limit
 // buffer. What it must not change is the bytes: the same offset and limit give
 // the model the same text, whether the file ends in a newline or not and
 // whether the lines straddle a read.
+// A CRLF file is readable and editable with the line endings the model can
+// see. It is a file a Windows editor wrote, checked into a tree whose
+// `.gitattributes` normalizes, or produced by a tool that emits CRLF, and it
+// reaches `read` and `edit` on every platform the release ships. The carriage
+// return is not shown, so the `old_string` the model sends back is the LF
+// spelling, and that is the spelling `edit` matches.
+test "a CRLF file is shown without carriage returns and edited from what was shown" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_path = dir_buf[0..try tmp.dir.realPath(io, &dir_buf)];
+    const path = try std.fs.path.join(arena, &.{ dir_path, "crlf.txt" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "crlf.txt", .data = "one\r\ntwo\r\nthree\r\n" });
+
+    const shown = try readLines(io, arena, path, 1, 2);
+    try std.testing.expectEqualStrings("one\ntwo\n", shown);
+
+    // Exactly the text the read above returned, which is what a model quotes
+    // back. Against a byte-exact match this finds nothing.
+    const edited = try applyEdit(arena, path, try arena.dupe(u8, "one\r\ntwo\r\nthree\r\n"), "one\ntwo", "ONE\nTWO", false);
+    const text = switch (edited) {
+        .refused => |message| {
+            // A refusal here is the bug this test exists to catch, and the
+            // line it returns names the match that was not found.
+            std.debug.print("refused: {s}\n", .{message});
+            return error.TestUnexpectedResult;
+        },
+        .text => |t| t.bytes,
+    };
+    try std.testing.expectEqualStrings("ONE\r\nTWO\r\nthree\r\n", text);
+
+    // An LF file is untouched by the same call, which is the other half of the
+    // rule: the file's own ending decides, not the host it is read on.
+    const lf = try applyEdit(arena, path, try arena.dupe(u8, "one\ntwo\n"), "one\ntwo", "ONE\nTWO", false);
+    const lf_text = switch (lf) {
+        .refused => |message| {
+            // A refusal here is the bug this test exists to catch, and the
+            // line it returns names the match that was not found.
+            std.debug.print("refused: {s}\n", .{message});
+            return error.TestUnexpectedResult;
+        },
+        .text => |t| t.bytes,
+    };
+    try std.testing.expectEqualStrings("ONE\nTWO\n", lf_text);
+}
+
 test "a ranged read returns the same lines the whole-file read used to return" {
     var state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer state.deinit();
