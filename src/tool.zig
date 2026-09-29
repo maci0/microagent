@@ -583,6 +583,12 @@ fn gitArgv(
     limit: usize,
 ) error{ OutOfMemory, UnknownCmd }![]const []const u8 {
     var argv: std.ArrayList([]const u8) = .empty;
+    // Every entry is a literal, the model's own `rev` and `path`, or one entry
+    // of `credential_pathspecs`, so the count is known before the first append.
+    // Reserving it replaces the walk up the doubling ladder, which on the turn
+    // arena leaves every intermediate block behind. `toolSearch` and `toolAst`
+    // reserve for the same reason and the same shape of list.
+    try argv.ensureTotalCapacity(arena, 10 + credential_pathspecs.len);
     try argv.appendSlice(arena, &.{ "git", "--no-pager" });
     if (std.mem.eql(u8, cmd, "status")) {
         try argv.appendSlice(arena, &.{ "status", "--short", "--branch" });
