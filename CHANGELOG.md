@@ -14,6 +14,22 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+### Added
+
+- `model`, `base_url` and `api_key` are config-file keys. Each is overridden by its environment
+  variable and then by its flag, so a file states the house endpoint and a shell states the account.
+
+### Changed
+
+- A run that names no base url is refused before the first request, with the message naming the flag,
+  the variable and the config key. There is no default provider: the endpoint decides whose account
+  the tokens are billed to and the key goes there.
+
+### Removed
+
+- The `$HOME/.secrets/openrouter` key-file fallback. A key comes from `--api-key`,
+  `MICROAGENT_API_KEY` or `api_key` in the config file.
+
 ## [0.6.0] - 2026-09-29
 
 ### Added

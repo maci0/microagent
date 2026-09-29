@@ -96,15 +96,18 @@ The `search`, `ast` and `git` tools call `rg`, `ast-grep` and `git`, so put thos
 ## First run
 
 ```sh
-export MICROAGENT_API_KEY=sk-or-...                    # any OpenAI-compatible provider's key
-export MICROAGENT_BASE_URL=https://openrouter.ai/api/v1 # the default
-export MICROAGENT_MODEL=deepseek/deepseek-v4-flash     # the default
+export MICROAGENT_API_KEY=sk-...                        # any OpenAI-compatible provider's key
+export MICROAGENT_BASE_URL=https://api.openai.com/v1   # no default: one source must name it
+export MICROAGENT_MODEL=gpt-4o-mini                    # default deepseek/deepseek-v4-flash
 
 microagent "fix the failing test and run it"
 ```
 
+All three may also be written in the config file (`model`, `base_url`, `api_key`); a flag beats the
+variable, which beats the file. There is no default provider and no key file.
+
 `microagent --help` lists every flag. [docs/usage.md](docs/usage.md) is the full reference: flags and
-environment variables, the config file (system prompt addendum, skills, MCP servers), the tools and their
+environment variables, the config file (provider settings, system prompt addendum, skills, MCP servers), the tools and their
 credential guards, the stdout and session-log formats, exit codes, retries, gauntlet setup, and
 self-update.
 

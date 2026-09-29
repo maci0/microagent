@@ -61,7 +61,7 @@ source tree and the host. The one asset worth stealing on its own is the API key
 | --- | --- | --- |
 | Command line, agent mode | prompt, flags, API key in `argv` | `parseArgs`, `src/main.zig:1191`; `main`, `src/main.zig:282`; the flag table at `src/main.zig:917` holds every valued flag the run accepts: `-p/--print`, `-m/--model`, `-b/--base-url`, `-k/--api-key`, `--ca-bundle`, `--config`, `--reasoning-effort`, `--budget`, `--max-spend-tokens`, `--max-turns`, `--max-tokens`, `--stall-timeout` |
 | `--ca-bundle <file>` | the PEM file whose certificates vouch for the provider and for GitHub | `net.caBundlePath`, `src/net.zig:105`; `loadCaBundle`, `src/net.zig:39`; applied at `src/main.zig:341` and `src/update.zig:939` |
-| `--config <file>`, `MICROAGENT_CONFIG`, `~/.microagent/config.toml` | the `system_prompt_extra` text, skill roots, `[[mcp]]` and `[tools.<name>]` tables, denied shell commands, and sandbox settings: what the prompt says, what the run starts or contacts, which tools it offers, what shell execution refuses, and filesystem confinement | `configSource`, `src/main.zig`; `loadConfig`, `src/main.zig:1516`; `config.parse`, `src/config.zig:163`; cap `max_config_bytes` (64 KB), `src/main.zig:128` |
+| `--config <file>`, `MICROAGENT_CONFIG`, `~/.microagent/config.toml` | the provider settings (`model`, `base_url`, `api_key`, the last a credential in the clear), the `system_prompt_extra` text, skill roots, `[[mcp]]` and `[tools.<name>]` tables, denied shell commands, and sandbox settings: what the prompt says, what the run starts or contacts, which tools it offers, what shell execution refuses, and filesystem confinement | `configSource`, `src/main.zig`; `loadConfig`, `src/main.zig:1516`; `config.parse`, `src/config.zig:163`; cap `max_config_bytes` (64 KB), `src/main.zig:128` |
 | `[[mcp]]` tables in that config | programs the run starts over stdio, remote servers it sends POSTs to (`url`), and the tools they offer | `connect`, `src/mcp.zig:925`; `handshake`, `src/mcp.zig:1059` |
 | `[tools.<name>]` tables in that config | which built-in tools the model is offered, and which of the public remote servers `web_search`, `context7`, `grep_app` and `deepwiki` are switched off (all four are on by default), with their url, key variable name and timeout | `toolKey`, `src/config.zig:480`; `toolConfigError`, `src/main.zig:498`; `builtinToolsJson`, `src/main.zig:2333`; refusal in `dispatchCall`, `src/main.zig:2894` |
 | Responses of a remote MCP server (JSON body or event stream) | text that becomes a tool result, and the session id echoed on later requests | `exchange`, `src/mcp.zig:405`; `readAnswer`, `src/mcp.zig:484`; `sseLine`, `src/mcp.zig:551` |
@@ -70,7 +70,7 @@ source tree and the host. The one asset worth stealing on its own is the API key
 | `MICROAGENT_MODEL`, `MICROAGENT_BASE_URL`, `MICROAGENT_REASONING_EFFORT` | endpoint, model, response style | `envValue`, `src/main.zig:749`; read at `src/main.zig:281-283` |
 | `MICROAGENT_MAX_TURNS`, `MICROAGENT_MAX_TOKENS` | loop and response ceilings | `max_turns_default`, `src/main.zig:88`; `default_max_tokens`, `src/main.zig:103`; both through `ceiling`, `src/main.zig:799` |
 | `MICROAGENT_API_KEY` | provider credential | `key_var`; resolved in `resolveKey` |
-| `~/.secrets/openrouter` | provider credential, up to 4 KB | path built in `resolveKey`, `src/main.zig:1320`; read by `readSecret`, `src/tool.zig:143`; cap `max_secret_bytes`, `src/tool.zig:34` |
+| `api_key` in the config file | provider credential, in the clear on disk | read by `config.parse`, `src/config.zig`; resolved in `resolveKey`; no key file is read |
 | `MICROAGENT_CA_BUNDLE`, `SSL_CERT_FILE` | trust anchors for the provider host and for GitHub | `caBundlePath`, `src/net.zig:105`, read at `src/main.zig:299`; loaded at `src/main.zig:341` and `src/update.zig:939` |
 | `MICROAGENT_BUDGET_SECONDS`, `--budget` | wall-clock ceiling on the run, suspended time included | `optionalCeiling`, `src/main.zig:1053`; carried by `Budget`, `src/main.zig:1759` |
 | `MICROAGENT_MAX_SPEND_TOKENS`, `--max-spend-tokens <n>` | run-wide token ceiling, counted before each turn | `optionalCeiling`, `src/main.zig:1053`; read at `src/main.zig:304`; enforced at `src/main.zig:1752` |
@@ -166,9 +166,9 @@ command.
 
 | Asset | Why it matters | Where it lives |
 | --- | --- | --- |
-| Provider API key | bills, model access, provider account | `argv` or environment, then process memory |
+| Provider API key | bills, model access, provider account | `argv`, the environment or the config file, then process memory |
 | `GITHUB_TOKEN` | releases API access, and repository scope beyond it | environment, then an `Authorization` header on `api.github.com` only (`bearerFor`, `src/update.zig:263`); absent from every tool subprocess (`secret_env_vars`, `src/main.zig:1457`) |
-| `~/.secrets/openrouter` | the same key, on disk | read in `resolveKey`, `src/main.zig:1320` |
+| `api_key` in the config file | the same key, on disk and in the clear | read in `resolveKey`; the file is not a credentials path, so the `read` tool can open it: keep it out of a workspace the model is given |
 | Source tree and everything in it | `.env`, keys, unreleased work | read by `toolRead` (`src/tool.zig:1239`), credentials refused at `src/tool.zig:1158`, sent to the provider in the request body |
 | A remote MCP server's key | access to the operator's account at that service | the environment, named by `api_key_env`; copied once by `withKeys` (`src/mcp.zig:895`), sent in one request header, removed from every child's environment (`scrubSecrets`, `src/main.zig:1480`); never in the config file or a log line |
 | Host compute and credentials | the shell inherits the environment minus this binary's own credentials | `scrubSecrets`, `src/main.zig:1480` |
@@ -367,8 +367,6 @@ The `Unreleased` section adds more of the same kinds:
   (`isCredentialPath`, `src/tool.zig:1140`);
 - an `ast --rewrite` that wrote a credentials file while the refusal told the model to
   fetch it through `bash` (`credentialRefusal`, `src/tool.zig:1210`);
-- a key file over the secret cap reported as unreadable rather than as the wrong shape
-  (`resolveKey`, `src/main.zig:1320`);
 - a key minted for one provider reaching another without a word (`keyNamesOtherProvider`,
   `src/main.zig:767`);
 - a tool call that closed both its pipes and then slept, holding the turn past the

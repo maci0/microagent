@@ -29,9 +29,6 @@ pub const max_tool_output = 24 * 1024;
 const max_read_bytes: usize = 4 * 1024 * 1024;
 /// `edit` reads the file it rewrites, so it holds the larger of the two.
 const max_edit_bytes: usize = 8 * 1024 * 1024;
-/// A secret file is one key, not a document. Public because the diagnostic
-/// `main` writes when a key file trips this cap names the ceiling.
-pub const max_secret_bytes: usize = 4096;
 
 /// The lines a tool appends after the output it captured, kept as constants so
 /// the buffer it assembles is sized from the same text it writes. Each carries
@@ -114,42 +111,6 @@ const ToolChild = struct {
         self.child.kill(io);
     }
 };
-
-/// A key file, and which of the three things happened to it.
-const SecretRead = union(enum) {
-    /// The file is not there, which is the ordinary case for a run that has
-    /// its key somewhere else.
-    absent,
-    /// The file is there and holds a key.
-    found: []const u8,
-    /// The file is there and could not be read, with the reason.
-    unreadable: struct { reason: anyerror },
-};
-
-/// Reads a key file whole and trimmed, under a cap of its own rather than the
-/// one `read` uses for source: a secret is one key, not a document.
-///
-/// The reason comes back with the answer, because "there is no key file" and
-/// "the key file is there and this process cannot read it" are different
-/// problems with different fixes, and a caller that cannot tell them apart
-/// tells its caller there is no key. A file whose permissions or ownership
-/// stopped this process reading it is a key that is set and unusable, and
-/// `error.StreamTooLong` is the one failure here that is not about access at
-/// all: the caller says so rather than reporting a missing key.
-///
-/// Takes the io and the arena rather than the process init, so the two file
-/// boundaries a key arrives through (the mark, then the surrounding
-/// whitespace) are testable without standing up an init.
-pub fn readSecret(io: Io, arena: std.mem.Allocator, path: []const u8) SecretRead {
-    const raw = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_secret_bytes)) catch |err| switch (err) {
-        error.FileNotFound => return .absent,
-        else => |e| return .{ .unreadable = .{ .reason = e } },
-    };
-    // The BOM first, then the whitespace: `trim` cuts the ASCII set, and U+FEFF
-    // is not in it, so a key file an editor saved with a BOM would otherwise
-    // send the BOM to the provider as the first byte of the key.
-    return .{ .found = std.mem.trim(u8, chat.stripBom(raw), net.env_surrounding) };
-}
 
 /// SIGKILL to a whole process group. A group that is already gone is the normal
 /// case, not a failure.
@@ -2856,46 +2817,6 @@ test "a write with no content is refused rather than emptying the file" {
     try args.put(arena, "content", .{ .string = "" });
     try std.testing.expect(std.mem.startsWith(u8, try toolWrite(io, arena, args, &.{}), "wrote 0 bytes to "));
     try std.testing.expectEqualStrings("", try tmp.dir.readFileAlloc(io, "a.txt", arena, .limited(64)));
-}
-
-test "a key file reads as the key and nothing around it" {
-    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer state.deinit();
-    const arena = state.allocator();
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const n = try tmp.dir.realPath(io, &path_buf);
-    const path = try std.fmt.allocPrint(arena, "{s}/openrouter", .{path_buf[0..n]});
-
-    // The newline a shell heredoc or an editor leaves, which is the case the
-    // trim has always covered.
-    try tmp.dir.writeFile(io, .{ .sub_path = "openrouter", .data = "sk-or-v1-abc\n" });
-    try std.testing.expectEqualStrings("sk-or-v1-abc", readSecret(io, arena, path).found);
-
-    // A mark ahead of it. It is invisible in the editor that wrote the file, so
-    // nothing on the way here looks like a mistake, and a request sent with it
-    // carries U+FEFF as the first byte of the key and is refused as invalid.
-    try tmp.dir.writeFile(io, .{ .sub_path = "openrouter", .data = chat.bom ++ "sk-or-v1-abc\n" });
-    try std.testing.expectEqualStrings("sk-or-v1-abc", readSecret(io, arena, path).found);
-
-    // A file that is nothing but a mark is a key file that is empty, which the
-    // caller reports rather than sending.
-    try tmp.dir.writeFile(io, .{ .sub_path = "openrouter", .data = chat.bom });
-    try std.testing.expectEqualStrings("", readSecret(io, arena, path).found);
-
-    // A mark inside the key is the key's own byte, not a header to skip.
-    try tmp.dir.writeFile(io, .{ .sub_path = "openrouter", .data = "sk-a" ++ chat.bom ++ "b-c\n" });
-    try std.testing.expectEqualStrings("sk-a" ++ chat.bom ++ "b-c", readSecret(io, arena, path).found);
-
-    // A file that is not there is absent, which is the ordinary case for a run
-    // whose key came from somewhere else and costs it nothing.
-    const gone = try std.fs.path.join(arena, &.{ path_buf[0..n], "no-such-key-file" });
-    try std.testing.expectEqual(SecretRead.absent, readSecret(io, arena, gone));
 }
 
 test "a tool argument cannot repaint the operator's terminal" {

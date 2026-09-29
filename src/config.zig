@@ -1,10 +1,13 @@
-//! The one config file: the system prompt addendum, skills, MCP servers, and
-//! the tool set.
+//! The one config file: the provider settings, the system prompt addendum,
+//! skills, MCP servers, and the tool set.
 //!
 //! Each is a section of the same document, because a second file for the
 //! servers would be a second answer to "where is this run configured":
 //!
 //! ```toml
+//! model               = "deepseek/deepseek-v4-flash"
+//! base_url            = "https://api.openai.com/v1"
+//! api_key             = "sk-..."
 //! system_prompt_extra = "Answer in one short paragraph."
 //! deny_commands       = ["sudo"]
 //! skills              = ["./skills", "~/.microagent/skills"]
@@ -76,6 +79,14 @@ const Server = struct {
 pub const Config = struct {
     /// Text appended to the system prompt after a blank line, empty for none.
     system_prompt_extra: []const u8 = "",
+    /// The provider settings the file named, empty when it named none. Each is
+    /// one of the sources a run draws from, and the weakest: a `--flag` beats
+    /// the environment variable, which beats the file. `api_key` is a secret
+    /// written in the clear, so a file inside a workspace the model can read is
+    /// not a place to put one.
+    model: []const u8 = "",
+    base_url: []const u8 = "",
+    api_key: []const u8 = "",
     /// The skill directories the file named, or null when it named none and
     /// the default root applies. An empty list is a file that turned skills
     /// off, which is not the same statement as a file that did not mention
@@ -311,8 +322,8 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8) Config {
 }
 
 /// A key at the top of the file, outside any table: `system_prompt_extra`,
-/// `skills` and `deny_commands`. `lines` is what follows this one, for the
-/// value that runs over several.
+/// `model`, `base_url`, `api_key`, `skills` and `deny_commands`. `lines` is what
+/// follows this one, for the value that runs over several.
 fn topKey(config: *Config, arena: std.mem.Allocator, lines: *Lines, key: []const u8, value_text: []const u8) void {
     if (std.mem.eql(u8, key, "system_prompt_extra")) {
         const text = promptString(arena, lines, value_text) orelse
@@ -321,6 +332,9 @@ fn topKey(config: *Config, arena: std.mem.Allocator, lines: *Lines, key: []const
         config.system_prompt_extra = text;
         return;
     }
+    if (std.mem.eql(u8, key, "model")) return topString(config, key, value_text, &config.model);
+    if (std.mem.eql(u8, key, "base_url")) return topString(config, key, value_text, &config.base_url);
+    if (std.mem.eql(u8, key, "api_key")) return topString(config, key, value_text, &config.api_key);
     if (std.mem.eql(u8, key, "skills")) {
         const dirs = stringArray(arena, value_text) orelse
             return config.note(.{ .key = key, .kind = .bad_value });
@@ -334,6 +348,28 @@ fn topKey(config: *Config, arena: std.mem.Allocator, lines: *Lines, key: []const
         return;
     }
     config.note(.{ .key = key, .kind = .unknown_key });
+}
+
+/// A top-level key whose value is one string: `model`, `base_url` and
+/// `api_key`. Quoted or not is not the point; a value this reader cannot see
+/// the end of is, because none of the three has a useful default to fall back
+/// to silently.
+fn topString(config: *Config, key: []const u8, value_text: []const u8, out: *[]const u8) void {
+    const value = stringValue(value_text) orelse
+        return config.note(.{ .key = key, .kind = .bad_value });
+    out.* = value;
+}
+
+/// One quoted string, or null when the text is not one: empty, bare, a number,
+/// or a quote with no closing quote. `unquote` returns an unterminated value as
+/// written, so the length is what tells the two apart.
+fn stringValue(raw: []const u8) ?[]const u8 {
+    const text = std.mem.trim(u8, raw, " \t");
+    if (text.len < 2) return null;
+    if (text[0] != '"' and text[0] != '\'') return null;
+    const value = unquote(text);
+    if (value.len == text.len) return null;
+    return value;
 }
 
 /// A key under `[sandbox]`.
@@ -779,6 +815,47 @@ test "system_prompt_extra past its bound is refused" {
 
     const multi = try std.fmt.allocPrint(arena, "system_prompt_extra = \"\"\"\n{s}\"\"\"\n", .{"a" ** (max_system_prompt_extra_bytes + 1)});
     try std.testing.expectEqual(Problem.Kind.bad_value, parse(arena, multi).problem.?.kind);
+}
+
+test "model, base_url and api_key are quoted strings, and a bad one keeps the default" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    const set = parse(arena, "model = \"deepseek/deepseek-v4-flash\"\nbase_url = 'https://api.example.com/v1'\napi_key = \"sk-test\" # a secret in the clear\n");
+    try std.testing.expect(set.problem == null);
+    try std.testing.expectEqualStrings("deepseek/deepseek-v4-flash", set.model);
+    try std.testing.expectEqualStrings("https://api.example.com/v1", set.base_url);
+    try std.testing.expectEqualStrings("sk-test", set.api_key);
+
+    // Absent is empty, which is what says the environment or the flag is next.
+    const absent = parse(arena, "skills = []\n");
+    try std.testing.expectEqualStrings("", absent.model);
+    try std.testing.expectEqualStrings("", absent.base_url);
+    try std.testing.expectEqualStrings("", absent.api_key);
+
+    // A bare value, a number, an empty value and an unterminated quote are all
+    // named and leave the key empty rather than half-read.
+    for ([_][]const u8{
+        "model = bare\n",
+        "model =\n",
+        "model = 5\n",
+        "model = \"open\n",
+        "base_url = https://api.example.com/v1\n",
+        "api_key = 'sk-test\n",
+    }) |text| {
+        const bad = parse(arena, text);
+        try std.testing.expectEqual(Problem.Kind.bad_value, bad.problem.?.kind);
+        try std.testing.expectEqualStrings("", bad.model);
+        try std.testing.expectEqualStrings("", bad.base_url);
+        try std.testing.expectEqualStrings("", bad.api_key);
+    }
+
+    // An empty string is a value the file wrote, and it means no more than an
+    // absent key does: the run falls through to the next source.
+    const empty = parse(arena, "model = \"\"\n");
+    try std.testing.expect(empty.problem == null);
+    try std.testing.expectEqualStrings("", empty.model);
 }
 
 // A `#` comment trails a key, a value and a table header alike, and the README

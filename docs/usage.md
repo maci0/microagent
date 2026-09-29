@@ -6,7 +6,7 @@ Everything a run reads and everything it writes. The [README](../README.md) is t
 - [Flags and environment](#flags-and-environment)
 - [How values resolve](#how-values-resolve)
 - [Providers and keys](#providers-and-keys)
-- [Config file](#config-file): [system prompt addendum](#system-prompt-addendum), [skills](#skills), [MCP servers](#mcp-servers), [tool set](#tool-set), [command filter](#command-filter)
+- [Config file](#config-file): [provider settings](#provider-settings), [system prompt addendum](#system-prompt-addendum), [skills](#skills), [MCP servers](#mcp-servers), [tool set](#tool-set), [command filter](#command-filter)
 - [Tools](#tools)
 - [Output](#output): [stdout](#stdout), [exit status](#exit-status), [session log](#session-log)
 - [Failure handling](#failure-handling)
@@ -17,9 +17,9 @@ Everything a run reads and everything it writes. The [README](../README.md) is t
 ## Quick start
 
 ```sh
-export MICROAGENT_API_KEY=sk-or-...
-export MICROAGENT_BASE_URL=https://openrouter.ai/api/v1
-export MICROAGENT_MODEL=deepseek/deepseek-v4-flash
+export MICROAGENT_API_KEY=sk-...
+export MICROAGENT_BASE_URL=https://api.openai.com/v1
+export MICROAGENT_MODEL=gpt-4o-mini
 
 microagent -p "fix the failing test and run it"
 ```
@@ -36,20 +36,21 @@ microagent - tiny OpenAI-compatible coding agent
 usage: microagent [options] "<prompt>"
 
   -p, --print <prompt>   task to run (also accepted as a bare argument)
-  -m, --model <model>    model id (env MICROAGENT_MODEL, default
-                         deepseek/deepseek-v4-flash)
+  -m, --model <model>    model id (env MICROAGENT_MODEL, config key
+                         model, default deepseek/deepseek-v4-flash)
   -b, --base-url <url>   OpenAI-compatible base url (env
-                         MICROAGENT_BASE_URL, default
-                         https://openrouter.ai/api/v1);
-                         https, or http on loopback, because the api
-                         key goes to it in the clear otherwise
-  -k, --api-key <key>    api key (env MICROAGENT_API_KEY). The key
-                         goes to the base url, so name a base url from
-                         the same provider as the key: the default is
-                         openrouter.ai. A key on the
+                         MICROAGENT_BASE_URL, config key base_url). One of
+                         the three has to name an endpoint: there is no
+                         default provider. https, or http on loopback,
+                         because the api key goes to it in the clear
+                         otherwise
+  -k, --api-key <key>    api key (env MICROAGENT_API_KEY, config key
+                         api_key; no key file is read). The key goes to
+                         the base url, so name a base url from the same
+                         provider as the key. A key on the
                          command line is in the process table, where any
                          user of this machine can read it; a variable or
-                         the key file is not
+                         a file mode 600 is not
       --max-turns <n>    tool-loop turn ceiling, at least 1
                          (env MICROAGENT_MAX_TURNS, default 100)
       --stall-timeout <s>  seconds the response socket may stay silent
@@ -193,8 +194,8 @@ A variable set to an empty string is not a value:
 `MICROAGENT_MODEL`, `MICROAGENT_BASE_URL`, `MICROAGENT_REASONING_EFFORT`,
 `MICROAGENT_BUDGET_SECONDS`, `MICROAGENT_MAX_SPEND_TOKENS`, `MICROAGENT_MAX_TURNS`,
 `MICROAGENT_MAX_TOKENS`, `MICROAGENT_STALL_TIMEOUT` and `MDEBUG` keep their defaults,
-`MICROAGENT_API_KEY` falls through to the key file, and `MICROAGENT_CA_BUNDLE` falls through to
-`SSL_CERT_FILE`.
+`MICROAGENT_API_KEY` falls through to the config file's `api_key`, and `MICROAGENT_CA_BUNDLE` falls
+through to `SSL_CERT_FILE`.
 Three variables are the exception: `MICROAGENT_CONFIG`, `MICROAGENT_SESSION_DIR` and
 `MICROAGENT_SKILLS` read empty as off, so no config file, no session log and no skills.
 
@@ -203,7 +204,7 @@ as empty. A wrapper that fills the environment from a file exports that file's t
 untrimmed it would break each option differently: an api key becomes an `Authorization` header with
 a byte a header may not hold, a base url stops parsing, a session directory names a directory no
 monitor looks in, and a `HOME` ending in a newline moves every default path
-(`~/.microagent/config.toml`, the session store, the key file) somewhere that does not exist. An
+(`~/.microagent/config.toml`, the session store) somewhere that does not exist. An
 empty `HOME` is no home rather than a path off the root.
 
 `MDEBUG=1` prints the configuration the run resolved: model, base url (credentials in it redacted),
@@ -219,19 +220,22 @@ Any OpenAI-compatible endpoint works: OpenRouter, DeepSeek, OpenAI, vLLM, LiteLL
 `deepseek/deepseek-v4-flash` and `stealth/space-bunny-alpha` (OpenRouter) were used to verify it end
 to end; see [benchmark.md](benchmark.md).
 
-The key is looked up in `--api-key`, then `MICROAGENT_API_KEY`. With neither set,
-`~/.secrets/openrouter` is read as a last resort; an empty file there is named on stderr rather than passed off as no key.
+The key is looked up in `--api-key`, then `MICROAGENT_API_KEY`, then `api_key` in the config file.
+There is no key file: the path the binary used to fall back to was one provider's, and a key belongs
+to the account that pays for the run.
 
 `--api-key` is the one source that is not private to this process: the whole command line is in the
 process table for as long as the run lasts, so any user on the machine can read the key out of it
-there. A variable or the key file is not, which is why those are the sources to reach for.
+there. A variable, or a config file only its owner can read (`chmod 600`), is not, which is why those
+are the sources to reach for. A key in the config file is in the clear on disk, and it is in a file
+the `read` tool can open: keep the file out of any workspace the model is given, or use a variable.
 
 The key goes to the base url in an `Authorization` header on every request. Two consequences:
 
-- A run that sets no base url talks to `https://openrouter.ai/api/v1` with
-  `deepseek/deepseek-v4-flash`, so the key goes to OpenRouter. A base url named with `--base-url`
-  or `MICROAGENT_BASE_URL` is where the key goes, including a self-hosted gateway that accepts a key
-  from any provider.
+- A run that names no base url is refused: there is no default provider, because an endpoint decides
+  whose account the tokens are billed to and the key goes there. `--base-url`, `MICROAGENT_BASE_URL`
+  or `base_url` in the config file names it, including a self-hosted gateway that accepts a key from
+  any provider. The model defaults to `deepseek/deepseek-v4-flash`, which most gateways accept.
 - A plain `http://` base url is refused unless the host is loopback (`localhost`, `127.0.0.0/8`,
   `::1`): a local gateway is the one plaintext case with no network path to intercept. A base url
   that does not parse is refused as a typo before that check runs.
@@ -286,7 +290,7 @@ output text.
 
 ## Config file
 
-One TOML file carries the system prompt addendum, the skill roots, the MCP servers, the tool set, denied shell commands, and workspace sandbox settings. It is `--config`, else
+One TOML file carries the provider settings, the system prompt addendum, the skill roots, the MCP servers, the tool set, denied shell commands, and workspace sandbox settings. It is `--config`, else
 `MICROAGENT_CONFIG`, else `~/.microagent/config.toml`. A named path may start with `~` or `~/`, which
 is the home directory: a shell expands the tilde in a command line before the flag is read, but a
 value that came out of `MICROAGENT_CONFIG` never went through one, so microagent expands it here.
@@ -299,6 +303,26 @@ file format does not define, are reported on stderr with that key's default kept
 a key or table this file once accepted under another name (`caveman`, `ponytail`, `[style]`,
 `[commands]`, `command_filter`, `sandbox = true`) is reported the same way. A [`[tools.<name>]`](#tool-set) table the run
 cannot honor is the exception: it stops the run.
+
+### Provider settings
+
+Three top-level keys name where a run talks and with what key, and each is overridden by the
+environment variable and then by the flag of the same option. They are the weakest of the three
+sources on purpose: a file that is committed for a team states the house endpoint, while the shell a
+run starts from states the account.
+
+```toml
+model    = "deepseek/deepseek-v4-flash"
+base_url = "https://api.openai.com/v1"
+api_key  = "sk-..."   # in the clear: chmod 600, and keep it out of a workspace
+```
+
+`model` defaults to `deepseek/deepseek-v4-flash` when no source names one. `base_url` and `api_key`
+have no default: a run that names neither is refused before the first request, with the message
+naming the flag, the variable and the config key. `base_url` is checked the way the flag is, so a
+value that is not a url, or a plain `http://` url that is not loopback, is refused.
+`api_key` is a secret written in the clear, and the `read` tool can open the file: a variable or
+`--api-key` keeps it out of a file a model can read.
 
 ### System prompt addendum
 

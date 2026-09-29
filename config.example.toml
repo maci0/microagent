@@ -1,5 +1,5 @@
-# microagent configuration: the system prompt addendum, the skills, the MCP
-# servers, the command filter, the sandbox and the tool set.
+# microagent configuration: the provider settings, the system prompt addendum,
+# the skills, the MCP servers, the command filter, the sandbox and the tool set.
 # Copy to ~/.microagent/config.toml, or point MICROAGENT_CONFIG or --config at
 # it. Every key is optional. A missing key, a bad value or a missing file keeps
 # the built-in default, and the first line this file gets wrong is named on
@@ -8,6 +8,20 @@
 #
 # MICROAGENT_SKILLS sets the skills for one run and overrides this file, since a
 # value named in the environment is the more explicit statement.
+
+# Where the run talks and with what key. Each is the weakest of the three
+# sources: --flag beats the environment variable, which beats this file.
+#
+# model has a default; base_url and api_key have none, and a run that names
+# neither is refused before the first request. There is no default provider.
+#
+# api_key is a secret written in the clear, and the `read` tool can open this
+# file: keep it mode 600, out of any workspace the model is given, or leave the
+# key to MICROAGENT_API_KEY or --api-key instead.
+#
+# model    = "deepseek/deepseek-v4-flash"
+# base_url = "https://api.openai.com/v1"
+# api_key  = "sk-..."
 
 # Text appended to the system prompt after a blank line, at most 16 KB. A basic
 # string ("..." with the escapes \n \t \r \" \\), a literal string ('...'), or

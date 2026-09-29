@@ -60,8 +60,14 @@ comptime {
     _ = @import("copy");
 }
 
-const default_base_url = "https://openrouter.ai/api/v1";
+/// The model a run uses when neither the command line, the environment nor the
+/// config file named one. The base url has no such default: an endpoint is a
+/// choice about whose account the tokens are billed to, so one of the three
+/// sources has to say it.
 const default_model = "deepseek/deepseek-v4-flash";
+/// The one variable the base url is read from. It is also the one the Harbor
+/// adapter sets, so a run it starts always names an endpoint.
+const base_url_var = "MICROAGENT_BASE_URL";
 /// Room for one whole tool message: the capped result plus the keys, the id
 /// and the JSON punctuation around it. The result arrives unescaped, and a
 /// result at the cap also carries the truncation note `toolResult` appends, so
@@ -169,7 +175,10 @@ fn writeAction(io: Io, action: Action) void {
 const Options = struct {
     prompt: []const u8 = "",
     model: []const u8 = default_model,
-    base_url: []const u8 = default_base_url,
+    /// The OpenAI-compatible endpoint. Empty until the config file, the
+    /// environment or the command line names one, and a run with none is
+    /// refused rather than sent to an endpoint nobody chose.
+    base_url: []const u8 = "",
     api_key: []const u8 = "",
     max_turns: usize = max_turns_default,
     /// Sent as `max_tokens`, the ceiling on one response's generated tokens.
@@ -392,8 +401,13 @@ fn runMain(init: std.process.Init) !u8 {
     // A value the environment named that this run could not use, held until the
     // command line says whether it is still in force.
     var env_problem: ?EnvProblem = null;
-    if (envValue(init.environ_map, "MICROAGENT_MODEL")) |v| opts.model = v;
-    if (envValue(init.environ_map, "MICROAGENT_BASE_URL")) |v| opts.base_url = v;
+    // Held rather than assigned, because the config file sits under the
+    // environment: a variable that named one wins over the file, and only a
+    // source that stayed silent lets the file answer.
+    const env_model = envValue(init.environ_map, "MICROAGENT_MODEL");
+    if (env_model) |v| opts.model = v;
+    const env_base_url = envValue(init.environ_map, base_url_var);
+    if (env_base_url) |v| opts.base_url = v;
     reasoningEffortFromEnv(init.environ_map, "MICROAGENT_REASONING_EFFORT", &opts.reasoning_effort, &env_problem);
     ceilingFromEnv(usize, init.environ_map, "MICROAGENT_MAX_TURNS", .max_turns, &opts.max_turns, &env_problem);
     ceilingFromEnv(u32, init.environ_map, "MICROAGENT_MAX_TOKENS", .max_tokens, &opts.max_tokens, &env_problem);
@@ -411,20 +425,23 @@ fn runMain(init: std.process.Init) !u8 {
 
     if (opts.prompt.len == 0) return usageError(io, "no prompt: pass it as an argument or with --print", .{});
     tool_mod.forwardInterruptsToToolGroup();
-    var key = resolveKey(io, init.environ_map, init.arena, opts.api_key);
+    // Read before the key and the endpoint are resolved, because the file is
+    // one of the sources they are resolved from.
+    const arena = init.arena.allocator();
+    const loaded = loadConfig(io, init, arena, opts.config);
+    if (toolConfigError(arena, loaded)) |msg| return configError(io, "{s}", .{msg});
+    // The file is the weakest of the three sources, so it answers only where
+    // neither the flag nor a variable did.
+    if (!opts.from_flag.contains(.model) and env_model == null and loaded.model.len != 0) opts.model = loaded.model;
+    if (!opts.from_flag.contains(.base_url) and env_base_url == null and loaded.base_url.len != 0) opts.base_url = loaded.base_url;
+    var key = resolveKey(init.environ_map, opts.api_key, loaded.api_key);
     // The value can be a slice of the environment map, which loses the credentials below.
     key.value = try init.arena.allocator().dupe(u8, key.value);
     opts.api_key = key.value;
-    // The message names every source, including the file, because a user who
-    // wrote a key there is not looking for the variable. `$HOME` is
-    // escaped the way `resolveKey` escapes it below, and for the reason that
-    // function gives: a home carrying ESC or a byte that is not text is a value
-    // the shell or a container image put there, and this line is the one a run
-    // with no key at all reaches.
-    if (opts.api_key.len == 0) return configError(io, "no API key: pass --api-key, set {s}, or put one in {s}/.secrets/openrouter", .{
-        key_var,
-        clip(net.homeDir(init.environ_map) orelse "$HOME"),
-    });
+    // The message names every source a key may come from, because the one the
+    // user wrote is the one they are looking at.
+    if (opts.api_key.len == 0) return configError(io, "no API key: pass --api-key, set {s}, or set api_key in the config file", .{key_var});
+    if (opts.base_url.len == 0) return configError(io, "no base url: pass --base-url, set MICROAGENT_BASE_URL, or set base_url in the config file", .{});
     // Refused as a url before it is refused as a leak, because that is what it
     // is: a caller who left the scheme off is told their key was about to go
     // out in the clear, which is a security warning about a value that never
@@ -441,9 +458,6 @@ fn runMain(init: std.process.Init) !u8 {
     // message is appended once, in the wire format, with no model in between.
     var msgs: std.ArrayList(u8) = .empty;
     defer msgs.deinit(gpa);
-    const arena = init.arena.allocator();
-    const loaded = loadConfig(io, init, arena, opts.config);
-    if (toolConfigError(arena, loaded)) |msg| return configError(io, "{s}", .{msg});
     opts.deny_commands = loaded.deny_commands;
     opts.disabled_tools = loaded.disabled_tools;
     opts.sandbox = loaded.sandbox;
@@ -569,20 +583,22 @@ const help_text =
     \\usage: microagent [options] "<prompt>"
     \\
     \\  -p, --print <prompt>   task to run (also accepted as a bare argument)
-    \\  -m, --model <model>    model id (env MICROAGENT_MODEL,
-++ " default\n" ++ "                         " ++ default_model ++ ")\n" ++
+    \\  -m, --model <model>    model id (env MICROAGENT_MODEL, config key
+    \\                         model, default
+++ " " ++ default_model ++ ")\n" ++
     \\  -b, --base-url <url>   OpenAI-compatible base url (env
-    \\                         MICROAGENT_BASE_URL, default
-++ "\n                         " ++ default_base_url ++ ");\n" ++
-    \\                         https, or http on loopback, because the api
-    \\                         key goes to it in the clear otherwise
-    \\  -k, --api-key <key>    api key (env MICROAGENT_API_KEY). The key
-    \\                         goes to the base url, so name a base url from
-    \\                         the same provider as the key: the default is
-    \\                         openrouter.ai. A key on the
+    \\                         MICROAGENT_BASE_URL, config key base_url). One of
+    \\                         the three has to name an endpoint: there is no
+    \\                         default provider. https, or http on loopback,
+    \\                         because the api key goes to it in the clear
+    \\                         otherwise
+    \\  -k, --api-key <key>    api key (env MICROAGENT_API_KEY, config key
+    \\                         api_key; no key file is read). The key goes to
+    \\                         the base url, so name a base url from the same
+    \\                         provider as the key. A key on the
     \\                         command line is in the process table, where any
     \\                         user of this machine can read it; a variable or
-    \\                         the key file is not
+    \\                         a file mode 600 is not
     \\      --max-turns <n>    tool-loop turn ceiling, at least 1
 ++ (std.fmt.comptimePrint("\n                         (env MICROAGENT_MAX_TURNS, default {d})\n", .{max_turns_default})) ++
     \\      --stall-timeout <s>  seconds the response socket may stay silent
@@ -767,14 +783,17 @@ test "a run that stopped at a ceiling reports a status of its own" {
     try std.testing.expect(std.mem.indexOf(u8, block.items, "3 the run stopped without an answer") != null);
 }
 
-test "the help text names the default model and base url" {
-    // The two a run reaches without anybody setting them, and the two whose
-    // absence from the help is what sends a key to a provider its owner did
-    // not name: a reader learns what a run talks to from this text, not from
-    // the source. Spelled from the constants, so a default that moves takes
-    // the sentence with it.
+test "the help text names the default model and the two config-only provider keys" {
+    // The model is the one a run reaches without anybody setting it. The base
+    // url and the key have no default, so the text has to say where they come
+    // from: a reader learns what a run talks to from this text, not from the
+    // source. Spelled from the constants, so a default that moves takes the
+    // sentence with it.
     try std.testing.expect(std.mem.indexOf(u8, help_text, default_model) != null);
-    try std.testing.expect(std.mem.indexOf(u8, help_text, default_base_url) != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_text, "config key base_url") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_text, "config key") != null);
+    // No provider is named as a default, because there is none.
+    try std.testing.expect(std.mem.indexOf(u8, help_text, "openrouter") == null);
 }
 
 test "the help text names the spend alarm the run prints" {
@@ -816,9 +835,9 @@ test "the help text states the ceilings and the budget grace the run uses" {
 /// hold, so every request is refused; a base url fails to parse, so the run
 /// stops claiming the key would go out in the clear, which is a security
 /// warning about a value that is otherwise fine. The ceilings and the levels
-/// trim for themselves at the point of parsing, `githubBearer` trims for the
-/// same reason, and a key file is read trimmed; this makes the environment
-/// itself the one place the whitespace is removed.
+/// trim for themselves at the point of parsing, and `githubBearer` trims for
+/// the same reason; this makes the environment itself the one place the
+/// whitespace is removed.
 fn envValue(env: *const std.process.Environ.Map, name: []const u8) ?[]const u8 {
     const v = std.mem.trim(u8, env.get(name) orelse return null, net.env_surrounding);
     return if (v.len == 0) null else v;
@@ -1287,62 +1306,19 @@ fn setPrompt(buf: []u8, opts: *Options, value: []const u8) ?[]const u8 {
     return null;
 }
 
-/// The key this run will use, and where it came from. A secret file that is
-/// there and holds nothing is named rather than passed off as no key at all:
-/// the file being present is exactly why a reader believes a key is set.
+/// The key this run will use, and where it came from.
 const Key = struct { value: []const u8, source: []const u8 };
 
 /// The key this run sends, and the name of the source it came from.
 ///
-/// `--api-key` wins, then `key_var`, then `$HOME/.secrets/openrouter` as a last
-/// resort. `MDEBUG` prints the source by name.
-fn resolveKey(io: Io, environ: *std.process.Environ.Map, arena_state: *std.heap.ArenaAllocator, given: []const u8) Key {
+/// `--api-key` wins, then `key_var`, then the `api_key` key of the config file.
+/// There is no key file to look in: a provider's key belongs to the account
+/// paying for the run, and a path baked into the binary named one provider's.
+/// `MDEBUG` prints the source by name.
+fn resolveKey(environ: *std.process.Environ.Map, given: []const u8, from_config: []const u8) Key {
     if (given.len > 0) return .{ .value = given, .source = "--api-key" };
     if (envValue(environ, key_var)) |v| return .{ .value = v, .source = key_var };
-    const arena = arena_state.allocator();
-    const fallback = std.fs.path.join(arena, &.{
-        net.homeDir(environ) orelse return .{ .value = "", .source = "none" },
-        ".secrets",
-        "openrouter",
-    }) catch |err| {
-        // Every other way this file can go unreadable is named, and this one
-        // read as "there is no key file here" instead: the caller then says
-        // the run has no API key, when the key is in a file whose path this
-        // could not build.
-        net.note(io, arena, "microagent: the path to {s}/.secrets/openrouter could not be built ({s}); no key was taken from a file there\n", .{
-            chat_mod.safeTextAll(arena, net.homeDir(environ) orelse "$HOME"), @errorName(err),
-        });
-        return .{ .value = "", .source = "none" };
-    };
-    // The path is built out of `$HOME`, which is whatever the shell, a wrapper
-    // script or a container image put there, so the two notes that name it
-    // escape it. `safeText` is what every other diagnostic quoting a value
-    // already uses; a home carrying ESC or a byte that is not text reached the
-    // operator's terminal through these two lines intact.
-    const shown_fallback = chat_mod.safeTextAll(arena, fallback);
-    switch (tool_mod.readSecret(io, arena, fallback)) {
-        .found => |v| {
-            if (v.len != 0) return .{ .value = v, .source = fallback };
-            net.note(io, arena, "microagent: {s} is empty; no key in it\n", .{shown_fallback});
-        },
-        // A key that is set in a file this process cannot read is not the same
-        // as no key, and the difference is the whole of what the caller does
-        // next: the first is a permissions problem on a file that holds a
-        // working key, the second is a key to go and find.
-        // `StreamTooLong` is the one failure in this arm that is not about
-        // access, and `readSecret` says the caller names it rather than
-        // reporting a missing key: the file opened and holds something, it is
-        // not shaped like a key, and the operator has to be told which of the
-        // two problems they have.
-        .unreadable => |u| {
-            if (u.reason == error.StreamTooLong) {
-                net.note(io, arena, "microagent: {s} is not a key file: it is larger than the {d} bytes a key may be, and no key was taken from it\n", .{ shown_fallback, tool_mod.max_secret_bytes });
-            } else {
-                net.note(io, arena, "microagent: {s} could not be read ({s}); it may hold a key this process cannot reach, and no key was taken from it\n", .{ shown_fallback, @errorName(u.reason) });
-            }
-        },
-        .absent => {},
-    }
+    if (from_config.len > 0) return .{ .value = from_config, .source = "config file" };
     return .{ .value = "", .source = "none" };
 }
 
@@ -1360,7 +1336,7 @@ const key_var = "MICROAGENT_API_KEY";
 /// different subset of it.
 const env_vars = [_][]const u8{
     "MICROAGENT_MODEL",
-    "MICROAGENT_BASE_URL",
+    base_url_var,
     key_var,
     "MICROAGENT_MAX_TURNS",
     "MICROAGENT_MAX_TOKENS",
@@ -1393,7 +1369,7 @@ const env_vars = [_][]const u8{
 /// documents to it.
 const empty_is_unset_vars = [_][]const u8{
     "MICROAGENT_MODEL",
-    "MICROAGENT_BASE_URL",
+    base_url_var,
     "MICROAGENT_REASONING_EFFORT",
     "MICROAGENT_BUDGET_SECONDS",
     "MICROAGENT_MAX_SPEND_TOKENS",
@@ -1444,6 +1420,10 @@ fn scrubSecrets(env: *std.process.Environ.Map, remote: []const mcp_mod.Entry) vo
 const LoadedConfig = struct {
     /// Text appended to the system prompt, empty for none.
     system_prompt_extra: []const u8,
+    /// The provider settings the file named, empty when it named none.
+    model: []const u8,
+    base_url: []const u8,
+    api_key: []const u8,
     /// The skill directories the config file named, or null when it named
     /// none, which is how the caller tells "use the default root" from "the
     /// file turned skills off".
@@ -1487,6 +1467,9 @@ fn loadConfig(io: Io, init: std.process.Init, arena: std.mem.Allocator, config: 
     if (parsed.problem) |problem| reportConfigProblem(io, arena, source, problem);
     return .{
         .system_prompt_extra = parsed.system_prompt_extra,
+        .model = parsed.model,
+        .base_url = parsed.base_url,
+        .api_key = parsed.api_key,
         .skills = parsed.skills,
         .mcp = parsed.mcp,
         .deny_commands = parsed.deny_commands,
@@ -3090,7 +3073,7 @@ test {
 }
 
 test "the api key is only sent over https, or to a loopback gateway" {
-    try std.testing.expect(net.urlCarriesKey(default_base_url));
+    try std.testing.expect(net.urlCarriesKey("https://openrouter.ai/api/v1"));
     try std.testing.expect(net.urlCarriesKey("https://gateway.internal:8443/v1"));
 
     // The loopback exemption is what makes a local gateway usable at all.
@@ -3132,7 +3115,7 @@ test "a base url that carries credentials does not print them" {
         displayUrl(arena, "https://user:sk-secret@openrouter.ai/api/v1/chat/completions"),
     );
     // Nothing to redact: the common case comes back as it went in.
-    try std.testing.expectEqualStrings(default_base_url, displayUrl(arena, default_base_url));
+    try std.testing.expectEqualStrings("https://openrouter.ai/api/v1", displayUrl(arena, "https://openrouter.ai/api/v1"));
     try std.testing.expectEqualStrings(
         "https://openrouter.ai/api/v1?x=1",
         displayUrl(arena, "https://openrouter.ai/api/v1?x=1"),
@@ -3871,7 +3854,6 @@ fn fuzzArgs(_: void, smith: *std.testing.Smith) !void {
 /// argument that never arrived leaves behind.
 fn isDefault(value: []const u8) bool {
     return std.mem.eql(u8, value, default_model) or
-        std.mem.eql(u8, value, default_base_url) or
         value.len == 0;
 }
 
@@ -5689,70 +5671,53 @@ test "a write issued twice leaves the file the first run left" {
 }
 
 // Where the key comes from is decided before the first turn: a `--api-key`
-// beats the variable, and only when the variable carries nothing is the file
-// under `$HOME` read. The file is a fallback rather than the first choice, and
-// a variable that is set to nothing is not a key at all.
-test "the key is the flag, then the variable, then the file" {
+// beats the variable, the variable beats the config file, and a value that is
+// set to nothing is not a key at all. No key file is read: the one that used to
+// be was named after a provider this binary no longer picks.
+test "the key is the flag, then the variable, then the config file" {
     var env: std.process.Environ.Map = .init(std.testing.allocator);
     defer env.deinit();
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const io = std.testing.io;
 
-    // A flag is a key and is not looked past, whatever the environment says.
+    // A flag is a key and is not looked past, whatever the environment or the
+    // file says.
     try env.put(key_var, "from-var");
     {
-        const k = resolveKey(io, &env, &arena_state, "from-flag");
+        const k = resolveKey(&env, "from-flag", "from-config");
         try std.testing.expectEqualStrings("from-flag", k.value);
         try std.testing.expectEqualStrings("--api-key", k.source);
     }
     {
-        const k = resolveKey(io, &env, &arena_state, "");
+        const k = resolveKey(&env, "", "from-config");
         try std.testing.expectEqualStrings("from-var", k.value);
         try std.testing.expectEqualStrings(key_var, k.source);
+    }
+    {
+        const k = resolveKey(&env, "", "");
+        try std.testing.expectEqualStrings("from-var", k.value);
     }
 
     // The variable of another provider is not a key for this program.
     _ = env.swapRemove(key_var);
     try env.put("OPENAI_API_KEY", "not-read");
     {
-        const k = resolveKey(io, &env, &arena_state, "");
-        try std.testing.expectEqualStrings("", k.value);
-        try std.testing.expectEqualStrings("none", k.source);
+        const k = resolveKey(&env, "", "from-config");
+        try std.testing.expectEqualStrings("from-config", k.value);
+        try std.testing.expectEqualStrings("config file", k.source);
     }
     _ = env.swapRemove("OPENAI_API_KEY");
 
-    // A variable set to nothing is not a key.
+    // A variable set to nothing is not a key, so the file answers.
     try env.put(key_var, "");
     {
-        const k = resolveKey(io, &env, &arena_state, "");
-        try std.testing.expectEqualStrings("", k.value);
+        const k = resolveKey(&env, "", "from-config");
+        try std.testing.expectEqualStrings("from-config", k.value);
     }
     _ = env.swapRemove(key_var);
 
-    // With no variable carrying one the file is read, and a key in it is named
-    // by the path it came from rather than by a variable nobody set.
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io, ".secrets");
-    try tmp.dir.writeFile(io, .{ .sub_path = ".secrets/openrouter", .data = "sk-from-the-file\n" });
-    const home = try tmp.dir.realPathFileAlloc(io, ".", arena_state.allocator());
-    try env.put("HOME", home);
+    // No variable and no file entry: no key, said so by the source rather than
+    // by a path that was never tried.
     {
-        const k = resolveKey(io, &env, &arena_state, "");
-        try std.testing.expectEqualStrings("sk-from-the-file", k.value);
-        try std.testing.expectEqualStrings(
-            try std.fs.path.join(arena_state.allocator(), &.{ home, ".secrets", "openrouter" }),
-            k.source,
-        );
-    }
-
-    // No variable, no file, and no `$HOME` to build a path from: no key, said
-    // so by the source rather than by a path that was never tried.
-    try tmp.dir.deleteFile(io, ".secrets/openrouter");
-    _ = env.swapRemove("HOME");
-    {
-        const k = resolveKey(io, &env, &arena_state, "");
+        const k = resolveKey(&env, "", "");
         try std.testing.expectEqualStrings("", k.value);
         try std.testing.expectEqualStrings("none", k.source);
     }
@@ -5798,12 +5763,15 @@ test "the tool environment is this one less the credentials" {
 // The Harbor adapter (`integrations/harbor/microagent_agent.py`) reads the
 // host's environment and hands this binary a subset of it, so it duplicates
 // the configuration this file owns: the provider key variable, the
-// reasoning levels, the default endpoint, the grace the budget is derived
-// against, and the exit code a stopped run leaves. A duplicate is fine; a
-// silent divergence is not, and nothing else in the tree would notice one: the
-// adapter is Python, it never imports this file, and the values it disagrees
-// about are the ones a run is scored on. The adapter's values are read from its source here, against the constants
-// themselves rather than against a second copy of them.
+// reasoning levels, the endpoint it passes as MICROAGENT_BASE_URL, the grace
+// the budget is derived against, and the exit code a stopped run leaves. A
+// duplicate is fine; a silent divergence is not, and nothing else in the tree
+// would notice one: the adapter is Python, it never imports this file, and the
+// values it disagrees about are the ones a run is scored on. The adapter also
+// supplies the base url the binary no longer defaults: a run it starts always
+// names an endpoint this way. The adapter's values are read from its source
+// here, against the constants themselves rather than against a second copy of
+// them.
 test "the harbor adapter mirrors this binary's configuration schema" {
     const gpa = std.testing.allocator;
     // The test runs with the build root as its working directory, which is
@@ -5817,9 +5785,9 @@ test "the harbor adapter mirrors this binary's configuration schema" {
     try expectSpelled(adapter, "trimmed_env(\"" ++ key_var ++ "\")");
     try expectNamesInOrder(adapter, "REASONING_EFFORTS = (", &reasoning_efforts);
 
-    // The scalars the adapter spells as its own constant. Each is a value this
-    // file owns, and a change to one is a change the adapter has to make.
-    try expectSpelled(adapter, "DEFAULT_BASE_URL = " ++ std.fmt.comptimePrint("\"{s}\"", .{default_base_url}));
+    // The scalars the adapter spells as its own constant, and the one variable
+    // it sets so the base url this binary no longer defaults is always named.
+    try expectSpelled(adapter, "\"" ++ base_url_var ++ "\"");
     try expectSpelled(adapter, std.fmt.comptimePrint("FINAL_PUSH_GRACE_S = {d}", .{final_push_grace_s}));
     try expectSpelled(adapter, std.fmt.comptimePrint("INCOMPLETE_EXIT_CODE = {d}", .{exit_incomplete}));
 
@@ -6230,6 +6198,9 @@ test "a config the tool tables make unusable stops the run with the fix named" {
             const parsed = config_mod.parse(a, text);
             return .{
                 .system_prompt_extra = parsed.system_prompt_extra,
+                .model = parsed.model,
+                .base_url = parsed.base_url,
+                .api_key = parsed.api_key,
                 .skills = parsed.skills,
                 .mcp = parsed.mcp,
                 .deny_commands = parsed.deny_commands,
