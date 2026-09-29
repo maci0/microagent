@@ -15,7 +15,7 @@ BIN := zig-out/bin/microagent
 export LC_ALL := C
 export TZ := UTC
 
-.PHONY: default help preflight version build musl test watch test-sanitize fmt fmt-check fmt-python lint lint-versions lint-lock check-sbom zig-version required-zig-version release-targets check-assets check-asset-run check-binary check-changelog check-changelog-links check-changelog-sections check-unreleased check-readme check-man check-release check-reproducible lint-shell lint-python lint-yaml check bench gauntlet instructions overhead install release-assets checksums sbom sha256-of clean
+.PHONY: default help preflight version build musl test watch test-sanitize fmt fmt-check fmt-python lint lint-versions lint-lock lint-ci check-sbom zig-version required-zig-version release-targets check-assets check-asset-run check-binary check-changelog check-changelog-links check-changelog-sections check-unreleased check-readme check-man check-release check-reproducible lint-shell lint-python lint-yaml check bench gauntlet instructions overhead install release-assets checksums sbom sha256-of clean
 
 # The Harbor adapter's directory, the one place that path is written down.
 # lint-lock.sh and lint-versions.sh both take it as an argument rather than
@@ -133,6 +133,7 @@ help:
 	  'check                 preflight, zig-version, check-unreleased, check-readme, fmt-check, the linters, the tests, an optimized build' \
 	  'lint                  the version and lock checks, the release inventory, then shellcheck, ruff and yamllint' \
 	  'lint-shell            shellcheck over every tracked .sh file' \
+	  'lint-ci               shellcheck over the run: steps in the workflows and composite actions' \
 	  'lint-python           ruff check and ruff format --check over every tracked .py file' \
 	  'lint-yaml             yamllint over every tracked .yml and .yaml file' \
 	  'lint-versions         check ruff and yamllint against the versions the gate runs, and that lint-requirements.in names the same' \
@@ -294,6 +295,11 @@ ZON_SOURCES := $(shell git ls-files '*.zon')
 # The Python and YAML the linters read, for the same reason.
 PY_SOURCES := $(shell git ls-files '*.py')
 YAML_SOURCES := $(shell git ls-files '*.yml' '*.yaml')
+# The workflows and composite actions, which `lint-yaml` reads for shape and
+# `lint-ci` reads for the shell in their `run:` steps. Taken from git for the
+# same reason as the lists above: a workflow added outside .github/ would be
+# checked by nothing and the gate would still pass.
+CI_SOURCES := $(shell git ls-files '.github/*.yml' '.github/**/*.yml')
 
 fmt:
 	@test -n "$(ZIG_SOURCES)" || { echo "no tracked .zig file to format" >&2; exit 1; }
@@ -321,7 +327,7 @@ fmt-python:
 # repeating the targets, so a linter added here reaches a push and a tag.
 # .github/dependabot.yml is the other thing to keep in step, since it decides
 # what opens a bump for these.
-lint: lint-versions lint-lock check-sbom lint-shell lint-python lint-yaml
+lint: lint-versions lint-lock check-sbom lint-shell lint-ci lint-python lint-yaml
 
 # The gate's own checks live in scripts/, not in recipes here, so shellcheck
 # reads them: a recipe is shell nothing lints, and these are the code that
@@ -443,6 +449,16 @@ lint-shell:
 	  }; \
 	done; \
 	git ls-files -z '*.sh' | xargs -0 shellcheck $(SHELLCHECK_OPTS)
+
+# The shell in the workflows is the same language under the same options, and
+# it is where a release is published from, so it is checked rather than
+# assumed. The steps are not tracked .sh files, so lint-shell cannot see them;
+# this extracts the `run:` bodies and runs the same shellcheck over them. The
+# option list is the one above rather than a second spelling, so the two gates
+# cannot drift into checking different things.
+lint-ci:
+	@test -n "$(CI_SOURCES)" || { echo "no tracked workflow to read the run: steps from" >&2; exit 1; }
+	SHELLCHECK_OPTS='$(SHELLCHECK_OPTS)' sh scripts/lint-ci-shell.sh $(CI_SOURCES)
 
 lint-python:
 	@test -n "$(PY_SOURCES)" || { echo "no tracked .py file to lint" >&2; exit 1; }

@@ -86,6 +86,7 @@ make test-sanitize          # the same suite under the undefined-behavior saniti
 make watch [FILTER="..."]   # the suite again on every source change, until Ctrl-C
 make preflight              # name any tool check and lint need that is not on PATH
 make lint                   # the pin checks, shellcheck, ruff and yamllint on their own
+make lint-ci                # shellcheck over the run: steps in the workflows, on their own
 make check-asset-run        # the published asset for this host, cross-built and started
 make instructions CHECK=--check   # retired instructions per unit, and a band it must stay inside
 make check-unreleased       # the [Unreleased] entry has the five sections, once each, in order
@@ -97,7 +98,8 @@ make check-unreleased       # the [Unreleased] entry has the five sections, once
 
 `make check` runs, in order: `preflight`, `zig-version`,
 `check-unreleased`, `check-readme`, `fmt-check`, `lint` (`lint-versions`,
-`lint-lock`, `check-sbom`, shellcheck, `ruff check`, `ruff format --check`,
+`lint-lock`, `check-sbom`, shellcheck over the tracked scripts and over the `run:`
+steps in the workflows, `ruff check`, `ruff format --check`,
 yamllint), `zig build test`,
 `zig build test-sanitize`, and `check-binary` (a `ReleaseSmall` build whose
 binary it then starts). These are the checks

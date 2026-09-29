@@ -139,7 +139,8 @@ jobs:
           # same published release. A published one is refused, because a
           # consumer has it and replacing it is not this workflow's call.
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            if [ "$(gh release view "${GITHUB_REF_NAME}" --json isDraft --jq .isDraft)" != "true" ]; then
+            is_draft="$(gh release view "${GITHUB_REF_NAME}" --json isDraft --jq .isDraft)"
+            if [ "$is_draft" != "true" ]; then
               echo "release ${GITHUB_REF_NAME} is already published; refusing to replace it" >&2
               exit 1
             fi
@@ -170,16 +171,30 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          if [ "$(gh release view "${GITHUB_REF_NAME}" --json isDraft --jq .isDraft)" != "false" ]; then
+          is_draft="$(gh release view "${GITHUB_REF_NAME}" --json isDraft --jq .isDraft)"
+          if [ "$is_draft" != "false" ]; then
             echo "release ${GITHUB_REF_NAME} is still a draft after publish" >&2
             exit 1
           fi
+
+          # because: the step runs `set -o pipefail`, so the assignment takes the exit status
+          # of the last command in it and `set -e` stops the step when that fails, so the
+          # return value is not masked here
+          # shellcheck disable=SC2312
           published="$(gh release view "${GITHUB_REF_NAME}" --json assets --jq '.assets[].name' | sort)"
-          built="$(cd dist && ls microagent-* | sort)"
+          # compgen rather than ls, which mangles a name carrying a character
+          # its own output columns are made of.
+          # because: the step runs `set -o pipefail`, so the assignment takes the exit status
+          # of the last command in it and `set -e` stops the step when that fails, so the
+          # return value is not masked here
+          # shellcheck disable=SC2312
+          built="$(cd dist && compgen -G 'microagent-*' | sort)"
           if [ "$published" != "$built" ]; then
             echo "the published release and this tag's build disagree on the asset list" >&2
-            echo "published: $(echo "$published" | tr '\n' ' ')" >&2
-            echo "built: $(echo "$built" | tr '\n' ' ')" >&2
+            echo "published:" >&2
+            echo "$published" >&2
+            echo "built:" >&2
+            echo "$built" >&2
             exit 1
           fi
           # An empty dist/ is a build that produced nothing, and an empty
@@ -218,4 +233,5 @@ jobs:
               exit 1
             fi
           done
-          echo "published release ${GITHUB_REF_NAME} carries $(echo "$built" | wc -l) assets, each byte-identical to dist/ and matching its sidecar"
+          asset_count="$(printf '%s\n' "$built" | wc -l)"
+          echo "published release ${GITHUB_REF_NAME} carries $asset_count assets, each byte-identical to dist/ and matching its sidecar"

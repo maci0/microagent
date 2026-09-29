@@ -121,7 +121,10 @@ jobs:
   # Python and YAML around them are not, and a defect in bench/run.sh or the
   # Harbor adapter is a wrong benchmark rather than a failed test, so they get
   # their own gate rather than riding along unreviewed. The tool versions are
-  # pinned so a new release cannot turn a green run red on its own.
+  # pinned so a new release cannot turn a green run red on its own. `make lint`
+  # reads the run: steps out of the workflows in this directory as well, so the
+  # shell that publishes a release is checked by the same shellcheck as the
+  # scripts rather than trusted because it is written in YAML.
   lint:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

@@ -39,6 +39,18 @@ release, and `microagent update` moves you to it.
   stderr is a terminal. A captured run, which is every gauntlet review and every log file, gets the
   same line and no escape bytes.
 
+- `make lint` reads the `run:` steps out of the workflows and composite actions and runs the same
+  shellcheck over them that it runs over `bench/*.sh` and `scripts/*.sh`, with the same six optional
+  checks and the same `# because:` rule for a disable. The shell that builds and publishes a release
+  is the one place a defect ships rather than fails a test, and it was the one place no linter
+  reached: a step is not a tracked `.sh` file, so `lint-shell` never saw it. Two findings came out of
+  the first run. The draft check in `release.yml` read `gh release view` inside a `[ ... ]` test, so a
+  `gh` failure was read as an empty answer and took the branch it should not have; it is assigned
+  first now, where `set -e` can see the failure. The asset list is read with `compgen` rather than
+  `ls`, which mangles a name carrying a character its own output columns are made of. Every
+  `# because:` line a workflow disable needs is asked for, because a reason written beside the scripts
+  does not travel with a step copied out of them.
+
 - The run says where it is. Every `bash` call starts in the current directory and no shell carries
   over, but the prompt never named that directory, so on a fresh context the model guessed one and
   prefixed commands with `cd <guess> || cd .`. The prompt and the bash tool now say the call starts
