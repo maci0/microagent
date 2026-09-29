@@ -775,7 +775,13 @@ fn resultText(arena: std.mem.Allocator, server_name: []const u8, result: std.jso
         else => return std.fmt.allocPrint(arena, "error: MCP server {s} answered with {s}, not a result object", .{ server_name, @tagName(result) }),
     };
     var buf: std.ArrayList(u8) = .empty;
-    const content = object.get("content") orelse {
+    // A member spelled as JSON `null` carries no text, which is what a member
+    // that is not there at all carries, so it takes the same branch. A server
+    // answering `content: null` beside a `structuredContent` payload was losing
+    // the payload, because `get` returns a present optional for both.
+    var maybe_content = object.get("content");
+    if (maybe_content != null and maybe_content.? == .null) maybe_content = null;
+    const content = maybe_content orelse {
         // The same bound the text path below builds to, for the same reason. A
         // server that answers with a structured payload of a megabyte was
         // stringified whole and clamped a moment later by the caller, so the
@@ -2260,6 +2266,12 @@ test "a non-text result block is named rather than dropped" {
 
     const structured = try std.json.parseFromSliceLeaky(std.json.Value, arena, "{\"structuredContent\":{\"n\":1}}", .{});
     try std.testing.expectEqualStrings("{\"n\":1}", try resultText(arena, "srv", structured));
+
+    // A `content` member spelled as JSON `null` holds no text, which is what one
+    // that is not there at all holds, so the structured payload behind it is
+    // what the model reads rather than a claim that the result was empty.
+    const null_content = try std.json.parseFromSliceLeaky(std.json.Value, arena, "{\"content\":null,\"structuredContent\":{\"n\":1}}", .{});
+    try std.testing.expectEqualStrings("{\"n\":1}", try resultText(arena, "srv", null_content));
 
     // The shapes that are not a result object, and the one that is an object
     // with nothing in it, are each said rather than handed to the model as

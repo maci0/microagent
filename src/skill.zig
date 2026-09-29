@@ -218,80 +218,91 @@ fn resolvedRoot(env: *const std.process.Environ.Map, arena: std.mem.Allocator, p
 pub fn discover(io: Io, arena: std.mem.Allocator, root_list: []const Root) Skills {
     var found: std.ArrayList(Skill) = .empty;
     for (root_list) |root| {
-        var dir = std.Io.Dir.openDirAbsolute(io, root.path, .{ .iterate = true }) catch |err| {
+        const dir = std.Io.Dir.openDirAbsolute(io, root.path, .{ .iterate = true }) catch |err| {
             if (root.named or err != error.FileNotFound)
                 net.note(io, arena, "microagent: skills directory {s}: {s}; it is skipped\n", .{ chat.safeTextAll(arena, root.path), @errorName(err) });
             continue;
         };
-        defer dir.close(io);
-        var it = dir.iterate();
-        while (it.next(io) catch |err| {
-            net.note(io, arena, "microagent: skills directory {s} could not be listed ({s}); the skills after this point are not found\n", .{ chat.safeTextAll(arena, root.path), @errorName(err) });
-            break;
-        }) |entry| {
-            // `Dir.iterate` reports a symlinked directory as a link, so an
-            // operator who linked a skill into the root had it dropped in
-            // silence: a skill installed and never offered. The link is
-            // followed here, and one that leads nowhere is said rather than
-            // skipped the way a file with no skills in it is.
-            if (entry.kind != .directory) {
-                if (entry.kind != .sym_link) continue;
-                const linked = dir.statFile(io, entry.name, .{}) catch |err| {
-                    net.note(io, arena, "microagent: skill {s}: {s}; it is skipped\n", .{ chat.safeTextAll(arena, entry.name), @errorName(err) });
-                    continue;
-                };
-                if (linked.kind != .directory) continue;
-            }
-            const rel = std.fs.path.join(arena, &.{ entry.name, "SKILL.md" }) catch |err| {
-                net.note(io, arena, "microagent: skill {s}: the path to its SKILL.md could not be built ({s}); it is skipped\n", .{ chat.safeTextAll(arena, entry.name), @errorName(err) });
-                continue;
-            };
-            const stat = dir.statFile(io, rel, .{}) catch |err| {
-                if (err != error.FileNotFound)
-                    net.note(io, arena, "microagent: skill {s}: {s}; it is skipped\n", .{ chat.safeTextAll(arena, entry.name), @errorName(err) });
-                continue;
-            };
-            if (stat.size > max_skill_bytes) {
-                net.note(io, arena, "microagent: skill {s} is skipped: it is larger than the {d} bytes a skill may hold\n", .{ chat.safeTextAll(arena, entry.name), max_skill_bytes });
-                continue;
-            }
-            const text = readHead(io, arena, dir, rel, entry.name, stat.size) orelse continue;
-            const name = skillName(arena, entry.name, text) catch |err| switch (err) {
-                error.InvalidName => {
-                    net.note(io, arena, "microagent: skill {s} is skipped: a name may hold only letters, digits, dot, dash and underscore\n", .{chat.safeTextAll(arena, entry.name)});
-                    continue;
-                },
-                error.OutOfMemory => {
-                    net.note(io, arena, "microagent: skill {s}: its name could not be read (OutOfMemory); it is skipped\n", .{chat.safeTextAll(arena, entry.name)});
-                    continue;
-                },
-            };
-            const path = std.fs.path.join(arena, &.{ root.path, entry.name, "SKILL.md" }) catch |err| {
-                net.note(io, arena, "microagent: skill {s}: the path to its SKILL.md could not be built ({s}); it is skipped\n", .{ chat.safeTextAll(arena, name), @errorName(err) });
-                continue;
-            };
-            if ((Skills{ .items = found.items }).get(name)) |_| {
-                net.note(io, arena, "microagent: skill {s} is already loaded from another directory; the first one wins\n", .{chat.safeTextAll(arena, name)});
-                continue;
-            }
-            // A listing that stops holding skills is a listing the provider is
-            // never shown, so the run is not told about a skill the operator
-            // installed. The ones already in are kept, since each was read and
-            // judged on its own.
-            found.append(arena, .{
-                .name = name,
-                .description = skillDescription(text),
-                .path = path,
-            }) catch |err| {
-                net.note(io, arena, "microagent: skill {s} could not be added to the listing ({s}), and the skills after it are not listed\n", .{
-                    chat.safeTextAll(arena, name), @errorName(err),
-                });
-                return .{ .items = found.items };
-            };
-        }
+        appendRootSkills(io, arena, dir, root.path, &found) catch |err| switch (err) {
+            error.OutOfMemory => return .{ .items = found.items },
+        };
     }
     sortByName(found.items);
     return .{ .items = found.items };
+}
+
+/// The skills one root holds, added to `found`, and `dir` closed on the way out
+/// whatever happened. The handle is closed here rather than by a `defer` in the
+/// walk above, because that defer belongs to the whole function and every root
+/// in the list kept its handle open until the last one was read.
+fn appendRootSkills(io: Io, arena: std.mem.Allocator, dir: Io.Dir, root_path: []const u8, found: *std.ArrayList(Skill)) error{OutOfMemory}!void {
+    defer dir.close(io);
+    var it = dir.iterate();
+    while (true) {
+        const entry = it.next(io) catch |err| {
+            net.note(io, arena, "microagent: skills directory {s} could not be listed ({s}); the skills after this point are not found\n", .{ chat.safeTextAll(arena, root_path), @errorName(err) });
+            break;
+        } orelse break;
+        // `Dir.iterate` reports a symlinked directory as a link, so an
+        // operator who linked a skill into the root had it dropped in
+        // silence: a skill installed and never offered. The link is
+        // followed here, and one that leads nowhere is said rather than
+        // skipped the way a file with no skills in it is.
+        if (entry.kind != .directory) {
+            if (entry.kind != .sym_link) continue;
+            const linked = dir.statFile(io, entry.name, .{}) catch |err| {
+                net.note(io, arena, "microagent: skill {s}: {s}; it is skipped\n", .{ chat.safeTextAll(arena, entry.name), @errorName(err) });
+                continue;
+            };
+            if (linked.kind != .directory) continue;
+        }
+        const rel = std.fs.path.join(arena, &.{ entry.name, "SKILL.md" }) catch |err| {
+            net.note(io, arena, "microagent: skill {s}: the path to its SKILL.md could not be built ({s}); it is skipped\n", .{ chat.safeTextAll(arena, entry.name), @errorName(err) });
+            continue;
+        };
+        const stat = dir.statFile(io, rel, .{}) catch |err| {
+            if (err != error.FileNotFound)
+                net.note(io, arena, "microagent: skill {s}: {s}; it is skipped\n", .{ chat.safeTextAll(arena, entry.name), @errorName(err) });
+            continue;
+        };
+        if (stat.size > max_skill_bytes) {
+            net.note(io, arena, "microagent: skill {s} is skipped: it is larger than the {d} bytes a skill may hold\n", .{ chat.safeTextAll(arena, entry.name), max_skill_bytes });
+            continue;
+        }
+        const text = readHead(io, arena, dir, rel, entry.name, stat.size) orelse continue;
+        const name = skillName(arena, entry.name, text) catch |err| switch (err) {
+            error.InvalidName => {
+                net.note(io, arena, "microagent: skill {s} is skipped: a name may hold only letters, digits, dot, dash and underscore\n", .{chat.safeTextAll(arena, entry.name)});
+                continue;
+            },
+            error.OutOfMemory => {
+                net.note(io, arena, "microagent: skill {s}: its name could not be read (OutOfMemory); it is skipped\n", .{chat.safeTextAll(arena, entry.name)});
+                continue;
+            },
+        };
+        const path = std.fs.path.join(arena, &.{ root_path, entry.name, "SKILL.md" }) catch |err| {
+            net.note(io, arena, "microagent: skill {s}: the path to its SKILL.md could not be built ({s}); it is skipped\n", .{ chat.safeTextAll(arena, name), @errorName(err) });
+            continue;
+        };
+        if ((Skills{ .items = found.items }).get(name)) |_| {
+            net.note(io, arena, "microagent: skill {s} is already loaded from another directory; the first one wins\n", .{chat.safeTextAll(arena, name)});
+            continue;
+        }
+        // A listing that stops holding skills is a listing the provider is
+        // never shown, so the run is not told about a skill the operator
+        // installed. The ones already in are kept, since each was read and
+        // judged on its own.
+        found.append(arena, .{
+            .name = name,
+            .description = skillDescription(text),
+            .path = path,
+        }) catch |err| {
+            net.note(io, arena, "microagent: skill {s} could not be added to the listing ({s}), and the skills after it are not listed\n", .{
+                chat.safeTextAll(arena, name), @errorName(err),
+            });
+            return error.OutOfMemory;
+        };
+    }
 }
 
 /// The head of one `SKILL.md`: up to `skill_head_bytes` of it, which is all

@@ -431,7 +431,12 @@ pub fn resolveEveryComponent(
         else
             try joinOnto(under_test, prefix, part);
         const n = dir.readLink(io, whole, name_buf) catch |err| switch (err) {
-            error.NotLink, error.FileNotFound => {
+            // `NotDir` is a component ahead of this one that is an ordinary
+            // file, so the name is not a link for the same reason a name that is
+            // not there is not one. Answering the error instead would hand the
+            // caller no path at all, and the check the walk exists for never
+            // runs on it.
+            error.NotLink, error.FileNotFound, error.NotDir => {
                 prefix = try copyInto(cur_buf, whole);
                 rest = after;
                 continue;
@@ -453,12 +458,9 @@ pub fn resolveEveryComponent(
         if (links > max_symlink_depth) return error.SymlinkLoop;
         if (std.fs.path.isAbsolute(target)) {
             prefix = try copyInto(cur_buf, target[0..1]);
-            rest = try copyInto(link_store, target[1..]);
+            rest = try linkRest(link_store, &.{}, target[1..], after);
         } else {
-            rest = if (prefix.len == 0)
-                try copyInto(link_store, target)
-            else
-                try joinOnto(link_store, prefix, target);
+            rest = try linkRest(link_store, prefix, target, after);
             prefix = &.{};
         }
     }
@@ -489,6 +491,34 @@ fn popComponent(prefix: []const u8) []const u8 {
     return std.fs.path.dirname(prefix) orelse &.{};
 }
 
+/// The path a link is replaced with: the directory holding it, then what the
+/// link names, then the components of the original path that followed the link.
+/// The tail is what a walk that stopped at the target lost, so `sub/link/leaf`
+/// with `link` naming `real2` answers `sub/real2/leaf` and not `sub/real2`.
+/// `after` is a slice of `buf` itself on every walk but the first, so it moves
+/// up to the end first: writing the head and the tail in place would have the
+/// second copy overwrite the first.
+fn linkRest(buf: []u8, dir_end: []const u8, target: []const u8, after: []const u8) error{NameTooLong}![]const u8 {
+    const head_empty = dir_end.len == 0 and target.len == 0;
+    const lead_sep: usize = if (dir_end.len == 0 or (target.len == 0 and after.len == 0)) 0 else 1;
+    const tail_sep: usize = if (after.len == 0 or head_empty) 0 else 1;
+    const n = dir_end.len + lead_sep + target.len + tail_sep + after.len;
+    if (n > buf.len) return error.NameTooLong;
+    if (after.len != 0) {
+        const tail = buf[n - after.len .. n];
+        if (@intFromPtr(tail.ptr) <= @intFromPtr(after.ptr)) {
+            std.mem.copyForwards(u8, tail, after);
+        } else {
+            std.mem.copyBackwards(u8, tail, after);
+        }
+    }
+    @memcpy(buf[0..dir_end.len], dir_end);
+    if (lead_sep != 0) buf[dir_end.len] = path_sep;
+    @memcpy(buf[dir_end.len + lead_sep ..][0..target.len], target);
+    if (tail_sep != 0) buf[dir_end.len + lead_sep + target.len] = path_sep;
+    return buf[0..n];
+}
+
 fn copyInto(buf: []u8, bytes: []const u8) error{NameTooLong}![]const u8 {
     if (bytes.len > buf.len) return error.NameTooLong;
     @memcpy(buf[0..bytes.len], bytes);
@@ -504,7 +534,7 @@ fn joinOnto(buf: []u8, dir_end: []const u8, link: []const u8) error{NameTooLong}
     const n = dir_end.len + sep_bytes + link.len;
     if (n > buf.len) return error.NameTooLong;
     @memcpy(buf[0..dir_end.len], dir_end);
-    buf[dir_end.len] = path_sep;
+    if (sep_bytes != 0) buf[dir_end.len] = path_sep;
     @memcpy(buf[dir_end.len + sep_bytes ..][0..link.len], link);
     return buf[0..n];
 }
@@ -1978,6 +2008,44 @@ test "a dot dot drops the component under it, and the root keeps its separator" 
     // it against the working directory.
     try std.testing.expectEqualStrings("/b", try resolve("/../b", &name_buf, &cur_buf, &next_buf));
     try std.testing.expectEqualStrings("/a/b", try resolve("/a/./b", &name_buf, &cur_buf, &next_buf));
+}
+
+// A link in a directory component was replaced by what it names and the
+// components behind it were dropped, so `sub/link/leaf` answered `sub/real2`
+// and the credential check cleared a path whose last name the walk had never
+// read. The tail is what the kernel opens after the target, so it belongs in
+// the answer; each of the four spellings below names the same file.
+test "a link in a directory component keeps the components behind it" {
+    const io = std.testing.io;
+    var name_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var cur_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
+    var next_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = tmp.dir;
+    try dir.createDirPath(io, "sub");
+    try dir.writeFile(io, .{ .sub_path = "sub/real2", .data = "" });
+    try dir.symLink(io, "real2", "sub/link", .{});
+    try dir.symLink(io, "sub/link", "chain", .{});
+    try dir.symLink(io, "../real2", "sub/rel", .{});
+    try dir.symLink(io, "/nonexistent/absolute/target", "link_to_abs", .{});
+
+    const resolve = struct {
+        fn call(d: Io.Dir, path: []const u8, n: []u8, a: []u8, b: []u8) ![]const u8 {
+            return resolveEveryComponent(io, d, path, n, a, b);
+        }
+    }.call;
+    try std.testing.expectEqualStrings("sub/real2/leaf", try resolve(dir, "sub/link/leaf", &name_buf, &cur_buf, &next_buf));
+    // Two links in a row, the second spelled against the working directory.
+    try std.testing.expectEqualStrings("sub/real2/leaf", try resolve(dir, "chain/leaf", &name_buf, &cur_buf, &next_buf));
+    // A relative target is read against the directory holding the link, and the
+    // `..` in it is walked like any other component.
+    try std.testing.expectEqualStrings("real2/leaf", try resolve(dir, "sub/rel/leaf", &name_buf, &cur_buf, &next_buf));
+    // An absolute target replaces the prefix outright, tail included.
+    try std.testing.expectEqualStrings("/nonexistent/absolute/target/leaf", try resolve(dir, "link_to_abs/leaf", &name_buf, &cur_buf, &next_buf));
+    // A link at the end of the path has no tail to carry.
+    try std.testing.expectEqualStrings("sub/real2", try resolve(dir, "sub/link", &name_buf, &cur_buf, &next_buf));
 }
 
 // The bound the walk carries is on links, because only a link makes the walk

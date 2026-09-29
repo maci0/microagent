@@ -329,7 +329,9 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8) Config {
             .sandbox => sandboxOnly(&config, arena, key, value),
             .mcp => if (open) |server| serverKey(&config, arena, server, key, value),
             .tool => if (open_tool) |target| toolKey(arena, &config, target, &presets, key, value),
-            .other => {},
+            // The `.other` lines are already past the guard above, so there is
+            // no section left to dispatch on here.
+            .other => unreachable,
         }
     }
 
@@ -569,6 +571,13 @@ fn serverKey(config: *Config, arena: std.mem.Allocator, server: *Server, key: []
 /// usable. A named key variable is a name, never a key: what is stored is the
 /// variable to read.
 fn remoteOption(arena: std.mem.Allocator, api_key_env: *[]const u8, api_key_header: *[]const u8, timeout_s: *u32, key: []const u8, value_text: []const u8) ?bool {
+    const known = std.mem.eql(u8, key, "api_key_env") or
+        std.mem.eql(u8, key, "api_key_header") or
+        std.mem.eql(u8, key, "timeout");
+    // The key is settled before the value is read. A value read first reported
+    // a bad value for a key the table never named, so a misspelled remote key
+    // was a dropped server and the misspelling was never said.
+    if (!known) return null;
     const value = std.mem.trim(u8, unquote(arena, value_text) orelse return false, " \t");
     if (std.mem.eql(u8, key, "api_key_env")) {
         if (value.len != 0 and !mcp_mod.validEnvName(value)) return false;
@@ -580,13 +589,10 @@ fn remoteOption(arena: std.mem.Allocator, api_key_env: *[]const u8, api_key_head
         api_key_header.* = value;
         return true;
     }
-    if (std.mem.eql(u8, key, "timeout")) {
-        const seconds = std.fmt.parseInt(u32, value, 10) catch return false;
-        if (seconds == 0 or seconds > mcp_mod.max_timeout_s) return false;
-        timeout_s.* = seconds;
-        return true;
-    }
-    return null;
+    const seconds = std.fmt.parseInt(u32, value, 10) catch return false;
+    if (seconds == 0 or seconds > mcp_mod.max_timeout_s) return false;
+    timeout_s.* = seconds;
+    return true;
 }
 
 /// One line inside an open `[tools.<name>]` table. Every problem here is one
@@ -2186,6 +2192,14 @@ test "an [[mcp]] table is a command or a url, and a url server takes the remote 
         try std.testing.expectEqual(@as(usize, 0), parsed.mcp.len);
         try std.testing.expect(parsed.problem != null);
     }
+
+    // A key the table does not have is an unknown key whatever its value is. The
+    // value was read first, so a misspelled remote key with an unquotable value
+    // was a dropped server and the misspelling was never said.
+    const misspelled = parse(arena, "[[mcp]]\nname = \"a\"\nurl = \"https://x.example/mcp\"\napi_key_enf = \"open\n");
+    try std.testing.expectEqual(Problem.Kind.unknown_key, misspelled.problem.?.kind);
+    try std.testing.expectEqualStrings("api_key_enf", misspelled.problem.?.key);
+    try std.testing.expectEqual(@as(usize, 1), misspelled.mcp.len);
 
     // A preset and a table of the same name would collide on one tool name.
     const twice = parse(arena, "[[mcp]]\nname = \"context7\"\ncommand = \"c\"\n[tools.context7]\nenabled = true\n");
