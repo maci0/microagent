@@ -5,7 +5,7 @@
 | path | what lives there |
 | --- | --- |
 | `src/` | the agent, one Zig file per concern, each with its tests and fuzz corpora beside the code |
-| `bench/` | the benchmark and gauntlet scripts, the task fixtures under `bench/tasks/`, the instruction gate's baseline, and the committed results (`results.jsonl`, `gauntlet-results.jsonl`) |
+| `bench/` | the benchmark and gauntlet scripts, a loopback stub provider for profiling the harness alone (`stub_provider.py`), the task fixtures under `bench/tasks/`, the instruction gate's baseline, and the committed results (`results.jsonl`, `gauntlet-results.jsonl`) |
 | `integrations/harbor/` | the adapter that runs microagent on [Harbor](integrations/harbor/README.md) benchmarks, and its pinned Python requirements |
 | `docs/` | reference and design docs: [usage](docs/usage.md), [benchmark](docs/benchmark.md), [performance](docs/performance.md), [threat model](docs/threat-model.md), and the logo |
 | `reviews/` | this project's own [gauntlet](https://github.com/maci0/gauntlet) review prompts; run them with `gauntlet --prompt-dir reviews`, which replaces gauntlet's embedded set |

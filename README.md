@@ -24,7 +24,7 @@ a container that has nothing installed. microagent is the other shape:
 - **Nothing to install.** One Zig binary with no runtime. The Linux build is static musl, so it runs
   in any Linux container of its architecture.
 - **Starts in milliseconds.** The harness is under 1% of a turn; the model and the tools are the
-  run. Kimi and opencode take a second or more just to print their version.
+  run. Kimi and opencode burn three quarters of a second of CPU just to print their version.
 - **Script-shaped output.** stdout is the answer plus one JSON usage line per response. Everything
   else goes to stderr. Exit codes separate "finished", "failed", "bad invocation" and "stopped at a
   ceiling".

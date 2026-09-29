@@ -434,9 +434,12 @@ OpenAI ones plus `cwd`, so any reader of agent transcripts works.
 
 ## Failure handling
 
-- **Transient failures retry.** A 429, any 5xx, or a connection that dies before the request reached
-  the provider is retried twice, with 1 s and 2 s of backoff, before the run exits non-zero. A
-  rejected request (400, 401, 404) fails at once.
+- **Transient failures retry.** A 408, 409, 425, 429, any 5xx, or a connection that dies before the
+  request reached the provider is retried twice, with 1 s and 2 s of backoff (or the provider's
+  `Retry-After`, capped at 120 s), before the run exits non-zero. Any other rejection (401, 404) fails
+  at once. A 400 does too, with one exception: when `--reasoning-effort` is set, the request is sent
+  once more without the `reasoning` field, since some providers refuse that field rather than the
+  request.
 - **A sent turn is never re-sent.** When the whole turn was sent and no response arrives, the
   provider may already have generated and billed the completion, so the run ends with the connection
   error on stderr rather than paying twice. A failure the provider reports part way through a stream

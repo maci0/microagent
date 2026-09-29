@@ -12,6 +12,24 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+### Added
+
+- `bench/stub_provider.py`, a loopback OpenAI-compatible endpoint that streams a
+  fixed number of frames and can answer 503 to the first requests. The
+  streaming profile and the retry evidence in `docs/benchmark.md` were measured
+  with scripts that were never committed; they are now re-measured with this
+  one and reproducible from the tree.
+
+### Fixed
+
+- `docs/usage.md` said a 429 or a 5xx is retried and a 400 fails at once. The
+  retried statuses are 408, 409, 425, 429 and every 5xx, and a 400 is retried
+  once without the `reasoning` field when `--reasoning-effort` is set.
+- `docs/benchmark.md` re-measured where its figures had drifted or could not be
+  traced: startup is now retired instructions and CPU time per harness, the
+  every-run SWE-bench table lists the three runs it had left out, and the
+  conversation-growth figures match the current prompt.
+
 ## [0.3.0] - 2026-09-29
 
 ### Changed

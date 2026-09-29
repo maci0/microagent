@@ -68,36 +68,30 @@ No runtime, no package manager, no node_modules, no Python. Eleven files under `
 
 ### Startup
 
-`--version`, hyperfine, 20-50 runs, no shell (`-N`):
+`--version`, `perf stat -r 10 -e instructions:u,task-clock`, one session on 2026-09-29. Retired
+instructions repeat to within 1% run to run whatever else the machine is doing; CPU time moves more,
+so its spread is given:
 
-| harness | mean |
-| --- | --- |
-| **microagent** | **1.4-2.5 ms** |
-| claude | 22.1 ms |
-| grok | 38.1 ms |
-| codex | 49.6 ms |
-| kimi 2.1.1 | 1.0-1.2 s |
-| opencode 1.18.31 | 1.0-1.9 s |
+| harness | instructions | CPU time |
+| --- | --- | --- |
+| **microagent 0.3.0, ReleaseFast** | **484,917** | **0.89 ms** (+-5%) |
+| microagent 0.3.0, ReleaseSmall (the release asset) | 1,324,275 | 1.04 ms (+-9%) |
+| claude 2.1.284 | 12.2 M | 7.6 ms (+-4%) |
+| codex 0.157.1 | 8.3 M | 13.1 ms (+-7%) |
+| grok 1.0.41 | 138 M | 27.4 ms (+-1%) |
+| opencode 1.18.31 | 3.59 G | 738 ms (+-2%) |
+| kimi 2.1.1 | 4.14 G | 772 ms (+-4%) |
 
-Startup for the node-based harnesses moves by hundreds of milliseconds between runs on a loaded
-machine, so ranges are reported.
-
-microagent's own row needs that caveat most: at this scale the harness around the measurement can
-outweigh it. The same `--version` on the same binary measured 442 us and 1.7 ms in one session, on a
-machine doing nothing different between them. The table stays a comparison; microagent's own
-startup is better read from counters that do not move:
-
-| | |
-| --- | --- |
-| retired instructions | **477,511** |
-| CPU time (`perf stat -e task-clock`) | **0.58-0.61 ms** |
-
-Both repeat to within 0.001% across runs regardless of machine load, which is why the gate
-(`make instructions`) measures work, not time.
+This table replaces a wall-clock one (hyperfine means, 1.4-2.5 ms for microagent). Wall clock at
+this scale measures the machine more than the binary: the same `--version` on the same binary took
+442 us and 1.7 ms in one earlier session, and this table was taken with a load average above 40, when
+no wall-clock figure would have been fair to any row. The ReleaseSmall build spends 2.7x the
+instructions of ReleaseFast before it prints a byte; both are under a millisecond of CPU.
 
 A gauntlet loop starts an agent once per review, so startup is per-review overhead. On a 60 s review,
-2 ms is 0.003% of the loop; on claude, grok and codex (22-50 ms) it is still under 0.1%, and on kimi and opencode (1.0-1.9 s) it is 1.7-3.2%. It matters for tight
-loops (`--retries`, short timeouts, hundreds of reviews), not for one review.
+a millisecond is 0.002% of the loop; claude, codex and grok (8-28 ms of CPU) stay under 0.05%, and
+kimi and opencode (0.74-0.77 s) are about 1.3%. It matters for tight loops (`--retries`, short
+timeouts, hundreds of reviews), not for one review.
 
 Turns after the first reuse the TLS session instead of paying a handshake: `keep_alive` defaults to
 true in `std.http.Client`, so every turn's request joins the client's connection pool, and the
@@ -191,22 +185,24 @@ into a full re-read).
 
 **Conversation growth.** Measured by `zig build test -Dtest-filter="a long run keeps the
 conversation bounded"` over a 120-turn run whose turns each read two 8 KB files, the shape of a real
-review:
+review (v0.3.0; the per-turn figures are the test's own sums over 120, printed by a temporary
+`std.debug.print`):
 
 | | bytes per turn |
 | --- | --- |
-| conversation sent | 293,766 |
-| of which the provider could reuse | 251,400 (86%) |
+| conversation sent | 278,587 |
+| of which the provider could reuse | 250,694 (90%) |
 
-Eight of those 120 turns compacted the conversation. On those the reusable prefix is next to
-nothing: elision rewrites the message array oldest first, so the first changed byte is early and
-everything after it is re-read. That keeps the evidence the model is acting on, but one turn in
-fifteen pays a full re-prefill.
+Eight of those 120 turns compacted the conversation (one in fifteen): the first at turn 25, when the
+conversation first passed the 400 KB limit, then every thirteenth turn (38, 51, 64, 77, 90, 103 and 116), each time it
+grew back by about half the limit. On those turns the reusable prefix is next to nothing: elision
+rewrites the message array oldest first, so the first changed byte is early and everything after it
+is re-read. That keeps the evidence the model is acting on, at the price of a full re-prefill.
 
 The prefix does grow, because the walk skips messages it already elided and resumes where the last
-compaction stopped, about 3 KB per compaction: from 1,704 bytes at the first to 22,956 at the eighth,
-5% of a 418 KB prompt. Over a run this size it never recovers; each compaction turn costs close to a
-full re-prefill, and the schedule is steady at one every thirteen turns.
+compaction stopped, about 3 KB per compaction: from 2,626 bytes at the first to 23,966 at the
+eighth, under 6% of the limit. Over a run this size it never recovers; each compaction turn costs
+close to a full re-prefill.
 
 `conversation_soft_limit` trades the two directly: raising it means a larger prompt every turn and
 fewer full re-prefills; lowering it is the reverse. Only a live provider can say which side wins, so
@@ -229,37 +225,36 @@ binds only on long runs.
 
 ### Streaming profile
 
-The harness's only hot loop is the SSE reader: every token delta is parsed and printed. It was
-profiled against a local OpenAI-compatible endpoint emitting a fixed 5000-frame stream
-(`/tmp/sse_bench.py`, not committed; loopback, no model, identical work every run), so only the
-reader is measured.
+The harness's only hot loop is the SSE reader: every token delta is parsed and printed. It is
+profiled against [`bench/stub_provider.py`](../bench/stub_provider.py), a loopback
+OpenAI-compatible endpoint that sends the same fixed stream every run, so only the reader is
+measured. Three ReleaseFast builds: the parent of `4d17882` (before), `4d17882` (the commit that
+changed the reader) and `1528a2e` (v0.3.0). Host: AMD Ryzen 9 9950X, Zig 0.16.0, 2026-09-29.
 
-Host: AMD Ryzen 9 9950X, Zig 0.16.0, `perf stat`, `strace -c`, 5000 frames, median of one run each
-(counters stable to <1% across repeats):
-
-| metric | before | after | delta |
+| metric | before | `4d17882` | v0.3.0 |
 | --- | --- | --- | --- |
-| `write` syscalls | 5002 | 58 | 86x fewer |
-| total syscalls | 5048 | 96 | 53x fewer |
-| CPU user+sys | 0.021 s | 0.006 s | 3.5x faster |
-| cycles | 31.5 M | 21.2 M | -33% |
-| branch misses | 22 557 | 10 567 | -53% |
-| instructions | 42.90 M | 42.60 M | -0.7% |
-| peak RSS, 40 000 frames | 155.7 MB | 26.0 MB | 6x less |
+| `write` and `writev` calls, 5,000 frames | 5,002 | 38 | 26 |
+| all syscalls, 5,000 frames, threads included | 5,369 | 724 | 1,161 |
+| instructions, 5,000 frames (three runs) | 42.9-43.3 M | 42.9-43.0 M | 29.1-29.3 M |
+| peak RSS, 40,000 frames | 153.9 MB | 14.2 MB | 14.5 MB |
 
-Two changes, both in `streamChat`:
+Instructions and syscalls are `perf stat -e instructions:u` and `strace -f -c`; RSS is the child's
+`ru_maxrss`. These counters do not move with machine load. Wall time, cycles and CPU time do, and
+the machine was under load when this table was taken, so none is reported here.
+
+`4d17882` made two changes, both in `streamChat`:
 
 1. **Output is buffered per read chunk instead of written per token.** One `write(2)` per delta
    became one per chunk the provider sent. Tokens in the same chunk were always drawn in the same
    tick, so streaming latency is unchanged; the syscall count was pure overhead.
 2. **Frames are parsed in a scratch arena reset after each frame.** Before, every frame's
    `std.json.Value` tree lived until process exit, so a long completion grew the heap without bound:
-   40 000 frames cost 155 MB. Text that must survive the reset is copied into the run arena.
+   40,000 frames cost 154 MB. Text that must survive the reset is copied into the run arena.
 
-Instructions barely moved, because the remaining 8.5k instructions per frame are the dynamic JSON
-parse itself (~4 us of CPU per frame). Against a model that takes seconds to produce those frames, a
-hand-rolled scanner for `delta.content` would add complexity for no user-visible millisecond, so the
-parse stays.
+The instruction drop from `4d17882` to v0.3.0 is the later switch from a `std.json.Value` tree to
+declared frame shapes ([performance.md](performance.md#what-was-changed-and-what-it-bought)).
+v0.3.0 makes more syscalls than `4d17882` (836 `readv` and 122 `munmap` of its 1,161); that is
+not yet explained.
 
 Regression tests (`zig build test`): `a long stream costs the largest frame, not the sum of frames`
 folds 20 000 frames through `applyFrame` with the per-frame reset and asserts the scratch arena's
@@ -267,20 +262,35 @@ folds 20 000 frames through `applyFrame` with the per-frame reset and asserts th
 loaded CI box cannot move it. `tool call fragments merge by index across frames` and `usage counters
 land on the result` pin the frame-parsing behaviour the change touched.
 
+To reproduce one column:
+
+```sh
+uv run --no-project bench/stub_provider.py 18901 --frames 5000 &
+export MICROAGENT_API_KEY=stub MICROAGENT_BASE_URL=http://127.0.0.1:18901/v1 \
+  MICROAGENT_CONFIG= MICROAGENT_SKILLS= MICROAGENT_SESSION_DIR=
+strace -f -c microagent -p "say words" >/dev/null
+perf stat -e instructions:u microagent -p "say words" >/dev/null
+```
+
 ### Fault injection
 
-A local OpenAI-compatible endpoint that answers 503 twice and then streams a valid completion
-(`/tmp/flaky.py`, not committed) exercises the retry path:
+`bench/stub_provider.py --fail-first 2` answers 503 twice and then streams a valid completion, which
+exercises the retry path (v0.3.0, 2026-09-29):
 
 | request | server | client |
 | --- | --- | --- |
 | 1 | 503 | waits 1 s |
 | 2 | 503 | waits 2 s |
-| 3 | 200 SSE | parses `pong`, prints usage, exits 0 |
+| 3 | 200 SSE | prints the text and the usage line, exits 0 |
 
-Total 3.0 s, dominated by the backoff. A 400 (invalid model) is not retried: it fails at once with
-the provider's message on stderr and exit code 1. The same run shows plain-HTTP base URLs work, so a
-local vLLM or LiteLLM endpoint needs no TLS.
+Total 3.02 s, dominated by the backoff. The same run shows plain-HTTP base URLs work on loopback, so
+a local vLLM or LiteLLM endpoint needs no TLS. A 400 (invalid model) fails at once, unless
+`--reasoning-effort` was set, which earns one retry without the `reasoning` field ([usage.md](usage.md#failure-handling)); a 400 that stands ends the run with the provider's message on stderr and exit code 1.
+
+```sh
+uv run --no-project bench/stub_provider.py 18731 --frames 1 --fail-first 2 &
+MICROAGENT_API_KEY=stub MICROAGENT_BASE_URL=http://127.0.0.1:18731/v1 microagent "say pong"
+```
 
 ## Task results
 
@@ -533,20 +543,26 @@ still failed. It stays as a cheap safety net for a real failure mode, not as a m
 
 #### Every run of the 13
 
-Every run of the same 13 instances, same model, same containers. Picking the best row would be
-picking noise, so all are listed:
+Every run of the same 13 instances, same model, same containers, in the order they ran. Picking the
+best row would be picking noise, so all are listed. The run name is the Harbor job directory, and
+each row is read from that job's `result.json`:
 
 | run | config | solved | exceptions |
 | --- | --- | --- | --- |
-| first | baseline harness | 5/13 | 0 |
+| `2026-09-28__22-33-12` | baseline harness | 5/13 | 0 |
 | `compacted` | conversation compaction | 7/13 | 0 |
+| `microagent-reasoning` | compaction, reasoning on, 1200 s task timeout | 7/13 | 0 |
 | `microagent-full` | git tool, workflow prompt, 150 turns, 2700 s | 8/13 | 0 |
 | `microagent-full-2` | same | 7/13 | 0 |
 | `microagent-r3` | same | 6/13 | 0 |
 | `microagent-r5` | same | 5/13 | 0 |
+| `microagent-r6`, `microagent-r7` | the loop regression ([faults](#harness-faults-the-benchmarks-found)) | 0/13 each | 13 each |
 | `microagent-r8` | verification gate, reasoning off | 6/13 | 0 |
 | `microagent-r9` | stronger completion rule, reasoning on | 7/13 | 2 |
-| **pooled** | | **51/104 = 0.490** | |
+| **pooled** | every run except r6 and r7 | **58/117 = 0.496** | |
+
+r6 and r7 are left out of the pool because every trial is the same harness fault (`RuntimeError:
+microagent exited 3`), not a model outcome.
 
 Published full-set (500-instance) results are what to compare against, not this sample.
 
@@ -559,7 +575,7 @@ through [integrations/harbor/microagent_agent.py](../integrations/harbor/microag
 
 #### SWE-bench Verified, 13 instances
 
-At a 1200 s per-task timeout, `-n 4`, one run each:
+At a 1200 s per-task timeout, `-n 4`, one run each (jobs `microagent-reasoning` and `opencode`; the TB2 rows are a separate five-task pair):
 
 | | microagent | opencode |
 | --- | --- | --- |
@@ -595,7 +611,7 @@ timeout is the benchmark's 3000 s):
 
 Pooled over 26 paired trials microagent leads by two. opencode's own SWE scores span 0.23 (0.462 here
 to 0.692 at the 1200 s timeout above), wider than the 0.077 between the two harnesses pooled. Across
-its three runs opencode is 6/13, 7/13 and 9/13, 22/39 = 0.564 pooled, against microagent's 0.490
+its three runs opencode is 6/13, 7/13 and 9/13, 22/39 = 0.564 pooled, against microagent's 0.496
 over [every run of the 13](#every-run-of-the-13). The two are inside each other's noise: 13
 instances cannot resolve a difference below about 0.25 without hundreds of runs.
 
