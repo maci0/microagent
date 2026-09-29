@@ -1442,7 +1442,10 @@ const SplitArg = struct { name: []const u8, joined: ?[]const u8 };
 fn splitArg(arg: []const u8) SplitArg {
     if (arg.len > 2 and arg[0] == '-' and arg[1] == '-') {
         if (std.mem.indexOfScalar(u8, arg, '=')) |eq| {
-            return .{ .name = arg[0..eq], .joined = arg[eq + 1 ..] };
+            // A bare `--` is the flag terminator, which takes no value, so
+            // `--=x` is not a terminator with a value joined to it: it is an
+            // argument naming no flag, and it is reported as one.
+            if (eq != 2) return .{ .name = arg[0..eq], .joined = arg[eq + 1 ..] };
         }
     }
     return .{ .name = arg, .joined = null };
