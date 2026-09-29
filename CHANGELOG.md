@@ -14,6 +14,15 @@ release, and `microagent update` moves you to it.
 
 ### Added
 
+- A session record carries the model that answered, beside the one the run asked
+  for. `model` is what the request named, and a gateway routes a name like
+  `deepseek/deepseek-v4-flash` to whichever snapshot it holds this week, so two
+  runs of the same command compared as equal when the weights behind them were
+  not, and the log that outlives both runs could not say which produced a
+  response. The new `served_model` and `fingerprint` are the provider's own
+  answer to that, read off the frames the run already parses; both are empty
+  strings when the stream named neither, and neither is prompt or output text.
+
 - `make test-sanitize` runs the unit tests a second time with the
   undefined-behavior sanitizer, and `make check` and both workflows run it. The
   plain suite says the assertions hold, not that nothing inside them is out of
@@ -174,6 +183,16 @@ release, and `microagent update` moves you to it.
   test` pinned both, so on a host whose locale is not `C` the sanitized run
   failed a child-environment test the plain run passed. Both runs now take the
   pair from one place in `build.zig`.
+- A failure the provider reported part way through a completion stream is named
+  and ends the turn. A provider that fails after the first tokens cannot say so
+  in a status line, because the response head was 200: it puts an `error` object
+  in a frame and stops, and the frames around it carry choices, so the turn read
+  as one the model finished. A stream that then closed with `[DONE]` put a
+  prefix of an abandoned answer on stdout and exited 0, and one that closed
+  without it said only that the terminator was missing. The turn now reports the
+  provider's own code and message on stderr, says that stdout holds a prefix,
+  and is not retried, because the request is not a resumption and a second one
+  is a second billable completion.
 - A session record's `elapsed_ms` no longer counts a suspend as model time. The
   stamp and the reading were both taken on the clock `--budget` is measured on,
   which keeps counting while the machine is off, so a laptop closed for eight

@@ -468,8 +468,9 @@ pub fn writeRecord(io: Io, arena: std.mem.Allocator, session: *?Session, elapsed
 const session_record_scaffolding_bytes = 512;
 
 /// One response's line: this response's own counters, not the run's cumulative
-/// ones, so a reader sums them; the directory it ran in; and the model time it
-/// took. The keys are the OpenAI-shaped ones toktop already reads by name.
+/// ones, so a reader sums them; the directory it ran in; the model the
+/// provider said answered, beside the one the run asked for; and the model time
+/// it took. The keys are the OpenAI-shaped ones toktop already reads by name.
 fn sessionRecord(
     allocator: std.mem.Allocator,
     ts_ms: i64,
@@ -478,11 +479,11 @@ fn sessionRecord(
     elapsed_ms: u64,
     result: *const chat.ChatResult,
 ) ![]u8 {
-    // Sized from the three strings the record carries, so it is allocated once
+    // Sized from the strings the record carries, so it is allocated once
     // rather than doubling up to a few hundred bytes on a ladder of copies.
     // Escape expansion can still push it past this, which the ladder handles.
     var jb = chat.JsonBuf.initCapacity(allocator, session_record_scaffolding_bytes +
-        cwd.len + model.len + result.finish_reason.len);
+        cwd.len + model.len + result.finish_reason.len + result.served_model.len + result.fingerprint.len);
     const w = jb.writer();
     try w.print("{{\"ts\":{d},\"cwd\":", .{ts_ms});
     try chat.writeJsonString(w, cwd);
@@ -493,6 +494,16 @@ fn sessionRecord(
     // string is a stream that carried no finish_reason at all.
     try w.writeAll(",\"finish_reason\":");
     try chat.writeJsonString(w, result.finish_reason);
+    // The model that answered, next to the one the run asked for. A gateway
+    // routes a name to whichever snapshot it holds this week, so the request's
+    // `model` is what was asked for and this is what produced the record: a
+    // reader comparing two runs needs both, and `system_fingerprint` is the
+    // half that moves when the weights do behind a served name that did not.
+    // Both are empty strings when the provider's stream named neither.
+    try w.writeAll(",\"served_model\":");
+    try chat.writeJsonString(w, result.served_model);
+    try w.writeAll(",\"fingerprint\":");
+    try chat.writeJsonString(w, result.fingerprint);
     try w.print(",\"elapsed_ms\":{d},\"usage\":{{" ++ chat.usage_fields, .{
         elapsed_ms, result.prompt_tokens, result.cached_tokens, result.completion_tokens, result.reasoning_tokens, result.total_tokens,
     });
@@ -547,11 +558,15 @@ test "session record carries one response's counters, cwd and model time" {
     result.reasoning_tokens = 0;
     result.total_tokens = 928;
     result.finish_reason = try arena.dupe(u8, "stop");
+    result.served_model = try arena.dupe(u8, "deepseek/deepseek-v4-flash-0726");
+    result.fingerprint = try arena.dupe(u8, "fp_9c1e");
 
     const line = try sessionRecord(arena, 1759000000000, "/home/me/proj", "deepseek/deepseek-v4-flash", 1234, &result);
     try std.testing.expectEqualStrings(
         "{\"ts\":1759000000000,\"cwd\":\"/home/me/proj\",\"model\":\"deepseek/deepseek-v4-flash\"," ++
-            "\"finish_reason\":\"stop\",\"elapsed_ms\":1234,\"usage\":{\"prompt_tokens\":910,\"cached_tokens\":832," ++
+            "\"finish_reason\":\"stop\"," ++
+            "\"served_model\":\"deepseek/deepseek-v4-flash-0726\",\"fingerprint\":\"fp_9c1e\"," ++
+            "\"elapsed_ms\":1234,\"usage\":{\"prompt_tokens\":910,\"cached_tokens\":832," ++
             "\"completion_tokens\":18,\"reasoning_tokens\":0,\"total_tokens\":928}}\n",
         line,
     );
@@ -565,6 +580,7 @@ test "session record escapes a directory that needs it" {
     try std.testing.expectEqualStrings(
         "{\"ts\":1,\"cwd\":\"/tmp/a\\\"b\\\\c\",\"model\":\"m\"," ++
             "\"finish_reason\":\"\"," ++
+            "\"served_model\":\"\",\"fingerprint\":\"\"," ++
             "\"elapsed_ms\":5,\"usage\":{\"prompt_tokens\":0,\"cached_tokens\":0," ++
             "\"completion_tokens\":4,\"reasoning_tokens\":0,\"total_tokens\":0}}\n",
         line,
@@ -1373,12 +1389,15 @@ fn fuzzSessionRecord(_: void, smith: *std.testing.Smith) !void {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    // The three strings, split out of the same bytes so one seed reaches all
-    // three at once and a cut one of them.
+    // The five strings, split out of the same bytes so one seed reaches all of
+    // them at once, and a cut inside any one of them.
     const third = text.len / 3;
     const cwd = text[0..third];
     const model = text[third .. 2 * third];
-    const finish_reason = try arena.dupe(u8, text[2 * third ..]);
+    const tail = text[2 * third ..];
+    const finish_reason = try arena.dupe(u8, tail[0 .. tail.len / 3]);
+    const served_model = try arena.dupe(u8, tail[tail.len / 3 .. 2 * tail.len / 3]);
+    const fingerprint = try arena.dupe(u8, tail[2 * tail.len / 3 ..]);
 
     // The numbers the provider chose, at the ends a count reaches: a stamp and
     // a duration are both read back by a monitor and summed, so a counter that
@@ -1398,13 +1417,15 @@ fn fuzzSessionRecord(_: void, smith: *std.testing.Smith) !void {
         .reasoning_tokens = 4,
         .total_tokens = total,
         .finish_reason = finish_reason,
+        .served_model = served_model,
+        .fingerprint = fingerprint,
     };
 
     const line = try sessionRecord(arena, ts_ms, cwd, model, elapsed_ms, &result);
 
     // One record, one line. The store is JSONL and a monitor reads it while the
-    // run is still going, so a newline inside any of the three strings splits
-    // the record into two responses the monitor will not join back together.
+    // run is still going, so a newline inside any of the strings splits the
+    // record into two responses the monitor will not join back together.
     try std.testing.expect(std.mem.endsWith(u8, line, "\n"));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, line, "\n"));
 
@@ -1417,6 +1438,11 @@ fn fuzzSessionRecord(_: void, smith: *std.testing.Smith) !void {
     // numbers are the numbers the record was built from.
     try expectSameString(obj, "cwd", cwd);
     try expectSameString(obj, "model", model);
+    // The model that answered beside the one the run asked for: the record is
+    // what outlives the run, so it is the only place a reader can find which
+    // snapshot behind a routed name produced it.
+    try expectSameString(obj, "served_model", served_model);
+    try expectSameString(obj, "fingerprint", fingerprint);
     try expectSameString(obj, "finish_reason", finish_reason);
     const usage = obj.get("usage").?.object;
     try std.testing.expectEqual(@as(i64, 1), usage.get("prompt_tokens").?.integer);

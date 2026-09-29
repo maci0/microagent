@@ -269,14 +269,18 @@ stays empty is worth one line. A run that finds its name taken takes the next on
 so a re-launched run writes beside the earlier log rather than over it:
 
 ```json
-{"ts":1790608347342,"cwd":"/home/maci/Desktop/Projects/microagent","model":"deepseek/deepseek-v4-flash","finish_reason":"stop","elapsed_ms":1448,"usage":{"prompt_tokens":998,"cached_tokens":896,"completion_tokens":19,"reasoning_tokens":16,"total_tokens":1017}}
+{"ts":1790608347342,"cwd":"/home/maci/Desktop/Projects/microagent","model":"deepseek/deepseek-v4-flash","finish_reason":"stop","served_model":"deepseek/deepseek-v4-flash-0726","fingerprint":"fp_9c1e","elapsed_ms":1448,"usage":{"prompt_tokens":998,"cached_tokens":896,"completion_tokens":19,"reasoning_tokens":16,"total_tokens":1017}}
 ```
 
 One response's own counters, not the run's cumulative ones, plus the directory the run works in and
 how long the model spent on that response. `finish_reason` is why the provider stopped: `length`
 means the response was cut at `--max-tokens`, so the turn is a prefix of what the model meant to
 say, and the run says so on stderr rather than reporting it as a finished answer. The empty string
-is a stream that carried no reason at all. The store keeps the 200 most recent runs and prunes the
+is a stream that carried no reason at all. `model` is what the run asked for and `served_model` is
+what the provider says answered, beside the `fingerprint` it reports for the weights: a gateway
+routes a model name to whichever snapshot it holds this week, so two runs of one command are only
+comparable when the record says which of them produced each response. Both are empty strings when
+the provider's stream named neither. The store keeps the 200 most recent runs and prunes the
 older ones, so a machine that runs this in a loop does not accumulate a log per review forever.
 `elapsed_ms` is the model's time, so a reader computes
 tokens per second the model actually generated instead of over a gap that includes tool calls. It is
@@ -372,7 +376,10 @@ rejected request (400/401/404) fails immediately instead. One failure is not ret
 response that never arrives after the whole turn was sent. The provider had the request, so the
 completion may already have been generated and billed, and a second POST of the same turn is a
 second billable completion, so that run ends with the connection error named on stderr rather than
-paying twice for one turn. Session resume is deliberately absent; gauntlet's `--retries` covers a
+paying twice for one turn. A failure the provider reports part way through a
+stream is named in its own words on stderr and ends the run, because the response head was 200
+long before it and whatever reached stdout is a prefix of an answer it abandoned; the turn is not
+re-sent, for the same reason the missing response is not. Session resume is deliberately absent; gauntlet's `--retries` covers a
 whole review, and a missing feature is cheaper than a half-working one.
 
 ## gauntlet

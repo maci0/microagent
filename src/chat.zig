@@ -160,6 +160,27 @@ pub const ChatResult = struct {
     /// matters: it means the response was cut at `max_tokens`, so the turn is a
     /// prefix of what the model meant to say.
     finish_reason: []u8 = &.{},
+    /// The model the provider says answered, as the last frame that carried it
+    /// spells it, or the empty slice when the stream carried none. Not the
+    /// model the request named: a gateway routes a name like
+    /// `deepseek/deepseek-v4-flash` to whichever snapshot it holds this week,
+    /// so the name in the request is what was asked for and this is what ran.
+    /// Two runs of one command are only comparable if the record says which of
+    /// the two answered, and it is the session log that outlives both.
+    served_model: []u8 = &.{},
+    /// The provider's own fingerprint for the weights behind this response, or
+    /// the empty slice when it sent none. The field that moves when the weights
+    /// move behind a served name that does not.
+    fingerprint: []u8 = &.{},
+    /// What the provider said went wrong in the middle of the stream, in one
+    /// line the caller can print, or the empty slice when no frame reported a
+    /// failure. A provider that fails after the first tokens has no way to say
+    /// so in a status line, so it puts an `error` object in a frame and stops:
+    /// the frames around it carry choices, and a turn read on their own is a
+    /// turn the provider finished. What it said before it gave up is on stdout
+    /// by then, so a stream that reported a failure and one that ran to its end
+    /// have to be told apart, and this is the field that tells them apart.
+    stream_error: []u8 = &.{},
     /// Bytes this one response has added to the run: the visible text and every
     /// call's arguments together. `max_response_bytes` bounds a response, not
     /// each stream in it, and the streams are not one: a provider that streams
@@ -200,6 +221,24 @@ pub const ChatResult = struct {
         self.finish_reason = &.{};
     }
 
+    /// Releases `served_model` and `fingerprint` on the rule
+    /// `deinitFinish` follows: a field with no bytes is the shared empty slice,
+    /// which is not this run's to free.
+    pub fn deinitServed(self: *ChatResult, gpa: std.mem.Allocator) void {
+        if (self.served_model.len != 0) gpa.free(self.served_model);
+        if (self.fingerprint.len != 0) gpa.free(self.fingerprint);
+        self.served_model = &.{};
+        self.fingerprint = &.{};
+    }
+
+    /// Releases `stream_error` on the same rule, and the note it carries is
+    /// this run's own copy for the same reason: the frame it was read from is
+    /// gone by the time the caller prints it.
+    pub fn deinitStreamError(self: *ChatResult, gpa: std.mem.Allocator) void {
+        if (self.stream_error.len != 0) gpa.free(self.stream_error);
+        self.stream_error = &.{};
+    }
+
     /// The response outlives the turn's arena, so what a turn keeps is
     /// allocated here and released with the turn rather than at process exit.
     /// The name and the id of a call are as much of the response as its
@@ -208,8 +247,31 @@ pub const ChatResult = struct {
         deinitCalls(gpa, &self.calls);
         self.content.deinit(gpa);
         self.deinitFinish(gpa);
+        self.deinitServed(gpa);
+        self.deinitStreamError(gpa);
     }
 };
+
+/// Replaces an owned field with what a frame carried, and copies only when the
+/// value changed. The copy is taken before the old one is released, so an
+/// allocation that fails leaves the field holding what it held.
+fn keepChanged(gpa: std.mem.Allocator, current: *[]u8, next: ?[]const u8) !void {
+    const value = next orelse return;
+    if (std.mem.eql(u8, current.*, value)) return;
+    const owned = try ownString(gpa, value);
+    if (current.*.len != 0) gpa.free(current.*);
+    current.* = owned;
+}
+
+/// Records what a frame said answered, in the two fields the session log reads.
+/// A field whose value did not change is left alone: a provider repeats `model`
+/// and `system_fingerprint` on every chunk of a stream, so a copy per frame is
+/// an allocation per chunk to hold bytes that did not move. A frame that
+/// carried no value leaves what an earlier one said.
+pub fn recordServed(gpa: std.mem.Allocator, result: *ChatResult, served: ?[]const u8, fingerprint: ?[]const u8) !void {
+    try keepChanged(gpa, &result.served_model, served);
+    try keepChanged(gpa, &result.fingerprint, fingerprint);
+}
 
 /// Releases the strings and the argument buffers a list of calls owns. A slot
 /// the frame parser filled to reach a later index holds nothing to release.

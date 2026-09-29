@@ -2200,6 +2200,20 @@ fn streamChat(
         net.note(io, arena, "microagent: the completion stream from {s} reached the {d} byte ceiling for one turn with {d} tool call(s) still being assembled; anything past it is not in this turn, and a tool call whose arguments were cut cannot be dispatched\n", .{
             shown_url, max_response_bytes, calls.items.len,
         });
+    // A failure the provider reported in the middle of the stream. It goes
+    // before the terminator check below, because a provider that reports a
+    // failure and then closes the stream cleanly is the case neither of the two
+    // notes names: the turn has text in it, the stream carried `[DONE]`, and
+    // what is on stdout is a prefix of an answer the provider abandoned. The
+    // provider's own words are the diagnostic, and a turn that has been given
+    // up on is not one the loop asks about again: the request is not a
+    // resumption, and a second one is a second billable completion.
+    if (result.stream_error.len != 0) {
+        net.note(io, arena, "microagent: the provider reported a failure part way through the completion stream from {s} after {d} byte(s) of content and {d} tool call(s): {s}; what is on stdout is a prefix of what it meant to send, and the turn is not retried\n", .{
+            shown_url, result.content.items.len, calls.items.len, tool_mod.terminalSafe(arena, result.stream_error),
+        });
+        return error.StreamError;
+    }
     // The provider closes a finished stream with a `[DONE]` frame. A stream
     // that ends without one was cut off partway, and the truncated turn below
     // would otherwise be appended as a complete answer: a turn that lost its
@@ -2370,6 +2384,11 @@ fn argumentsAreAnObject(gpa: std.mem.Allocator, args: []const u8) bool {
 const StreamFrame = struct {
     usage: ?UsageFrame = null,
     choices: []const Choice = &.{},
+    // What the provider says answered. Absent on a frame that omits them, which
+    // is the rule `recordServed` follows: an earlier frame's value
+    // stands rather than a later frame's absence emptying the field.
+    model: ?[]const u8 = null,
+    system_fingerprint: ?[]const u8 = null,
 
     const Choice = struct {
         // Read as a Value so a reason that is not a string leaves the last one
@@ -2419,6 +2438,58 @@ fn applyFinishReason(gpa: std.mem.Allocator, result: *chat_mod.ChatResult, value
     result.finish_reason = owned;
 }
 
+/// The member a provider reports a mid-stream failure in, spelled as the bytes
+/// that key arrives as.
+const error_member = "\"error\":";
+
+/// Whether a frame carries a report of a failure rather than a chunk.
+///
+/// This is a byte test and it is exact. A model that writes `{"error": ...}`
+/// into its own answer has it escaped, so the bytes that spell a key never
+/// appear inside a string, and the only other way to reach them is a member of
+/// the frame itself. `"error":null` is not a report of anything, and a gateway
+/// that sends it on every chunk would otherwise put every chunk on the slow
+/// parse for no gain.
+///
+/// The declared shapes have no field for a member named `error`, since a struct
+/// field cannot be spelled that one, so a frame that reports a failure is read
+/// by the generic parse instead. That is where a frame that is nothing but a
+/// failure report lands anyway, and the shapes would have found nothing in it.
+fn reportsError(payload: []const u8) bool {
+    const pos = std.mem.indexOf(u8, payload, error_member) orelse return false;
+    const value = std.mem.trim(u8, payload[pos + error_member.len ..], " \t");
+    return !std.mem.startsWith(u8, value, "null");
+}
+
+/// What a frame said went wrong, as the one line a note carries: the code the
+/// provider gave and the message under it, or whichever of the two it sent, and
+/// a placeholder for a frame that reported a failure and named no reason. The
+/// first report is the one kept: a provider that reports the same failure in
+/// every frame after it says it once, and the first is the cause.
+///
+/// The bytes are the provider's, so they are copied into this run rather than
+/// read out of the frame's own arena, and the caller prints them through the
+/// same escaping as any other provider text.
+fn noteStreamError(gpa: std.mem.Allocator, result: *chat_mod.ChatResult, value: ?std.json.Value) !void {
+    const v = value orelse return;
+    if (result.stream_error.len != 0) return;
+    var code: ?[]const u8 = null;
+    var message: ?[]const u8 = null;
+    if (v == .object) {
+        code = chat_mod.str(v.object.get("code"));
+        message = chat_mod.str(v.object.get("message"));
+    } else if (chat_mod.str(v)) |text| {
+        // Some gateways send the failure as the member's own value rather than
+        // as an object under it.
+        message = text;
+    }
+    const text: []const u8 = message orelse code orelse "the provider reported an error and named no reason";
+    result.stream_error = if (message != null and code != null)
+        try std.fmt.allocPrint(gpa, "{s}: {s}", .{ code.?, message.? })
+    else
+        try chat_mod.ownString(gpa, text);
+}
+
 /// Folds one frame through the declared shapes. False means the frame did not
 /// fit them and nothing was applied, so the caller parses it the long way.
 fn applyDeclared(
@@ -2439,6 +2510,8 @@ fn applyDeclared(
         else => return false,
     };
     const frame = parsed.value;
+
+    try chat_mod.recordServed(gpa, result, frame.model, frame.system_fingerprint);
 
     if (frame.usage) |u| {
         applyUsage(result, .{
@@ -2709,8 +2782,10 @@ fn applyFrame(
 ) !void {
     // The declared shapes cover every frame a provider sends in practice. The
     // generic parse behind them still runs for anything that does not fit, so
-    // this is a speedup and not a narrowing of what is accepted.
-    if (try applyDeclared(scratch, gpa, payload, result, calls, out_buf, unparsable)) return;
+    // this is a speedup and not a narrowing of what is accepted. A frame that
+    // reports a failure never takes it: the shapes have no member for an `error`
+    // to land in, because a struct field cannot be spelled that one.
+    if (!reportsError(payload) and try applyDeclared(scratch, gpa, payload, result, calls, out_buf, unparsable)) return;
 
     const parsed = std.json.parseFromSlice(std.json.Value, scratch, payload, .{}) catch |err| switch (err) {
         // Counted as unreadable only when it really was: a frame that would not
@@ -2728,6 +2803,9 @@ fn applyFrame(
         unparsable.* += 1;
         return;
     }
+
+    try chat_mod.recordServed(gpa, result, chat_mod.str(root.object.get("model")), chat_mod.str(root.object.get("system_fingerprint")));
+    try noteStreamError(gpa, result, root.object.get("error"));
 
     if (root.object.get("usage")) |u| if (u == .object) {
         var reasoning: ?std.json.Value = null;
@@ -6189,6 +6267,114 @@ test "a frame with fields the shapes do not name still lands" {
     try std.testing.expectEqualStrings("fallback", sink.result.content.items);
     try std.testing.expectEqual(@as(usize, 1), sink.calls.items.len);
     try std.testing.expectEqualStrings("read", sink.calls.items[0].name);
+}
+
+// The model the provider says answered, not the one the run asked for. A
+// gateway routes a name to whichever snapshot it holds, so a record carrying
+// only the request's name cannot say which model produced a run, and two runs
+// of one command compare as equal when the weights behind them were not.
+test "what answered a response is kept, and a later frame that omits it does not erase it" {
+    var sink = FrameSink.init(std.testing.allocator);
+    defer sink.deinit();
+
+    try sink.feed(
+        \\{"id":"gen-1","model":"deepseek/deepseek-v4-flash-0726","system_fingerprint":"fp_aaa","choices":[{"delta":{"content":"a"}}]}
+    );
+    try std.testing.expectEqualStrings("deepseek/deepseek-v4-flash-0726", sink.result.served_model);
+    try std.testing.expectEqualStrings("fp_aaa", sink.result.fingerprint);
+
+    // Repeated on every chunk of a stream, which is why the fields are not
+    // re-copied, and a frame that omits them leaves what the first one said.
+    try sink.feed(
+        \\{"id":"gen-2","model":"deepseek/deepseek-v4-flash-0726","system_fingerprint":"fp_aaa","choices":[{"delta":{"content":"b"}}]}
+    );
+    try sink.feed(
+        \\{"id":"gen-3","choices":[{"delta":{"content":"c"}}]}
+    );
+    try std.testing.expectEqualStrings("deepseek/deepseek-v4-flash-0726", sink.result.served_model);
+    try std.testing.expectEqualStrings("fp_aaa", sink.result.fingerprint);
+
+    // The generic path, which is where a frame the declared shapes cannot hold
+    // lands, reads the same two fields.
+    try sink.feed(
+        \\{"model":"other/other-0731","system_fingerprint":"fp_bbb","unknown_top":{"a":[1,2]},"choices":[{"delta":{"content":"d"}}]}
+    );
+    try std.testing.expectEqualStrings("other/other-0731", sink.result.served_model);
+    try std.testing.expectEqualStrings("fp_bbb", sink.result.fingerprint);
+
+    // A frame whose `model` is a number rather than a string carries no name to
+    // record, so it leaves the one that is standing rather than blanking it.
+    try sink.feed(
+        \\{"model":7,"choices":[{"delta":{"content":"e"}}]}
+    );
+    try std.testing.expectEqualStrings("other/other-0731", sink.result.served_model);
+}
+
+// The strings `served_model` and `fingerprint` hold are this run's own, so a
+// turn that ends releases them with the rest of the response.
+test "the served model and fingerprint are released with the response" {
+    const gpa = std.testing.allocator;
+    var result: chat_mod.ChatResult = .{};
+    try chat_mod.recordServed(gpa, &result, "served/one", "fp_one");
+    // The same values again change nothing and leave nothing to release twice.
+    try chat_mod.recordServed(gpa, &result, "served/one", "fp_one");
+    try chat_mod.recordServed(gpa, &result, "served/two", null);
+    try std.testing.expectEqualStrings("served/two", result.served_model);
+    try std.testing.expectEqualStrings("fp_one", result.fingerprint);
+    result.deinit(gpa);
+}
+
+// A provider that fails after the first tokens cannot say so in a status line:
+// the response head was 200 and the failure arrives as a frame. Nothing about
+// the frames around it marks the turn, so a stream read on its own is a stream
+// the provider finished, and a turn that had already said something is put on
+// stdout as a whole answer. The report has to survive into the turn's notice.
+test "a failure the provider reported in the stream is kept, in its own words" {
+    var sink = FrameSink.init(std.testing.allocator);
+    defer sink.deinit();
+
+    try sink.feed(
+        \\{"id":"gen-1","model":"m","choices":[{"delta":{"content":"partial answer"}}]}
+    );
+    try std.testing.expectEqual(@as(usize, 0), sink.result.stream_error.len);
+
+    try sink.feed(
+        \\{"error":{"code":"provider_error","message":"upstream timed out mid-generation"}}
+    );
+    try std.testing.expectEqualStrings("provider_error: upstream timed out mid-generation", sink.result.stream_error);
+    // The text that arrived before the failure is untouched, so the notice can
+    // say what is on stdout is a prefix of what the provider meant to send.
+    try std.testing.expectEqualStrings("partial answer", sink.result.content.items);
+
+    // A gateway that reports the same failure in every frame after it says it
+    // once: the first is the cause, and the rest are it repeated.
+    try sink.feed(
+        \\{"error":{"message":"second report"}}
+    );
+    try std.testing.expectEqualStrings("provider_error: upstream timed out mid-generation", sink.result.stream_error);
+
+    // The shapes that carry the rest of a frame do not mistake the report for
+    // one: an `error` member is what sends a frame to the generic parse, and a
+    // frame without one still takes the declared one.
+    try std.testing.expect(!reportsError("{\"model\":\"m\",\"choices\":[]}"));
+    try std.testing.expect(!reportsError("{\"error\":null,\"model\":\"m\"}"));
+    try std.testing.expect(reportsError("{\"error\":{\"message\":\"boom\"}}"));
+    try std.testing.expect(reportsError("{\"error\": \"boom\"}"));
+    // A model that writes the member into its own answer has it escaped, so the
+    // bytes that spell a key cannot appear inside the string.
+    try std.testing.expect(!reportsError("{\"choices\":[{\"delta\":{\"content\":\"look at {\\\"error\\\": 1} here\"}}]}"));
+
+    // A frame reporting a failure the provider sent no reason for still ends the
+    // turn: the notice needs words, not silence.
+    const gpa = std.testing.allocator;
+    var bare: chat_mod.ChatResult = .{};
+    try noteStreamError(gpa, &bare, null);
+    try std.testing.expect(bare.stream_error.len == 0);
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, "{\"error\":{}}", .{});
+    defer parsed.deinit();
+    try noteStreamError(gpa, &bare, parsed.value.object.get("error"));
+    try std.testing.expectEqualStrings("the provider reported an error and named no reason", bare.stream_error);
+    bare.deinit(gpa);
 }
 
 // A generation the provider cut at `max_tokens` arrives with a clean
