@@ -255,16 +255,6 @@ fn runSearchTool(
     // object` failed the same way. `captureResult` keeps the clean call
     // zero-copy, so passing the streams through costs a search that worked
     // nothing.
-    // Both streams and the exit status, for the reason `captureResult` gives:
-    // returning stdout alone reported a search that had failed as one that had
-    // succeeded. `rg` over a tree holding a directory this process cannot read
-    // writes its matches to stdout, `Permission denied` to stderr, and exits 2,
-    // so the model was handed a clean-looking list of matches with no sign that
-    // part of the tree was never walked, and it reasoned about the whole tree
-    // from the part that was. A `git` that printed a log and then `fatal: bad
-    // object` failed the same way. `captureResult` keeps the clean call
-    // zero-copy, so passing the streams through costs a search that worked
-    // nothing.
     if (res.stdout.len != 0 or res.stderr.len != 0) return captureResult(arena, .{
         .stdout = res.stdout,
         .stderr = res.stderr,

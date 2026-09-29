@@ -40,10 +40,8 @@ runs=${RUNS:-3}
 tolerance=${TOLERANCE:-10}
 
 command -v perf >/dev/null 2>&1 || {
-	# Unlike the other bench scripts, this one is Linux only: retired
-	# instructions are read from `perf stat`, and no BSD or macOS equivalent
-	# reports a hardware event counter. Say which platform rather than leaving
-	# a macOS contributor to install something that will never be there.
+	# Say which platform rather than leaving a macOS contributor to install
+	# something that will never be there.
 	printf '%s\n' "bench/instructions.sh: this measurement needs Linux perf, which macOS does not ship; nothing to measure" >&2
 	exit 2
 }

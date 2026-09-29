@@ -247,11 +247,27 @@ pub const ChatResult = struct {
     pub fn deinit(self: *ChatResult, gpa: std.mem.Allocator) void {
         deinitCalls(gpa, &self.calls);
         self.content.deinit(gpa);
-        self.deinitFinish(gpa);
-        self.deinitServed(gpa);
-        self.deinitStreamError(gpa);
+        for (&[_]*[]u8{
+            &self.finish_reason,
+            &self.served_model,
+            &self.fingerprint,
+            &self.stream_error,
+        }) |field| release(gpa, field);
     }
 };
+
+/// Releases a string field this run copied, and leaves it pointing at the
+/// shared empty slice.
+///
+/// A field is freed only when it has bytes: the empty slice every field starts
+/// at is shared and not this run's to free, and a copied one is a leak if it
+/// is kept. A caller that replaces one field mid-stream releases it through
+/// this before writing the new value over it; the frame the old copy was read
+/// from is gone by then, so the copy is what has to be released.
+pub fn release(gpa: std.mem.Allocator, field: *[]u8) void {
+    if (field.*.len != 0) gpa.free(field.*);
+    field.* = &.{};
+}
 
 /// Replaces an owned field with what a frame carried, and copies only when the
 /// value changed. The copy is taken before the old one is released, so an
@@ -589,7 +605,7 @@ pub fn numCount(v: ?std.json.Value) usize {
 /// A provider string this run will own, or the shared empty slice when the
 /// provider sent nothing.
 ///
-/// Ownership here is carried by emptiness: `deinitFinish` and `deinitCalls`
+/// Ownership here is carried by emptiness: `release` and `deinitCalls`
 /// free a field only when it has bytes, because that is the test for a copy
 /// this run made. Duping an empty string anyway breaks the test in the middle of
 /// a stream: the field keeps its length of zero, so the next frame overwrites

@@ -341,27 +341,12 @@ fn runMain(init: std.process.Init) !u8 {
         var env_buf: [256]u8 = undefined;
         if (reasoningEffort(&env_buf, v, &opts.reasoning_effort)) |m| configError(io, "{s}", .{m});
     }
-    if (envValue(init.environ_map, "MICROAGENT_MAX_TURNS")) |v| {
-        var env_buf: [256]u8 = undefined;
-        if (ceiling(usize, &env_buf, "MICROAGENT_MAX_TURNS", v, &opts.max_turns)) |m| configError(io, "{s}", .{m});
-    }
-    if (envValue(init.environ_map, "MICROAGENT_MAX_TOKENS")) |v| {
-        var env_buf: [256]u8 = undefined;
-        if (ceiling(u32, &env_buf, "MICROAGENT_MAX_TOKENS", v, &opts.max_tokens)) |m| configError(io, "{s}", .{m});
-    }
-    if (envValue(init.environ_map, "MICROAGENT_STALL_TIMEOUT")) |v| {
-        var env_buf: [256]u8 = undefined;
-        if (ceiling(u32, &env_buf, "MICROAGENT_STALL_TIMEOUT", v, &opts.stall_timeout_s)) |m| configError(io, "{s}", .{m});
-    }
+    ceilingFromEnv(io, usize, init.environ_map, "MICROAGENT_MAX_TURNS", &opts.max_turns);
+    ceilingFromEnv(io, u32, init.environ_map, "MICROAGENT_MAX_TOKENS", &opts.max_tokens);
+    ceilingFromEnv(io, u32, init.environ_map, "MICROAGENT_STALL_TIMEOUT", &opts.stall_timeout_s);
     opts.ca_bundle = net.caBundlePath(init.environ_map);
-    if (envValue(init.environ_map, "MICROAGENT_BUDGET_SECONDS")) |v| {
-        var env_buf: [256]u8 = undefined;
-        if (optionalCeiling(&env_buf, "MICROAGENT_BUDGET_SECONDS", v, &opts.budget_s)) |m| return configError(io, "{s}", .{m});
-    }
-    if (envValue(init.environ_map, "MICROAGENT_MAX_SPEND_TOKENS")) |v| {
-        var env_buf: [256]u8 = undefined;
-        if (optionalCeiling(&env_buf, "MICROAGENT_MAX_SPEND_TOKENS", v, &opts.max_spend_tokens)) |m| return configError(io, "{s}", .{m});
-    }
+    optionalCeilingFromEnv(io, init.environ_map, "MICROAGENT_BUDGET_SECONDS", &opts.budget_s);
+    optionalCeilingFromEnv(io, init.environ_map, "MICROAGENT_MAX_SPEND_TOKENS", &opts.max_spend_tokens);
     opts.session_dir = session_mod.sessionDir(init.environ_map, init.arena.allocator());
 
     var err_buf: [512]u8 = undefined;
@@ -785,6 +770,23 @@ fn ceiling(comptime T: type, buf: []u8, from: []const u8, value: []const u8, out
         "must be at least 1";
     out.* = n;
     return null;
+}
+
+/// A ceiling read out of the environment, for the reason `ceiling` returns a
+/// message rather than stopping. Each one is a name, a type and a field, so
+/// `main` calls this once per variable and the buffer a message is spelled into
+/// is this function's rather than six blocks of it.
+fn ceilingFromEnv(io: Io, comptime T: type, env: *const std.process.Environ.Map, name: []const u8, out: *T) void {
+    const v = envValue(env, name) orelse return;
+    var buf: [256]u8 = undefined;
+    if (ceiling(T, &buf, name, v, out)) |m| configError(io, "{s}", .{m});
+}
+
+/// The same for a ceiling that zero turns off rather than forbids.
+fn optionalCeilingFromEnv(io: Io, env: *const std.process.Environ.Map, name: []const u8, out: *?u64) void {
+    const v = envValue(env, name) orelse return;
+    var buf: [256]u8 = undefined;
+    if (optionalCeiling(&buf, name, v, out)) |m| configError(io, "{s}", .{m});
 }
 
 /// The same list spelled as the sentence an error needs, so adding a provider
@@ -2761,7 +2763,7 @@ const StreamFrame = struct {
 fn applyFinishReason(gpa: std.mem.Allocator, result: *chat_mod.ChatResult, value: ?std.json.Value) !void {
     const reason = chat_mod.str(value) orelse return;
     const owned = try chat_mod.ownString(gpa, reason);
-    result.deinitFinish(gpa);
+    chat_mod.release(gpa, &result.finish_reason);
     result.finish_reason = owned;
 }
 

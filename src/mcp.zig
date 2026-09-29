@@ -830,14 +830,13 @@ test "a non-text result block is named rather than dropped" {
     defer state.deinit();
     const arena = state.allocator();
 
-    var parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena,
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena,
         \\{"content":[{"type":"text","text":"one"},{"type":"image","data":"x"}],"isError":true}
     , .{});
     const text = try resultText(arena, "srv", parsed);
     try std.testing.expect(std.mem.indexOf(u8, text, "one") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "[image content from MCP server srv, not shown]") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "marked this result an error") != null);
-    _ = &parsed;
 
     const structured = try std.json.parseFromSliceLeaky(std.json.Value, arena, "{\"structuredContent\":{\"n\":1}}", .{});
     try std.testing.expectEqualStrings("{\"n\":1}", try resultText(arena, "srv", structured));

@@ -977,8 +977,7 @@ fn fuzzHttpDate(_: void, smith: *std.testing.Smith) !void {
     // instant one second past the last the four-digit year field can carry.
     // Nothing downstream cares (a caller only ever subtracts it from a clock),
     // so it is held to the range above and the round trip starts after it.
-    const last_second_of_the_last_day = daysFromCivil(widest_year, 12, 31) * @as(i64, std.time.s_per_day) +
-        23 * @as(i64, std.time.s_per_hour) + 59 * @as(i64, std.time.s_per_min) + 60;
+    const last_second_of_the_last_day = last;
     if (got < 0 or got >= last_second_of_the_last_day) return;
     var header: [64]u8 = undefined;
     const written = writeHttpDate(got, &header) catch |err| {

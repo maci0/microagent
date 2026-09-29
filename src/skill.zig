@@ -425,10 +425,10 @@ test "frontmatter is read only where the format puts it" {
         const split = splitFrontmatter(text);
         // A body is never lost: whatever the block ends up being, the body is
         // the whole of what is left, and the test drives the reader over the
-        // corpus the fuzzer uses so the two cannot disagree about a shape.
-        // The body is always what is left of the file: the text itself when
-        // there is no block, and the bytes past the closing `---` when there
-        // is. A reader that cut the wrong way would fail here.
+        // corpus the fuzzer uses so the two cannot disagree about a shape. The
+        // body is the text itself when there is no block, and the bytes past the
+        // closing `---` when there is. A reader that cut the wrong way would
+        // fail here.
         try std.testing.expect(std.mem.endsWith(u8, chat.stripBom(text), split.body));
     }
 
