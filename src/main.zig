@@ -314,9 +314,13 @@ const lane_highs: usize = lane_ones * 0x80;
 /// The length of a C string, a word at a time: `std.mem.len` is a byte loop in a `ReleaseSmall`
 /// build, and the environment is about 8 KB of strings. An aligned word never crosses a page, so
 /// reading the whole word that holds the terminator cannot fault. Little-endian only, which every
-/// release target is.
+/// release target is, and a `@compileError` rather than an assert: `std.debug.assert` on a
+/// comptime-false condition is `unreachable`, which `ReleaseSmall` compiles to nothing, so the
+/// guard would be absent from every build that ships and a big-endian target would get a length
+/// read from the wrong end of the word.
 fn cstrlen(s: [*:0]const u8) usize {
-    comptime std.debug.assert(builtin.cpu.arch.endian() == .little);
+    comptime if (builtin.cpu.arch.endian() != .little)
+        @compileError("cstrlen reads a zero byte out of a word with @ctz, which is only the low byte on a little-endian target");
     const start = @intFromPtr(s);
     var at = start;
     while (at % word_bytes != 0) : (at += 1) {

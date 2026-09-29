@@ -165,6 +165,13 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- `$TMPDIR` is a sandbox writable root on every platform, not only on macOS.
+  The root was added by an OS check, so a Linux host that exports the variable
+  somewhere other than `/tmp` (a systemd service with `PrivateTmp`, a CI runner,
+  a container image) had every tool that writes to the directory the environment
+  named refused as outside the sandbox, and the refusal named a path the operator
+  never wrote. The value decides now, and a value a root already covers is not
+  added twice.
 - A `[mcp]` table is named instead of passed over. The servers are declared as
   `[[mcp]]`, and a file that writes one bracket took the whole table as somebody
   else's, so its servers never started and their tools were simply absent from

@@ -23,9 +23,10 @@ fn canonical(io: Io, arena: std.mem.Allocator, path: []const u8) []const u8 {
 }
 
 /// Resolves the absolute canonical directory roots that the sandbox permits writing to.
-/// Always includes the current working directory and `/tmp`, and on macOS `$TMPDIR`, which is
-/// where that system keeps per-user scratch space. If `session_dir` is provided, it is also
-/// included so the run can append its session log.
+/// Always includes the current working directory and `/tmp`, and `$TMPDIR` where it names an
+/// absolute directory no root above already covers, which is where macOS keeps per-user scratch
+/// space and where a Linux host that exports it keeps it. If `session_dir` is provided, it is
+/// also included so the run can append its session log.
 pub fn resolveWritableRoots(
     io: Io,
     arena: std.mem.Allocator,
@@ -43,13 +44,6 @@ pub fn resolveWritableRoots(
 
     // 2. /tmp
     try roots.append(arena, canonical(io, arena, "/tmp"));
-    if (builtin.os.tag == .macos) {
-        if (environ_map) |env| {
-            if (env.get("TMPDIR")) |tmpdir| {
-                if (std.fs.path.isAbsolute(tmpdir)) try roots.append(arena, canonical(io, arena, tmpdir));
-            }
-        }
-    }
 
     // 3. session_dir if set
     if (session_dir) |sdir| {
@@ -74,6 +68,25 @@ pub fn resolveWritableRoots(
         else
             try std.fs.path.resolve(arena, &.{ cwd, expanded });
         try roots.append(arena, canonical(io, arena, std.mem.trimEnd(u8, resolved, "/\\")));
+    }
+
+    // 5. $TMPDIR, last so the coverage test below reads every root added before
+    // it. macOS keeps per-user scratch space under /var/folders, nowhere near
+    // /tmp, and a Linux host that exports it somewhere else needs the same root
+    // for the same reason: a tool that writes to the directory the environment
+    // named is refused by the sandbox otherwise, and the refusal names a path
+    // the operator never wrote. So the value decides, not the system it was set
+    // on. A value that is not absolute names no directory, and one already
+    // covered by a root above is not added a second time, which is what the
+    // unset and the `/tmp` cases are.
+    if (environ_map) |env| {
+        if (env.get("TMPDIR")) |raw| {
+            const tmpdir = std.mem.trim(u8, raw, net.env_surrounding);
+            if (std.fs.path.isAbsolute(tmpdir)) {
+                const resolved = canonical(io, arena, tmpdir);
+                if (!withinAnyRoot(resolved, roots.items)) try roots.append(arena, resolved);
+            }
+        }
     }
 
     return roots.items;
@@ -437,7 +450,7 @@ test "resolveWritableRoots resolves cwd, tmp, session_dir, and custom roots" {
     try std.testing.expectEqualStrings(canonical(io, arena, "/var/log"), roots[3]);
 }
 
-test "resolveWritableRoots adds $TMPDIR on macOS, and nowhere else" {
+test "resolveWritableRoots adds $TMPDIR where a root does not already cover it" {
     var state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer state.deinit();
     const arena = state.allocator();
@@ -451,25 +464,45 @@ test "resolveWritableRoots adds $TMPDIR on macOS, and nowhere else" {
     const tmpdir = "/nonexistent-tmpdir-for-the-sandbox-test";
     try env.put("TMPDIR", tmpdir);
 
+    // macOS keeps per-user scratch space in $TMPDIR, under /var/folders and
+    // nowhere near /tmp, and a Linux host that exports it somewhere else keeps
+    // it there for the same reason: a tool writing to the directory the
+    // environment named is refused by the sandbox otherwise. What decides is
+    // the value, so the answer is the same on every claimed platform.
     const roots = try resolveWritableRoots(io, arena, &env, &.{}, null);
     var found = false;
     for (roots) |root| {
         if (std.mem.eql(u8, root, tmpdir)) found = true;
     }
-    // macOS keeps per-user scratch space in $TMPDIR, which is under
-    // /var/folders and not under /tmp, so a run sandboxed there cannot write
-    // anything the way a tool expects to. Every other claimed platform puts it
-    // in /tmp, which is already a root, and a relative or empty value names no
-    // directory to add.
-    try std.testing.expectEqual(builtin.os.tag == .macos, found);
+    try std.testing.expect(found);
 
+    // The ordinary Linux value names the root that is already there, so it is
+    // not added a second time: the same grant twice is a longer ruleset and a
+    // profile listing one subpath per line for nothing.
+    try env.put("TMPDIR", "/tmp");
+    const from_tmp = try resolveWritableRoots(io, arena, &env, &.{}, null);
+    var tmp_roots: usize = 0;
+    for (from_tmp) |root| {
+        if (std.mem.eql(u8, root, canonical(io, arena, "/tmp"))) tmp_roots += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), tmp_roots);
+
+    // A value that names no directory adds no root, and the newline a wrapper
+    // exported from a file is trimmed off one that does rather than appended to
+    // the path it names.
     var relative: std.process.Environ.Map = .init(std.testing.allocator);
     defer relative.deinit();
     try relative.put("TMPDIR", "relative/scratch");
-    const from_relative = try resolveWritableRoots(io, arena, &relative, &.{}, null);
-    for (from_relative) |root| {
+    for (try resolveWritableRoots(io, arena, &relative, &.{}, null)) |root| {
         try std.testing.expect(!std.mem.eql(u8, root, "relative/scratch"));
     }
+    try relative.put("TMPDIR", tmpdir ++ "\n");
+    var found_trimmed = false;
+    for (try resolveWritableRoots(io, arena, &relative, &.{}, null)) |root| {
+        try std.testing.expect(!std.mem.endsWith(u8, root, "\n"));
+        if (std.mem.eql(u8, root, tmpdir)) found_trimmed = true;
+    }
+    try std.testing.expect(found_trimmed);
 }
 
 test "isPathWritable resolves a relative path against the first root" {
