@@ -799,6 +799,10 @@ fn resultText(arena: std.mem.Allocator, server_name: []const u8, result: std.jso
         if (buf.items.len < cap) {
             if (started) try buf.append(arena, '\n');
             const room = cap - buf.items.len;
+            // The cut here is a byte count and lands wherever it lands, and it
+            // needs no care of its own: a result this cut shortened is over the
+            // cap, so the whole of what it left is clamped again on a codepoint
+            // boundary below, which is what the model is handed.
             try buf.appendSlice(arena, piece[0..@min(piece.len, room)]);
         }
         started = true;
@@ -2014,6 +2018,45 @@ test "a non-text result block is named rather than dropped" {
     // empty string a call clamps and hands on as a tool result.
     const empty = try std.json.parseFromSliceLeaky(std.json.Value, arena, "{\"content\":[]}", .{});
     try std.testing.expectEqualStrings("(the MCP server returned no text)", try resultText(arena, "srv", empty));
+}
+
+// A server's own text is read by the model like any other tool result, and the
+// cap that bounds it cuts on a codepoint boundary like every other one. This
+// pins that: the text arriving whole is the text the model is handed, and a
+// result the cap reached is whole too rather than ending in the first byte of a
+// character the server sent. Both are the property, whatever the cut does on
+// the way there.
+test "a text result cut at the cap keeps whole characters" {
+    const gpa = std.testing.allocator;
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    // One character wider than the room the cap leaves after the note the
+    // result over the cap is given, so the cut lands inside it whichever way
+    // the two ends of the cap fall.
+    const filler = "a" ** (tool_mod.max_tool_output - 1);
+    const body = try std.fmt.allocPrint(arena,
+        \\{{"content":[{{"type":"text","text":"{s}"}}]}}
+    , .{filler ++ "\u{65e5}\u{65e5}\u{65e5}"});
+
+    const cut = try resultText(arena, "srv", try std.json.parseFromSliceLeaky(std.json.Value, arena, body, .{}));
+    try std.testing.expect(cut.len <= tool_mod.max_tool_output);
+    try std.testing.expect(std.mem.indexOf(u8, cut, "tool output truncated") != null);
+    // The property, spelled directly: what the model is handed is text.
+    try std.testing.expect(std.unicode.utf8ValidateSlice(cut));
+
+    // An astral character, which is four bytes and the widest the request body
+    // will carry, cut the same way.
+    var emoji_state = std.heap.ArenaAllocator.init(gpa);
+    defer emoji_state.deinit();
+    const emoji_arena = emoji_state.allocator();
+    const emoji = try std.fmt.allocPrint(emoji_arena,
+        \\{{"content":[{{"type":"text","text":"{s}"}}]}}
+    , .{"b" ** (tool_mod.max_tool_output - 2) ++ "\u{1f600}\u{1f600}"});
+    const cut_emoji = try resultText(arena, "srv", try std.json.parseFromSliceLeaky(std.json.Value, emoji_arena, emoji, .{}));
+    try std.testing.expect(cut_emoji.len <= tool_mod.max_tool_output);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(cut_emoji));
 }
 
 // A server's structured result is server output the model reads, so it is

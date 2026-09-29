@@ -2989,14 +2989,21 @@ fn streamChatOnce(
         net.note(io, arena, "microagent: the response from {s} hit the generation ceiling (max_tokens {d}) after {d} byte(s) of content and {d} tool call(s); the turn is incomplete\n", .{
             shown_url, opts.max_tokens, result.content.items.len, calls.items.len,
         });
-    // The last flush holds the tail back on the same rule as every read above:
-    // a stream that ends partway through a character leaves that character
-    // unfinished for good, and there is no next read to finish it, so writing
-    // it would put a broken byte on the operator's screen and nothing after it
-    // would replace it. The newline goes on after the count, not before it.
-    const held = chat_mod.partialTailLen(out_buf.items);
-    if (result.content.items.len > 0) try out_buf.append(gpa, '\n');
-    try writeOutPrefix(io, arena, &out_buf, out_buf.items.len - held, shown_url);
+    // The last flush goes out through the same writer every other byte of the
+    // answer did, and says what `writeOutPrefix` says when stdout refuses it.
+    // The buffer it drains is the stream's, and nothing reads it after this.
+    const Emit = struct {
+        fn write(itself: *@This(), bytes: []const u8) !void {
+            if (bytes.len == 0) return;
+            try net.writeOut(itself.io, bytes);
+        }
+        io: Io,
+    };
+    var emit: Emit = .{ .io = io };
+    flushAnswer(arena, &out_buf, result.content.items.len > 0, &emit) catch |err| {
+        net.note(io, arena, "microagent: the text streamed from {s} could not be written to stdout ({s}); the rest of this run's output is not on it either, and the run fails rather than finishing with a partial answer\n", .{ shown_url, @errorName(err) });
+        return err;
+    };
     result.calls = calls;
     // Whatever the filter took out is named, one reason at a time. A turn is
     // still complete without those calls, and a run that silently ran every call
@@ -3008,6 +3015,32 @@ fn streamChatOnce(
     if (stream_mod.droppedCallNotice(arena, shown_url, dropped, result.over_cap)) |notice| net.note(io, arena, "{s}\n", .{notice});
     if (dropped.duplicate > 0) net.note(io, arena, "microagent: the completion stream from {s} carried {d} tool call(s) whose id this response had already delivered; they are not dispatched a second time\n", .{ shown_url, dropped.duplicate });
     return result;
+}
+
+/// The last flush of a turn: what the answer holds is handed to `emit`, and
+/// the newline that ends it goes after.
+///
+/// The tail is held back on the same rule as every read in the loop above: a
+/// stream that ends partway through a character leaves that character
+/// unfinished for good, and there is no next read to finish it, so writing it
+/// would put a broken byte on the operator's screen and nothing after it would
+/// replace it.
+///
+/// The newline is written after that flush and not appended to the buffer
+/// first. Appended first, it moved the tail the count was taken from: a buffer
+/// ending in the two bytes of a three-byte character held two back, the newline
+/// made it four long, and the count then cut it at two, so the flush wrote the
+/// first byte of that character and dropped the newline the terminal's prompt
+/// needed. The count has to be taken on the bytes the flush writes.
+fn flushAnswer(arena: std.mem.Allocator, out_buf: *std.ArrayList(u8), has_content: bool, writer: anytype) !void {
+    const held = chat_mod.partialTailLen(out_buf.items);
+    if (out_buf.items.len > held) try writer.write(out_buf.items[0 .. out_buf.items.len - held]);
+    if (!has_content) return;
+    // What the flush held back is dropped rather than kept, so the newline is
+    // not appended to a buffer whose last bytes are half of a character.
+    out_buf.clearRetainingCapacity();
+    try out_buf.appendSlice(arena, "\n");
+    try writer.write(out_buf.items);
 }
 
 // The other half of the stream loop's flush: what the writer writes, and what
@@ -3036,6 +3069,65 @@ test "a character split across two reads is written once it is whole" {
 
     try std.testing.expectEqualStrings(answer, written.items);
     try std.testing.expectEqual(@as(usize, 0), buf.items.len);
+}
+
+/// What `flushAnswer` writes, kept rather than sent to stdout, so the bytes it
+/// chose are the ones a test reads back.
+const CollectingWriter = struct {
+    out: *std.ArrayList(u8),
+    gpa: std.mem.Allocator,
+
+    fn write(self: *@This(), bytes: []const u8) !void {
+        try self.out.appendSlice(self.gpa, bytes);
+    }
+};
+
+// A stream that ends partway through a character is a stream the last flush has
+// to cut short of, and the newline that ends the turn has to reach the terminal
+// anyway. Both at once is where the two interact: the newline cannot go into
+// the buffer before the cut, because it moves the tail the cut is measured
+// from, and the count then lands in the middle of the character and drops the
+// newline. So the answer's whole characters go out, then the newline on its own.
+test "the last flush cuts a half character and still writes the newline" {
+    const gpa = std.testing.allocator;
+
+    // What the loop leaves behind: the first two bytes of a three-byte
+    // character, which no next read is coming to finish.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(gpa);
+    try buf.appendSlice(gpa, "done\xe6\x97");
+    var written: std.ArrayList(u8) = .empty;
+    defer written.deinit(gpa);
+    var collect: CollectingWriter = .{ .out = &written, .gpa = gpa };
+
+    try flushAnswer(gpa, &buf, true, &collect);
+
+    // Everything written is whole characters, and the turn still ends on a
+    // line: a broken byte on stdout is what the hold-back exists to prevent,
+    // and a missing newline leaves the operator's prompt in the answer.
+    try std.testing.expect(std.unicode.utf8ValidateSlice(written.items));
+    try std.testing.expectEqualStrings("done\n", written.items);
+
+    // A turn with no content writes no newline, so an empty stream does not
+    // put a blank line where the operator is reading.
+    var empty: std.ArrayList(u8) = .empty;
+    defer empty.deinit(gpa);
+    var nothing: std.ArrayList(u8) = .empty;
+    defer nothing.deinit(gpa);
+    var collect_empty: CollectingWriter = .{ .out = &nothing, .gpa = gpa };
+    try flushAnswer(gpa, &empty, false, &collect_empty);
+    try std.testing.expectEqualStrings("", nothing.items);
+
+    // A turn whose answer ended whole has no tail to hold back, and the
+    // newline follows the answer rather than replacing any of it.
+    var whole: std.ArrayList(u8) = .empty;
+    defer whole.deinit(gpa);
+    try whole.appendSlice(gpa, "ok \u{1f600}");
+    var whole_out: std.ArrayList(u8) = .empty;
+    defer whole_out.deinit(gpa);
+    var collect_whole: CollectingWriter = .{ .out = &whole_out, .gpa = gpa };
+    try flushAnswer(gpa, &whole, true, &collect_whole);
+    try std.testing.expectEqualStrings("ok \u{1f600}\n", whole_out.items);
 }
 
 /// Hands the buffered tokens to stdout, and says so when stdout refuses them.
