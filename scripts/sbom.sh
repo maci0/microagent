@@ -163,6 +163,15 @@ EOF
 	printf '  "files": [\n'
 	separator=
 	for name in $assets; do
+		# The digest is read before the entry is written rather than inlined
+		# into the format argument: a hashing command that fails would
+		# otherwise leave an empty checksumValue, which is a file described as
+		# carrying no digest rather than a generator that stopped.
+		value="$(digest "$dist/$name")"
+		test -n "$value" || {
+			echo "$name could not be hashed, so the inventory would record no digest of it" >&2
+			exit 1
+		}
 		printf '%s' "$separator"
 		printf '    {\n'
 		printf '      "SPDXID": "SPDXRef-File-%s",\n' "$name"
@@ -170,7 +179,7 @@ EOF
 		printf '      "checksums": [\n'
 		printf '        {\n'
 		printf '          "algorithm": "SHA256",\n'
-		printf '          "checksumValue": "%s"\n' "$(digest "$dist/$name")"
+		printf '          "checksumValue": "%s"\n' "$value"
 		printf '        }\n'
 		printf '      ],\n'
 		printf '      "licenseConcluded": "NOASSERTION",\n'
@@ -218,4 +227,5 @@ EOF
 	printf '}\n'
 } > "$out"
 
-echo "wrote $out: $asset_count assets, $(printf '%s\n' "$pins" | wc -l) declared pins"
+pin_count="$(printf '%s\n' "$pins" | wc -l)"
+echo "wrote $out: $asset_count assets, $pin_count declared pins"

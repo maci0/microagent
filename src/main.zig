@@ -512,7 +512,7 @@ fn runMain(init: std.process.Init) !u8 {
     defer opts.mcp.shutdown(io);
     traceConfig(io, arena, opts, loaded, skill_roots, key.source);
     const skill_block = try opts.skills.prompt(arena);
-    const agents = readAgentsFile(io, arena, loaded.agents_file, loaded.agents_file_named);
+    const agents = try readAgentsFile(io, arena, loaded.agents_file, loaded.agents_file_named);
     const agents_block = if (agents) |text|
         try std.fmt.allocPrint(arena, "\n\nThe repository's own instructions, from {s}, which this run follows within the task above:\n{s}", .{
             chat_mod.safeTextAll(arena, loaded.agents_file),
@@ -548,9 +548,14 @@ fn runMain(init: std.process.Init) !u8 {
 /// block it becomes says where it came from; a file larger than the cap is
 /// followed up to the cap rather than not at all, and the note names the size
 /// it was cut from.
-fn readAgentsFile(io: Io, arena: std.mem.Allocator, path: []const u8, named: bool) ?[]const u8 {
+fn readAgentsFile(io: Io, arena: std.mem.Allocator, path: []const u8, named: bool) error{OutOfMemory}!?[]const u8 {
     if (path.len == 0) return null;
-    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_agents_bytes + 1)) catch |err| {
+    // Read the file through a reader rather than `readFileAlloc`, because a
+    // limit that is reached there is an error that discards what it read: a
+    // repository's instructions past the cap would then be no instructions at
+    // all. `appendRemaining` keeps the bytes it read before refusing, so the
+    // cap is a cut rather than a refusal.
+    var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| {
         // A named file that is not there is the operator's own spelling of a
         // setting that did nothing, and the run says so. The default name is
         // silent there, because most repositories have no such file; a file
@@ -563,8 +568,28 @@ fn readAgentsFile(io: Io, arena: std.mem.Allocator, path: []const u8, named: boo
         }
         return null;
     };
-    if (bytes.len <= max_agents_bytes) return bytes;
-    const whole = bytes[0..chat_mod.partialTailLen(bytes[0..max_agents_bytes])];
+    defer file.close(io);
+    var reader = file.reader(io, &.{});
+    var bytes: std.ArrayList(u8) = .empty;
+    var past_cap = false;
+    reader.interface.appendRemaining(arena, &bytes, .limited(max_agents_bytes + 1)) catch |err| switch (err) {
+        error.StreamTooLong => past_cap = true,
+        error.OutOfMemory => |e| return e,
+        else => |e| {
+            net.note(io, arena, "microagent: the repository instructions {s} could not be read ({s}); this run follows the system prompt alone\n", .{
+                chat_mod.safeTextAll(arena, path),
+                @errorName(e),
+            });
+            return null;
+        },
+    };
+    if (!past_cap) return bytes.items;
+    // The cut lands on the last line boundary at or before the cap, so what is
+    // followed is whole instructions rather than the first half of one, and
+    // the tail is only walked back far enough to end a UTF-8 sequence.
+    const head = bytes.items[0..max_agents_bytes];
+    const line_end = std.mem.lastIndexOfScalar(u8, head, '\n') orelse 0;
+    const whole = head[0 .. line_end + chat_mod.partialTailLen(head[line_end..])];
     net.note(io, arena, "microagent: the repository instructions {s} are larger than {d} bytes; the first {d} are followed\n", .{
         chat_mod.safeTextAll(arena, path),
         max_agents_bytes,
@@ -1514,6 +1539,11 @@ fn scrubSecrets(env: *std.process.Environ.Map, remote: []const mcp_mod.Entry) vo
 const LoadedConfig = struct {
     /// Text appended to the system prompt, empty for none.
     system_prompt_extra: []const u8,
+    /// The repository instructions file the config named, empty when it named
+    /// one to turn the read off.
+    agents_file: []const u8,
+    /// Whether `agents_file` above came from the file or is the default.
+    agents_file_named: bool,
     /// The provider settings the file named, empty when it named none.
     model: []const u8,
     base_url: []const u8,
@@ -1567,6 +1597,8 @@ fn loadConfig(io: Io, init: std.process.Init, arena: std.mem.Allocator, config: 
     if (parsed.problem) |problem| reportConfigProblem(io, arena, source, problem);
     return .{
         .system_prompt_extra = parsed.system_prompt_extra,
+        .agents_file = parsed.agents_file,
+        .agents_file_named = parsed.agents_file_named,
         .model = parsed.model,
         .base_url = parsed.base_url,
         .api_key = parsed.api_key,
@@ -6541,6 +6573,8 @@ test "a config the tool tables make unusable stops the run with the fix named" {
             const parsed = config_mod.parse(a, text);
             return .{
                 .system_prompt_extra = parsed.system_prompt_extra,
+                .agents_file = parsed.agents_file,
+                .agents_file_named = parsed.agents_file_named,
                 .model = parsed.model,
                 .base_url = parsed.base_url,
                 .api_key = parsed.api_key,
@@ -6635,6 +6669,58 @@ test "the variables that hold a remote server's key are scrubbed from the tool e
     // Read before the scrub, so the connection still has what it needs.
     try std.testing.expectEqualStrings("sk-exa", entries[0].api_key);
     try std.testing.expectEqualStrings("sk-docs", entries[1].api_key);
+}
+
+test "the repository instructions are read, capped, and skipped when the config turns them off" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    const io = std.testing.io;
+
+    // The run reads from the working directory, so the file is named by an
+    // absolute path here: what this asks is what readAgentsFile returns, and a
+    // relative name would read the tree's own AGENTS.md instead.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+    const named = try std.fs.path.join(arena, &.{ root, "NOTES.md" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "NOTES.md", .data = "Name the file and the line.\n" });
+
+    try std.testing.expectEqualStrings("Name the file and the line.\n", (try readAgentsFile(io, arena, named, true)).?);
+
+    // The config's empty value turns the read off, so no name is passed and
+    // nothing is read rather than the default name being tried.
+    try std.testing.expect(try readAgentsFile(io, arena, "", true) == null);
+    // A path that is not there reads as nothing, whether it was named or is
+    // the default, so a run in a repository with no such file says nothing.
+    const absent = try std.fs.path.join(arena, &.{ root, "none.md" });
+    try std.testing.expect(try readAgentsFile(io, arena, absent, false) == null);
+    try std.testing.expect(try readAgentsFile(io, arena, absent, true) == null);
+
+    // A file past the cap is followed up to the cap, cut on a line boundary
+    // rather than mid-instruction, and never past it.
+    const long = try arena.alloc(u8, max_agents_bytes + 4096);
+    @memset(long, 'a');
+    @memcpy(long[0..6], "START\n");
+    @memcpy(long[max_agents_bytes - 4 ..][0..5], "\nSTOP");
+    try tmp.dir.writeFile(io, .{ .sub_path = "LONG.md", .data = long });
+    const long_path = try std.fs.path.join(arena, &.{ root, "LONG.md" });
+    const capped = (try readAgentsFile(io, arena, long_path, true)).?;
+    try std.testing.expect(std.mem.startsWith(u8, capped, "START\n"));
+    try std.testing.expect(capped.len <= max_agents_bytes);
+
+    // The block the file becomes says where it came from, and the system prompt
+    // carries it after the operator's own addendum.
+    const block = try std.fmt.allocPrint(arena, "\n\nThe repository's own instructions, from {s}, which this run follows within the task above:\n{s}", .{
+        chat_mod.safeTextAll(arena, long_path),
+        capped,
+    });
+    const text = try systemText(arena, "OPERATOR", block, "", .initEmpty());
+    const extra_at = std.mem.indexOf(u8, text, "OPERATOR").?;
+    const block_at = std.mem.indexOf(u8, text, "The repository's own instructions").?;
+    try std.testing.expect(extra_at < block_at);
+    try std.testing.expect(std.mem.indexOf(u8, text[block_at..], "STOP") == null);
 }
 
 test "cstrlen agrees with std.mem.len at every alignment and length" {

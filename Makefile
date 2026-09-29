@@ -1083,10 +1083,17 @@ sha256-of:
 # a list that stops naming a file the build has since started reading, and the
 # build it checks is then not the one that ships. The copy lives in a
 # sibling of REPRO_DIR rather than inside it, because build_once empties
-# REPRO_DIR on every call. A working tree with a tracked build input modified
+# REPRO_DIR on every call. A working tree with a tracked file modified, deleted
 # or a new one untracked is the case where the copy is not this tree at all, so
 # the comparison is skipped there and says so: the two builds above it still
-# compare the working tree against itself and still mean what they claim.
+# compare the working tree against itself and still mean what they claim. The
+# check is `git status` over the whole tree rather than a list of the build's
+# own inputs, because a list is a second spelling of the input set and the
+# reason the copy is made from `git ls-files` in the first place applies to it
+# too. `config.example.toml` is the case that made this concrete: it is
+# `@embedFile`'d into every binary, and a guard naming only `src` and the build
+# files let a modified template reach the comparison and be reported as a build
+# path reaching the binary.
 # ci.yml runs this on every push and release.yml runs
 # it on the tag, so a release is never published from a commit that has not
 # passed it.
@@ -1137,10 +1144,13 @@ check-reproducible:
 	    exit 1; \
 	  fi; \
 	  if [ "$$target" = "$(firstword $(RELEASE_TARGETS))" ]; then \
-	    if [ -n "$$(git status --porcelain -- src build.zig build.zig.zon)" ]; then \
-	      echo "skipping the build-directory comparison: a tracked build input is modified or deleted in this"; \
-	      echo "working tree, and the copy is made from git, so it would compare two different sources and"; \
-	      echo "report a build path reaching the binary when the source is what differs"; \
+	    if [ -n "$$(git status --porcelain)" ]; then \
+	      echo "skipping the build-directory comparison: a tracked file is modified, deleted or"; \
+	      echo "untracked in this working tree, and the copy is made from git, so it would compare"; \
+	      echo "two different sources and report a build path reaching the binary when the source is"; \
+	      echo "what differs. This list is the whole tree rather than the build's own inputs on"; \
+	      echo "purpose: a hand-written list of inputs is one that stops naming a file the build has"; \
+	      echo "since started reading, and the next omission fails the same way this one would."; \
 	    else \
 	      elsewhere=$$(build_from_copy 1900000000 C UTC "$$target"); \
 	      if [ "$$first" != "$$elsewhere" ]; then \

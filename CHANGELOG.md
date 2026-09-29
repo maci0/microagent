@@ -16,6 +16,14 @@ release, and `microagent update` moves you to it.
 
 ### Added
 
+- A run reads `AGENTS.md` from the working directory at start-up and appends it
+  to the system prompt, under a header naming where it came from. `agents_file`
+  in the config names another path and an empty value turns the read off. A
+  named path that is not there is said on stderr; the default name is not,
+  because most repositories have no such file. A file past 16 KB is followed up
+  to the cap, cut on a line boundary, and the note names how much of it is
+  followed.
+
 - Every release publishes an SPDX inventory beside its binaries,
   `microagent-<tag>.spdx.json`, naming each asset with its digest and every
   package the repository pins for its linters and its Harbor benchmark adapter,

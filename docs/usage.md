@@ -357,6 +357,28 @@ The value is a TOML string: `"..."` with the escapes `\n`, `\t`, `\r`, `\"` and 
 `'...'` with none, or either kind as a multi-line string. It is at most 16 KB, because it is re-sent
 on every turn; a longer value is reported as a bad value and the prompt stays the built-in one.
 
+### Repository instructions
+
+A run reads `AGENTS.md` from the working directory at start-up and appends it to the system prompt,
+under a header naming where it came from. The convention file is what every other coding agent
+reads, so a repository that carries one carries it for this run.
+
+`agents_file` names another path, and an empty value turns the read off:
+
+```toml
+agents_file = "AGENTS.md"   # the default; "" reads nothing
+```
+
+A relative path resolves against the working directory. A path past 1 KB is reported as a bad value
+and the default stays. A named path that is not there is named on stderr; the default name is not,
+because most repositories have no such file and a note per run about it would be noise. A file that
+is there and cannot be read is named either way. A file past 16 KB is followed up to the cap, cut on
+a line boundary, and the note names how much of it is followed.
+
+The bytes are a repository's, not an operator's, so the block is escaped before it reaches the
+prompt the same way any other untrusted text is, and the run follows them within the task rather
+than in place of it.
+
 ### Skills
 
 A skill is a directory holding a `SKILL.md`: an optional frontmatter block naming it and saying when

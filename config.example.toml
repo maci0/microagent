@@ -33,6 +33,16 @@
 # Name the file and the line when you cite code.
 # '''
 
+# The repository's own instructions, read from the working directory at start-up
+# and appended to the system prompt under a header naming where they came from.
+# AGENTS.md is the name every other coding agent reads; a relative path resolves
+# against the working directory and an empty value turns the read off. These are
+# the bytes of whoever wrote the repository under review, so name a path only
+# when those bytes are instructions this run should follow. A file past 16 KB is
+# followed up to the cap, cut on a line boundary.
+#
+# agents_file = "AGENTS.md"
+
 # Where skills are read from: one directory per root, each holding one
 # directory per skill, each with a SKILL.md in it. A relative path is resolved
 # against the working directory. Leaving the key out uses

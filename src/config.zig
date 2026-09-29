@@ -356,11 +356,15 @@ fn topKey(config: *Config, arena: std.mem.Allocator, lines: *Lines, key: []const
         return;
     }
     if (std.mem.eql(u8, key, "agents_file")) {
-        topString(config, key, value_text, &config.agents_file);
-        if (config.agents_file.len > max_agents_path_bytes)
+        const value = stringValue(value_text) orelse
             return config.note(.{ .key = key, .kind = .bad_value });
-        // Named, so a path that is not there is the operator's own spelling of
-        // a setting that did nothing, and the run says so.
+        if (value.len > max_agents_path_bytes)
+            return config.note(.{ .key = key, .kind = .bad_value });
+        // Named only once the value is one. A rejected value leaves the
+        // default in force, and a run reading the default says nothing about
+        // it being missing, so a bad line must not turn into a warning about a
+        // path the file never named.
+        config.agents_file = value;
         config.agents_file_named = true;
         return;
     }
@@ -1253,6 +1257,44 @@ test "an MCP server is one [[mcp]] table, and a broken one is named and skipped"
     try std.testing.expectEqualStrings("args", bad_args.problem.?.key);
     const bad_env = parseBare(arena, "[[mcp]]\nname = \"a\"\ncommand = \"b\"\nenv = [\"K\"]\n");
     try std.testing.expectEqualStrings("env", bad_env.problem.?.key);
+}
+
+test "agents_file names the repository instructions, and the default is not named" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    // Absent, the name every other coding agent reads, and not named: most
+    // repositories have no such file, and a run that said so every time would
+    // be noise.
+    const stock = parse(arena, "");
+    try std.testing.expectEqualStrings("AGENTS.md", stock.agents_file);
+    try std.testing.expect(!stock.agents_file_named);
+
+    const named = parse(arena, "agents_file = \"NOTES.md\"\n");
+    try std.testing.expectEqualStrings("NOTES.md", named.agents_file);
+    try std.testing.expect(named.agents_file_named);
+
+    // An empty value turns the read off rather than naming a file that is not
+    // there, so the run says nothing about a missing path it never wanted.
+    const off = parse(arena, "agents_file = \"\"\n");
+    try std.testing.expectEqualStrings("", off.agents_file);
+    try std.testing.expect(off.agents_file_named);
+
+    // A value that is not a string, and one past the path cap, are reported
+    // and leave the default in force. Neither is marked named: the run is
+    // reading the default, and a note about the default going missing would
+    // name a setting the file did not state.
+    const not_a_string = parse(arena, "agents_file = 3\n");
+    try std.testing.expectEqualStrings("agents_file", not_a_string.problem.?.key);
+    try std.testing.expectEqualStrings("AGENTS.md", not_a_string.agents_file);
+    try std.testing.expect(!not_a_string.agents_file_named);
+
+    const too_long = try std.fmt.allocPrint(arena, "agents_file = \"{s}\"\n", .{"x" ** (max_agents_path_bytes + 1)});
+    const past_cap = parse(arena, too_long);
+    try std.testing.expectEqualStrings("agents_file", past_cap.problem.?.key);
+    try std.testing.expectEqualStrings("AGENTS.md", past_cap.agents_file);
+    try std.testing.expect(!past_cap.agents_file_named);
 }
 
 // `config.example.toml` is the only template the project ships, and a key
