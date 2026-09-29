@@ -23,11 +23,42 @@
 # is found by reading, not by a bot: the Harbor release is a benchmark harness,
 # the versions in docs/benchmark.md were measured against a specific one, and
 # changing it changes a number rather than a binary.
+#
+# The composite actions are declared as directories of their own rather than
+# left to the entry for `/`. Dependabot reads `.github/workflows` for that
+# entry and nothing else, so `mlugg/setup-zig` and `actions/cache`, which are
+# pinned inside `.github/actions/setup-zig/action.yml` and
+# `.github/actions/setup-linters/action.yml` rather than in a workflow, would
+# sit at their pinned sha until a runner image stopped answering to one of
+# them. The three entries share a schedule and a limit, so the repository
+# receives one grouped pull request per week.
 version: 2
 
 updates:
   - package-ecosystem: github-actions
     directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - ci
+    groups:
+      actions:
+        patterns:
+          - "*"
+  - package-ecosystem: github-actions
+    directory: /.github/actions/setup-zig
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - ci
+    groups:
+      actions:
+        patterns:
+          - "*"
+  - package-ecosystem: github-actions
+    directory: /.github/actions/setup-linters
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
