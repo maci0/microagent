@@ -85,7 +85,7 @@ make test FILTER="..."      # one test, while you are mid-edit; a filter matchin
 make test-sanitize          # the same suite under the undefined-behavior sanitizer
 make watch [FILTER="..."]   # the suite again on every source change, until Ctrl-C
 make preflight              # name any tool check and lint need that is not on PATH
-make lint                   # the pin checks, shellcheck, ruff and yamllint on their own
+make lint                   # the pin checks, shellcheck, ruff, yamllint and Markdown on their own
 make lint-ci                # shellcheck over the run: steps in the workflows, on their own
 make check-asset-run        # the published asset for this host, cross-built and started
 make instructions CHECK=--check   # retired instructions per unit, and a band it must stay inside
@@ -100,7 +100,7 @@ make check-unreleased       # the [Unreleased] entry has the five sections, once
 `check-unreleased`, `check-readme`, `check-man`, `fmt-check`, `lint`
 (`lint-versions`, `lint-lock`, `check-sbom`, shellcheck over the tracked scripts
 and over the `run:` steps in the workflows, `ruff check`, `ruff format --check`,
-yamllint), `zig build test`,
+yamllint, and the Markdown check), `zig build test`,
 `zig build test-sanitize`, and `check-binary` (a `ReleaseSmall` build whose
 binary it then starts). These are the checks
 [.github/workflows/ci.yml](.github/workflows/ci.yml) runs in its test and lint
@@ -124,11 +124,17 @@ matches nothing reports success while running no test. `make watch` is that same
 watch is not a push.
 
 `make fmt` applies `zig fmt` and `ruff format`; `make fmt-check` is what the
-gate runs. The three linters cover what `zig fmt` cannot: the bench shell, the
+gate runs. The other linters cover what `zig fmt` cannot: the bench shell, the
 Harbor adapter under `integrations/harbor` (rules in [ruff.toml](ruff.toml)),
-and the workflows, the composite actions and the Dependabot config (rules in
-[.yamllint](.yamllint)). Each takes its file list from git, so a shell, Python
-or YAML file added anywhere is linted too. Both workflows call `make lint`
+the workflows, the composite actions and the Dependabot config (rules in
+[.yamllint](.yamllint)), and the Markdown through
+[scripts/lint-md.sh](scripts/lint-md.sh), which is the one tracked file kind
+no other linter reads. It checks the things a rendered page hides and a diff
+does not: a hard tab or a trailing space outside a code fence, two blank lines
+in a row, a fence that is never closed, and a file with no final newline.
+There is no Markdown formatter, so this is the whole of that gate rather than
+a proxy for one. Each target takes its file list from git, so a shell, Python,
+YAML or Markdown file added anywhere is linted too. Both workflows call `make lint`
 rather than repeating its targets, so a linter added to the Makefile gates a
 push and a tag as well as a laptop.
 

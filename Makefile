@@ -15,7 +15,7 @@ BIN := zig-out/bin/microagent
 export LC_ALL := C
 export TZ := UTC
 
-.PHONY: default help preflight version build musl test watch test-sanitize fmt fmt-check fmt-python lint lint-versions lint-lock lint-ci check-sbom zig-version required-zig-version release-targets check-assets check-asset-run check-binary check-changelog check-changelog-links check-changelog-sections check-unreleased check-readme check-man check-release check-reproducible lint-shell lint-python lint-yaml check bench gauntlet instructions overhead install release-assets checksums sbom sha256-of clean
+.PHONY: default help preflight version build musl test watch test-sanitize fmt fmt-check fmt-python lint lint-versions lint-lock lint-ci check-sbom zig-version required-zig-version release-targets check-assets check-asset-run check-binary check-changelog check-changelog-links check-changelog-sections check-unreleased check-readme check-man check-release check-reproducible lint-shell lint-python lint-yaml lint-md check bench gauntlet instructions overhead install release-assets checksums sbom sha256-of clean
 
 # The Harbor adapter's directory, the one place that path is written down.
 # lint-lock.sh and lint-versions.sh both take it as an argument rather than
@@ -295,6 +295,10 @@ ZON_SOURCES := $(shell git ls-files '*.zon')
 # The Python and YAML the linters read, for the same reason.
 PY_SOURCES := $(shell git ls-files '*.py')
 YAML_SOURCES := $(shell git ls-files '*.yml' '*.yaml')
+# The prose, for the same reason and one more on top of it: it is the only
+# tracked file kind nothing else here reads, so a defect in a code fence or a
+# trailing space is checked by no target in this file and the gate passes.
+MD_SOURCES := $(shell git ls-files '*.md')
 # The workflows and composite actions, which `lint-yaml` reads for shape and
 # `lint-ci` reads for the shell in their `run:` steps. Taken from git for the
 # same reason as the lists above: a workflow added outside .github/ would be
@@ -321,13 +325,13 @@ fmt-python:
 	ruff format --config ruff.toml $(PY_SOURCES)
 
 # The Zig sources have no linter beyond zig fmt, which check runs; the shell,
-# Python and YAML around them do, and a shell that only fails when a benchmark
-# runs is a shell nobody has read. This list is the whole of the gate the
-# workflows run: ci.yml and release.yml both call `make lint` rather than
+# Python, YAML and Markdown around them do, and a shell that only fails when a
+# benchmark runs is a shell nobody has read. This list is the whole of the gate
+# the workflows run: ci.yml and release.yml both call `make lint` rather than
 # repeating the targets, so a linter added here reaches a push and a tag.
 # .github/dependabot.yml is the other thing to keep in step, since it decides
 # what opens a bump for these.
-lint: lint-versions lint-lock check-sbom lint-shell lint-ci lint-python lint-yaml
+lint: lint-versions lint-lock check-sbom lint-shell lint-ci lint-python lint-yaml lint-md
 
 # The gate's own checks live in scripts/, not in recipes here, so shellcheck
 # reads them: a recipe is shell nothing lints, and these are the code that
@@ -414,9 +418,12 @@ SHELLCHECK_OPTS := -x --enable=$(SHELLCHECK_CHECKS)
 # takes a trailing reason (shellcheck parses the rest of the line as more
 # checks and fails the directive), and an unmarked comment above a suppression
 # is indistinguishable from the comment that explains the code, so the marker
-# is what makes the two tellable apart. The tree carries four suppressions
-# today, each silencing a finding that is still there, so this asks a new one
-# to say the same thing the existing four do.
+# is what makes the two tellable apart. The scripts carry seven suppressions
+# today, six of them `# shellcheck disable=SC2086` for a word list that has to
+# arrive as several words and one `# shellcheck disable=SC2016,SC2086` on a
+# line that needs both, and each silences a finding that is still there, so
+# this asks a new one to say the same thing the existing ones do. The two more
+# in release.yml are held to the same rule by lint-ci.
 #
 # awk, not grep, because the question spans the comment block above a line and
 # grep reads a file a line at a time. The marker is matched as three whole
@@ -480,6 +487,16 @@ lint-python:
 lint-yaml:
 	@test -n "$(YAML_SOURCES)" || { echo "no tracked .yml or .yaml file to lint" >&2; exit 1; }
 	yamllint -c .yamllint $(YAML_SOURCES)
+
+# The Markdown, which no other target here reads: zig fmt has no opinion on a
+# prose file, and the three linters above each cover one language that is not
+# this one. It is the largest surface in the tree and carries the install
+# command and the configuration surface, so a defect in it is a wrong
+# instruction rather than a red test. The gate lives in scripts/ for the reason
+# lint-versions above names: a recipe is shell nothing lints.
+lint-md:
+	@test -n "$(MD_SOURCES)" || { echo "no tracked .md file to lint" >&2; exit 1; }
+	sh scripts/lint-md.sh $(MD_SOURCES)
 
 # The CI gate, so a formatting, lint or test failure shows up here rather than
 # after a push. Keep these in step with .github/workflows/ci.yml. The release

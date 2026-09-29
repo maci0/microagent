@@ -105,7 +105,6 @@ in file size and by 1.3x to 2.7x in memory, and a large file that is never touch
 No runtime, no package manager, no node_modules, no Python. Thirteen files under `src/`, 24 674 lines
 (`wc -l src/*.zig`):
 
-
 | file | role |
 | --- | --- |
 | `main.zig` | the agent loop and its wiring |

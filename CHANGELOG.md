@@ -22,6 +22,14 @@ release, and `microagent update` moves you to it.
   read off, a named path that is not there is named on stderr, the text is at
   most 16 KB, and the file never becomes the whole prompt.
 
+- The Markdown is linted. It was the largest tracked surface and the only kind
+  of file no target in `make lint` read, so an unclosed code fence, a hard tab
+  and a missing final newline passed a push. `make lint-md` runs from
+  `scripts/lint-md.sh` and is in `make lint`, which both workflows call, so it
+  gates a push and a tag. It checks only what a rendered page hides: tabs and
+  trailing whitespace outside a code fence, two blank lines in a row, an
+  unclosed fence, and a file that does not end in a newline.
+
 - Every release publishes an SPDX inventory beside its binaries,
   `microagent-<tag>.spdx.json`, naming each asset with its digest and every
   package the repository pins for its linters and its Harbor benchmark adapter,
@@ -58,7 +66,6 @@ release, and `microagent update` moves you to it.
   empty list turns the read off. Repository content the run follows as instructions is the
   operator's call, which is what the key is for; a file past 16 KB is cut to the cap with the size
   named, and a path that is not there is named too.
-
 
 - The tool gutter names the tool with a colon (⏺ bash: echo hi) and draws that name bold when
   stderr is a terminal. A captured run, which is every gauntlet review and every log file, gets the
@@ -98,6 +105,11 @@ release, and `microagent update` moves you to it.
 - `scripts/sbom.sh` reads an asset's digest and the pin count through a variable of its own, so
   shellcheck's `check-extra-masked-returns`, which the gate enables, passes on a host with a current
   shellcheck, and a hash that fails stops the run instead of writing an empty checksum.
+- `agents_files` reached the system prompt builder unbuilt: the key was parsed,
+  documented and read by `agentsBlock`, and the value it names was never copied
+  into the struct the run reads, so the file did not compile. A key added to
+  `config_mod.Config` is now copied in one place, and that place is the only one
+  a new key has to be added to.
 
 - A `[[mcp]]` `env` key is held to the same rule as `api_key_env`: a name carrying a `=`, a NUL or a
   control character drops the server, where it reached the child's environment block and took the run
