@@ -117,7 +117,21 @@ release, and `microagent update` moves you to it.
   prefix the assets use, so it lands in the same `dist/` and carries a `.sha256`
   sidecar like every other asset.
 
+- `make check-help`, run by `make check`, holds the `--help` block
+  `docs/usage.md` prints as verbatim to the text the binary prints, and fails
+  with the diff when it does not. The page is a hand-maintained copy of a
+  157-line string, so a flag, an exit status or a default that moved left it
+  quoting the previous release with nothing to tell a reader which of the two
+  the running binary is answering. `make check-man` asked the same question of
+  the man page and the usage page had no equivalent.
+
 ### Changed
+
+- `microagent --help` names `-c` beside `--check` in the `update` subcommand
+  synopsis, so it reads the way `microagent update --help`, the man page
+  synopsis and the update's own usage line already did. The top-level help is
+  where a reader looks for the spelling of the subcommand's one flag, and it
+  was the only surface that offered the long form alone.
 
 - `git show` is asked for the hash, the date and the subject rather than the
   commit header it prints by default. `Author:` and `Commit:` are a name and an
@@ -339,6 +353,15 @@ release, and `microagent update` moves you to it.
   `make help` also lists `lint-md`, which `make lint` runs and the help had
   dropped, so a contributor reading the target list was not told the Markdown
   gate existed.
+
+- Ctrl+C takes the MCP servers with it. Each server leads its own process
+  group, so the terminal's signal never reached one, and the `std.process.exit`
+  the interrupt handler runs skips every `defer` the run holds, so the shutdown
+  that would have stopped it never ran either. An operator who stopped a run
+  with Ctrl+C left an `npx` and everything it started behind them. Child process
+  groups are now published in one table the handler signals, which is what a
+  run with both tool calls and servers needs; a group past the table's ceiling
+  is stopped rather than started outside it.
 
 ## [0.7.0] - 2026-09-30
 

@@ -125,26 +125,66 @@ fn signalGroup(pgid: std.posix.pid_t) void {
     std.posix.kill(-pgid, .KILL) catch {};
 }
 
-/// The group of the tool subprocess in flight, published for the interrupt
-/// handler. A tool child leads its own group, so the terminal's Ctrl+C never
-/// reaches it: without this the user stops the agent and the build it launched
-/// keeps writing files behind it. Zero means no tool call is running.
-var tool_group: std.atomic.Value(std.posix.pid_t) = .init(0);
+/// The process groups of the children this run has started and not yet reaped,
+/// published for the interrupt handler. Every child leads its own group, so the
+/// terminal's Ctrl+C never reaches one: without this the operator stops the
+/// agent and the build it launched, or the MCP server it started, keeps running
+/// behind it. A group is published when the child is spawned and retired when it
+/// is reaped, so a slot is zero between two tool calls and a signal that lands
+/// there finds nothing of the previous one behind.
+///
+/// A table rather than the one slot a tool call needs, because an MCP server
+/// lives for the whole run rather than for one call. Atomics rather than a lock,
+/// because the reader is a signal handler that must not take one: a handler that
+/// blocks on a mutex the interrupted thread already holds is a hang where the
+/// exit code was going to be.
+const max_child_groups: usize = 64;
+var child_groups: [max_child_groups]std.atomic.Value(std.posix.pid_t) =
+    [_]std.atomic.Value(std.posix.pid_t){.init(0)} ** max_child_groups;
 
-/// A signal that ends the run takes the tool subprocess with it, then leaves by
-/// the code the shell reads as an interrupt.
-fn onInterrupt(_: std.posix.SIG) callconv(.c) void {
-    const group = tool_group.load(.monotonic);
-    if (group > 0) signalGroup(group);
-    std.process.exit(130);
+/// Publishes a child's group so `onInterrupt` can signal it. False when the
+/// table is full, and the caller stops the child rather than start one the
+/// handler cannot reach: an untracked group is a group Ctrl+C leaves behind.
+pub fn publishChildGroup(pgid: std.posix.pid_t) bool {
+    for (&child_groups) |*slot| {
+        if (slot.load(.monotonic) == 0) {
+            slot.store(pgid, .monotonic);
+            return true;
+        }
+    }
+    return false;
 }
 
-/// Publishes the group a tool call just started in, so `onInterrupt` has
-/// something to signal. The group is cleared again by `runCapped` when the
-/// child is reaped, so a signal that arrives between two calls finds zero and
-/// leaves nothing of the previous one behind.
-fn watchToolGroup(pgid: std.posix.pid_t) void {
-    tool_group.store(pgid, .monotonic);
+/// Retires a group whose child has been reaped, so a later signal does not hit
+/// a pid the operating system may have handed to something else.
+pub fn retireChildGroup(pgid: std.posix.pid_t) void {
+    for (&child_groups) |*slot| {
+        if (slot.load(.monotonic) == pgid) {
+            slot.store(0, .monotonic);
+            return;
+        }
+    }
+}
+
+/// How many children are published, which is zero once every one is reaped.
+fn liveChildGroups() usize {
+    var n: usize = 0;
+    for (&child_groups) |*slot| {
+        if (slot.load(.monotonic) != 0) n += 1;
+    }
+    return n;
+}
+
+/// A signal that ends the run takes every child with it, then leaves by the
+/// code the shell reads as an interrupt. The exit skips every `defer` this run
+/// holds, so the shutdown that would have stopped an MCP server never runs, and
+/// `kill(2)` is the whole of what a handler may do to another process.
+fn onInterrupt(_: std.posix.SIG) callconv(.c) void {
+    for (&child_groups) |*slot| {
+        const group = slot.load(.monotonic);
+        if (group > 0) signalGroup(group);
+    }
+    std.process.exit(130);
 }
 
 /// Installed once the run starts, so Ctrl+C and `kill` reach the tools. Help,
@@ -1982,10 +2022,18 @@ fn runCapped(
 ) !Captured {
     var spawned = try ToolChild.spawn(io, argv, environ_map);
     // The group is published while the call runs, so an interrupt reaches it,
-    // and cleared on the way out, so a later signal does not hit a dead group.
-    watchToolGroup(spawned.pgid);
+    // and retired on the way out, so a later signal does not hit a dead group.
+    // A full table is the one case that cannot be published, and the child is
+    // killed before it is waited on rather than left outside the handler. The
+    // error is the stdlib's own "no system resources left" rather than one of
+    // this program's, so a caller that reports it names a shortage rather than
+    // an internal table.
+    if (!publishChildGroup(spawned.pgid)) {
+        spawned.reap(io);
+        return error.SystemResources;
+    }
     defer {
-        watchToolGroup(0);
+        retireChildGroup(spawned.pgid);
         spawned.reap(io);
     }
     const child = &spawned.child;
@@ -5098,11 +5146,30 @@ test "an interrupt during a tool call is forwarded to that call's process group"
     const thread = try Thread.spawn(.{}, Call.go, .{ arena, io });
     // Published for as long as the call runs, which is what the handler reads.
     var attempt: usize = 0;
-    while (tool_group.load(.monotonic) == 0 and attempt < 200) : (attempt += 1)
+    while (liveChildGroups() == 0 and attempt < 200) : (attempt += 1)
         try io.sleep(.{ .nanoseconds = 5 * std.time.ns_per_ms }, .awake);
-    try std.testing.expect(tool_group.load(.monotonic) > 0);
+    try std.testing.expectEqual(@as(usize, 1), liveChildGroups());
     thread.join();
-    try std.testing.expectEqual(@as(std.posix.pid_t, 0), tool_group.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 0), liveChildGroups());
+}
+
+test "the interrupt handler's group table holds every child at once and empties" {
+    // The table is what makes Ctrl+C reach an MCP server as well as a tool call:
+    // a server lives for the whole run, so one slot per call is not enough, and
+    // a full table is the one case that would leave a child outside the handler.
+    // The pids here are not real and nothing signals them: the table holds
+    // numbers, and the handler is the only reader.
+    defer for (0..max_child_groups) |i| retireChildGroup(@intCast(i + 1));
+    for (0..max_child_groups) |i| try std.testing.expect(publishChildGroup(@intCast(i + 1)));
+    try std.testing.expectEqual(@as(usize, max_child_groups), liveChildGroups());
+    // A group already published is not published twice, or the count above is a
+    // table full of one child with no room for the rest.
+    try std.testing.expect(!publishChildGroup(1));
+    retireChildGroup(1);
+    try std.testing.expectEqual(@as(usize, max_child_groups - 1), liveChildGroups());
+    // The freed slot is the one a server started later takes.
+    try std.testing.expect(publishChildGroup(1));
+    try std.testing.expectEqual(@as(usize, max_child_groups), liveChildGroups());
 }
 
 test "a tool call reports the exit status of the command it ran" {
@@ -5727,7 +5794,7 @@ test "a command that closes its pipes and keeps running is bounded by the tool t
     // The child the deadline killed is not left holding its process group: the
     // reap is what keeps a timed-out command's background work from outliving
     // the turn, and it only runs because the wait returned.
-    try std.testing.expectEqual(@as(std.posix.pid_t, 0), tool_group.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 0), liveChildGroups());
 }
 
 test "write and edit refuse paths outside sandbox writable roots" {

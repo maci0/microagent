@@ -864,7 +864,7 @@ const help_text =
     \\  status 2.
     \\
     \\subcommand:
-    \\  update [--check]
+    \\  update [-c | --check]
     \\                         replace this binary with the latest GitHub
     \\                         release after verifying its .sha256 sidecar
     \\                         (--check only reports; GITHUB_TOKEN lifts the

@@ -104,10 +104,10 @@ a value of --print, is a task, and so is the word "update" anywhere but
 first: as the first argument it is the subcommand below, and a task of
 that name is written after a flag or a --. A
 second bare word is the one thing this does not read as a task: two prompts
-are a usage error. A word that names no flag is answered with the one it is
-closest to, so --modl says did you mean --model?; a word close to none of them
-is reported plainly, because naming the least bad of a dozen is worse than
-naming none.
+are a usage error. A word that names no flag is answered with the one it
+is closest to, so --modl says did you mean --model?; a word close to none
+of them is reported plainly, because naming the least bad of a dozen is
+worse than naming none.
 
 session log:
   MICROAGENT_SESSION_DIR where the per-response JSONL session log goes
@@ -142,7 +142,7 @@ Tools (`[tools.<name>]` tables in the config):
   status 2.
 
 subcommand:
-  update [--check]
+  update [-c | --check]
                          replace this binary with the latest GitHub
                          release after verifying its .sha256 sidecar
                          (--check only reports; GITHUB_TOKEN lifts the

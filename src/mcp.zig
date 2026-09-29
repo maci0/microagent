@@ -190,6 +190,7 @@ pub const Server = struct {
             .stdio => |*s| s,
             .http => return,
         };
+        tool_mod.retireChildGroup(stdio.pgid);
         std.posix.kill(-stdio.pgid, .KILL) catch {};
         stdio.child.kill(io);
         // The buffer is this allocator's, not the arena's, so it is handed
@@ -1458,16 +1459,27 @@ fn spawnOne(
         return;
     };
 
+    const pgid: std.posix.pid_t = @intCast(child.id.?);
     var server: Server = .{
         .name = entry.name,
         .transport = .{ .stdio = .{
             .child = child,
-            .pgid = @intCast(child.id.?),
+            .pgid = pgid,
             .to_server = child.stdin.?,
             .from_server = child.stdout.?,
         } },
         .tools = &.{},
     };
+    // Published for the interrupt handler, for the same reason a tool call's
+    // child is: a server leads its own process group, so the terminal's Ctrl+C
+    // never reaches it, and the `std.process.exit` the handler runs skips the
+    // `shutdown` that would have stopped it. A server the table cannot hold is
+    // stopped here rather than left outside the handler.
+    if (!tool_mod.publishChildGroup(pgid)) {
+        net.note(io, arena, "microagent: MCP server {s}: this run already tracks as many child process groups as it can; it is stopped and skipped\n", .{shown});
+        server.reap(io);
+        return;
+    }
     out.append(arena, server) catch |err| {
         net.note(io, arena, "microagent: MCP server {s}: it could not be recorded ({s}); it is stopped and skipped\n", .{ shown, @errorName(err) });
         server.reap(io);

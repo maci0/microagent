@@ -15,7 +15,7 @@ BIN := zig-out/bin/microagent
 export LC_ALL := C
 export TZ := UTC
 
-.PHONY: default help preflight version build musl test watch test-sanitize fmt fmt-check fmt-python lint lint-versions lint-lock lint-ci check-sbom check-refs zig-version required-zig-version release-targets check-assets check-asset-run check-binary check-changelog check-changelog-links check-changelog-sections check-unreleased check-readme check-man check-release check-reproducible lint-shell lint-python lint-yaml lint-md check bench gauntlet instructions overhead install release-assets checksums sbom sha256-of clean
+.PHONY: default help preflight version build musl test watch test-sanitize fmt fmt-check fmt-python lint lint-versions lint-lock lint-ci check-sbom check-refs zig-version required-zig-version release-targets check-assets check-asset-run check-binary check-changelog check-changelog-links check-changelog-sections check-unreleased check-readme check-help check-man check-release check-reproducible lint-shell lint-python lint-yaml lint-md check bench gauntlet instructions overhead install release-assets checksums sbom sha256-of clean
 
 # The Harbor adapter's directory, the one place that path is written down.
 # lint-lock.sh and lint-versions.sh both take it as an argument rather than
@@ -157,7 +157,7 @@ help:
 	  'fmt                   rewrite every tracked .zig and .py file in format style' \
 	  'fmt-python            rewrite the tracked .py files, which zig fmt does not reach' \
 	  'fmt-check             what check runs over the same files, without rewriting' \
-	  'check                 preflight, zig-version, check-unreleased, check-readme, check-man, fmt-check, the linters, the tests, an optimized build' \
+	  'check                 preflight, zig-version, check-unreleased, check-readme, check-help, check-man, fmt-check, the linters, the tests, an optimized build' \
 	  'lint                  the version and lock checks, the release inventory, then shellcheck, ruff and yamllint' \
 	  'lint-shell            shellcheck over every tracked .sh file' \
 	  'lint-ci               shellcheck over the run: steps in the workflows and composite actions' \
@@ -187,6 +187,7 @@ help:
 	  'check-changelog-sections SECTION=...  the same five-section shape under one named heading' \
 	  'check-changelog-links  every heading has the compare link its version implies' \
 	  'check-readme      the README installs and names the version build.zig.zon declares' \
+	  'check-help        the usage.md --help block is what --help prints' \
 	  'check-man         the man page documents every flag --help lists, as the declared version' \
 	  'check-release TAG=vX.Y.Z  the tag names build.zig.zon, nothing is stranded unreleased' \
 	  'check-reproducible    every published target rebuilds byte-identical' \
@@ -558,6 +559,7 @@ check:
 	$(MAKE) zig-version
 	$(MAKE) check-unreleased
 	$(MAKE) check-readme
+	$(MAKE) check-help
 	$(MAKE) check-man
 	$(MAKE) fmt-check
 	$(MAKE) lint
@@ -636,6 +638,28 @@ install: build
 # is left alone: a man page may summarize, but a man page that invents an
 # option is the failure this cannot catch by reading flags, so the direction
 # that can be checked is the one that is checked.
+# The block docs/usage.md prints as "microagent --help, verbatim" is a copy of
+# the built-in text, and a copy is only worth having if it is the copy. Nothing
+# keeps the two together: a flag added to src/main.zig, an exit status added to
+# the table, a default that moves, and the page keeps the sentence the last
+# release shipped, which is worse than no page because a reader cannot tell
+# which of the two the running binary is answering. check-man asks the same
+# question of the man page; this asks it of the page most readers open.
+check-help: build
+	@set -eu; \
+	tmp="$$(mktemp -d)"; \
+	trap 'rm -rf "$$tmp"' EXIT; \
+	awk '/^## Flags and environment$$/{seen=1} seen && /^```$$/{n++; next} n==1' docs/usage.md > "$$tmp/doc" || true; \
+	test -s "$$tmp/doc" || { echo "docs/usage.md has no --help block under '## Flags and environment'" >&2; exit 1; }; \
+	$(BIN) --help > "$$tmp/help"; \
+	if ! cmp -s "$$tmp/doc" "$$tmp/help"; then \
+	  echo "docs/usage.md quotes a --help that this build does not print:" >&2; \
+	  diff -u "$$tmp/doc" "$$tmp/help" >&2 || true; \
+	  echo "the text lives in src/main.zig; copy it into the block rather than editing either side" >&2; \
+	  exit 1; \
+	fi; \
+	echo "docs/usage.md quotes this build's --help verbatim"
+
 check-man: build
 	@set -eu; \
 	want="$$($(MAKE) --no-print-directory version)"; \
