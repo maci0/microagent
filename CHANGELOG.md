@@ -257,6 +257,18 @@ release, and `microagent update` moves you to it.
   an unexpected content type, or is cut off mid-body, closes the connection
   instead of handing the next request the bytes it never read.
 
+- `bench/instructions.sh` and `bench/overhead.sh` build their scratch under the
+  tree's `.scratch/`, as `bench/run.sh` and `bench/gauntlet.sh` already do. Their
+  `mktemp -d` work directories landed in the host's temp directory, which is a
+  tmpfs on most Linux hosts, so a run wrote a test binary and a hyperfine export
+  into the machine's RAM, and two runs on one host could not be kept apart. Both
+  take the root from `BENCH_WORK`, the override the other two already honor, and
+  `bench/instructions.sh` traps `INT` and `TERM` as `bench/overhead.sh` does, so
+  a `perf` run stopped with Ctrl-C no longer leaves its work directory behind.
+  `make help` also lists `lint-md`, which `make lint` runs and the help had
+  dropped, so a contributor reading the target list was not told the Markdown
+  gate existed.
+
 ## [0.7.0] - 2026-09-30
 
 ### Added

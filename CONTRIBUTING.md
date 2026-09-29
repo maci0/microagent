@@ -183,6 +183,13 @@ above its band is a regression to fix. A row below it retired less work than
 the baseline records, so the baseline is stale; the run says which of the two
 it found.
 
+The four bench scripts write their scratch under the tree's gitignored
+`.scratch/`, never under `${TMPDIR:-/tmp}`: the host's temp directory is a
+tmpfs on most Linux hosts, so a run's tree and its harness build products would
+be read out of and written back to RAM. `BENCH_WORK` names another root for a
+contributor whose scratch belongs on a named disk, and `GAUNTLET_WORK` does the
+same for `make gauntlet`.
+
 ## Tests
 
 A `test` block lives in the file it covers, next to the code, named for the

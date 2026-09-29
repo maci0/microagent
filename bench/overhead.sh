@@ -12,12 +12,19 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 agents=${*:-microagent claude gemini codex crush grok kimi opencode cursor-agent clanker dsh}
 prompt="Reply with exactly: pong"
 
+# The tree's own gitignored .scratch/, for the reason bench/run.sh and
+# bench/gauntlet.sh build theirs there rather than under ${TMPDIR:-/tmp}: /tmp is
+# a tmpfs on most Linux hosts, and a run writes a hyperfine export and an agent
+# transcript per harness into it, so the measurement's disk is the host's RAM.
+# BENCH_WORK overrides it for a contributor who names a scratch disk.
+work_root="${BENCH_WORK:-$root/.scratch/overhead}"
+mkdir -p "$work_root" || exit 2
+
 # The work directory of the agent in flight, and the trap that takes it away on
 # every way out, including a signal. `bench/instructions.sh` has one for the same
 # reason: `rm -rf` on the last line of a loop body is reached only when the body
 # runs to its end, so an interrupt or a failed command left one directory per
-# agent behind in the system temp directory, and the next run started with the
-# pile still there.
+# agent behind, and the next run started with the pile still there.
 work=
 trap '[ -n "$work" ] && rm -rf "$work"' EXIT
 trap 'exit 130' INT
@@ -31,7 +38,7 @@ for agent in $agents; do
 	# One work directory per agent, and hyperfine's export inside it: a fixed
 	# machine-wide path is written by two runs at once and read by the other,
 	# so each row's startup number is the other row's measurement.
-	work=$(mktemp -d)
+	work=$(mktemp -d "$work_root/agent-XXXXXX")
 	# The mean is read by the key it is written under, not by its column: a
 	# field position is only right for one layout, and hyperfine's export is
 	# pretty-printed on some releases and a single line on others. Read as a

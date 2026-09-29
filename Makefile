@@ -143,6 +143,7 @@ help:
 	  'lint-ci               shellcheck over the run: steps in the workflows and composite actions' \
 	  'lint-python           ruff check and ruff format --check over every tracked .py file' \
 	  'lint-yaml             yamllint over every tracked .yml and .yaml file' \
+	  'lint-md               the Markdown check over every tracked .md file' \
 	  'lint-versions         check ruff and yamllint against the versions the gate runs, and that lint-requirements.in names the same' \
 	  'lint-lock             check the Harbor lock carries the manifest pins, a hash each, and nothing else' \
 	  'check-sbom            run the release inventory over stand-in assets and check what a scanner reads' \

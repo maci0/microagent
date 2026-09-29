@@ -49,13 +49,29 @@ command -v perf >/dev/null 2>&1 || {
 # Row name, test filter, units the row's work is done in. Per-unit numbers stay
 # comparable when a test grows.
 # The baseline is measured once, before this loop, so it is not a row.
-work=$(mktemp -d) || exit 2
+# The tree's own gitignored .scratch/, for the reason bench/run.sh and
+# bench/gauntlet.sh build theirs there rather than under ${TMPDIR:-/tmp}: /tmp is
+# a tmpfs on most Linux hosts, and a run writes a test binary and a perf report
+# per row into it, so the measurement's disk is the host's RAM. It is inside the
+# tree so `rm -rf` in the harness leaves nothing to sweep up by hand, and it is
+# still the tree's, not a path two accounts on a shared machine share.
+# BENCH_WORK overrides it for a contributor who names a scratch disk.
+work_root="${BENCH_WORK:-$root/.scratch/instructions}"
+# mktemp inside that root rather than at a fixed name: two runs on one host
+# would otherwise share one directory, and each would delete the other's binary.
+mkdir -p "$work_root" || exit 2
+work=$(mktemp -d "$work_root/run-XXXXXX") || exit 2
+# The signal traps are `bench/overhead.sh`'s, for its reason: an EXIT trap is
+# not run when the shell is killed, and a `perf` run over five rows takes
+# minutes, so Ctrl-C is the ordinary way to stop one and the work directory
+# holding its binary was left behind.
 trap 'rm -rf "$work"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 bin="$work/instructions-test"
 
-# The rows live in $work rather than a fixed name under /tmp: a predictable path
-# in a world-writable directory is another account's file to write through, and
-# TMPDIR is where bench/run.sh puts its scratch anyway.
+# The rows live in $work rather than beside this script: a predictable path in a
+# world-writable directory is another account's file to write through.
 cat >"$work/rows" <<'ROWS'
 stream content frame|stream.test.a long stream costs|20000
 stream tool-arg frame|stream.test.streamed argument fragments|2000

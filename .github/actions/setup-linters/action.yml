@@ -24,13 +24,19 @@ runs:
     # changes no lint pin installs nothing. The venv itself is not cached: it
     # is built in a few seconds and caching it would put a second copy of the
     # pinned wheels in the tree beside the ones this step already verified.
+    #
+    # `runner.arch` is in the key for the reason setup-zig's caches give: os
+    # alone is not a machine, and ruff and yamllint are installed from
+    # platform-specific wheels. A second architecture answering to the same
+    # runner.os would race the first to save the same entry, and the loser would
+    # either restore wheels it cannot install or re-download every one of them.
     - name: restore the pip cache
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.cache/pip
-        key: pip-${{ runner.os }}-${{ hashFiles('lint-requirements.txt') }}
+        key: pip-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lint-requirements.txt') }}
         restore-keys: |
-          pip-${{ runner.os }}-
+          pip-${{ runner.os }}-${{ runner.arch }}-
 
     - name: install the linters
       shell: bash
