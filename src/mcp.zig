@@ -83,11 +83,6 @@ const max_name_bytes: usize = 64;
 /// The longest server description kept. A description is what the model picks
 /// a tool by, and every later turn pays for it.
 const max_mcp_description_bytes: usize = 1024;
-/// The bytes an untrusted name is escaped to before it reaches a gutter line
-/// the operator reads or a note on stderr. Long enough for a name to be
-/// recognized, short enough that a name chosen to be long cannot fill the
-/// terminal.
-const max_shown_name_bytes: usize = 120;
 /// The most bytes one tool's `inputSchema` contributes to the request. A
 /// description is bounded because it is a sentence; a schema is whatever the
 /// server chose to serialize, and a server that embeds a large `description`,
@@ -729,7 +724,7 @@ pub const Servers = struct {
         try pb.writer().writeAll(if (args.len == 0) "{}" else args);
         try pb.writer().writeAll("}");
 
-        net.writeErr(io, try std.fmt.allocPrint(arena, "\u{23fa} {s}\n", .{chat.safeText(arena, tool_call.tool.exposed, max_shown_name_bytes)}));
+        net.writeErr(io, try std.fmt.allocPrint(arena, "\u{23fa} {s}\n", .{chat.safeText(arena, tool_call.tool.exposed, net.shown_name_bytes)}));
         // The answer is parsed in a scratch arena and only the text built from
         // it is kept, for the reason the handshake gives.
         var scratch_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -1609,7 +1604,7 @@ fn buildTools(io: Io, arena: std.mem.Allocator, scratch: std.mem.Allocator, serv
         // is copied out of the arena the answer is parsed in.
         const name = chat.str(entry.get("name")) orelse continue;
         if (!validName(name)) {
-            net.note(io, arena, "microagent: MCP server {s} offers a tool named {s}, which cannot be spelled in a tool name; it is skipped\n", .{ chat.safeTextAll(arena, server.name), chat.safeText(arena, name, max_shown_name_bytes) });
+            net.note(io, arena, "microagent: MCP server {s} offers a tool named {s}, which cannot be spelled in a tool name; it is skipped\n", .{ chat.safeTextAll(arena, server.name), chat.safeText(arena, name, net.shown_name_bytes) });
             continue;
         }
         // The exposed name is the server's name behind the prefix, so two

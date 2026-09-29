@@ -51,6 +51,11 @@ pub fn hasHeaderControlBytes(value: []const u8) bool {
 /// two from drifting apart.
 pub const quoted_value_bytes: usize = 80;
 
+/// How much of an untrusted name a diagnostic quotes: a skill name the model
+/// spells back and an MCP tool name a server offers, bounded as
+/// `quoted_value_bytes` bounds a value so the two cannot drift apart.
+pub const shown_name_bytes: usize = 120;
+
 /// Points the TLS client at a PEM file when one was named. Many container
 /// images (bare ubuntu, distroless) ship no ca-certificates at all, and the
 /// client's own rescan then fails with TlsInitializationFailed before a single

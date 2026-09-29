@@ -57,8 +57,6 @@ const max_prompt_bytes: usize = 8 * 1024;
 /// description is prose and is cut when the prompt is written.
 const max_name_bytes: usize = 64;
 const max_skill_description_bytes: usize = 200;
-/// The longest escaped name a `skill` call writes to the trace.
-const max_shown_name_bytes: usize = 120;
 
 /// One skill on disk, as discovery found it.
 const Skill = struct {
@@ -474,7 +472,7 @@ pub fn call(io: Io, arena: std.mem.Allocator, args_text: []const u8, set: Skills
     const name = chat.str(args.get("name")) orelse return "error: missing name";
     // The name as a diagnostic spells it, which is a different bound from the
     // one discovery holds it to: the escape can make a short name longer.
-    const shown = chat.safeText(arena, name, max_shown_name_bytes);
+    const shown = chat.safeText(arena, name, net.shown_name_bytes);
     net.writeErr(io, try std.fmt.allocPrint(arena, "\u{23fa} {s} {s}\n", .{ tool_name, shown }));
     const skill = set.get(name) orelse return std.fmt.allocPrint(
         arena,

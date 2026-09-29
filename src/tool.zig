@@ -606,7 +606,7 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
         const named = r[colon + 1 ..];
         if (isCredentialPath(named)) return credentialRefusal(arena, .git, named, false);
         return std.fmt.allocPrint(arena, "error: rev must name a revision, not a file; use the path argument for a file (got '{s}')", .{
-            chat.safeText(arena, r, 120),
+            chat.safeText(arena, r, max_detail_bytes),
         });
     };
     // The same hole without the colon. `git blame .env` and `git diff .env`
@@ -918,7 +918,7 @@ pub fn runTool(
 /// own bytes and reaches the prompt and a stderr gutter, so it is escaped here
 /// the way every other untrusted value reaching a diagnostic is.
 fn unknownTool(arena: std.mem.Allocator, name: []const u8) error{OutOfMemory}![]const u8 {
-    return std.fmt.allocPrint(arena, "error: unknown tool '{s}'", .{chat.safeText(arena, name, 40)});
+    return std.fmt.allocPrint(arena, "error: unknown tool '{s}'", .{chat.safeText(arena, name, max_tool_name_bytes)});
 }
 
 /// The gutter line, without the stream it is written to, so the one-line shape
@@ -930,7 +930,14 @@ fn unknownTool(arena: std.mem.Allocator, name: []const u8) error{OutOfMemory}![]
 /// pass past; the detail is the model's own bytes and is what the second bound
 /// is for.
 const bold_name_bytes = "\u{1b}[1m".len + "\u{1b}[0m".len;
-const max_gutter_line_bytes = 5 + 40 + 1 + 1 + 120 + 1 + bold_name_bytes;
+/// The widest tool name a diagnostic spells, which is the widest tag of the
+/// `Tool` enum rather than a number a caller could pass past.
+const max_tool_name_bytes = 40;
+/// How much of a tool's own text a gutter line quotes, which is the model's
+/// argument and the one field on the line the operator cannot recognize by its
+/// shape.
+const max_detail_bytes = 120;
+const max_gutter_line_bytes = 5 + max_tool_name_bytes + 1 + 1 + max_detail_bytes + 1 + bold_name_bytes;
 
 /// A one-line tool gutter on stderr, the shape gauntlet recognizes. The detail
 /// is the provider's own text and may carry a newline or an escape sequence,
@@ -977,7 +984,7 @@ fn toolCallLine(arena: std.mem.Allocator, buf: []u8, tool: chat.Tool, args: std.
     // that is not text as U+FFFD. A tool argument is whatever the model decided
     // to send, and the model decides that from files in the tree, so the gutter
     // line is a boundary like any other.
-    const shown = chat.safeText(arena, detail, 120);
+    const shown = chat.safeText(arena, detail, max_detail_bytes);
     if (bold) return std.fmt.bufPrint(buf, "\u{23fa} \u{1b}[1m{s}\u{1b}[0m: {s}\n", .{ tool.name(), shown });
     return std.fmt.bufPrint(buf, "\u{23fa} {s}: {s}\n", .{ tool.name(), shown });
 }
