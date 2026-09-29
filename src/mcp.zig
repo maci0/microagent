@@ -825,6 +825,123 @@ test "a server that cannot be started, or that exits, is skipped" {
     try std.testing.expectEqual(@as(usize, 0), gone.items.len);
 }
 
+// The frames below are the answers an MCP server writes on its stdout, in the
+// shape the model context protocol publishes: an `initialize` result, a
+// `tools/list` result, a `tools/call` result with text and with structured
+// content, a protocol error, and the malformed ones a broken server writes
+// instead. `std.testing.fuzz` runs them through the harness on every
+// `zig build test`, and through the fuzzer's mutations when the test binary is
+// built in fuzz mode.
+const frame_corpus = [_][]const u8{
+    "{}",
+    "[]",
+    "null",
+    "42",
+    "\"text\"",
+    "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}",
+    "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"fake\",\"version\":\"1\"}}}",
+    "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[{\"name\":\"echo\",\"description\":\"Echo text back\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"]}}]}}",
+    "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"pong\"}]}}",
+    "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"one\"},{\"type\":\"image\",\"data\":\"x\"}],\"isError\":true}}",
+    "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"structuredContent\":{\"n\":1}}}",
+    "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"content\":[]}}",
+    "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"content\":{}}}",
+    "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"content\":[{},\"x\",null,{\"type\":\"text\"}]}}",
+    "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"\"}],\"isError\":false}}",
+    "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"a\"}],\"isError\":\"yes\"}}",
+    "{\"jsonrpc\":\"2.0\",\"id\":4,\"error\":{\"code\":-32601,\"message\":\"Method not found\"}}",
+    "{\"jsonrpc\":\"2.0\",\"id\":4,\"error\":{\"message\":\"line\\n\\u001b[2Jignored\"}}",
+    "{\"jsonrpc\":\"2.0\",\"id\":4,\"error\":{\"code\":\"-32601\"}}",
+    "{\"jsonrpc\":\"2.0\",\"id\":4,\"error\":\"plain refusal\"}",
+    "{\"jsonrpc\":\"2.0\",\"id\":4,\"error\":[1,2]}",
+    "{\"jsonrpc\":\"2.0\",\"id\":4,\"error\":{}}",
+    "{\"jsonrpc\":\"2.0\",\"id\":9223372036854775807,\"result\":{}}",
+    "{\"jsonrpc\":\"2.0\",\"id\":1.5,\"result\":{}}",
+    "{\"result\":{}}",
+    "not json at all",
+    "{\"content\":[{\"type\":\"text\",\"text\":\"a\\ud83d\\ude00b\"}]}",
+    "{\"content\":[{\"type\":\"text\",\"text\":\"\\u0000\\u001b[31mred\\u001b[0m\"}]}",
+};
+
+// What a server writes is read by the same two steps a live connection takes:
+// the line is parsed as JSON, and the object it holds is read for its `result`
+// and its `error`. `std.testing.fuzz` runs this corpus on every
+// `zig build test`, and through the fuzzer's mutations when the test binary is
+// built in fuzz mode. A server is a child process the operator configured, so
+// its stdout is as untrusted as anything off the network: the text it carries
+// is built up to the result cap, escaped into a tool result, and read by the
+// model and the operator.
+test "a fuzzed MCP frame becomes a tool result inside the cap the caller clamps to" {
+    try std.testing.fuzz({}, fuzzFrame, .{ .corpus = &frame_corpus });
+}
+
+fn fuzzFrame(_: void, smith: *std.testing.Smith) !void {
+    var raw: [16 * 1024]u8 = undefined;
+    const bytes: []const u8 = if (smith.in) |seed| seed else raw[0..smith.slice(&raw)];
+
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    // Bytes that are not a frame are what a server writes when it is broken,
+    // and a live connection skips them and reads the next line. A fuzzer that
+    // only ever produced valid JSON would never reach the text arithmetic with
+    // a piece of a length nobody chose, so unparseable bytes are carried as the
+    // text of a result frame and the same reader runs over them.
+    const parsed = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{}) catch
+        try std.json.parseFromSliceLeaky(std.json.Value, arena, try carriedFrame(arena, bytes), .{});
+    const object = switch (parsed) {
+        .object => |o| o,
+        else => return,
+    };
+
+    if (object.get("error")) |value| {
+        const described = try describeError(arena, value);
+        // A server's refusal is read by the model and by the operator's
+        // terminal, and nothing a terminal acts on survives the escaper.
+        try std.testing.expect(described.len > 0);
+        try std.testing.expect(std.mem.indexOf(u8, described, "\x1b") == null);
+        // A refusal with a message is bounded at the description ceiling, and
+        // the code is added to it rather than displacing it.
+        if (value == .object and value.object.get("message") != null)
+            try std.testing.expect(described.len <= max_description_bytes + 32);
+    }
+
+    const result = object.get("result") orelse return;
+    // A result with no content is the structured one, and it is copied out as
+    // the server wrote it rather than under the cap, so the cap is asked of
+    // the text path only.
+    if (result != .object or result.object.get("content") == null) return;
+    const text = try resultText(arena, "srv", result);
+    try std.testing.expect(text.len <= tool_mod.max_tool_output);
+    // Where the text was cut, the note names the cap the caller clamps with and
+    // the size the whole text would have had, and the second is past the first
+    // or the cut happened for nothing.
+    const marker = "... [tool output truncated at ";
+    if (std.mem.indexOf(u8, text, marker)) |at| {
+        const rest = text[at + marker.len ..];
+        const of_at = std.mem.indexOf(u8, rest, " of ") orelse return error.TestUnexpectedResult;
+        const cap_at = std.fmt.parseInt(u64, rest[0..of_at], 10) catch return error.TestUnexpectedResult;
+        const after = rest[of_at + " of ".len ..];
+        const bytes_at = std.mem.indexOfScalar(u8, after, ' ') orelse return error.TestUnexpectedResult;
+        const total = std.fmt.parseInt(u64, after[0..bytes_at], 10) catch return error.TestUnexpectedResult;
+        try std.testing.expectEqual(tool_mod.max_tool_output, cap_at);
+        try std.testing.expect(total > cap_at);
+        try std.testing.expect(std.mem.endsWith(u8, text, "bytes]"));
+    }
+}
+
+/// A result frame carrying `bytes` as its text, escaped as JSON. A piece of
+/// text of any shape then reaches the reader that builds the tool result.
+fn carriedFrame(arena: std.mem.Allocator, bytes: []const u8) ![]const u8 {
+    var jb = chat.JsonBuf.init(arena);
+    const w = jb.writer();
+    try w.writeAll("{\"result\":{\"content\":[{\"type\":\"text\",\"text\":");
+    try chat.writeJsonString(w, bytes);
+    try w.writeAll("}]}}");
+    return jb.items();
+}
+
 test "a non-text result block is named rather than dropped" {
     var state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer state.deinit();

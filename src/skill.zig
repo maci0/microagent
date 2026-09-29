@@ -443,6 +443,70 @@ test "frontmatter is read only where the format puts it" {
     try std.testing.expectEqualStrings("body\n", splitFrontmatter("---\nname: a\n---\nbody\n").body);
 }
 
+// A skill file is parsed by three readers that have to agree: the split, the
+// name, and the description. `std.testing.fuzz` runs `skill_corpus` through
+// this on every `zig build test`, and through the fuzzer's mutations when the
+// test binary is built in fuzz mode. The corpus above is a set of frontmatter
+// shapes; the mutations are the frontmatter shapes nobody wrote down, which is
+// the part of a hand-written file format a fixed corpus cannot reach.
+test "a fuzzed skill file names a skill the listing can spell" {
+    try std.testing.fuzz({}, fuzzSkillFile, .{ .corpus = &skill_corpus });
+}
+
+fn fuzzSkillFile(_: void, smith: *std.testing.Smith) !void {
+    var raw: [16 * 1024]u8 = undefined;
+    const text: []const u8 = if (smith.in) |seed| seed else raw[0..smith.slice(&raw)];
+
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    const split = splitFrontmatter(text);
+    // The body is what is left of the file: the whole text when there is no
+    // block, and the bytes past the closing `---` when there is one. A block
+    // cut the wrong way drops instructions the model was told to follow.
+    try std.testing.expect(std.mem.endsWith(u8, chat.stripBom(text), split.body));
+    // The block is either the frontmatter or nothing: never half of it, and
+    // never a span the split invented. It is a slice of the text, so its
+    // bytes came from the file rather than from the parser.
+    if (split.block.len != 0) {
+        try std.testing.expect(std.mem.indexOf(u8, text, split.block) != null);
+        try std.testing.expect(split.body.len <= text.len);
+    }
+
+    const name = skillName(arena, "fuzz", text);
+    const description = skillDescription(text);
+    if (name) |n| {
+        // A name is half of a tool call, so it is either absent or spellable:
+        // the listing writes it, and the model types it back.
+        try std.testing.expect(n.len > 0 and n.len <= max_name_bytes);
+        for (n) |c| try std.testing.expect(std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.');
+        const listed = Skills{ .items = &.{.{ .name = n, .description = description, .path = "/fuzz/SKILL.md" }} };
+        // The name the listing shows and the name a call looks up are the same
+        // bytes, so a name that reached the listing is a name that resolves.
+        try std.testing.expectEqualStrings(n, listed.get(n).?.name);
+
+        // The listing is what every later turn of a run re-sends, and the only
+        // bytes in it a file chose are the description. A description is
+        // rendered into it, so no control byte of the file reaches the prompt
+        // whole and the listing stays one line per skill.
+        const block = try listed.prompt(arena);
+        try std.testing.expect(std.mem.indexOf(u8, block, "\x1b") == null);
+        try std.testing.expect(std.mem.indexOf(u8, block, "\r") == null);
+        // Three newlines close the preamble, one ends the skill's own line, and
+        // the overflow note is the only other line that can appear.
+        const lines = std.mem.count(u8, block, "\n");
+        try std.testing.expect(lines >= 4 and lines <= 5);
+        try std.testing.expect(std.mem.indexOf(u8, block, n) != null);
+        // The same listing twice, so a read that held state across calls
+        // cannot hand the model a different one from the one it saw.
+        try std.testing.expectEqualStrings(block, try listed.prompt(arena));
+    } else {
+        // A file the reader will not name contributes nothing to the prompt.
+        try std.testing.expectEqualStrings("", try (Skills{}).prompt(arena));
+    }
+}
+
 test "a skill name comes from the frontmatter, else the directory, and must be a name" {
     const gpa = std.testing.allocator;
     var state = std.heap.ArenaAllocator.init(gpa);
