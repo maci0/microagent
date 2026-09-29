@@ -2768,6 +2768,32 @@ test "read refuses a secret file and says so, and reads the rest" {
     // file the name rule must not wave through, so it is refused with the rest.
     for ([_][]const u8{ "src/main.zig", "README.md", "cert.crt", "id_ed25519.pub", "monkey.zig" }) |path|
         try std.testing.expect(!isCredentialPath(path));
+
+    // The name rule is only half of it: a read that refused every path would
+    // pass the loop above, so the published key and a source file are read
+    // through the tool the way a run reads them.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "id_ed25519.pub", .data = "ssh-ed25519 AAAA\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "main.zig", .data = "pub fn main() void {}\n" });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const root = path_buf[0..n];
+
+    var args: std.json.ObjectMap = .empty;
+    try args.put(arena, "path", .{ .string = try std.fs.path.join(arena, &.{ root, "id_ed25519.pub" }) });
+    try std.testing.expect(std.mem.indexOf(u8, try toolRead(io, arena, args), "ssh-ed25519 AAAA") != null);
+
+    try args.put(arena, "path", .{ .string = try std.fs.path.join(arena, &.{ root, "main.zig" }) });
+    try std.testing.expect(std.mem.indexOf(u8, try toolRead(io, arena, args), "pub fn main()") != null);
 }
 
 test "a read of a secret file returns the refusal, not the key" {
@@ -4402,11 +4428,20 @@ test "an ast rewrite whose output still matches its pattern is refused" {
     try std.testing.expect((try astRewriteRefusal(arena, "foo($A)", "bar($A)")) == null);
     try std.testing.expect((try astRewriteRefusal(arena, "kw($A, $B)", "kw($B, $A)")) == null);
     // A replacement spelled as the pattern writes the file with its own bytes.
-    try std.testing.expect((try astRewriteRefusal(arena, "foo($A)", "foo($A)")).?.len > 0);
+    // Which of the two refusals it draws from is the whole difference: the
+    // second names the reason, and a caller that printed the wrong one would
+    // send the model after a fix that does not apply.
+    try std.testing.expectEqualStrings(
+        "no change: rewrite is the pattern itself (foo($A))",
+        (try astRewriteRefusal(arena, "foo($A)", "foo($A)")).?,
+    );
     // Metavariables alone match every node, so they match whatever they were
     // rewritten to, and there is no literal text to read the replacement
     // against either.
-    try std.testing.expect((try astRewriteRefusal(arena, "$A", "[$A]")).?.len > 0);
+    try std.testing.expectEqualStrings(
+        "error: the pattern $A is metavariables alone, so it matches whatever its own rewrite produced and a second run of this rewrite would apply again; match on the literal text around the metavariable, or use `edit`",
+        (try astRewriteRefusal(arena, "$A", "[$A]")).?,
+    );
     // A skeleton too short to anchor a match says nothing about whether the
     // replacement re-matches, so it is not read against it.
     try std.testing.expect((try astRewriteRefusal(arena, "($A)", "($A) == ($A)")) == null);
@@ -5001,6 +5036,17 @@ test "bash refuses a command matching the configured command filter" {
     for (allowed) |cmd| {
         try std.testing.expectEqual(@as(?[]const u8, null), deniedInCommand(cmd, &deny_list));
     }
+
+    // The same word check, driven through the tool the way a run drives it. A
+    // filter applied only inside `deniedInCommand` and never reached from the
+    // tool would leave the refused side above green and let every one of these
+    // through. These are commands that fail on their own, so what is checked
+    // is the refusal that did not happen, not their exit status.
+    for ([_][]const u8{ "python3 run_sudoku.py", "cat pseudocode.txt", "reboot_service.sh", "issue_tracker.py", "echo hi" }) |cmd| {
+        const args = try std.fmt.allocPrint(arena, "{{\"command\":\"{s}\"}}", .{cmd});
+        const out = try dispatchWith(arena, "bash", args, &deny_list, &.{});
+        try std.testing.expect(std.mem.indexOf(u8, out, "denied by configuration") == null);
+    }
 }
 
 // The provider key lives in this process's environment, and a tool subprocess
@@ -5150,6 +5196,31 @@ test "write and edit refuse paths outside sandbox writable roots" {
     const edit_res = try toolEdit(io, arena, edit_args, &writable_roots);
     try std.testing.expect(std.mem.startsWith(u8, edit_res, "refused:"));
     try std.testing.expect(std.mem.indexOf(u8, edit_res, "outside the sandbox writable roots") != null);
+
+    // The same two tools, on a path inside the root. Refusals alone cannot
+    // tell a check that names its reason from one that refuses everything, so
+    // the other side of the boundary is driven here, and the file the refusals
+    // above named is asserted never to have appeared.
+    const inside = try std.fs.path.join(arena, &.{ root, "inside.txt" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "inside.txt", .data = "a b\n" });
+
+    var ok_write: std.json.ObjectMap = .empty;
+    try ok_write.put(arena, "path", .{ .string = inside });
+    try ok_write.put(arena, "content", .{ .string = "written\n" });
+    try std.testing.expect(!std.mem.startsWith(u8, try toolWrite(io, arena, ok_write, &writable_roots), "refused:"));
+    try std.testing.expectEqualStrings("written\n", try tmp.dir.readFileAlloc(io, "inside.txt", arena, .limited(64)));
+
+    var ok_edit: std.json.ObjectMap = .empty;
+    try ok_edit.put(arena, "path", .{ .string = inside });
+    try ok_edit.put(arena, "old_string", .{ .string = "written" });
+    try ok_edit.put(arena, "new_string", .{ .string = "edited" });
+    try std.testing.expect(!std.mem.startsWith(u8, try toolEdit(io, arena, ok_edit, &writable_roots), "refused:"));
+    try std.testing.expectEqualStrings("edited\n", try tmp.dir.readFileAlloc(io, "inside.txt", arena, .limited(64)));
+
+    try std.testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.cwd().statFile(io, "/etc/notallowed.txt", .{}),
+    );
 }
 
 test "multi_edit applies every edit, across files, each on what the earlier ones left" {
@@ -5350,9 +5421,16 @@ test "todo keeps a bounded, printable text for each item" {
     try long.appendNTimes(arena, 'a', max_todo_text_bytes * 3);
     try long.appendSlice(arena, "\\u001b[31m\"}]}");
     const result = try dispatch(arena, "todo", long.items);
-    // The line is the number, the status, the bounded text and a newline, then the count: no
-    // escape byte reaches the model's next turn or the operator's screen through it.
+    // The line is the number, the status, the bounded text and a newline, then
+    // the count. The bound is the cap itself rather than a multiple of it, so a
+    // text that stopped honouring the cap cannot pass under a loose ceiling.
+    try std.testing.expectEqual(
+        "1. [pending] ".len + max_todo_text_bytes + "\n0 of 1 done".len,
+        result.len,
+    );
+    try std.testing.expectEqualStrings("a" ** max_todo_text_bytes, result["1. [pending] ".len..][0..max_todo_text_bytes]);
+    // No escape byte reaches the model's next turn or the operator's screen
+    // through it, and the tail the escaper cut is not in the line either.
     try std.testing.expect(std.mem.indexOfScalar(u8, result, 0x1b) == null);
-    try std.testing.expect(result.len < "1. [pending] ".len + max_todo_text_bytes * 2 + "\n0 of 1 done".len);
     try std.testing.expect(std.mem.endsWith(u8, result, "\n0 of 1 done"));
 }

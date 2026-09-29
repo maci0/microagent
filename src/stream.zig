@@ -362,21 +362,41 @@ test "the declared and generic parses count usage the same way" {
     }.of;
 
     // Every spelling of a cached count the three providers send, so the one
-    // field with three names is the one under test.
-    const usages = [_][]const u8{
-        \\{"prompt_tokens":11,"completion_tokens":22,"total_tokens":33,"completion_tokens_details":{"reasoning_tokens":44},"prompt_tokens_details":{"cached_tokens":55}}
-        ,
-        \\{"prompt_tokens":11,"completion_tokens":22,"prompt_cache_hit_tokens":66}
-        ,
-        \\{"prompt_tokens":11,"completion_tokens":22,"cache_read_input_tokens":77}
-        ,
-        // A total of 0 is not a total the provider stands behind, so the sum
-        // of the parts stands in for it on both paths.
-        \\{"prompt_tokens":11,"completion_tokens":22,"total_tokens":0}
-        ,
+    // field with three names is the one under test. The counts each one folds
+    // to are spelled beside it: two results that both stayed at zero agree
+    // with each other and prove nothing, so every counter is pinned here.
+    const cases = [_]struct { usage: []const u8, want: Counters }{
+        .{
+            .usage =
+            \\{"prompt_tokens":11,"completion_tokens":22,"total_tokens":33,"completion_tokens_details":{"reasoning_tokens":44},"prompt_tokens_details":{"cached_tokens":55}}
+            ,
+            .want = .{ .prompt = 11, .completion = 22, .total = 33, .reasoning = 44, .cached = 55 },
+        },
+        .{
+            .usage =
+            \\{"prompt_tokens":11,"completion_tokens":22,"prompt_cache_hit_tokens":66}
+            ,
+            // No total of the provider's, so the sum of the parts stands in.
+            .want = .{ .prompt = 11, .completion = 22, .total = 33, .reasoning = 0, .cached = 66 },
+        },
+        .{
+            .usage =
+            \\{"prompt_tokens":11,"completion_tokens":22,"cache_read_input_tokens":77}
+            ,
+            .want = .{ .prompt = 11, .completion = 22, .total = 33, .reasoning = 0, .cached = 77 },
+        },
+        .{
+            .usage =
+            \\{"prompt_tokens":11,"completion_tokens":22,"total_tokens":0}
+            ,
+            // A total of 0 is not a total the provider stands behind, so the
+            // sum of the parts stands in for it on both paths.
+            .want = .{ .prompt = 11, .completion = 22, .total = 33, .reasoning = 0, .cached = 0 },
+        },
     };
 
-    for (usages) |usage| {
+    for (cases) |case| {
+        const usage = case.usage;
         var results: [2]chat_mod.ChatResult = .{ .{}, .{} };
         // `choices` spelled as something the declared shapes refuse is what
         // sends the second frame down the generic parse; the usage block
@@ -394,7 +414,8 @@ test "the declared and generic parses count usage the same way" {
             try applyFrame(arena, arena, payload, &results[which], &calls, &out_buf, &unparsable);
             try std.testing.expectEqual(@as(usize, 0), unparsable);
         }
-        try std.testing.expectEqual(counters(&results[0]), counters(&results[1]));
+        try std.testing.expectEqual(case.want, counters(&results[0]));
+        try std.testing.expectEqual(case.want, counters(&results[1]));
     }
 }
 
@@ -1295,9 +1316,23 @@ test "a gap in the tool-call indexes leaves no nameless call behind" {
     try std.testing.expectEqual(@as(usize, 1), calls.items.len);
     try std.testing.expectEqualStrings("read", calls.items[0].name);
 
-    // A response whose calls are all named is untouched.
-    _ = keepRunnableCalls(arena, &calls);
-    try std.testing.expectEqual(@as(usize, 1), calls.items.len);
+    // A response whose calls are all named is untouched: the sweep over the
+    // one call that survived drops nothing, where re-running it over the gaps
+    // of a list that is already swept can only confirm it kept what it kept.
+    var named: std.ArrayList(chat_mod.ToolCall) = .empty;
+    defer chat_mod.deinitCalls(arena, &named);
+    const two = "{\"choices\":[{\"delta\":{\"tool_calls\":[" ++
+        "{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}," ++
+        "{\"index\":1,\"id\":\"call_2\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}" ++
+        "]}}]}";
+    try applyFrame(arena, arena, two, &result, &named, &out_buf, &unparsable);
+    try std.testing.expectEqual(@as(usize, 2), named.items.len);
+    const dropped = keepRunnableCalls(arena, &named);
+    try std.testing.expectEqual(@as(usize, 2), named.items.len);
+    try std.testing.expectEqual(@as(usize, 0), dropped.unusable);
+    try std.testing.expectEqual(@as(usize, 0), dropped.duplicate);
+    try std.testing.expectEqualStrings("call_1", named.items[0].id);
+    try std.testing.expectEqualStrings("call_2", named.items[1].id);
 }
 
 /// The ids a two-call frame carries before the drop, and the ones left after
@@ -1751,12 +1786,12 @@ test "a tool call index past the cap is dropped, not allocated" {
     // Every call carries an id and an object argument, so the run's own
     // unusable-call sweep cannot empty the list and hide which side of the cap
     // the call fell.
-    for ([_]struct { index: u32, slots: usize }{
-        .{ .index = 0, .slots = 1 },
-        .{ .index = 63, .slots = 64 },
-        .{ .index = 64, .slots = 0 },
-        .{ .index = 1000, .slots = 0 },
-        .{ .index = 4000000000, .slots = 0 },
+    for ([_]struct { index: u32, slots: usize, kept: usize }{
+        .{ .index = 0, .slots = 1, .kept = 1 },
+        .{ .index = 63, .slots = 64, .kept = 1 },
+        .{ .index = 64, .slots = 0, .kept = 0 },
+        .{ .index = 1000, .slots = 0, .kept = 0 },
+        .{ .index = 4000000000, .slots = 0, .kept = 0 },
     }) |case| {
         var sink = FrameSink.init(std.testing.allocator);
         defer sink.deinit();
@@ -1771,7 +1806,7 @@ test "a tool call index past the cap is dropped, not allocated" {
         // and the slots below it are the placeholders the sweep drops.
         try std.testing.expectEqual(case.slots, sink.calls.items.len);
         _ = keepRunnableCalls(sink.run.allocator(), &sink.calls);
-        try std.testing.expectEqual(@as(usize, if (case.index >= max_tool_calls) 0 else 1), sink.calls.items.len);
+        try std.testing.expectEqual(case.kept, sink.calls.items.len);
         if (case.slots != 0) try std.testing.expectEqualStrings("call_1", sink.calls.items[0].id);
     }
 

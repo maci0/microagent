@@ -567,6 +567,17 @@ const args_corpus = [_][]const u8{
     "a" ** 200,
 };
 
+/// Whether the first word that is not a check flag is one of the two spellings
+/// of the flag asked for. `parseArgs` returns at that word, so a run that
+/// answers `.help` or `.version` has one, and it is the one that decided it.
+fn isFirstNonCheck(words: []const []const u8, short: []const u8, long: []const u8) bool {
+    for (words) |w| {
+        if (std.mem.eql(u8, w, "--check") or std.mem.eql(u8, w, "-c")) continue;
+        return std.mem.eql(u8, w, short) or std.mem.eql(u8, w, long);
+    }
+    return false;
+}
+
 test "update: fuzz: a fuzzed command line is read as flags or quoted as unknown" {
     try std.testing.fuzz({}, fuzzArgs, .{ .corpus = &args_corpus });
 }
@@ -587,7 +598,12 @@ fn fuzzArgs(_: void, smith: *std.testing.Smith) !void {
         .check => for (words) |w| {
             try std.testing.expect(std.mem.eql(u8, w, "-c") or std.mem.eql(u8, w, "--check"));
         },
-        .help, .version => {},
+        // A help or a version is reached only by the exact word that asks for
+        // it: the parser returns at the first word that is not a check flag,
+        // and that word has to be the one asking. A parser answering either to
+        // arbitrary bytes would pass without these.
+        .help => try std.testing.expect(isFirstNonCheck(words, "-h", "--help")),
+        .version => try std.testing.expect(isFirstNonCheck(words, "-V", "--version")),
         .unknown => |arg| {
             var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
             defer arena_state.deinit();

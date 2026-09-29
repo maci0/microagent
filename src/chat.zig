@@ -1018,13 +1018,17 @@ test "valid multibyte text passes through the escaper unchanged" {
 }
 
 test "an empty provider string is the shared slice, not a copy this run owns" {
-    const gpa = std.testing.allocator;
     // A field's length is what tells the deinit that it owns the bytes behind
     // it, so an empty value has to stay the shared slice: a zero-length copy
-    // reads as unowned and is never released.
-    try std.testing.expectEqualStrings("", try ownString(gpa, ""));
-    const owned = try ownString(gpa, "stop");
-    defer gpa.free(owned);
+    // reads as unowned and is never released. Comparing the text cannot tell
+    // the two apart, since both are empty, so the allocator is the witness: a
+    // copy is an allocation, and this one refuses the first.
+    var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectEqualStrings("", try ownString(failing.allocator(), ""));
+
+    // A value with bytes in it is the one copy, and it is the run's to free.
+    const owned = try ownString(std.testing.allocator, "stop");
+    defer std.testing.allocator.free(owned);
     try std.testing.expectEqualStrings("stop", owned);
 }
 

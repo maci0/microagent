@@ -1014,18 +1014,24 @@ test "a session log is readable by its owner alone" {
 
     // The log is named after the run's own clock stamp, so it is found by
     // walking the store rather than by spelling a name a test cannot know.
+    // Every file the walk turns up is checked, not the first one: a store
+    // holding a second log nobody else can read is a claim the test would
+    // otherwise have stopped short of making.
     var store_dir = try std.Io.Dir.openDir(std.Io.Dir.cwd(), io, relative, .{ .iterate = true });
     defer store_dir.close(io);
     var walker = try store_dir.walk(arena);
     defer walker.deinit();
-    const entry = (try walker.next(io)) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(Io.File.Kind.file, entry.kind);
-
+    var checked: usize = 0;
     var name_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const log_path = try std.fmt.bufPrint(&name_buf, "{s}/{s}", .{ relative, entry.basename });
-    const log_stat = try std.Io.Dir.cwd().statFile(io, log_path, .{});
-    try std.testing.expectEqual(@as(u32, 0), log_stat.permissions.toMode() & group_other_mode_bits);
-    try std.testing.expect(log_stat.permissions.toMode() & owner_mode_bits == owner_mode_bits);
+    while (try walker.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        checked += 1;
+        const log_path = try std.fmt.bufPrint(&name_buf, "{s}/{s}", .{ relative, entry.basename });
+        const log_stat = try std.Io.Dir.cwd().statFile(io, log_path, .{});
+        try std.testing.expectEqual(@as(u32, 0), log_stat.permissions.toMode() & group_other_mode_bits);
+        try std.testing.expect(log_stat.permissions.toMode() & owner_mode_bits == owner_mode_bits);
+    }
+    try std.testing.expect(checked > 0);
 }
 
 /// The group and other permission bits, the ones a shared machine reads

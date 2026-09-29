@@ -131,6 +131,14 @@ const stream_read_chunk: usize = 8 * 1024;
 /// token-sized delta or a fragment of one call's arguments, so this is far
 /// past anything a real completion sends.
 const max_frame_bytes: usize = 1024 * 1024;
+
+/// Whether what the line split left is a line that has outgrown the turn.
+/// The input is the residual after `net.nextLineEnd` has consumed the whole
+/// lines, which is what makes the boundary the ceiling itself: a line of
+/// exactly `max_frame_bytes` has not overrun, one byte more has.
+fn frameOverran(pending: []const u8) bool {
+    return pending.len > max_frame_bytes;
+}
 /// The config file is a handful of keys; a bigger file is not one.
 const max_config_bytes: usize = 64 * 1024;
 /// A provider's error body is a diagnostic, not a payload, so it is bounded
@@ -2709,7 +2717,7 @@ fn streamChatOnce(
         // one: asked before the split, a complete line of exactly the ceiling
         // was refused for its own newline, and a short frame read alongside a
         // partial line counted the short frame against the long one.
-        if (pending.items.len > max_frame_bytes) {
+        if (frameOverran(pending.items)) {
             net.note(io, arena, "microagent: a line of the completion stream from {s} passed {d} byte(s) without ending; the turn is discarded\n", .{
                 shown_url, pending.items.len,
             });
@@ -3259,22 +3267,29 @@ test "a base url that carries credentials does not print them" {
 // `clip` is that escaping for the `die` paths, and this is what it does to the
 // shapes an environment actually carries.
 test "a home directory quoted into a diagnostic is escaped" {
-    for ([_][]const u8{
-        "/home/me",
+    // The quoted form of each, because a check that the output merely has no
+    // control byte in it is satisfied by dropping the ESC sequence outright,
+    // and by a string that says nothing about the path either. The bytes a
+    // terminal would act on are named as the escape for the byte, and a byte
+    // that is not UTF-8 is replaced rather than written through, so the
+    // quoted form is valid UTF-8 and cannot end mid-codepoint.
+    for ([_]struct { home: []const u8, shown: []const u8 }{
+        .{ .home = "/home/me", .shown = "/home/me" },
         // ESC and the clear-screen sequence behind it.
-        "/home/\x1b[2J",
+        .{ .home = "/home/\x1b[2J", .shown = "/home/\\x1b[2J" },
         // A latin-1 e-acute: not UTF-8, so it reaches the screen as mojibake
         // written through rather than as the character the operator set.
-        "/home/caf\xe9",
+        .{ .home = "/home/caf\xe9", .shown = "/home/caf\u{fffd}" },
         // The truncation tail of a two-byte sequence.
-        "/home/\xe6\x97",
+        .{ .home = "/home/\xe6\x97", .shown = "/home/\u{fffd}\u{fffd}" },
         // Bidi override: the path reads as a different directory from the one
         // named.
-        "/home/\u{202e}sj.nigulp",
+        .{ .home = "/home/\u{202e}sj.nigulp", .shown = "/home/\\u202esj.nigulp" },
         // Zero-width space inside a component.
-        "/home/me\u{200b}/.secrets",
-    }) |home| {
-        const shown = clip(home);
+        .{ .home = "/home/me\u{200b}/.secrets", .shown = "/home/me\\u200b/.secrets" },
+    }) |case| {
+        const shown = clip(case.home);
+        try std.testing.expectEqualStrings(case.shown, shown);
         try std.testing.expect(std.unicode.utf8ValidateSlice(shown));
         for (shown) |c| try std.testing.expect(c >= 0x20 and c != 0x7f);
     }
@@ -4332,7 +4347,23 @@ test "a stream line that never ends is bounded" {
 
     var pending: std.ArrayList(u8) = .empty;
     try pending.appendNTimes(gpa, 'd', max_frame_bytes + 1);
-    try std.testing.expect(pending.items.len > max_frame_bytes);
+    try std.testing.expect(frameOverran(pending.items));
+
+    // The boundary itself: a line of exactly the ceiling is carried, and one
+    // byte more ends the turn. A ceiling moved by a byte moves this pair, so
+    // the check is pinned to the number rather than to a buffer it grew.
+    try pending.resize(gpa, max_frame_bytes);
+    try std.testing.expect(!frameOverran(pending.items));
+    try pending.append(gpa, 'd');
+    try std.testing.expect(frameOverran(pending.items));
+    // A line that ends costs nothing whatever its length, because the split
+    // has consumed it before the ceiling is read.
+    var whole: std.ArrayList(u8) = .empty;
+    try whole.appendNTimes(gpa, 'd', max_frame_bytes * 2);
+    try whole.append(gpa, '\n');
+    var consumed: usize = 0;
+    _ = net.nextLineEnd(whole.items, &consumed).?;
+    try std.testing.expect(!frameOverran(whole.items[consumed..]));
 
     // A line that does end is consumed by the split before the ceiling is
     // read, so what the ceiling is applied to is the residual rather than
@@ -4360,7 +4391,7 @@ test "a turn's tool results stop at the turn's ceiling and every call still answ
     defer std.testing.allocator.free(full);
     @memset(full, 'x');
 
-    var messages: usize = 0;
+    var carried_results: usize = 0;
     var markers: usize = 0;
     // More calls than fit, so the ceiling is reached inside this loop and the
     // rest of the turn is markers.
@@ -4370,14 +4401,22 @@ test "a turn's tool results stop at the turn's ceiling and every call still answ
             markers += 1;
         } else {
             try std.testing.expectEqualStrings(full, carried_bytes);
+            carried_results += 1;
         }
-        messages += 1;
     }
     try std.testing.expect(capped);
     try std.testing.expect(markers > 0);
     // Every call still has a result to write, which is what keeps the pairing
-    // the next request rejects without.
-    try std.testing.expectEqual(@as(usize, stream_mod.max_tool_calls + 1), messages);
+    // the next request rejects without: every call answered with either the
+    // full result or a marker, and none was left without one.
+    try std.testing.expectEqual(
+        @as(usize, stream_mod.max_tool_calls + 1),
+        carried_results + markers,
+    );
+    // The calls the ceiling did fit are exactly the ones that fit: every result
+    // is a full `max_tool_output`, so the turn carries that many and marks the
+    // rest, and a ceiling moved by one result would move this count.
+    try std.testing.expectEqual(max_turn_tool_output / tool_mod.max_tool_output, carried_results);
     try std.testing.expect(carried <= max_turn_tool_output);
     // A result that still fits the turn's remaining room is carried, so a turn
     // of many small results never meets the ceiling, and the total stays under
@@ -5013,7 +5052,15 @@ test "out-of-range numbers from the model saturate instead of trapping" {
     try std.testing.expectEqual(std.math.maxInt(u64), chat_mod.num(.{ .float = 1e30 }));
     try std.testing.expectEqual(@as(u64, 0), chat_mod.num(.{ .float = -5 }));
     try std.testing.expectEqual(@as(u64, 0), chat_mod.num(.{ .float = std.math.nan(f64) }));
-    _ = net.durationMs(std.math.maxInt(u64));
+    // A millisecond count that would overflow the nanosecond multiply is
+    // pinned to the top of the range, not to whatever the wrapping multiply
+    // left behind: a timeout of a few hours is a slow server, and one of a few
+    // hundred nanoseconds is a server that answers nothing.
+    const huge = net.durationMs(std.math.maxInt(u64));
+    try std.testing.expectEqual(std.math.maxInt(u64), huge.duration.raw.nanoseconds);
+    // The ordinary spelling next to it, so the saturating one is a saturating
+    // one and not the only value this ever returns.
+    try std.testing.expectEqual(@as(u64, 60_000) * std.time.ns_per_ms, net.durationMs(60_000).duration.raw.nanoseconds);
 }
 
 test "a saturated token count does not overflow the run total" {
@@ -5691,9 +5738,15 @@ test "the first run writes the tracked template where the config is looked for" 
 
     // A path this process cannot write to costs the run nothing: the template
     // is a convenience, and the run is on the same defaults without it. A file
-    // where the directory would go is one way the create fails.
+    // where the directory would go is one way the create fails, and the file
+    // that was in its way is left as the operator left it, empty.
     try tmp.dir.writeFile(io, .{ .sub_path = "blocked", .data = "" });
     writeDefaultConfig(io, arena, .{ .path = try std.fs.path.join(arena, &.{ dir, "blocked", "config.toml" }), .named = false });
+    try std.testing.expectError(error.NotDir, std.Io.Dir.cwd().statFile(io, try std.fs.path.join(arena, &.{ dir, "blocked", "config.toml" }), .{}));
+    // The file that was in the way is the one the run leaves as it stands, and
+    // the config written above it is the one it does not touch.
+    try std.testing.expectEqualStrings("", try tmp.dir.readFileAlloc(io, "blocked", arena, .limited(max_config_bytes)));
+    try std.testing.expectEqualStrings("model = \"mine\"\n", try std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_config_bytes)));
 }
 
 /// The template the release embeds and writes on a first run.
