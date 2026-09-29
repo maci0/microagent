@@ -541,11 +541,17 @@ fn runMain(init: std.process.Init) !u8 {
 /// block it becomes says where it came from; a file larger than the cap is
 /// followed up to the cap rather than not at all, and the note names the size
 /// it was cut from.
+///
+/// A file the config named is reported on stderr when it is not there, because a
+/// setting that did nothing is the operator's own spelling. The default name is
+/// not: most repositories carry no `AGENTS.md`, and a run in one of them would
+/// otherwise open with a note about a file nobody asked for.
 fn agentsBlock(io: Io, arena: std.mem.Allocator, files: ?[]const []const u8) ![]const u8 {
     const paths = files orelse &config_mod.agents_files_default;
+    const named = files != null;
     var out: std.ArrayList(u8) = .empty;
     for (paths) |path| {
-        const text = readAgentsFile(io, arena, std.Io.Dir.cwd(), path, true) orelse continue;
+        const text = readAgentsFile(io, arena, std.Io.Dir.cwd(), path, named) orelse continue;
         if (text.len == 0) continue;
         try out.appendSlice(arena, "\n\nThe repository's own instructions, from ");
         try out.appendSlice(arena, chat_mod.safeTextAll(arena, path));

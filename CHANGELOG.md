@@ -17,8 +17,8 @@ release, and `microagent update` moves you to it.
 ### Added
 
 - Repository instructions are read at start-up: `AGENTS.md` in the working
-  directory, or whatever `agents_file` names, appended to the system prompt
-  under a line saying which file it came from. An empty `agents_file` turns the
+  directory, or whatever `agents_files` names, appended to the system prompt
+  under a line saying which file it came from. An empty list turns the
   read off, a named path that is not there is named on stderr, the text is at
   most 16 KB, and the file never becomes the whole prompt.
 
@@ -110,6 +110,9 @@ release, and `microagent update` moves you to it.
   into the struct the run reads, so the file did not compile. A key added to
   `config_mod.Config` is now copied in one place, and that place is the only one
   a new key has to be added to.
+- `LoadedConfig` and the constructor that fills it named `agents_files` twice each, the
+  second copy left by a merge of the two commits above, so the program did not compile at
+  all until one of each was dropped.
 
 - A `[[mcp]]` `env` key is held to the same rule as `api_key_env`: a name carrying a `=`, a NUL or a
   control character drops the server, where it reached the child's environment block and took the run

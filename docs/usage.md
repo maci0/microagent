@@ -348,11 +348,17 @@ names other paths, in order.
 agents_files = ["AGENTS.md", "docs/HOUSE.md"]
 ```
 
-A file past 16 KB is followed up to the cap and the note names the size it was cut from; a path that
-is not there is named on stderr, because the operator wrote it and got nothing for it. Unlike a
-skill, whose roots the operator names, this file is repository content the run treats as
-instructions. It is read once, before the first request, so a file changed during the run reaches
-the next run and not this one.
+A path is at most 1024 bytes, and a longer one is reported as a bad value. The default name that is
+not there is silent, because most repositories carry none; a path a list names that is not there is
+named on stderr, because a setting that did nothing is the operator's own spelling. A file that is
+there and cannot be read is named either way.
+
+The text is at most 16 KB. A larger file is followed up to the cap, cut at a character boundary, and
+the note on stderr names the size it was cut from. Unlike a skill, whose roots the operator names,
+this file is repository content the run treats as instructions. It is read once, before the first
+request, so a file changed during the run reaches the next run and not this one, and it never becomes
+the whole prompt. The [threat model](threat-model.md) ranks what a file in a repository under review
+can reach.
 
 ### System prompt addendum
 
@@ -374,29 +380,6 @@ Name the file and the line when you cite code.
 The value is a TOML string: `"..."` with the escapes `\n`, `\t`, `\r`, `\"` and `\\`, a literal
 `'...'` with none, or either kind as a multi-line string. It is at most 16 KB, because it is re-sent
 on every turn; a longer value is reported as a bad value and the prompt stays the built-in one.
-
-### Repository instructions
-
-`agents_file` names the file a run reads the repository's own instructions from, relative to the
-working directory, and appends it to the system prompt under a line saying where it came from.
-
-```toml
-agents_file = "AGENTS.md"   # the default; "" turns the read off
-```
-
-The default is `AGENTS.md`, the name every other coding agent reads, so a repository that carries one
-carries it for this run. A file that is not there is silent, because most repositories have none; a
-path this key names that is not there is named on stderr, because a setting that did nothing is the
-operator's own spelling. A file that is there and cannot be read is named either way.
-
-The text is at most 16 KB. A larger file is followed up to the cap, cut at a character boundary, and
-the note on stderr says what it was cut from. The path is at most 1024 bytes, and a longer one is
-reported as a bad value.
-
-Repository text is not the operator's, so it is never the whole prompt: it rides after
-`system_prompt_extra` and before the skill listing, inside the same system message, under a header
-naming the file it came from. The [threat model](threat-model.md) ranks what a file in a repository
-under review can reach.
 
 ### Skills
 
