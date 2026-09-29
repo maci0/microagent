@@ -61,13 +61,16 @@ It also spent about 1.9x the input tokens. Details, caveats and error bars are i
 
 Prebuilt binaries for `x86_64-linux-musl`, `aarch64-linux-musl`, `x86_64-macos` and `aarch64-macos`
 are on the [releases page](https://github.com/maci0/microagent/releases), each with a `.sha256`
-sidecar:
+sidecar. Pick the target your machine runs:
 
 ```sh
 v=v0.4.0 t=x86_64-linux-musl
 curl -fLO https://github.com/maci0/microagent/releases/download/$v/microagent-$v-$t
 curl -fLO https://github.com/maci0/microagent/releases/download/$v/microagent-$v-$t.sha256
-sha256sum -c microagent-$v-$t.sha256 && install -m 755 microagent-$v-$t ~/.local/bin/microagent
+# GNU coreutils spells it sha256sum, macOS ships shasum; both read the same
+# `<digest>  <name>` line. Which one a host has is probed, not read off its name.
+if command -v sha256sum >/dev/null 2>&1; then sum=sha256sum; else sum="shasum -a 256"; fi
+$sum -c microagent-$v-$t.sha256 && mkdir -p ~/.local/bin && install -m 755 microagent-$v-$t ~/.local/bin/microagent
 ```
 
 `microagent update` replaces an installed binary with the latest release after checking its digest.
