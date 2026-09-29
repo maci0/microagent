@@ -1202,7 +1202,9 @@ test "a session log is readable by its owner alone" {
         try std.testing.expectEqual(@as(u32, 0), log_stat.permissions.toMode() & group_other_mode_bits);
         try std.testing.expect(log_stat.permissions.toMode() & owner_mode_bits == owner_mode_bits);
     }
-    try std.testing.expect(checked > 0);
+    // Exactly the one log `open` wrote: a walk that turned up a second file, a
+    // stray temp beside it, would have had its mode checked and passed anyway.
+    try std.testing.expectEqual(@as(usize, 1), checked);
 }
 
 /// The group and other permission bits, the ones a shared machine reads

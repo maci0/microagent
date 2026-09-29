@@ -1314,11 +1314,16 @@ test "a body split at any byte still joins into the text it was" {
         try std.testing.expect(std.unicode.utf8ValidateSlice(head[0 .. head.len - held]));
         // The character the split fell in can have its lead byte in this chunk
         // and its last bytes in the next, which is the case this is here for: a
-        // three-byte head and a one-byte tail of a four-byte character. A count
-        // that over-held would swallow whole characters, so what goes on the
-        // wire before the tail is put back has to be the text's own prefix and
-        // nothing longer.
-        try std.testing.expect(std.mem.startsWith(u8, text, head[0 .. head.len - held]));
+        // three-byte head and a one-byte tail of a four-byte character.
+        if (held != 0) {
+            // A count that over-held swallowed whole characters, so the byte it
+            // starts on is a continuation byte or the lead byte of a character
+            // it already has all of. Either way the sequence that byte names is
+            // no longer than the bytes held after it, which is the opposite of
+            // what the count means.
+            const owed = std.unicode.utf8ByteSequenceLength(head[head.len - held]) catch 0;
+            try std.testing.expect(owed > held);
+        }
     }
 }
 
