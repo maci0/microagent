@@ -525,11 +525,78 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
     // `error: git diff failed: StreamTooLong` with no lines at all.
     // Empty rather than undefined, for the reason `runSearchTool` gives.
     var got: Partial = .{ .stdout = &.{}, .stderr = &.{}, .dropped = .{ false, false } };
-    const res = runCapped(io, arena, argv, max_tool_output * capture_limit_factor, net.durationMs(boundedMs(tool_timeout_ms, ceiling_ms)), environ_map, &got) catch |err|
+    var res = runCapped(io, arena, argv, max_tool_output * capture_limit_factor, net.durationMs(boundedMs(tool_timeout_ms, ceiling_ms)), environ_map, &got) catch |err|
         return failedOutput(arena, got, try missingProgram(arena, try std.fmt.allocPrint(arena, "git {s}", .{cmd}), git_install, err));
+    if (std.mem.eql(u8, cmd, "blame")) res.stdout = try redactBlameNames(arena, res.stdout);
     const text = if (res.stdout.len > 0) res.stdout else res.stderr;
     if (text.len == 0) return gitRanNothing(arena, cmd, res, limit);
     return gitResult(arena, res, limit);
+}
+
+/// The fields a blame line carries after the author's name: the date, the time,
+/// the zone and the line number. What the name is worth on a line is a commit
+/// hash, and the hash is on the same line.
+const blame_fields_after_name = 4;
+
+/// `git blame`'s output with the author's name taken out of every line.
+///
+/// The name is a person, and a tool result is re-sent to the provider on every
+/// later turn, so blaming one file ships the name of everyone who ever touched
+/// it to whichever host the base url names, once per line, over a run. `show`
+/// asks git for the hash, the date and the subject rather than its `Author:`
+/// and `Commit:` header lines for the same reason, and nothing a coding task
+/// reads a blame for is in the name: the commit hash beside it already answers
+/// "who last touched this line", and the model can `show` that hash.
+///
+/// git spells the line `<hash> (<name> <date> <time> <zone> <number>) <code>`,
+/// so the name is everything from the paren to the fourth space back from its
+/// close. A line without that shape is passed through as git printed it, which
+/// is the same bytes the tool returned before this and not a line this has
+/// mangled to hide something.
+fn redactBlameNames(arena: std.mem.Allocator, text: []const u8) error{OutOfMemory}![]u8 {
+    if (std.mem.indexOf(u8, text, " (") == null) return arena.dupe(u8, text);
+    var out: std.ArrayList(u8) = .empty;
+    var start: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, text, start, '\n')) |nl| {
+        try appendBlameLine(arena, &out, text[start..nl]);
+        try out.append(arena, '\n');
+        start = nl + 1;
+    }
+    try appendBlameLine(arena, &out, text[start..]);
+    return out.toOwnedSlice(arena);
+}
+
+/// One line, with the name cut out of it where there is one to cut. The last
+/// line of a result that does not end in a newline is a line like any other.
+fn appendBlameLine(arena: std.mem.Allocator, out: *std.ArrayList(u8), line: []const u8) error{OutOfMemory}!void {
+    if (blameNameCut(line)) |cut| {
+        try out.appendSlice(arena, line[0..cut.head]);
+        try out.appendSlice(arena, cut.tail);
+    } else {
+        try out.appendSlice(arena, line);
+    }
+}
+
+/// Where a blame line's name begins and what stands in for the rest of it. The
+/// head is the paren, and the tail starts on the date, so what is left of the
+/// span is the `(YYYY-MM-DD HH:MM:SS +ZZZZ n` git opened it for.
+const BlameCut = struct { head: usize, tail: []const u8 };
+
+/// The cut to make in one blame line, or null where the line has no
+/// `<name> <date> <time> <zone> <number>` span to cut a name out of.
+fn blameNameCut(line: []const u8) ?BlameCut {
+    const paren = std.mem.indexOf(u8, line, " (") orelse return null;
+    const close = std.mem.indexOfScalarPos(u8, line, paren + " (".len, ')') orelse return null;
+    // Where there is a byte after the close it is the separator git writes
+    // before the code, so a `)` the name itself carries does not pass as the
+    // close. A line ending at the close has nothing after it, and the name's
+    // fields come after the name, so that close is the real one.
+    if (close + 1 < line.len and line[close + 1] != '\t' and line[close + 1] != ' ') return null;
+    var cut = close;
+    for (0..blame_fields_after_name) |_| {
+        cut = std.mem.lastIndexOfScalar(u8, line[0..cut], ' ') orelse return null;
+    }
+    return .{ .head = paren + " (".len, .tail = line[cut + 1 ..] };
 }
 
 /// What a `git` that printed nothing at all answers with. A call that failed
@@ -616,6 +683,10 @@ fn gitArgv(
         try argv.appendSlice(arena, &.{ "--pretty=tformat:%h %ad %s", "--date=iso-strict" });
         try argv.append(arena, rev orelse "HEAD");
     } else if (std.mem.eql(u8, cmd, "blame")) {
+        // The human format, which names the author of every line. git has no
+        // format that leaves the name out, so `redactBlameNames` takes it back
+        // out of the output for the reason the `show` format above is asked
+        // for rather than left at its default.
         try argv.append(arena, "blame");
         if (rev) |r| try argv.append(arena, r);
     } else {
@@ -4388,6 +4459,99 @@ test "a shown commit does not carry who wrote it" {
             return error.TestUnexpectedResult;
         }
     }
+}
+
+// A blame line names whoever last touched it, once per line, and the tool
+// result goes to the provider on every later turn. The commit hash on the same
+// line is what answers "who last touched this", so the name is cut and the hash,
+// the date and the line itself are not.
+test "a blamed line does not carry the name of whoever wrote it" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "src");
+    try tmp.dir.writeFile(io, .{ .sub_path = "src/main.zig", .data = "pub fn main() void {}\n" });
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+
+    const script = try std.fmt.allocPrint(arena,
+        \\git -C '{s}' init -q && git -C '{s}' config commit.gpgsign false && git -C '{s}' config core.hooksPath '' && git -C '{s}' config user.name 'Rosa Fixture' && git -C '{s}' config user.email rosa@example.invalid && git -C '{s}' add -A && git -C '{s}' commit -qm 'a subject line'
+    , .{ root, root, root, root, root, root, root });
+    const setup = [_][]const u8{ "/bin/sh", "-c", script };
+    const made = try runCapped(io, arena, &setup, 1 << 20, net.durationMs(60_000), null, null);
+    if (made.term != .exited or made.term.exited != 0) {
+        std.debug.print("could not build the fixture repository: {s}\n", .{made.stderr});
+        return error.TestUnexpectedResult;
+    }
+
+    // `git` runs in the process's own working directory and the test cannot
+    // move it, so this is the argv `toolGit` builds pointed at the fixture with
+    // `-C`, and the redaction the tool applies to it: the shape of the line is
+    // git's own, which is the half that has to be real.
+    const res = try runCapped(io, arena, try gitIn(arena, root, "blame", null, "src/main.zig"), 1 << 20, net.durationMs(60_000), null, null);
+    const text = try redactBlameNames(arena, res.stdout);
+    for ([_][]const u8{ "Rosa Fixture", "rosa@example.invalid" }) |identity| {
+        if (std.mem.indexOf(u8, text, identity) != null) {
+            std.debug.print("git blame carried '{s}'\n", .{identity});
+            return error.TestUnexpectedResult;
+        }
+    }
+    // The control: the hash, the line number and the line itself are what a
+    // coding task reads a blame for, and none of them is the name.
+    for ([_][]const u8{ "pub fn main() void {}", " 1)" }) |kept| {
+        if (std.mem.indexOf(u8, text, kept) == null) {
+            std.debug.print("git blame lost '{s}': {s}\n", .{ kept, text });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+// The rewrite is a shape, not a guess: a line git printed in another shape is
+// passed through byte for byte rather than cut at a space that is not there.
+test "a blame line is only rewritten when it has the shape git prints" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const line = "^933c940 (Rosa Fixture 2026-09-30 03:29:32 +0800 1) pub fn main()";
+    try std.testing.expectEqualStrings(
+        "^933c940 (2026-09-30 03:29:32 +0800 1) pub fn main()",
+        try redactBlameNames(arena, line),
+    );
+
+    // No paren, so there is no name to take out.
+    try std.testing.expectEqualStrings(
+        "fatal: no such path",
+        try redactBlameNames(arena, "fatal: no such path"),
+    );
+    // A `)` in the code after the name's fields, where the shape still holds and
+    // the cut is the name alone.
+    try std.testing.expectEqualStrings(
+        "abc123 (2026-09-30 03:29:32 +0800 1) call (x)",
+        try redactBlameNames(arena, "abc123 (Rosa Fixture 2026-09-30 03:29:32 +0800 1) call (x)"),
+    );
+    // A name holding a `)` of its own, with a letter behind it: the close that
+    // comes first is not the one the fields end on, and the line is passed
+    // through rather than cut short of them.
+    try std.testing.expectEqualStrings(
+        "abc123 (Ma(rko)v 2026-09-30 03:29:32 +0800 1) call (x)",
+        try redactBlameNames(arena, "abc123 (Ma(rko)v 2026-09-30 03:29:32 +0800 1) call (x)"),
+    );
+    // Every line of a multi-line result, and the trailing newline, so the
+    // rewrite is not one line of a run's output.
+    try std.testing.expectEqualStrings(
+        "^abc1234 (2026-09-30 03:29:32 +0800 1) one\ndef5678 (2026-09-30 03:29:32 +0800 2) two\n",
+        try redactBlameNames(arena, "^abc1234 (Rosa Fixture 2026-09-30 03:29:32 +0800 1) one\ndef5678 (Someone Else 2026-09-30 03:29:32 +0800 2) two\n"),
+    );
 }
 
 /// The argv `gitArgv` builds, pointed at `root` the way the tool's own

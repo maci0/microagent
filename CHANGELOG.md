@@ -166,12 +166,14 @@ release, and `microagent update` moves you to it.
   was the only surface that offered the long form alone.
 
 - `git show` is asked for the hash, the date and the subject rather than the
-  commit header it prints by default. `Author:` and `Commit:` are a name and an
-  email address each, and a tool result is re-sent to the provider on every
-  later turn, so looking at a handful of commits shipped the contact details of
-  everyone who wrote them to whoever runs the base url, for a patch. `log` is
-  `--oneline` and never printed them; `blame` still prints the name of whoever
-  last touched a line, which is what the tool is for.
+  commit header it prints by default, and the name on a `git blame` line is cut
+  out of it. `Author:` and `Commit:` are a name and an email address each, and a
+  blame line names whoever last touched it, once per line; a tool result is
+  re-sent to the provider on every later turn, so looking at a handful of commits
+  shipped the contact details of everyone who wrote them to whoever runs the base
+  url, for a patch. `log` is `--oneline` and never printed them. The commit hash
+  a blame line already carries is what answers who last touched it, and `show`
+  reads that hash.
 
 - Every one of the four remote tool presets is described to the model with the
   same closing sentence: a call leaves the machine, and nothing belonging to

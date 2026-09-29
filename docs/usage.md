@@ -284,10 +284,11 @@ to whichever host the base url names, and they are re-sent on every later turn. 
 the one that reads what other people wrote, and it is held to what a coding task reads a commit for:
 `log` is `--oneline`, so a subject and a hash and no author; `show` asks git for the hash, the date
 and the subject rather than the `Author:` and `Commit:` header lines, so no name and no email address
-reaches the provider; `blame` prints the name of whoever last touched a line, which is the one field
-left that identifies a person and is what the tool is for. The credential guards under
-[Tools](#tools) keep key material out of a tool result; apart from the blame name, nothing here keeps
-a person's name out of one. The request itself carries no identifier of this run: the body is the
+reaches the provider; `blame` keeps the hash, the date and the line number and has the name of
+whoever last touched the line cut out of every line, since the hash on the same line already answers
+that and `show` will read it. The credential guards under
+[Tools](#tools) keep key material out of a tool result, and the `git` format choices keep a person's
+name out of one. The request itself carries no identifier of this run: the body is the
 model name, the tool schemas, `max_tokens`, the optional `reasoning` block and the conversation, and
 the headers are `Authorization`, `content-type` and `accept`. No user id, no session id, no machine
 name, no account name, no timestamp, no run counter.
@@ -644,7 +645,7 @@ them off ([tool set](#tool-set)).
 | `multi_edit` | a list of `{path, old_string, new_string, replace_all}` replacements, in one file or across files, applied in order on the text the earlier ones left. Every edit is judged as `edit` judges it, and no file is written unless all are accepted, so a refusal names the edit and changes nothing; up to 64 edits per call. A file written part way says how many files had already landed. |
 | `search` | `rg --line-number --no-heading`, optional glob; credentials files excluded. |
 | `ast` | `ast-grep run` for a structural match, or `--rewrite --update-all` to apply one; credentials files excluded, and a `rewrite` refuses a path outside the sandbox roots when enabled. |
-| `git` | read-only `status`, `diff`, `log`, `show`, `blame`, capped at 400 lines; a credentials path is refused, and `show` is asked for the hash, date and subject rather than the author and committer header lines. |
+| `git` | read-only `status`, `diff`, `log`, `show`, `blame`, capped at 400 lines; a credentials path is refused, `show` is asked for the hash, date and subject rather than the author and committer header lines, and the name on a `blame` line is cut out of it. |
 | `todo` | keeps the steps of a long task: the whole list, each `pending`, `doing` or `done`, replaces the last one and is returned. |
 
 A config can add two more kinds: the `skill` tool when a skills root held something, and one
