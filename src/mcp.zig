@@ -382,19 +382,40 @@ pub fn connect(
     entries: []const Entry,
     client_version: []const u8,
 ) Servers {
-    var servers: std.ArrayList(Server) = .empty;
-    for (entries) |entry| {
-        connectOne(io, arena, environ_map, entry, client_version, &servers);
+    // Every server is started before any of them is asked to initialize. What
+    // a handshake mostly waits for is the server's own boot -- `npx` resolving
+    // a package, a node or python interpreter coming up -- and that is the
+    // server's work, not a message the client is waiting on. Started one at a
+    // time, N servers cost the sum of their boot times before the run can send
+    // its first request; started together, they cost the slowest one. The
+    // handshakes then run in order, so the tool list, the notes and which
+    // server answers for a name all keep the order the file wrote.
+    var spawned: std.ArrayList(Server) = .empty;
+    for (entries) |entry| spawnOne(io, arena, environ_map, entry, &spawned);
+
+    var connected: std.ArrayList(Server) = .empty;
+    for (spawned.items) |*server| {
+        if (!handshake(io, arena, server, client_version)) {
+            net.note(io, arena, "microagent: MCP server {s}: {s}; it is skipped\n", .{
+                chat.safeTextAll(arena, server.name),
+                server.last_error,
+            });
+            server.reap(io);
+            continue;
+        }
+        connected.append(arena, server.*) catch server.reap(io);
     }
-    return .{ .items = servers.items };
+    return .{ .items = connected.items };
 }
 
-fn connectOne(
+/// Starts one server and records it, whether or not it will answer: the
+/// handshake runs later, over the whole list, so one server's boot overlaps
+/// the next one's. A server that cannot be spawned is named and left out.
+fn spawnOne(
     io: Io,
     arena: std.mem.Allocator,
     environ_map: *const std.process.Environ.Map,
     entry: Entry,
-    client_version: []const u8,
     out: *std.ArrayList(Server),
 ) void {
     const shown = chat.safeTextAll(arena, entry.name);
@@ -434,11 +455,6 @@ fn connectOne(
         .from_server = child.stdout.?,
         .tools = &.{},
     };
-    if (!handshake(io, arena, &server, client_version)) {
-        net.note(io, arena, "microagent: MCP server {s}: {s}; it is skipped\n", .{ shown, server.last_error });
-        server.reap(io);
-        return;
-    }
     out.append(arena, server) catch server.reap(io);
 }
 
@@ -570,6 +586,54 @@ test "a configured server is connected, listed and called" {
     // An argument payload that is not JSON is refused here, before it reaches
     // the server as a malformed frame.
     try std.testing.expectEqualStrings("error: tool arguments are not valid JSON", try Servers.call(io, arena, resolved, "{", net.durationMs(10_000)));
+}
+
+// A handshake mostly waits for the server's own boot, so the run starts every
+// server before it asks any of them to initialize. This pins that property
+// without a clock: `waiter` refuses to answer until `starter` has run, and the
+// starter is only spawned once the waiter's handshake is over unless the two
+// boots overlap. Sequential connects skip the waiter (its bounded wait runs
+// out and it exits), so the test asserts two servers rather than one.
+test "every server is started before any of them is asked to initialize" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "responder.sh", .data = fake_server });
+    const waiter = try std.fmt.allocPrint(arena,
+        \\i=0
+        \\while [ ! -f "{s}/started" ] && [ "$i" -lt 40 ]; do i=$((i+1)); sleep 0.05; done
+        \\[ -f "{s}/started" ] || exit 1
+        \\exec /bin/sh "{s}/responder.sh"
+        \\
+    , .{ base, base, base });
+    const starter = try std.fmt.allocPrint(arena,
+        \\touch "{s}/started"
+        \\exec /bin/sh "{s}/responder.sh"
+        \\
+    , .{ base, base });
+    try tmp.dir.writeFile(io, .{ .sub_path = "waiter.sh", .data = waiter });
+    try tmp.dir.writeFile(io, .{ .sub_path = "starter.sh", .data = starter });
+
+    const waiter_path = try std.fs.path.join(arena, &.{ base, "waiter.sh" });
+    const starter_path = try std.fs.path.join(arena, &.{ base, "starter.sh" });
+    const entries = [_]Entry{
+        .{ .name = "waiter", .command = "/bin/sh", .args = &.{waiter_path} },
+        .{ .name = "starter", .command = "/bin/sh", .args = &.{starter_path} },
+    };
+    var env: std.process.Environ.Map = .init(arena);
+    var servers = connect(io, arena, &env, &entries, "test");
+    defer servers.shutdown(io);
+
+    try std.testing.expectEqual(@as(usize, 2), servers.items.len);
+    try std.testing.expect(servers.resolve("mcp__waiter__echo") != null);
+    try std.testing.expect(servers.resolve("mcp__starter__echo") != null);
 }
 
 test "a server that cannot be started, or that exits, is skipped" {
