@@ -520,8 +520,8 @@ check:
 	$(MAKE) check-man
 	$(MAKE) fmt-check
 	$(MAKE) lint
-	$(ZIG) build test --summary all
-	$(ZIG) build test-sanitize --summary all
+	$(MAKE) test
+	$(MAKE) test-sanitize
 	$(MAKE) check-binary OPT=ReleaseSmall
 
 # The bench scripts invoke each harness by bare name and skip the ones that are
@@ -1122,7 +1122,15 @@ sha256-of:
 # ci.yml runs this on every push and release.yml runs
 # it on the tag, so a release is never published from a commit that has not
 # passed it.
-check-reproducible:
+#
+# The compiler is checked first, for the reason `musl` names and the three
+# targets beside it already carry: this target compares two builds against each
+# other, so a laptop on a Zig the release does not use compares that compiler's
+# output with itself and every line it prints is true of a binary nothing
+# publishes. The runners install the pinned version through setup-zig, so the
+# check costs them one `zig version`; on a laptop it is the difference between
+# a reproducibility result about the release and one about whatever the host had.
+check-reproducible: zig-version
 	@set -eu; \
 	test -n "$(RELEASE_TARGETS)" || { echo "no RELEASE_TARGETS to check" >&2; exit 1; }; \
 	sum=$$($(SHA256_CMD)); \

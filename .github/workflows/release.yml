@@ -73,11 +73,16 @@ jobs:
       - name: the man page documents the flags this build lists
         run: make check-man
 
+      # `make test` and `make test-sanitize`, the recipes `make check` runs, for
+      # the reason the step above calls `make check-release`: the command and
+      # the environment it is built in are written down once, in the Makefile.
+      # Spelled as `zig build` here, this job compiles the release tree outside
+      # the LC_ALL and TZ every other recipe in the gate exports.
       - name: unit tests pass
-        run: zig build test --summary all
+        run: make test
 
       - name: unit tests pass under the undefined-behavior sanitizer
-        run: zig build test-sanitize --summary all
+        run: make test-sanitize
 
       # The target list and the asset names come from the Makefile, so a
       # rehearsal with `make release-assets TAG=v0.2.0` builds the same files

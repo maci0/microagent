@@ -183,6 +183,14 @@ release, and `microagent update` moves you to it.
 - `make build` compiles again. The `agents_file` the config parses and the flag saying whether the
   path was named were read from a `LoadedConfig` that had no such fields, so every entry point failed
   to compile while the test suite stayed green: no test reaches `main`, so Zig never analyzed it.
+- `make check-reproducible` asks for the pinned Zig first. The target compares two builds with each
+  other, so on a laptop with another compiler it compared that compiler's output with itself and
+  reported every published target reproducible, which says nothing about the bytes a tag publishes.
+  `musl`, `release-assets` and `check-asset-run` already asked; this one did not.
+- The two workflows run the test suite through `make test` and `make test-sanitize` rather than
+  spelling `zig build` themselves. Those four steps were the only builds in the gate that ran outside
+  the Makefile, so they missed the `LC_ALL` and `TZ` it exports for every other recipe, and a change
+  to the command they run reached a laptop and not a runner.
 - `zig build test` compiles the program as well as running the tests, so a break in the entry point
   fails the loop a contributor runs mid-edit rather than the first `make build` after it.
 - `scripts/sbom.sh` reads an asset's digest and the pin count through a variable of its own, so

@@ -96,15 +96,21 @@ jobs:
       - name: the man page documents the flags this build lists
         run: make check-man
 
+      # `make test`, not the `zig build test` it runs, for the reason the lint
+      # job below calls `make lint`: the recipe is the one place the command is
+      # written down, and it is the only place the build gets the LC_ALL and TZ
+      # this file's Makefile exports for every other recipe. Spelled here, a
+      # change to either reaches a laptop and not this runner, and the compiler
+      # reads the job's ambient locale and timezone instead of the pinned pair.
       - name: unit tests pass
-        run: zig build test --summary all
+        run: make test
 
       # The same tests compiled with the undefined-behavior sanitizer. An
       # out-of-bounds load, a misaligned access or an integer overflow is
       # silent in the ReleaseSmall build above and is what the published assets
       # are made of, so the suite is run instrumented as well as plain.
       - name: unit tests pass under the undefined-behavior sanitizer
-        run: zig build test-sanitize --summary all
+        run: make test-sanitize
 
       # `update` is the one subcommand that names the running executable, so
       # both paths in it are worth exercising on a real filesystem. The build
