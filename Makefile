@@ -169,7 +169,15 @@ MUSL_BINARY := integrations/harbor/microagent-$(MUSL_ARCH)-linux-musl
 # is made beside it and renamed: a copy interrupted halfway leaves a truncated
 # binary that the next Harbor run uploads into every container and fails in,
 # which reads as a broken agent rather than a broken build.
-musl:
+# The gate `check` runs is not enough on its own, because the two targets here
+# are the ones that put a binary on a machine: `zig-version` only reaches them
+# through `check`, and both are runnable on their own. A different zig decides
+# the bytes, and nothing downstream can see it: the assets still pass
+# `check-assets`, and a rebuild of them with the same wrong compiler still
+# passes `check-reproducible`, which compares two builds rather than a build
+# against a pin. The dependency is what makes a rehearsal on a laptop the same
+# bytes the tag publishes, which is the claim CONTRIBUTING.md makes.
+musl: zig-version
 	$(ZIG) build -Dtarget=$(MUSL_ARCH)-linux-musl -Doptimize=ReleaseFast
 	cp $(BIN) $(MUSL_BINARY).tmp
 	mv $(MUSL_BINARY).tmp $(MUSL_BINARY)
@@ -746,7 +754,11 @@ check-assets:
 # `dist/microagent-*`, so a second run on a machine that once built another
 # version would upload that version's binaries under this tag, and `checksums`
 # would sidecar them as if they were the ones just built.
-release-assets:
+# version a release is published with, for the reason musl names: this is the
+# target whose output is published, and a compiler other than the pinned one
+# produces an asset no checksum ever described, reproducibly enough to pass
+# check-reproducible.
+release-assets: zig-version
 	rm -rf dist
 	mkdir -p dist
 	@set -eu; for target in $(RELEASE_TARGETS); do \
@@ -813,7 +825,11 @@ checksums:
 # a list that stops naming a file the build has since started reading, and the
 # build it checks is then not the one that ships. The copy lives in a
 # sibling of REPRO_DIR rather than inside it, because build_once empties
-# REPRO_DIR on every call. ci.yml runs this on every push and release.yml runs
+# REPRO_DIR on every call. A working tree with a tracked build input modified
+# or a new one untracked is the case where the copy is not this tree at all, so
+# the comparison is skipped there and says so: the two builds above it still
+# compare the working tree against itself and still mean what they claim.
+# ci.yml runs this on every push and release.yml runs
 # it on the tag, so a release is never published from a commit that has not
 # passed it.
 check-reproducible:
@@ -862,13 +878,19 @@ check-reproducible:
 	    exit 1; \
 	  fi; \
 	  if [ "$$target" = "$(firstword $(RELEASE_TARGETS))" ]; then \
-	    elsewhere=$$(build_from_copy 1900000000 C UTC "$$target"); \
-	    if [ "$$first" != "$$elsewhere" ]; then \
-	      echo "$$target built from another directory differs: $$first != $$elsewhere" >&2; \
-	      echo "the build path reaches the binary, so a checksum published from one checkout describes only that checkout" >&2; \
-	      exit 1; \
+	    if [ -n "$$(git status --porcelain -- src build.zig build.zig.zon)" ]; then \
+	      echo "skipping the build-directory comparison: a tracked build input is modified or deleted in this"; \
+	      echo "working tree, and the copy is made from git, so it would compare two different sources and"; \
+	      echo "report a build path reaching the binary when the source is what differs"; \
+	    else \
+	      elsewhere=$$(build_from_copy 1900000000 C UTC "$$target"); \
+	      if [ "$$first" != "$$elsewhere" ]; then \
+	        echo "$$target built from another directory differs: $$first != $$elsewhere" >&2; \
+	        echo "the build path reaches the binary, so a checksum published from one checkout describes only that checkout" >&2; \
+	        exit 1; \
+	      fi; \
+	      echo "$$target is the same from another build directory"; \
 	    fi; \
-	    echo "$$target is the same from another build directory"; \
 	  fi; \
 	  echo "$$target rebuilds to $$first"; \
 	done; \
