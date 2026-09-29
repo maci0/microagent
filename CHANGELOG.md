@@ -247,6 +247,57 @@ release, and `microagent update` moves you to it.
   naming an individual puts that name in a third party's search log to answer a coding task. Both
   categories still work, so a task that asks for a profile search gets one.
 
+- An `[[mcp]]` `env` key and a bare value are held to the rule `api_key_env`
+  already was. A name carrying a `=`, a NUL or a control character drops the
+  server, where it reached the child's environment block and took the run down.
+  A quoted key is unquoted, so `env = { "LOG" = "debug" }` sets `LOG` and not a
+  variable named `"LOG"`, and a bare value may no longer carry the `=` that
+  separates it from its name. A server configured this way stops being offered
+  to the model, which is a change an existing configuration sees.
+
+- A provider `api_key` holding a control character is refused before the first
+  request, from the flag, the variable and the config file alike. The key goes
+  into an `Authorization` header, and a CR or an LF in it ends that line; a
+  remote MCP server's key was already refused for this and the provider's was
+  not. A key read out of `MICROAGENT_API_KEY` with a stray newline from a
+  `$(...)` capture is named by its source and stops the run at load, where it
+  used to reach the header.
+
+- A provider error frame that arrives before any content is asked again rather
+  than ending the run. The frame used to end it with `StreamError` and a
+  non-zero exit, where nothing was generated and nothing reached stdout; the
+  turn is now re-asked on the same 1 s and 2 s backoff the pre-request stages
+  use, bounded by `--budget`. A frame part way through a stream still ends the
+  run: a completion that may already have been billed is never paid for twice.
+  The same invocation that used to exit non-zero now runs to its answer, so this
+  is a change in what a run returns, not only in how it fails.
+
+- A writable path is resolved before it is compared to the sandbox roots. The
+  check read the path the call named, so a tree carrying `docs -> /etc` passed
+  it while writing outside the root: the lexical path began inside a root, and
+  nothing looked at what the link pointed at. Both halves now have to hold. The
+  deepest ancestor of the path that exists is resolved with every symlink on the
+  way followed and must itself be inside a root, and the lexical path must be
+  too. A `write`, `edit` or `multi_edit` to a file reached through a link out of
+  a root is refused, and so is one whose every path component is missing, which
+  used to be accepted because no ancestor was there to disagree. A repository
+  that keeps a symlinked directory inside its working tree and edits through it
+  sees those calls refused.
+
+- `ast` with `--rewrite` is confined to the sandbox writable roots. It was
+  checked only for a credential name, so on a host where the kernel sandbox did
+  not apply, a rewrite reached any file the process could open. It is refused
+  outside the roots now, as the editing tools already were.
+
+- A Landlock ruleset that the kernel will not grant the read-only `/` rule is
+  no longer reported as enforced. Every other rule is written against that one,
+  and a ruleset that dropped it denied the filesystem accesses outright, so a
+  run confined by one could not read the model, the tool or its own source. The
+  answer is false, which the run says out loud, rather than a silent `true` that
+  had nothing behind it. A writable root the kernel will not grant still leaves
+  the other roots applied, and the run is confined, so a host that refuses one
+  root does not lose the rest.
+
 ### Fixed
 
 - The gate reads a file the contributor has not committed yet. Every linter's
@@ -376,13 +427,6 @@ release, and `microagent update` moves you to it.
   second copy left by a merge of the two commits above, so the program did not compile at
   all until one of each was dropped.
 
-- A `[[mcp]]` `env` key is held to the same rule as `api_key_env`: a name carrying a `=`, a NUL or a
-  control character drops the server, where it reached the child's environment block and took the run
-  down. A quoted key is unquoted, so `env = { "LOG" = "debug" }` sets `LOG` and not a variable named
-  `"LOG"`, and a bare value may no longer carry the `=` that separates it from its name.
-- A key holding a control character is refused before the first request, from every source. The key
-  goes into an `Authorization` header, and a CR or an LF in it ends that line; a remote MCP server's
-  key was already refused for this, and the provider's was not.
 - The harbor adapter's run logs, and the work trees and transcripts under `.scratch/` that
   `bench/run.sh` and `bench/gauntlet.sh` leave, are created at mode 0600 and 0700 rather than at the
   default 0666 less the umask, which on a shared host left a run's whole account of the tree it was
@@ -390,12 +434,6 @@ release, and `microagent update` moves you to it.
 - The usage text said a bare `help` is answered "the way `microagent update help` does". `update`
   stopped taking that word when it shed `--repo` in 0.6.0 and answers to `--help` and `-h` only, so
   the sentence promised an invocation that exits 2. The text now says what the parser does.
-
-- A provider error frame that arrives before any content ends the run with
-  `StreamError`, where nothing was generated and nothing reached stdout, so the
-  turn is asked again on the same 1 s and 2 s backoff the pre-request stages use,
-  bounded by `--budget`. A frame part way through a stream still ends the run: a
-  completion that may already have been billed is never paid for twice.
 
 - A finished answer is no longer reported as an unfinished one. The automatic
   verification turn is asked only when `--max-turns` leaves room for it, so
@@ -435,6 +473,52 @@ release, and `microagent update` moves you to it.
   groups are now published in one table the handler signals, which is what a
   run with both tool calls and servers needs; a group past the table's ceiling
   is stopped rather than started outside it.
+
+- A `git` call that printed nothing at all is no longer answered with `(git X: no
+  output)`. A call that failed had already said what it had to say in its exit
+  status, and the short line reads to the model as a command that ran and found
+  nothing, which is the one answer a failed call must not give. It now comes
+  back with the streams and the exit status beside it, as a `git` that printed
+  something has always done. A call that printed nothing and exited zero is
+  still the short line, and that is the only case it is for.
+
+- A `deny_commands` entry longer than sixteen words is no longer truncated and
+  then matched as a prefix: the truncated form was slid across any command that
+  began with those words, so a long entry denied commands it never named. Such
+  an entry is matched on its verbatim text and on nothing else.
+
+- The credential walk reaches a word that carries a path separator. The guard
+  that skips a word with no `.` in it read the basename, but the guard beside it
+  had already passed over every word holding a separator, so `basename` was
+  never the word being asked about. The dot test runs on the word itself, which
+  is the test that decides.
+
+- A tool that printed nothing is no longer answered `(no output, exit exited 0)`.
+  The status is spelled out from its tag name, so saying `exit` as well read as
+  a typo. It now reads `(no output, exited 0)`.
+
+- A skills root a run could not record is named on stderr, along with the roots
+  after it that are therefore not searched, and so is an MCP preset that was
+  dropped. Both used to disappear without a line, so a run silently searched
+  fewer directories than its configuration asked for.
+
+- `--=x` is reported as an unknown argument. It was read as the flag terminator,
+  so an invocation naming it was parsed as a run with no prompt rather than as
+  the typo it is.
+
+- The newline ending a turn is written after the tail hold-back rather than into
+  the buffer ahead of it, so a stream cut off part way through a multi-byte
+  character no longer loses the newline that ends the answer, and no longer
+  writes the first byte of the truncated character. A failure to write to stdout
+  ends the run with a note instead of being swallowed.
+
+- A tool timeout whose clock failed is no longer reported as `Timeout`, and a
+  tool template left half-written is no longer claimed to be gone when the
+  unlink fails; the file still on disk is named.
+
+- `make sha256-of FILE=<path>` prints the digest of one file, which is what the
+  release workflow needs beside the binary it builds. It is listed in `make help`
+  and `.PHONY` beside the other targets.
 
 ## [0.7.0] - 2026-09-30
 
