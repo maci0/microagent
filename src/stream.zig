@@ -1855,3 +1855,506 @@ test "a response releases the copies it made of a tool call" {
     // The testing allocator reports the copies the response kept past deinit.
     result.deinit(gpa);
 }
+
+// One `data:` payload is the largest untrusted input this binary parses: it
+// arrives over the network, and every byte of it that survives the fold is
+// copied into the next request body or dispatched as a tool call. The stream
+// reader in `main.zig` already feeds whole streams of arbitrary bytes through
+// `FrameSink`; this harness takes one frame at a time, writes it as JSON from
+// fuzzed parts, and asserts what the frame is supposed to add to the response.
+// A fuzzer proves a crash exists, and these assertions are what turn a wrong
+// count or a lost fragment into a failure it can see.
+//
+// `std.testing.fuzz` runs this corpus on every `zig build test`, and through
+// the fuzzer's mutations when the test binary is built in fuzz mode. The
+// corpus entries are whole provider frames, read raw; the parts below are
+// only reached once the binary is built in fuzz mode, which is where the
+// mutations that reach them come from.
+const frame_corpus = [_][]const u8{
+    "",
+    " ",
+    "null",
+    "5",
+    "\"a string\"",
+    "[]",
+    "{",
+    "{}",
+    "{\"choices\":null}",
+    "{\"choices\":[null]}",
+    "{\"usage\":{\"prompt_tokens\":\"nope\"}}",
+    "{\"choices\":[{\"delta\":{\"content\":\"a\\ud800b\"}}]}",
+    "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1e300}]}}]}",
+    "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c\",\"function\":{\"arguments\":\"{\\\"a\\\":\"}}]}}]}",
+    "{\"error\":{\"message\":\"upstream\",\"type\":\"server_error\"}}",
+    "{\"model\":\"m\",\"system_fingerprint\":\"fp\",\"choices\":[{\"finish_reason\":\"stop\"}]}",
+};
+
+test "a fuzzed provider frame is counted the way the payload says it should be" {
+    try std.testing.fuzz({}, fuzzFrame, .{ .corpus = &frame_corpus });
+}
+
+fn fuzzFrame(_: void, smith: *std.testing.Smith) !void {
+    const gpa = std.testing.allocator;
+
+    // The raw half first: whatever the fuzzer's bytes spell, a frame that is
+    // not a JSON object is counted once and nothing else, and a frame that is
+    // one and carries no usage block is never counted. That is the only thing
+    // `unparsable` means, and a counter the reader can move for any other
+    // reason is a count the operator reads as a frame the run could not parse.
+    var raw: [4 * 1024]u8 = undefined;
+    const payload: []const u8 = if (smith.in) |seed| seed else raw[0..smith.slice(&raw)];
+    try checkRawAccounting(gpa, payload);
+
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    // Whole tokens rather than raw bytes, so the frame written below is the
+    // valid UTF-8 the parser is written against; a frame that is not valid
+    // JSON is the raw half's job, and this half exists to reach the fold.
+    var text: [512]u8 = undefined;
+    const content = fuzzText(smith, &text);
+    var arg_buf: [512]u8 = undefined;
+    const args = fuzzText(smith, &arg_buf);
+    var name_buf: [128]u8 = undefined;
+    const name = fuzzText(smith, &name_buf);
+    var id_buf: [128]u8 = undefined;
+    const id = fuzzText(smith, &id_buf);
+    const prompt: u64 = smith.value(u32);
+    const completion: u64 = smith.value(u32);
+    const total: u64 = smith.value(u32);
+
+    const shape: FrameShape = @enumFromInt(smith.index(@typeInfo(FrameShape).@"enum".fields.len));
+    // An index past the cap, and past it by a fuzzed amount, because the count
+    // of what was dropped is read off the first index over the line.
+    const index = if (shape == .over_cap_call) max_tool_calls + smith.index(4) else 0;
+
+    var sink = FrameSink.init(gpa);
+    defer sink.deinit();
+    try sink.feed(try buildFrame(arena, .{
+        .shape = shape,
+        .content = content,
+        .args = args,
+        .name = name,
+        .id = id,
+        .index = index,
+        .prompt = prompt,
+        .completion = completion,
+        .total = total,
+    }));
+
+    // The frame was written as JSON, so the reader had to read it: a count
+    // against a frame the harness built itself is a count of a frame the
+    // provider never sent.
+    try std.testing.expectEqual(@as(usize, 0), sink.unparsable);
+    try std.testing.expectEqual(prompt, sink.result.prompt_tokens);
+    try std.testing.expectEqual(completion, sink.result.completion_tokens);
+    try std.testing.expectEqual(folded_total(total, prompt, completion), sink.result.total_tokens);
+    try std.testing.expectEqual(total != 0, sink.result.total_from_provider);
+
+    // One budget for the whole response, spent on the text and the arguments
+    // together, and every fragment the frame carried is in it.
+    const want_streamed = (if (shape.hasContent()) content.len else 0) +
+        (if (shape.hasCall()) args.len else 0);
+    try std.testing.expectEqual(want_streamed, sink.result.streamed);
+    try std.testing.expect(sink.result.streamed <= max_response_bytes);
+    try std.testing.expectEqualStrings(content, if (shape.hasContent()) sink.result.content.items else "");
+
+    if (shape == .over_cap_call) {
+        // An index past the cap drops the call and says so once, whatever the
+        // fragments that follow it repeat.
+        try std.testing.expectEqual(@as(usize, 0), sink.calls.items.len);
+        try std.testing.expectEqual(@as(usize, 1), sink.result.over_cap);
+        return;
+    }
+    if (!shape.hasCall()) {
+        try std.testing.expectEqual(@as(usize, 0), sink.calls.items.len);
+        return;
+    }
+    try std.testing.expectEqual(@as(usize, 1), sink.calls.items.len);
+    try std.testing.expectEqualStrings(id, sink.calls.items[0].id);
+    try std.testing.expectEqualStrings(name, sink.calls.items[0].name);
+    try std.testing.expectEqualStrings(args, sink.calls.items[0].args.items);
+}
+
+/// What one provider frame carries besides its usage block. The five are the
+/// shapes a real provider sends, and each is a different path through the fold:
+/// two that only add text, two that announce a call, and one whose index is
+/// past the cap and is dropped for it.
+const FrameShape = enum {
+    content,
+    call,
+    over_cap_call,
+    usage_only,
+    content_and_call,
+
+    /// Whether the frame's delta carries answer text.
+    pub fn hasContent(self: FrameShape) bool {
+        return self == .content or self == .content_and_call;
+    }
+
+    /// Whether the frame's delta announces a tool call.
+    pub fn hasCall(self: FrameShape) bool {
+        return self == .call or self == .over_cap_call or self == .content_and_call;
+    }
+};
+
+const FrameParts = struct {
+    shape: FrameShape,
+    content: []const u8,
+    args: []const u8,
+    name: []const u8,
+    id: []const u8,
+    index: usize,
+    prompt: u64,
+    completion: u64,
+    total: u64,
+};
+
+/// One frame written as JSON from the parts, which is the shape `applyFrame`
+/// is written against. Byte mutations of a seed never spell a frame, so the
+/// fold is only reached through this.
+fn buildFrame(arena: std.mem.Allocator, parts: FrameParts) ![]const u8 {
+    var buf = chat_mod.JsonBuf.init(arena);
+    const w = buf.writer();
+    try w.print("{{\"usage\":{{\"prompt_tokens\":{d},\"completion_tokens\":{d},\"total_tokens\":{d}}},\"choices\":[{{\"delta\":{{", .{
+        parts.prompt,
+        parts.completion,
+        parts.total,
+    });
+    if (parts.shape.hasContent()) {
+        try w.writeAll("\"content\":");
+        try chat_mod.writeJsonString(w, parts.content);
+        if (parts.shape.hasCall()) try w.writeAll(",");
+    }
+    if (parts.shape.hasCall()) {
+        try w.writeAll("\"tool_calls\":[{\"index\":");
+        try w.print("{d}", .{parts.index});
+        try w.writeAll(",\"id\":");
+        try chat_mod.writeJsonString(w, parts.id);
+        try w.writeAll(",\"function\":{\"name\":");
+        try chat_mod.writeJsonString(w, parts.name);
+        try w.writeAll(",\"arguments\":");
+        try chat_mod.writeJsonString(w, parts.args);
+        try w.writeAll("}}]"); // the function, the call, and the array of them
+    }
+    try w.writeAll("}}]}"); // the delta, the choice, the array, and the frame
+    return buf.items();
+}
+
+// The fuzzer reaches all five shapes by mutation, and the corpus entries above
+// are read raw, so a shape the harness stopped writing would take a whole
+// `zig build test` to notice. This one walks them in order: each is a frame
+// the fold is asked about, and an assertion that cannot fail is not a test.
+test "every frame shape the harness writes is a frame the fold reads" {
+    const gpa = std.testing.allocator;
+    var i: usize = 0;
+    while (i < @typeInfo(FrameShape).@"enum".fields.len) : (i += 1) {
+        const shape: FrameShape = @enumFromInt(i);
+        var state = std.heap.ArenaAllocator.init(gpa);
+        defer state.deinit();
+        const arena = state.allocator();
+
+        var sink = FrameSink.init(gpa);
+        defer sink.deinit();
+        try sink.feed(try buildFrame(arena, .{
+            .shape = shape,
+            .content = "hi",
+            .args = "{\"command\":\"ls\"}",
+            .name = "bash",
+            .id = "call_1",
+            .index = if (shape == .over_cap_call) max_tool_calls else 0,
+            .prompt = 11,
+            .completion = 22,
+            .total = 33,
+        }));
+        // A frame the harness wrote and the fold could not read would leave
+        // every assertion below vacuous, so the read is asserted first.
+        try std.testing.expectEqual(@as(usize, 0), sink.unparsable);
+        try std.testing.expectEqualStrings(if (shape.hasContent()) "hi" else "", sink.result.content.items);
+        const want_calls: usize = if (shape == .over_cap_call) 0 else if (shape.hasCall()) 1 else 0;
+        try std.testing.expectEqual(want_calls, sink.calls.items.len);
+        if (want_calls == 1) try std.testing.expectEqualStrings("bash", sink.calls.items[0].name);
+        try std.testing.expectEqual(@as(usize, if (shape == .over_cap_call) 1 else 0), sink.result.over_cap);
+    }
+}
+
+/// The total a usage block folds to: the provider's own when it sent one that
+/// is not zero, the sum of the parts otherwise.
+fn folded_total(total: u64, prompt: u64, completion: u64) u64 {
+    return if (total != 0) total else prompt +| completion;
+}
+
+/// Feeds one arbitrary payload and checks the only count a payload the harness
+/// did not write decides on its own: whether it is counted unreadable. The
+/// usage block is left out of the assertion, because a counter in it spelled
+/// as something that is not a number is counted too, and this is the harness
+/// that says so is right.
+fn checkRawAccounting(gpa: std.mem.Allocator, payload: []const u8) !void {
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    const root = std.json.parseFromSliceLeaky(std.json.Value, arena, payload, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => {
+            var sink = FrameSink.init(gpa);
+            defer sink.deinit();
+            try sink.feed(payload);
+            try std.testing.expectEqual(@as(usize, 1), sink.unparsable);
+            return;
+        },
+    };
+
+    var sink = FrameSink.init(gpa);
+    defer sink.deinit();
+    try sink.feed(payload);
+    if (root != .object) {
+        try std.testing.expectEqual(@as(usize, 1), sink.unparsable);
+        return;
+    }
+    if (root.object.get("usage") == null)
+        try std.testing.expectEqual(@as(usize, 0), sink.unparsable);
+    try std.testing.expect(sink.result.streamed <= max_response_bytes);
+    try std.testing.expect(sink.calls.items.len <= max_tool_calls);
+    // One budget, and it is the answer text and every call's arguments
+    // together: a `streamed` the two held separately do not add up to is a
+    // counter that lets a response past the cap.
+    var held: usize = sink.result.content.items.len;
+    for (sink.calls.items) |call| held += call.args.items.len;
+    try std.testing.expectEqual(held, sink.result.streamed);
+}
+
+/// The strings a delta carries, drawn as whole tokens: a token list is the
+/// only way to keep the frame the harness writes valid JSON without writing
+/// the fuzzer's own escape, which would be the code under test judging itself.
+const fuzz_text_tokens = [_][]const u8{
+    "",
+    " ",
+    "\n",
+    "\t",
+    "\x00",
+    "\\",
+    "\"",
+    "{",
+    "}",
+    "hello",
+    "wor",
+    "ld",
+    "é",
+    "日本",
+    "\u{1f680}",
+};
+
+fn fuzzText(smith: *std.testing.Smith, buf: []u8) []const u8 {
+    var len: usize = 0;
+    var count: usize = 0;
+    while (count < 8) : (count += 1) {
+        const token = fuzz_text_tokens[smith.index(fuzz_text_tokens.len)];
+        if (token.len > buf.len - len) break;
+        @memcpy(buf[len..][0..token.len], token);
+        len += token.len;
+    }
+    return buf[0..len];
+}
+
+// A response is a sequence of frames, and the fold carries state across them:
+// one call's arguments arrive as fragments, the answer text is the fragments
+// in order, and the counters are folded rather than replaced. None of that is
+// reachable from a single frame, so this harness feeds several of them into
+// one sink and asserts the result is the concatenation the frames spell. The
+// `main.zig` stream harness reads whole streams of arbitrary bytes and checks
+// the request body they produce; this one is the other half, the arithmetic
+// behind that body.
+//
+// `std.testing.fuzz` runs this corpus on every `zig build test`, and through
+// the fuzzer's mutations when the test binary is built in fuzz mode.
+const sequence_corpus = [_][]const u8{
+    "",
+    "a",
+    "{\"choices\":[{\"delta\":{\"content\":\"a\"}}]}",
+    "{\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2}}",
+    "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\"}}]}}]}",
+    "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"ls\\\"}\"}}]}}]}",
+    "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":7,\"function\":{\"arguments\":\"{}\"}}]}}]}",
+    "not json",
+};
+
+test "a fuzzed frame sequence folds to the concatenation the frames spell" {
+    try std.testing.fuzz({}, fuzzFrameSequence, .{ .corpus = &sequence_corpus });
+}
+
+fn fuzzFrameSequence(_: void, smith: *std.testing.Smith) !void {
+    const gpa = std.testing.allocator;
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    var seed: [512]u8 = undefined;
+    _ = if (smith.in) |s| s else seed[0..smith.slice(&seed)];
+
+    const index = smith.index(max_tool_calls);
+    var id_buf: [128]u8 = undefined;
+    const id = fuzzText(smith, &id_buf);
+    var name_buf: [128]u8 = undefined;
+    const name = fuzzText(smith, &name_buf);
+
+    // What the frames are expected to add, grown beside the frames that add
+    // it. The harness cannot check the concatenation any other way: the frames
+    // are written here and the fold runs inside the module.
+    var want_text: std.ArrayList(u8) = .empty;
+    defer want_text.deinit(gpa);
+    var want_args: std.ArrayList(u8) = .empty;
+    defer want_args.deinit(gpa);
+    var want_calls: usize = 0;
+    var want_prompt: u64 = 0;
+    var want_completion: u64 = 0;
+    var want_total: u64 = 0;
+    var want_total_from_provider = false;
+    var want_unparsable: usize = 0;
+
+    var sink = FrameSink.init(gpa);
+    defer sink.deinit();
+
+    // The frame every sequence opens with: a call announced at an index the
+    // fuzzer chose, so the list grows to that index and the fragments that
+    // follow have a slot to land in.
+    try sink.feed(try frameWithCall(arena, index, id, name, ""));
+    want_calls = index + 1;
+
+    const count = 1 + smith.index(4);
+    var step: usize = 0;
+    while (step < count) : (step += 1) {
+        switch (smith.index(4)) {
+            0 => {
+                var buf: [512]u8 = undefined;
+                const text = fuzzText(smith, &buf);
+                try want_text.appendSlice(gpa, text);
+                try sink.feed(try frameWithContent(arena, text));
+            },
+            1 => {
+                var buf: [512]u8 = undefined;
+                const piece = fuzzText(smith, &buf);
+                try want_args.appendSlice(gpa, piece);
+                try sink.feed(try frameWithCall(arena, index, null, null, piece));
+            },
+            2 => {
+                const prompt: u64 = smith.value(u32);
+                const completion: u64 = smith.value(u32);
+                const total: u64 = smith.value(u32);
+                want_prompt = prompt;
+                want_completion = completion;
+                want_total = folded_total(total, prompt, completion);
+                want_total_from_provider = total != 0;
+                try sink.feed(try frameWithUsage(arena, prompt, completion, total));
+            },
+            else => {
+                // A frame of raw bytes, so the sequence carries the frames a
+                // provider sends and the ones it never should. Only the
+                // unreadable ones are fed: a readable frame would carry
+                // content, a call or a usage block of its own, and the
+                // expectations above are the sum of the frames written here
+                // beside them. What a readable arbitrary frame folds to is
+                // `fuzzFrame`'s business, and it is checked there.
+                var buf: [1024]u8 = undefined;
+                const raw: []const u8 = if (smith.in) |s| s else buf[0..smith.slice(&buf)];
+                const root = std.json.parseFromSliceLeaky(std.json.Value, arena, raw, .{}) catch null;
+                if (root == null or root.? != .object) {
+                    try sink.feed(raw);
+                    want_unparsable += 1;
+                }
+            },
+        }
+    }
+
+    try std.testing.expectEqual(want_calls, sink.calls.items.len);
+    try std.testing.expectEqualStrings(id, sink.calls.items[index].id);
+    try std.testing.expectEqualStrings(name, sink.calls.items[index].name);
+    try std.testing.expectEqualStrings(want_args.items, sink.calls.items[index].args.items);
+    try std.testing.expectEqualStrings(want_text.items, sink.result.content.items);
+    try std.testing.expectEqual(want_prompt, sink.result.prompt_tokens);
+    try std.testing.expectEqual(want_completion, sink.result.completion_tokens);
+    try std.testing.expectEqual(want_total, sink.result.total_tokens);
+    try std.testing.expectEqual(want_total_from_provider, sink.result.total_from_provider);
+    // A frame that is not a JSON object is counted once and no more, whatever
+    // else the sequence did.
+    try std.testing.expectEqual(want_unparsable, sink.unparsable);
+    try std.testing.expect(sink.result.streamed <= max_response_bytes);
+    try std.testing.expectEqual(sink.result.content.items.len + want_args.items.len, sink.result.streamed);
+}
+
+// The corpus entries above are one frame each, and the fuzzer is what walks
+// the sequence, so every assertion in `fuzzFrameSequence` would go unchecked
+// on a run that never fuzzed. This is the sequence the harness builds, spelled
+// out: an announced call, a content frame, an argument fragment, a usage
+// trailer and a frame that is not JSON at all, which is every step it can
+// take. The same five expectations, from the same builders.
+test "a sequence of frames folds to what the five of them spell between them" {
+    const gpa = std.testing.allocator;
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    var sink = FrameSink.init(gpa);
+    defer sink.deinit();
+    try sink.feed(try frameWithCall(arena, 2, "call_1", "bash", ""));
+    try sink.feed(try frameWithContent(arena, "Hello"));
+    try sink.feed(try frameWithCall(arena, 2, null, null, "{\"comm"));
+    try sink.feed(try frameWithUsage(arena, 11, 22, 0));
+    try sink.feed("not json");
+
+    // The index grew the list to the slot the call was announced at, and the
+    // two slots before it are the walk's placeholders.
+    try std.testing.expectEqual(@as(usize, 3), sink.calls.items.len);
+    try std.testing.expectEqualStrings("call_1", sink.calls.items[2].id);
+    try std.testing.expectEqualStrings("bash", sink.calls.items[2].name);
+    try std.testing.expectEqualStrings("{\"comm", sink.calls.items[2].args.items);
+    try std.testing.expectEqualStrings("Hello", sink.result.content.items);
+    // No total of the provider's, so the sum of the parts stands in for it.
+    try std.testing.expectEqual(@as(u64, 33), sink.result.total_tokens);
+    try std.testing.expect(!sink.result.total_from_provider);
+    try std.testing.expectEqual(@as(usize, 1), sink.unparsable);
+    try std.testing.expectEqual("Hello".len + "{\"comm".len, sink.result.streamed);
+}
+
+fn frameWithCall(arena: std.mem.Allocator, index: usize, id: ?[]const u8, name: ?[]const u8, args: []const u8) ![]const u8 {
+    var buf = chat_mod.JsonBuf.init(arena);
+    const w = buf.writer();
+    try w.print("{{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":{d}", .{index});
+    if (id) |v| {
+        try w.writeAll(",\"id\":");
+        try chat_mod.writeJsonString(w, v);
+    }
+    try w.writeAll(",\"function\":{");
+    var member = false;
+    if (name) |v| {
+        try w.writeAll("\"name\":");
+        try chat_mod.writeJsonString(w, v);
+        member = true;
+    }
+    if (member) try w.writeAll(",");
+    try w.writeAll("\"arguments\":");
+    try chat_mod.writeJsonString(w, args);
+    try w.writeAll("}}]}}]}");
+    return buf.items();
+}
+
+fn frameWithContent(arena: std.mem.Allocator, text: []const u8) ![]const u8 {
+    var buf = chat_mod.JsonBuf.init(arena);
+    const w = buf.writer();
+    try w.writeAll("{\"choices\":[{\"delta\":{\"content\":");
+    try chat_mod.writeJsonString(w, text);
+    try w.writeAll("}}]}");
+    return buf.items();
+}
+
+fn frameWithUsage(arena: std.mem.Allocator, prompt: u64, completion: u64, total: u64) ![]const u8 {
+    var buf = chat_mod.JsonBuf.init(arena);
+    const w = buf.writer();
+    try w.print("{{\"usage\":{{\"prompt_tokens\":{d},\"completion_tokens\":{d},\"total_tokens\":{d}}},\"choices\":[]}}", .{
+        prompt,
+        completion,
+        total,
+    });
+    return buf.items();
+}
