@@ -2042,8 +2042,18 @@ fn writeDefaultConfig(io: Io, arena: std.mem.Allocator, source: ConfigSource) vo
         // and reads a half-written template as the operator's own settings.
         // The defaults are not what it would then get. A template is a
         // convenience, so a failure to write one costs the run nothing: the
-        // partial file is taken back down and the note says why.
-        std.Io.Dir.cwd().deleteFile(io, path) catch {};
+        // partial file is taken back down, and when the unlink itself fails
+        // the note says the file is still there rather than claiming a file
+        // is not. A filesystem that refuses the write and then the unlink
+        // (a read-only mount, an immutable attribute) is exactly the case
+        // where the next run would read the prefix as the operator's own
+        // settings, and a note saying nothing was left is what hides it.
+        std.Io.Dir.cwd().deleteFile(io, path) catch |unlink_err| {
+            net.note(io, arena, "microagent: config {s}: the template could not be written ({s}) and the half-written file could not be removed ({s}); the built-in defaults are in force, and the next run reads the part that was written until it is removed\n", .{
+                shown, @errorName(err), @errorName(unlink_err),
+            });
+            return;
+        };
         net.note(io, arena, "microagent: config {s}: the template could not be written ({s}); the built-in defaults are in force and no file was left\n", .{ shown, @errorName(err) });
         return;
     }

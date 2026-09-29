@@ -2152,6 +2152,12 @@ fn waitBounded(
         /// that exited on its own has a status worth reporting, and a child the
         /// deadline killed has the signal this program sent it.
         timed_out: std.atomic.Value(bool) = .init(false),
+        /// Set when the poll the deadline is checked on could not be taken. The
+        /// group is signalled either way, so the call stays bounded, but the
+        /// deadline had not passed and reporting the kill as `Timeout` names a
+        /// cause the operator cannot act on: the budget was still there, and
+        /// what ended the command was a clock that would not sleep.
+        poll_err: ?anyerror = null,
 
         fn waitForExit(self: *@This()) void {
             if (self.child.wait(self.io)) |t| {
@@ -2163,6 +2169,7 @@ fn waitBounded(
         }
 
         fn signalAtDeadline(self: *@This()) void {
+            var expired = true;
             while (!self.exited.load(.acquire)) {
                 const left = self.deadline.toDurationFromNow(self.io) orelse return;
                 if (left.raw.nanoseconds <= 0) break;
@@ -2177,7 +2184,19 @@ fn waitBounded(
                 // command that closed its pipes and slept would have held the
                 // whole run past its tool timeout, and the reap in `runCapped`
                 // never fired because this call had not returned.
-                slice.sleep(self.io) catch break;
+                //
+                // The two ways out of the loop are not the same failure, so
+                // only the elapsed one sets `timed_out`. Signalling is right
+                // either way, since the wait is what has to be bounded, but a
+                // sleep that failed says the budget was spent early rather
+                // than that a command ran past it, and reporting the second
+                // for the first sends an operator to look at a command that
+                // was killed with time left on the clock.
+                slice.sleep(self.io) catch |err| {
+                    expired = false;
+                    self.poll_err = err;
+                    break;
+                };
             }
             // A child that already exited needs no signal, and one that has
             // not is what this task exists to bound. The group goes rather than
@@ -2185,7 +2204,7 @@ fn waitBounded(
             // backgrounded the work it was asked to do, and that work is what
             // the timeout was for.
             if (self.exited.load(.acquire)) return;
-            self.timed_out.store(true, .release);
+            if (expired) self.timed_out.store(true, .release);
             signalGroup(self.pgid);
         }
     };
@@ -2203,8 +2222,21 @@ fn waitBounded(
         else => |e| return e,
     };
     group.concurrent(io, Waiting.signalAtDeadline, .{&waiting}) catch |err| switch (err) {
-        error.ConcurrencyUnavailable => return error.NoConcurrency,
-        else => |e| return e,
+        // The wait task is already running and is blocked in `child.wait`,
+        // which nothing cancels it out of, so returning from here hands the
+        // `group.cancel` below a task that ends when the child chooses to.
+        // That is the unbounded wait the deadline exists to remove, arriving
+        // on the path meant to remove it, and the reap in `runCapped` never
+        // runs because this call has not returned. The one thing the task
+        // that could not start would have done is done inline before the
+        // return, so the join is bounded by the signal rather than by the
+        // child. The failure still reaches the caller: the command did not
+        // run to its own end, and saying so beats reporting a signal the
+        // deadline never sent.
+        error.ConcurrencyUnavailable => {
+            signalGroup(pgid);
+            return error.NoConcurrency;
+        },
     };
     // The join is allowed to be cancelled, and the two answers the tasks set
     // are asked for first: a task that did run has something to say, and a
@@ -2215,6 +2247,11 @@ fn waitBounded(
         join_err = err;
     };
     if (waiting.wait_err) |err| return err;
+    // A poll that could not sleep has already signedalled the group, and the
+    // command was killed before its budget was spent. That is the reason the
+    // call failed, so it is asked before `timed_out`, which the same kill
+    // leaves false.
+    if (waiting.poll_err) |err| return err;
     // The kill is this program's own, so it is reported as the timeout it is
     // rather than as a signal the command did not choose for itself.
     if (waiting.timed_out.load(.acquire)) return error.Timeout;
