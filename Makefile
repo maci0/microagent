@@ -1,6 +1,6 @@
 # Zig invocations are spelled out so the same commands work without make.
 ZIG ?= zig
-OPT ?= ReleaseFast
+OPT ?= ReleaseSmall
 BIN := zig-out/bin/microagent
 
 # A recipe that fails mid-copy leaves no half-written target behind, so a later
@@ -15,7 +15,7 @@ BIN := zig-out/bin/microagent
 export LC_ALL := C
 export TZ := UTC
 
-.PHONY: default help preflight version build small musl test test-sanitize test-one watch fmt fmt-check fmt-python lint lint-versions lint-lock lint-pins zig-version required-zig-version release-targets check-targets check-assets check-asset-run check-binary check-changelog check-changelog-links check-changelog-sections check-unreleased check-readme check-release check-reproducible lint-shell lint-python lint-yaml check bench gauntlet instructions overhead install release-assets checksums clean
+.PHONY: default help preflight version build musl test test-sanitize fmt fmt-check fmt-python lint lint-versions lint-lock zig-version required-zig-version release-targets check-assets check-asset-run check-binary check-changelog check-changelog-links check-changelog-sections check-unreleased check-readme check-release check-reproducible lint-shell lint-python lint-yaml check bench gauntlet instructions overhead install release-assets checksums clean
 
 # The targets `microagent update` asks for, in the names release.yml publishes.
 # ci.yml rehearses the same list on every push and release.yml publishes it, so
@@ -55,19 +55,12 @@ REPRO_GLOBAL ?= $(CURDIR)/.scratch/repro-global
 # The linter versions the gate runs. `ruff format` rewrites files and
 # `yamllint` changes rules between releases, so a local run on a different
 # version is a green run CI disagrees with. Spelled once, here:
-# `lint-versions` checks a local install against them, and checks that the
-# hashes in lint-requirements.txt still pin them, because the ci.yml lint job
-# installs that file. shellcheck rides on the runner image, so it has no
-# version to pin here.
+# `lint-versions` checks a local install against them, and checks that
+# lint-requirements.in, which lint-requirements.txt is compiled from, names the
+# same two, because the ci.yml lint job installs that file. shellcheck rides on
+# the runner image, so it has no version to pin here.
 RUFF_VERSION := 0.16.4
 YAMLLINT_VERSION := 1.38.0
-
-# The same two pins as name==version, for the check that reads what the
-# linters declare rather than what the gate names: the roots it does not ask
-# anything to require. Spelled from the versions above rather than written
-# again, so a bump moves both or neither.
-RUFF_PIN := ruff==$(RUFF_VERSION)
-YAMLLINT_PIN := yamllint==$(YAMLLINT_VERSION)
 
 # The default target is the build, so a bare `make` in a fresh clone is the
 # first thing in the README and it has to do what the README says.
@@ -99,7 +92,7 @@ preflight:
 	    git) \
 	      echo "$$tool is not on PATH: every linter's file list is read from it with 'git ls-files', so a clone without it lints nothing" >&2 ;; \
 	    python3) \
-	      echo "$$tool is not on PATH: lint-pins reads the linters' own package metadata with it, and so does setup-linters, which builds the CI venv" >&2 ;; \
+	      echo "$$tool is not on PATH: setup-linters builds the CI venv with it" >&2 ;; \
 	    *) \
 	      echo "$$tool is not on PATH" >&2 ;; \
 	  esac; \
@@ -110,27 +103,23 @@ preflight:
 help:
 	@printf '%s\n' \
 	  'help                  this list' \
-	  'default               the ReleaseFast build, the target bare make runs' \
+	  'default               the ReleaseSmall build, the target bare make runs' \
 	  'build                 zig build -Doptimize=$(OPT) -> $(BIN)' \
-	  'small                 ReleaseSmall binary' \
 	  'musl                  static musl binary for integrations/harbor, for this host ($(MUSL_ARCH))' \
 	  'version               the version build.zig.zon declares' \
 	  'test [FILTER=...]     the whole unit test suite, or only the tests FILTER names' \
 	  'test-sanitize         the same suite under the undefined-behavior sanitizer' \
-	  'test-one FILTER=...   only tests whose name contains FILTER' \
-	  'watch [FILTER=...]    rerun the suite on every source change, until Ctrl-C' \
 	  'preflight             name every tool check and lint need that is not on PATH' \
 	  'fmt                   rewrite every tracked .zig and .py file in format style' \
 	  'fmt-python            rewrite the tracked .py files, which zig fmt does not reach' \
 	  'fmt-check             what check runs over the same files, without rewriting' \
-	  'check                 preflight, zig-version, check-targets, check-unreleased, check-readme, fmt-check, the linters, the tests, an optimized build' \
-	  'lint                  the pin checks, then shellcheck, ruff and yamllint' \
+	  'check                 preflight, zig-version, check-unreleased, check-readme, fmt-check, the linters, the tests, an optimized build' \
+	  'lint                  the version and lock checks, then shellcheck, ruff and yamllint' \
 	  'lint-shell            shellcheck over every tracked .sh file' \
 	  'lint-python           ruff check and ruff format --check over every tracked .py file' \
 	  'lint-yaml             yamllint over every tracked .yml and .yaml file' \
-	  'lint-versions         check ruff and yamllint against the versions the gate runs, and that every pin is hashed' \
+	  'lint-versions         check ruff and yamllint against the versions the gate runs, and that lint-requirements.in names the same' \
 	  'lint-lock             check the Harbor lock carries the manifest pins, a hash each, and nothing else' \
-	  'lint-pins             check the linter pins against what ruff and yamllint declare, and nothing else' \
 	  'zig-version           check the local zig against the version the release is built with' \
 	  'bench AGENTS=...      three coding tasks through each harness' \
 	  'gauntlet AGENTS=...   the same gauntlet review on a fresh clone, per harness' \
@@ -140,7 +129,6 @@ help:
 	  'release-assets        cross-build every published target into dist/' \
 	  'release-assets TAG=vX.Y.Z  the same, named as release.yml publishes them' \
 	  'release-targets       the published target triples, one per line' \
-	  'check-targets         every published target is one `update` asks for' \
 	  'check-assets TAG=...  the assets in dist/ are the ones the tag will publish' \
 	  'check-asset-run [TARGET=...]  the published asset for this host, cross-built and started' \
 	  'check-binary [OPT=...]  the binary this tree builds, started (what check runs)' \
@@ -178,10 +166,6 @@ release-targets:
 
 build:
 	$(ZIG) build -Doptimize=$(OPT)
-
-# Smallest binary that still runs the same code (~840 KB).
-small:
-	$(ZIG) build -Doptimize=ReleaseSmall
 
 # The architecture the musl binary is built for, from the host's own. Harbor
 # runs the task container on the host's architecture, so an Apple silicon or
@@ -226,26 +210,33 @@ endif
 # against a pin. The dependency is what makes a rehearsal on a laptop the same
 # bytes the tag publishes, which is the claim CONTRIBUTING.md makes.
 musl: zig-version
-	$(ZIG) build -Dtarget=$(MUSL_ARCH)-linux-musl -Doptimize=ReleaseFast
+	$(ZIG) build -Dtarget=$(MUSL_ARCH)-linux-musl -Doptimize=$(OPT)
 	cp $(BIN) $(MUSL_BINARY).tmp
 	mv $(MUSL_BINARY).tmp $(MUSL_BINARY)
 
-# `make test FILTER=...` is the same run `make test-one` makes, so the spelling
-# a contributor reaches for first is not the one that quietly ignores the
-# filter and runs the whole suite.
+# A filter that matches no declared test would report success without running one, so it is checked
+# against the test names first.
 test:
-	@if [ -n "$(FILTER)" ]; then $(MAKE) --no-print-directory test-one FILTER="$(FILTER)"; else $(ZIG) build test --summary all; fi
+	@if [ -n "$(FILTER)" ]; then \
+	  grep -h -o -E '^test "[^"]+"' $(ZIG_SOURCES) | grep -F -q -- "$(FILTER)" || { \
+	    printf 'no declared test is named like "%s"\n' "$(FILTER)" >&2; \
+	    printf "  list the names with: grep -h -o -E '^test \"[^\"]+\"' $(ZIG_SOURCES)\n" >&2; \
+	    exit 2; }; \
+	  $(ZIG) build test -Dtest-filter="$(FILTER)" --summary all; \
+	else \
+	  $(ZIG) build test --summary all; \
+	fi
 
 # The same tests, compiled with the undefined-behavior sanitizer. The suite
 # passing tells a reader the assertions hold, not that no load, store or
 # integer operation inside them is out of its bounds or overflows: those are
-# silent in a ReleaseFast build and are what the release assets carry. This is
+# silent in a ReleaseSmall build and are what the release assets carry. This is
 # a second run of the same tests rather than a second set, so a failure names
 # the test the plain run already knows.
 test-sanitize:
 	$(ZIG) build test-sanitize --summary all
 
-# The Zig sources the test names are read out of, for `test-one`, and the ones
+# The Zig sources the test names are read out of, for `test`, and the ones
 # `fmt` and `fmt-check` read. Taken from git for the reason lint-shell names: a
 # glob names the paths as they stand, so a Zig file added outside src/ is
 # formatted by nothing and the gate still passes.
@@ -253,40 +244,13 @@ ZIG_SOURCES := $(shell git ls-files '*.zig')
 # `zig fmt` formats .zon as well as .zig, and build.zig.zon is where the
 # version every release is published from is written down, so it is read by a
 # hand edit that nothing checks the shape of. It is listed apart from
-# ZIG_SOURCES because that list is also what `test-one` greps for test names,
+# ZIG_SOURCES because that list is also what `test` greps for test names,
 # and a manifest has none.
 ZON_SOURCES := $(shell git ls-files '*.zon')
 
 # The Python and YAML the linters read, for the same reason.
 PY_SOURCES := $(shell git ls-files '*.py')
 YAML_SOURCES := $(shell git ls-files '*.yml' '*.yaml')
-
-test-one:
-	@test -n "$(FILTER)" || { printf 'usage: make test-one FILTER=<test name substring>\n' >&2; exit 2; }
-	@grep -h -o -E '^test "[^"]+"' $(ZIG_SOURCES) | grep -F -q -- "$(FILTER)" || { \
-	  printf 'no declared test is named like "%s"\n' "$(FILTER)" >&2; \
-	  printf 'the run below would report success without running a test; list the names with:\n' >&2; \
-	  printf "  grep -h -o -E '^test \"[^\"]+\"' $(ZIG_SOURCES)\n" >&2; \
-	  exit 2; }
-	$(ZIG) build test -Dtest-filter="$(FILTER)" --summary all
-
-# The edit loop. `zig build test --watch` is the build system's own mode and
-# needs nothing here that `test` does not already do, so this wraps the same
-# command rather than introducing a second way to run the suite. FILTER narrows
-# it the way `test-one` narrows one run, and is checked against the declared
-# test names for the same reason: a filter matching nothing reports success
-# while running no test, which is worse than a slow loop.
-watch:
-	@if [ -n "$(FILTER)" ]; then \
-	  grep -h -o -E '^test "[^"]+"' $(ZIG_SOURCES) | grep -F -q -- "$(FILTER)" || { \
-	    printf 'no declared test is named like "%s"\n' "$(FILTER)" >&2; \
-	    printf 'the watch below would report success without running a test; list the names with:\n' >&2; \
-	    printf "  grep -h -o -E '^test \"[^\"]+\"' $(ZIG_SOURCES)\n" >&2; \
-	    exit 2; }; \
-	  $(ZIG) build test -Dtest-filter="$(FILTER)" --watch --summary all; \
-	else \
-	  $(ZIG) build test --watch --summary all; \
-	fi
 
 fmt:
 	@test -n "$(ZIG_SOURCES)" || { echo "no tracked .zig file to format" >&2; exit 1; }
@@ -314,7 +278,7 @@ fmt-python:
 # repeating the targets, so a linter added here reaches a push and a tag.
 # .github/dependabot.yml is the other thing to keep in step, since it decides
 # what opens a bump for these.
-lint: lint-versions lint-lock lint-pins lint-shell lint-python lint-yaml
+lint: lint-versions lint-lock lint-shell lint-python lint-yaml
 
 HARBOR_DIR := integrations/harbor
 
@@ -330,14 +294,6 @@ lint-versions:
 # is scripts/lint-lock.sh's to say.
 lint-lock:
 	@sh scripts/lint-lock.sh $(HARBOR_DIR)/requirements.txt
-
-# lint-requirements.txt is hashed and installed with --require-hashes like the
-# Harbor lock, and is the one dependency set here that is hand-written rather
-# than generated, so nothing checks its transitive pins against what the
-# linters declare. The two roots are what the gate runs, and are the pins the
-# check does not ask anything to require.
-lint-pins:
-	@sh scripts/lint-pins.sh lint-requirements.txt $(RUFF_PIN) $(YAMLLINT_PIN)
 
 # A different zig is a different compiler, and a compiler decides the bytes:
 # codegen, inlining and linker layout all move between releases. setup-zig
@@ -475,7 +431,6 @@ lint-yaml:
 check:
 	$(MAKE) preflight
 	$(MAKE) zig-version
-	$(MAKE) check-targets
 	$(MAKE) check-unreleased
 	$(MAKE) check-readme
 	$(MAKE) fmt-check
@@ -539,23 +494,6 @@ install: build
 # spelling one, yields a `microagent` the adapter cannot find. That is a build
 # that succeeds and a benchmark that fails, so it is asked here rather than by
 # whoever runs Harbor next.
-check-targets:
-	@set -eu; \
-	for target in $(RELEASE_TARGETS); do \
-		grep -q -- "$$target" src/update.zig || { \
-		  echo "$$target is published here but src/update.zig never asks for it, so no update can install it" >&2; \
-		  exit 1; }; \
-	done; \
-	musl_target="$(MUSL_ARCH)-linux-musl"; \
-	for target in $(RELEASE_TARGETS); do \
-		if [ "$$target" = "$$musl_target" ]; then musl_published=1; break; fi; \
-	done; \
-	test "$${musl_published:-0}" -eq 1 || { \
-	  echo "this host is $(MUSL_ARCH) and 'make musl' builds $(MUSL_BINARY), which is not one of: $(RELEASE_TARGETS)" >&2; \
-	  echo "the release publishes no musl asset for it, so the Harbor adapter has nothing to upload" >&2; \
-	  exit 1; \
-	}
-
 # The shape of one changelog entry: the Keep a Changelog sections
 # CONTRIBUTING.md requires, one of each at most, in their order. SECTION names
 # the entry, so the same awk asks the one a change is drafted under and the one

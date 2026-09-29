@@ -14,7 +14,8 @@ ceiling is a watchdog where `timeout` is not installed.
 ## Contents
 
 - [Harness costs](#harness-costs)
-  - [Size](#size)
+  - [Memory footprint](#memory-footprint)
+  - [Binary size and source](#binary-size-and-source)
   - [Startup](#startup)
   - [Un-cacheable request bytes](#un-cacheable-request-bytes)
   - [Harness prompt overhead](#harness-prompt-overhead)
@@ -26,6 +27,9 @@ ceiling is a watchdog where `timeout` is not installed.
   - [Task benchmark](#task-benchmark)
   - [gauntlet loop](#gauntlet-loop)
   - [Usefulness](#usefulness)
+  - [Terminal-Bench 4.0](#terminal-bench-40)
+  - [Aider polyglot](#aider-polyglot)
+  - [DeepSWE](#deepswe)
   - [Terminal-Bench 2](#terminal-bench-2)
   - [SWE-bench Verified](#swe-bench-verified)
   - [Head to head with opencode](#head-to-head-with-opencode)
@@ -36,7 +40,54 @@ ceiling is a watchdog where `timeout` is not installed.
 
 ## Harness costs
 
-### Size
+### Memory footprint
+
+The number that matters for an agent that runs unattended is how much memory it holds while it
+runs, because that is what every copy left running costs, and it is the one figure that neither a
+startup time nor a binary size carries. It is measured with [bench/maxrss.py](../bench/maxrss.py),
+which starts the command under ptrace and reads the process's `VmHWM` at the last moment it exists
+(`PTRACE_O_TRACEEXIT`), so a command that lives a few hundred microseconds is not missed. Median of
+five runs, x86_64 Linux, one session on 2026-09-29. The machine was busy with a benchmark job, which
+moves timings and barely moves resident memory: the five runs behind each `--version` row below differ by under 12%.
+
+`--version`, peak resident memory:
+
+| harness | peak resident |
+| --- | --- |
+| **microagent, this tree (ReleaseSmall)** | **0.6 MB** |
+| grok 1.0.41 | 24.7 MB |
+| codex-cli 0.158.0 | 27.7 MB |
+| claude 2.1.284 | 36.7 MB |
+| crush v0.96.1 | 57.6 MB |
+| opencode 1.18.31 | 198 MB |
+| kimi 2.1.1 | 326 MB |
+
+That is 38 times less than the smallest of the others and 500 times less than the largest, at
+start. `--version` is all that was measured for them: a real run adds each harness's own working
+set, and only microagent's is measured below.
+
+microagent's own footprint, by build mode and by what the run does, in kB. A stub provider on
+loopback answers the frames runs (`bench/stub_provider.py`); the second column is a run whose
+connection is refused, which is everything up to the first request:
+
+| build | `--version` | refused | 1 frame | 5,000 frames | 50,000 frames |
+| --- | --- | --- | --- | --- | --- |
+| **ReleaseSmall** | **540** | **764** | **768** | **868** | **1,300** |
+| ReleaseFast | 788 | 1,244 | 1,300 | 1,320 | 1,812 |
+| ReleaseSafe | 1,120 | 2,156 | 1,884 | 1,884 | 3,164 |
+
+`ReleaseSmall` is smallest in every column, 28% to 41% below `ReleaseFast`, and under half of
+`ReleaseSafe`'s. It is the build the release assets, `make` and `make musl` produce, so the numbers
+here are the numbers of what ships. The price is some CPU, not memory: `--version` retires 63,683
+instructions against 46,256 for `ReleaseFast`, and a 5,000-frame stream 37.8 million against 27.0
+million, about 1.4 times. The shipped build carries its own word-at-a-time `memcpy` (`src/copy.zig`),
+because the compiler runtime's is a byte loop in this mode and a run spent a third of its instructions
+in it. The harness is under 1% of a turn either way, so
+[docs/performance.md](performance.md) measures its CPU on `ReleaseFast` and this file measures its
+memory on what ships. The last column is dominated by the model's own text, which a run holds once
+as the response and once as the output buffer.
+
+### Binary size and source
 
 `ls -l zig-out/bin/microagent` after each build of this tree. Each build overwrites `zig-out`, so
 the four were built and measured one after another. `build.zig` sets `.strip = optimize != .Debug`:
@@ -44,13 +95,16 @@ release builds are stripped, Debug keeps its symbols.
 
 | build | binary |
 | --- | --- |
-| `zig build -Doptimize=ReleaseSmall` (stripped) | 902 840 B (0.86 MiB) |
-| `zig build -Doptimize=ReleaseFast` (stripped) | 1 692 536 B (1.61 MiB) |
-| `zig build -Doptimize=ReleaseSafe` (stripped) | 1 596 792 B (1.52 MiB) |
-| `zig build` (Debug, unstripped) | 34 935 202 B (33.32 MiB) |
+| `zig build -Doptimize=ReleaseSmall` (stripped) | 937,232 B (0.89 MiB) |
+| `zig build -Doptimize=ReleaseFast` (stripped) | 1,766,160 B (1.68 MiB) |
+| `zig build -Doptimize=ReleaseSafe` (stripped) | 1,636,392 B (1.56 MiB) |
+| `zig build` (Debug, unstripped) | 46,433,805 B (44.28 MiB) |
 
-No runtime, no package manager, no node_modules, no Python. Fourteen files under `src/`, 24 236 lines
+The file size and the resident set are related and not the same: the release modes differ by up to 1.9x
+in file size and by 1.3x to 2.7x in memory, and a large file that is never touched costs no memory.
+No runtime, no package manager, no node_modules, no Python. Thirteen files under `src/`, 24 674 lines
 (`wc -l src/*.zig`):
+
 
 | file | role |
 | --- | --- |
@@ -63,11 +117,10 @@ No runtime, no package manager, no node_modules, no Python. Fourteen files under
 | `config.zig` | the config file: reply-style levels, skills and MCP servers |
 | `mcp.zig` | MCP servers: tools reached over a child process's stdin and stdout |
 | `skill.zig` | skills: instruction documents the model may load while it works |
-| `style.zig` | reply-style modes appended to the system prompt |
 | `update.zig` | `microagent update`, the checksum-verified self-update |
 | `net.zig` | what the machine-facing modules share: CA bundle, deadlines, output sinks, retry policy |
 | `sandbox.zig` | the configurable workspace sandbox: Landlock and path confinement |
-| `fuzzargv.zig` | the argv shape both command-line fuzzers feed a parser |
+| `copy.zig` | a word-at-a-time `memcpy` for the ReleaseSmall build, whose compiler runtime copies a byte at a time |
 
 ### Startup
 
@@ -77,8 +130,8 @@ so its spread is given:
 
 | harness | instructions | CPU time |
 | --- | --- | --- |
-| **microagent 0.3.0, ReleaseFast** | **484,917** | **0.89 ms** (+-5%) |
-| microagent 0.3.0, ReleaseSmall (the release asset) | 1,324,275 | 1.04 ms (+-9%) |
+| microagent, ReleaseFast (not shipped) | 46,256 | 0.23 ms (+-2%) |
+| **microagent, ReleaseSmall (the release asset)** | **63,683** | **0.13 ms** (+-2%) |
 | claude 2.1.284 | 12.2 M | 7.6 ms (+-4%) |
 | codex 0.157.1 | 8.3 M | 13.1 ms (+-7%) |
 | grok 1.0.41 | 138 M | 27.4 ms (+-1%) |
@@ -88,7 +141,7 @@ so its spread is given:
 This table replaces a wall-clock one (hyperfine means, 1.4-2.5 ms for microagent). Wall clock at
 this scale measures the machine more than the binary: the same `--version` on the same binary took
 442 us and 1.7 ms in one earlier session, and this table was taken with a load average above 40, when
-no wall-clock figure would have been fair to any row. The ReleaseSmall build spends 2.7x the
+no wall-clock figure would have been fair to any row. The microagent rows are this tree, measured later; the ReleaseSmall build spends 1.4x the
 instructions of ReleaseFast before it prints a byte; both are under a millisecond of CPU.
 
 A gauntlet loop starts an agent once per review, so startup is per-review overhead. On a 60 s review,
@@ -108,16 +161,16 @@ Prompt caching keys on the exact byte prefix of a request, so a turn's body must
 turn's body plus the new messages. That holds only while nothing constant sits *behind* the growing
 array.
 
-The tool schemas used to be written after `messages`. They are 3,775 bytes for the seven built-in
+The tool schemas used to be written after `messages`. They are 4,123 bytes for the nine built-in
 tools, and behind the conversation they fell outside the cacheable prefix on every turn of every
 run, so the provider re-read them each time:
 
 | | un-cacheable tail per turn |
 | --- | --- |
-| tool schemas written after `messages` | 3,775 bytes (~940 tokens) |
+| tool schemas written after `messages` | 4,123 bytes (~1,030 tokens) |
 | written before, as now | **2 bytes** |
 
-Over a 100-turn review that was 0.38 MB of repeated prefill, invisible to every counter in this file,
+Over a 100-turn review that was 0.41 MB of repeated prefill, invisible to every counter in this file,
 because `cached_tokens` counts what was reused and never what was not.
 
 JSON member order is not significant, so the constant fields go first and `messages` ends the body.
@@ -127,21 +180,24 @@ and the schema must appear before the conversation.
 ### Harness prompt overhead
 
 The first request of a run, in bytes. Every row is derived from the tree (the prompt and schema
-constants, and the style block the defaults produce), so it can be re-derived without paying for a
+constants), so it can be re-derived without paying for a
 run:
 
 | | bytes |
 | --- | --- |
-| system prompt | 1,778 |
-| reply style (caveman ultra, ponytail full) | 1,616 |
-| the seven tool schemas | 3,775 |
-| the rest of the body: model, stream flags, `max_tokens`, JSON scaffolding | 133 |
-| **everything a request carries besides the conversation** | **7 302** |
+| system prompt | 2,273 |
+| the nine tool schemas | 4,123 |
+| the rest of the body: model, stream flags, `max_tokens`, JSON scaffolding | 120 |
+| **everything a request carries besides the conversation** | **6,516** |
 
-That 7 302 is the entire fixed cost of a request, and the schemas are just over half of it. A
+That 6,516 is the entire fixed cost of a request, and the schemas are nearly two thirds of it. A
 `--reasoning-effort` adds the `reasoning` member to the last row, nothing else. The block is re-sent
 every turn and cached from the second turn on, so it is a prefix cost, not a per-turn one (see
 [Un-cacheable request bytes](#un-cacheable-request-bytes) for the part that is not).
+
+With the three remote presets on the tool schemas are 7,519 bytes and the fixed cost 9,912: the five
+remote tools ship compact descriptions and schemas (`terse_tools` in `src/mcp.zig`, used only for the
+preset's own host), because the servers send 8.4 KB for them, of which most is examples and emphasis.
 
 An earlier figure of 933 tokens, read from a run's usage line, covered six of the seven tools; the
 bytes above replace it because they can be re-derived from the tree. Competitor CLIs in one-shot mode
@@ -222,7 +278,7 @@ per token spent.
 On the 23-task Terminal-Bench 2 sample ([below](#terminal-bench-2-23-task-sample)) the limit never
 fires: 16.5 M input tokens is about 66 MB of prompt, which spread over the turns those tasks took is
 72-143 KB per request (a range because the benchmark does not keep the turn count), against a 400 KB
-limit. The fixed 7 302 bytes is 5-10% of one request. That prompt is evidence the agent
+limit. The fixed 6,516 bytes is 5-9% of one request. That prompt is evidence the agent
 accumulated, not fixed harness cost and not compaction; the limit is inert at benchmark scale and
 binds only on long runs.
 
@@ -424,7 +480,79 @@ are single runs against a stealth model behind a router that may re-route. The d
 (three timeouts with zero files changed, then three passes with diffs), but this is evidence, not a
 controlled experiment.
 
+### Terminal-Bench 4.0
+
+The current release of Terminal-Bench (v4.0.0, 26 August 2026): 66 containerized tasks, a
+maintenance release on 3.0 that removed eight tasks and revised eighteen. It is the dataset
+`terminal-bench/terminal-bench@4.0.0` in Harbor's registry, run through the same adapter as
+Terminal-Bench 2, and `bench/harbor.sh tb4` drives it. Every task has an 8 hour agent timeout, which
+the script scales to 3600 s for both harnesses (`--agent-timeout-multiplier 0.125`) so that a task
+neither harness can solve does not run for hours; the in-container cap is 3480 s and the working
+budget 3100 s.
+
+The sample is every third of the 66 tasks, sorted by name, fixed before any run:
+[bench/tb4-sample.txt](../bench/tb4-sample.txt), 22 tasks. Two of them, `fp8-rmsnorm-gemm` and
+`jax-speedrun-gpu`, ask for a GPU. A host without one cannot run them, so on such a host they are
+reported as not run and are not scored 0.
+
+Task ids in this dataset carry the dataset's name (`terminal-bench/<task>`), and `-i <task>` alone
+matches nothing, so the script adds the prefix.
+
+Checked so far, and not more: Harbor 0.23.0, the version the adapter pins, downloads all 66 tasks and
+runs `html-js-filter` with its oracle solution to reward 1.0 and no exception; a microagent trial on
+the same task starts, uploads the binary and reaches the provider (with a deliberately invalid key, so
+it ends at `http 401`). **There is no microagent score on this dataset yet.** It needs a provider key
+and a run, and the Terminal-Bench 2 numbers below are not comparable to it.
+
+### Aider polyglot
+
+The quick one. [aider-polyglot](https://aider.chat/docs/leaderboards/) is 225 small exercises, each a
+2 KB instruction and a unit-test suite, in six languages (C++, Go, Java, JavaScript, Python, Rust). It
+is the dataset `aider/aider-polyglot` in Harbor's registry, and `bench/harbor.sh polyglot` drives it
+through the same adapter. Where a Terminal-Bench 4.0 task can use a whole hour, a polyglot trial is
+minutes: one CPU, 4 GB, and an image that builds in about a minute. Every task allows 1800 s, which
+the script halves for both harnesses (`--agent-timeout-multiplier 0.5`); the in-container cap is 870 s
+and the working budget 500 s. Published aider results exist for the full set, which the other Harbor
+benchmarks here lack, but a sample is not the leaderboard: compare harnesses on the same sample.
+
+The sample is every 11th of the 225 tasks, sorted by name, fixed before any run:
+[bench/polyglot-sample.txt](../bench/polyglot-sample.txt), 21 tasks (3 C++, 3 Go, 5 Java, 4
+JavaScript, 3 Python, 3 Rust). Task ids carry the prefix `aider/`, which the script adds.
+
+Checked so far, and not more: Harbor 0.23.0 downloads all 225 tasks and runs the reference solution of
+`polyglot_go_octal`, `polyglot_python_bowling` and `polyglot_rust_two-bucket` to reward 1.0 with no
+exception, 69 to 120 s per trial including the image build and the verifier, three at a time in 2
+minutes. **There is no microagent score on this dataset yet.**
+
+### DeepSWE
+
+[DeepSWE](https://deepswe.datacurve.ai/blog/deepswe) (Datacurve) measures coding agents on original,
+long-horizon engineering tasks written for the benchmark, across five languages and 91 open
+source repositories. Harbor's registry carries it as `datacurve/deep-swe-1-1`, 113 tasks, and
+`bench/harbor.sh deepswe` drives it. Each task gives the agent 5400 s and no network, so the script
+lets the provider's host through (`--allow-agent-host`, taken from `MICROAGENT_BASE_URL`, OpenRouter
+by default) and nothing else. The in-container cap is 5000 s and the working budget 4600 s. The
+verifier is separate from the agent's container and reports fail-to-pass and pass-to-pass counts
+beside the reward, which `integrations/harbor/summarize.py` reads as `reward`.
+
+The sample is every ninth of the 113 tasks, sorted by name, fixed before any run:
+[bench/deepswe-sample.txt](../bench/deepswe-sample.txt), 13 tasks. Task ids carry the prefix
+`datacurve/`, added by the script.
+
+The DeepSWE repository documents its own runner, Pier, and its published numbers use
+`mini-swe-agent`. This run uses Harbor and microagent's own loop, so its numbers compare harnesses
+here and are not entries for that leaderboard.
+
+Checked so far, and not more: Harbor 0.23.0 downloads the 113 tasks and runs `expr-try-catch-errors`
+with its oracle solution to reward 1.0 (79 of 79 fail-to-pass, 66,265 of 66,265 pass-to-pass), and a
+microagent trial in the no-network container reaches OpenRouter through the allowlist (with an invalid
+key, so it ends at `http 401`). Harbor warns that the task's artifact path overlaps another; that is
+in the dataset. **There is no microagent score on this dataset yet.**
+
 ### Terminal-Bench 2
+
+Superseded by [Terminal-Bench 4.0](#terminal-bench-40) as the current release; the numbers here are
+Terminal-Bench 2 numbers and stay as the record of what was run.
 
 The external benchmark for a coding harness: 89 containerized tasks with their own verifiers, driven
 through Harbor. microagent runs inside the task container as a static binary with no C library (`make musl`), so
@@ -680,7 +808,7 @@ Pooled, microagent is 16/46 against 11/46, but only pass 1 is valid: pass 2 meas
 an adapter bug. A third pass is listed under [Not measured / open](#not-measured--open).
 
 Neither harness was tuned for the other's benchmark. opencode ships repo-aware tooling and a much
-larger prompt; microagent ships seven tools and a prompt in the hundreds-of-tokens range. That trade
+larger prompt; microagent ships eight tools and a prompt of a few thousand bytes. That trade
 is visible in the token columns.
 
 ## Harness faults the benchmarks found
@@ -711,8 +839,8 @@ exception column.
 - **Counters over clocks.** Where a number is small enough for the machine to outweigh it (startup,
   the streaming reader), the gate measures instructions or bytes, not time.
 - **Samples are chosen before the run.** SWE-bench uses every 40th of 500 instances, Terminal-Bench 2
-  every fourth of 89 tasks, both sorted by name. Thirteen instances carry roughly +/-13% standard
-  error at the observed rate.
+  every fourth of 89 tasks, Terminal-Bench 4.0 every third of 66, Aider polyglot every 11th of 225, DeepSWE every ninth of 113, all
+  sorted by name. Thirteen instances carry roughly +/-13% standard error at the observed rate.
 - **Every run is recorded.** Picking the best of several runs of a sampled model picks noise, so
   repeated runs are listed in full and pooled.
 - **Exceptions are printed beside scores.** A mean hides a broken loop or a failed setup.
@@ -737,6 +865,9 @@ exception column.
   request succeeds, with the default 65536 it is refused, and the harbor adapter now forwards
   `MICROAGENT_MAX_TOKENS`, so a run can be pointed at a low balance. The pass result would replace
   pass 2, not be averaged with it.
+- **Terminal-Bench 4.0 and DeepSWE scores.** The plumbing is checked for both (see their sections);
+  no model run has been made, because it needs a provider key and hours of wall time per harness.
+  The two GPU tasks in the Terminal-Bench 4.0 sample cannot run on a host without a GPU.
 - **A full SWE-bench Verified set.** 500 instances at this rate is roughly 8 hours of wall time and a
   few hundred GB of image pulls; the 13 above are a sample, not a substitute.
 - **DSH's own `benchmarks/`** (terminal-io, session-open, active-stream-reconnect and others) measure

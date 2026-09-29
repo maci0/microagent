@@ -1,0 +1,9 @@
+# The linters `make check` runs. lint-requirements.txt is compiled from this file, one hash per
+# published artifact, and CI installs it with `--require-hashes`; recompile it after a change with
+#
+#     uv pip compile --generate-hashes --python-version 3.12 --universal \
+#       -o lint-requirements.txt lint-requirements.in
+#
+# The versions are also named in the Makefile, and `make lint-versions` fails when they disagree.
+ruff==0.16.4
+yamllint==1.38.0

@@ -25,8 +25,8 @@ trap '[ -n "$work" ] && rm -rf "$work"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-printf '%-14s %10s %10s %10s\n' agent startup_ms wall_s tokens
-printf '%s\n' "----------------------------------------------"
+printf '%-14s %10s %10s %10s %10s\n' agent startup_ms peak_kb wall_s tokens
+printf '%s\n' "---------------------------------------------------------"
 
 for agent in $agents; do
 	command -v "$agent" >/dev/null 2>&1 || continue
@@ -50,13 +50,19 @@ for agent in $agents; do
 		}' "$work/startup.json")
 	[ -z "$startup" ] && startup=-
 
+	# Peak resident memory of the same `--version`, from bench/maxrss.py: the
+	# resident set is what an unattended loop pays for every agent it keeps
+	# running, and the number a startup time does not carry.
+	peak=$(python3 "$root/bench/maxrss.py" "$agent" --version 2>/dev/null) || peak=-
+	[ -z "$peak" ] && peak=-
+
 	# The startup column above comes from hyperfine, which has the resolution
 	# for a sub-millisecond figure. This clock does not: two back-to-back
 	# readings of /proc/uptime differ by 0 ns, because it has 10 ms
 	# granularity. It is right for the one-shot wall time below and wrong for
 	# anything shorter, which is why nothing short is measured with it.
 	if ! start=$(monotonic_ns); then
-		printf '%-14s %10s %10s %10s\n' "$agent" "$startup" no-clock -
+		printf '%-14s %10s %10s %10s %10s\n' "$agent" "$startup" "$peak" no-clock -
 		rm -rf "$work"
 		continue
 	fi
@@ -81,7 +87,7 @@ for agent in $agents; do
 	# reading that failed divided one raw nanosecond count by a billion and
 	# printed that as the run's wall time.
 	if ! end=$(monotonic_ns); then
-		printf '%-14s %10s %10s %10s\n' "$agent" "$startup" no-clock -
+		printf '%-14s %10s %10s %10s %10s\n' "$agent" "$startup" "$peak" no-clock -
 		rm -rf "$work"
 		continue
 	fi
@@ -91,5 +97,5 @@ for agent in $agents; do
 	[ -z "$tokens" ] && tokens=-
 	rm -rf "$work"
 
-	printf '%-14s %10s %10s %10s\n' "$agent" "$startup" "$wall" "$tokens"
+	printf '%-14s %10s %10s %10s %10s\n' "$agent" "$startup" "$peak" "$wall" "$tokens"
 done

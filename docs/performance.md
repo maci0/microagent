@@ -11,11 +11,19 @@ reasons unrelated to the code. `bench/instructions.sh --check` is the gate that 
 ## The short version
 
 The harness is not the bottleneck. A run is 47 s to 720 s, and the harness's own share is under 1%
-per turn: about 110,000 instructions before the first byte reaches the provider, and about 4,200 instructions
+per turn: about 83,000 instructions before the first byte reaches the provider, and about 4,200 instructions
 per streamed frame. The model and the tool subprocesses are the run.
 
 So the levers worth pulling are not in the CPU. They are in the bytes on the wire, in what the run
 waits for, and in what it holds resident, none of which a profiler or an instruction counter shows.
+
+What it holds resident is the headline: 0.5 MB at `--version`, 0.8 MB up to the first request,
+1.3 MB after 50,000 streamed frames, on the build that ships. The other agent CLIs hold 25 MB to
+326 MB at `--version`; the table, the method and the three build modes are in
+[docs/benchmark.md](benchmark.md#memory-footprint). The release build is `ReleaseSmall` because it
+holds the least of the three release modes. The CPU rows below are measured on `ReleaseFast`, where
+the counters are stable; `ReleaseSmall` retires about 1.4 times as many, which is why the
+gate names the mode it counts in.
 
 ## Where the work goes
 
@@ -25,8 +33,8 @@ so a row here that moves is a gate that moved with it:
 
 | path | instructions | per unit |
 | --- | --- | --- |
-| process start, arg parse (`--version`) | 71,792 | n/a |
-| everything before the first request is sent | 108,563 | n/a |
+| process start, arg parse (`--version`) | 46,256 | n/a |
+| everything before the first request is sent | 82,786 | n/a |
 | a streamed content frame (47 B) | n/a | 4,160 |
 | a streamed tool-argument frame | n/a | 9,253 |
 | compaction of a 1 MB conversation | 31,049,215 | one call |
@@ -93,11 +101,16 @@ run-to-run noise, so there is no build flag to reach for either.
 | three 4 MB MCP tool results | 19.1 MB resident | **12.8 MB** | the text was built whole and clamped to 24 KB a moment later, so the copy and the clamp both worked over bytes nobody keeps; it stops at the cap while it is built, and the note names the size it would have had |
 | a 5,000-frame stream's client CPU | 29.0 M instr | **28.0 M instr** | `std.json.parseFromSlice` wrapped every frame in an arena of its own, on top of the per-frame scratch the caller already resets; `parseFromSliceLeaky` parses into that scratch directly |
 | per-thread signal stack | 256 KB zeroed in every thread | **none** | std gives each thread a 256 KB `.tbss` signal stack for its segfault handler whether or not the handler is on, and a release build has it off; the zeroing was 360,541 of 368,781 instructions in `--version` and one more copy per `Io.Threaded` worker |
-| `--version` | 477,472 instr | **71,792 instr** | the signal stack above, then the environment map below |
-| everything before the first request | 1,329,995 instr | **108,563 instr** | the same two changes, plus the two below |
+| `--version` | 477,472 instr | **46,256 instr** | the signal stack above, then the environment map and the string scan below |
+| everything before the first request | 1,329,995 instr | **82,786 instr** | the same changes, plus the two below |
 | peak resident, a run that never connects | 2,164 kB | **1,304 kB** | the signal stack: each thread touched 256 KB of it |
 | syscalls, `--version` | 67 | **17** | the signal stack's `mmap` and `munmap` pairs per thread, and the worker threads' start-up |
-| the environment map | two copies, ~100 allocations each, freed at exit | **one copy in the run arena** | `createMap` regrew its table and allocated twice per variable, and the tool environment was a second copy less the credentials; the map is built once into one buffer, and the credentials are removed from it in place after the key is read |
+| the environment map | two copies, ~100 allocations each, freed at exit | **no copy** | `createMap` regrew its table and allocated twice per variable, and the tool environment was a second copy less the credentials; the map's keys and values are now slices of the process's own environment block, which outlives it, and the credentials are removed from it in place after the key is read. The arena's `free` ignores memory it did not hand out, so nothing frees them |
+| the environment's string lengths | a byte loop, 18,408 instr (`ReleaseSmall`) | **a word at a time, 11,800 fewer instr in `--version`** | `std.mem.len` is a byte loop in a `ReleaseSmall` build and the environment is about 8 KB; an aligned word never crosses a page, so the scan reads the word that holds the terminator |
+| `--version`, shipped build | 154,657 instr | **63,683 instr** | the two rows above, plus skipping `Map.putMove`'s key validation, which is evaluated even with asserts off (30,000 instr) |
+| resident memory while waiting on a model, HTTPS | 1,530 kB (handshake stack stays dirty) | **1,324 kB** | the handshake dirties about 200 kB of stack for milliseconds; `madvise(DONTNEED)` on the `[stack]` mapping below the caller's frame gives it back, and does nothing on any other thread or mapping |
+| a full run's copies, shipped build | 92,000 of 255,644 instr in `memcpy` | **8,000 of 171,991** | Zig's compiler runtime copies a byte at a time in `ReleaseSmall`, about four instructions a byte, and the request body goes through several writers; `src/copy.zig` is a word-at-a-time `memcpy`, built with `-fno-builtin` so LLVM cannot turn its loop back into a call to itself, and linked only where the runtime's is the slow one |
+| the stream's error check, shipped build | 54.3 M instr for 5,000 frames | **37.8 M** | `std.mem.indexOf` for `"error":` made a call per position, 128,042 calls in a 3,000-frame stream; the needle is one machine word, so each position is a load and a compare. `ReleaseFast` inlined the call and does not change (26.9 M) |
 | the stock system prompt | escaped per run (about 12 instr per byte) | **escaped at compile time** | a run with no reply style and no skills sends the same 3 KB every time |
 | a JSON string's plain runs | one table lookup per byte | **a word at a time** | after a plain byte, eight bytes are tested at once; compaction of a 1 MB conversation fell 37.2 M to 31.0 M instr, and the byte loop is unchanged for text that is mostly escapes or non-ASCII |
 | the sandbox path check | a `realpath` of `.` per `write` and `edit` | **none** | the working directory is `writable_roots[0]`, taken at startup; a `realpath` is an `openat`, a `readlink` and a `close` |
@@ -135,11 +148,14 @@ Kept out on the numbers, not on taste:
   `indexOfScalarPos`. On a 20,000-frame stream in ReleaseFast it cost 4.5% more instructions
   (114.7 M against 109.8 M): a 47-byte frame holds about ten quotes, and ten hops cost more than
   one short scan.
-- **ReleaseFast release assets.** ReleaseSmall spends 1.7-1.9x the user cycles of ReleaseFast
-  (20.6-22.9 M against 11.3-12.4 M on a 5,000-frame stream, 0.65 M against 0.34 M for `--version`),
-  but pages in half the binary, so CPU time including the kernel is within about 10% either way and
-  lower for ReleaseSmall at startup. Switching would cost 0.8 MB (0.91 MB to 1.71 MB) to save cycles
-  that are under 1% of a turn.
+- **ReleaseFast release assets.** ReleaseSmall retires 1.4 times the instructions of ReleaseFast
+  (63,683 against 46,256 for `--version`, 37.8 M against 27.0 M for a 5,000-frame stream), and it
+  holds 28% to 41% less resident memory: 540 kB against 788 kB at `--version`, 764 kB against 1,244 kB
+  up to the first request, 1,300 kB against 1,812 kB after 50,000 frames. Startup CPU time is 0.13 ms
+  against 0.23 ms, because it pages in half the binary. Memory is the headline, and the cycles it
+  gives up are under 1% of a turn, so the release assets, `make` and `make musl` build ReleaseSmall.
+  ReleaseSafe holds two to three times ReleaseSmall's. Before the fixes above the shipped build
+  retired twice ReleaseFast's instructions.
 - **Skipping the system CA store rescan.** With no `--ca-bundle`, the HTTP client parses every
   certificate in the system store before the first https request: 121 certificates, 5.9 M
   instructions and 0.7 ms of CPU on this machine, once per run and with no peak-memory cost. There

@@ -14,9 +14,18 @@ const LandlockPathBeneathAttr = extern struct {
     parent_fd: i32,
 };
 
+/// `path` with symlinks resolved, or as given when it does not exist yet (a root that is not there
+/// grants nothing in the kernel either). macOS keeps `/tmp` and `$TMPDIR` behind symlinks into
+/// `/private`, and both the in-process check and a Seatbelt `subpath` compare resolved paths.
+fn canonical(io: Io, arena: std.mem.Allocator, path: []const u8) []const u8 {
+    const real = std.Io.Dir.cwd().realPathFileAlloc(io, path, arena) catch return path;
+    return std.mem.trimEnd(u8, real, "/\\");
+}
+
 /// Resolves the absolute canonical directory roots that the sandbox permits writing to.
-/// Always includes the current working directory and `/tmp`. If `session_dir` is provided,
-/// it is also included so the run can append its session log.
+/// Always includes the current working directory and `/tmp`, and on macOS `$TMPDIR`, which is
+/// where that system keeps per-user scratch space. If `session_dir` is provided, it is also
+/// included so the run can append its session log.
 pub fn resolveWritableRoots(
     io: Io,
     arena: std.mem.Allocator,
@@ -33,7 +42,14 @@ pub fn resolveWritableRoots(
     try roots.append(arena, std.mem.trimEnd(u8, cwd, "/\\"));
 
     // 2. /tmp
-    try roots.append(arena, "/tmp");
+    try roots.append(arena, canonical(io, arena, "/tmp"));
+    if (builtin.os.tag == .macos) {
+        if (environ_map) |env| {
+            if (env.get("TMPDIR")) |tmpdir| {
+                if (std.fs.path.isAbsolute(tmpdir)) try roots.append(arena, canonical(io, arena, tmpdir));
+            }
+        }
+    }
 
     // 3. session_dir if set
     if (session_dir) |sdir| {
@@ -44,7 +60,7 @@ pub fn resolveWritableRoots(
             else
                 try std.fs.path.resolve(arena, &.{ cwd, sdir_exp });
             _ = std.Io.Dir.cwd().createDirPath(io, resolved_sdir) catch {};
-            try roots.append(arena, std.mem.trimEnd(u8, resolved_sdir, "/\\"));
+            try roots.append(arena, canonical(io, arena, std.mem.trimEnd(u8, resolved_sdir, "/\\")));
         }
     }
 
@@ -57,7 +73,7 @@ pub fn resolveWritableRoots(
             try std.fs.path.resolve(arena, &.{expanded})
         else
             try std.fs.path.resolve(arena, &.{ cwd, expanded });
-        try roots.append(arena, std.mem.trimEnd(u8, resolved, "/\\"));
+        try roots.append(arena, canonical(io, arena, std.mem.trimEnd(u8, resolved, "/\\")));
     }
 
     return roots.items;
@@ -174,6 +190,71 @@ pub fn applyLandlock(arena: std.mem.Allocator, writable_roots: []const []const u
     return checked(linux.syscall2(.landlock_restrict_self, @intCast(ruleset_fd), 0)) != null;
 }
 
+/// The device files a child opens for writing whatever the roots are: `/dev/null` for a stdio it
+/// discards, `/dev/tty` for a tool that prompts, `/dev/dtracehelper` for the system libraries.
+const seatbelt_devices = [_][]const u8{ "/dev/null", "/dev/tty", "/dev/dtracehelper" };
+
+/// The Seatbelt profile (SBPL) that confines writes to `roots`: every other operation stays
+/// allowed, file writes are denied, and the roots and a few device files are allowed back in.
+/// Later rules win in SBPL, so the allow follows the deny. A `subpath` names a resolved path, so
+/// the roots must already be canonical. A root with a control byte in it is left out, which is the
+/// safe side: no grant, and no way to end the string early.
+pub fn seatbeltProfile(arena: std.mem.Allocator, roots: []const []const u8) std.mem.Allocator.Error![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(arena, "(version 1)\n(allow default)\n(deny file-write*)\n(allow file-write*\n");
+    for (seatbelt_devices) |device| {
+        try out.print(arena, "  (literal \"{s}\")\n", .{device});
+    }
+    for (roots) |root| {
+        if (root.len == 0) continue;
+        if (std.mem.indexOfAny(u8, root, &control_bytes) != null) continue;
+        try out.appendSlice(arena, "  (subpath \"");
+        for (root) |c| {
+            if (c == '"' or c == '\\') try out.append(arena, '\\');
+            try out.append(arena, c);
+        }
+        try out.appendSlice(arena, "\")\n");
+    }
+    try out.appendSlice(arena, ")\n");
+    return out.items;
+}
+
+const control_bytes = blk: {
+    var bytes: [0x20 + 1]u8 = undefined;
+    for (0..0x20) |c| bytes[c] = @intCast(c);
+    bytes[0x20] = 0x7f;
+    break :blk bytes;
+};
+
+// libSystem, which every macOS binary links: the sandbox calls live there. Deprecated by Apple in
+// name, used by the system itself, and the same call `sandbox-exec` makes.
+extern "c" fn sandbox_init(profile: [*:0]const u8, flags: u64, errorbuf: *?[*:0]u8) c_int;
+extern "c" fn sandbox_free_error(errorbuf: ?[*:0]u8) void;
+
+/// Applies the Seatbelt profile to this process. Children inherit it across `exec`, as Landlock's
+/// rules are, so `bash` and the MCP servers are confined too. Returns whether it took effect.
+fn applySeatbelt(arena: std.mem.Allocator, writable_roots: []const []const u8) bool {
+    const profile = seatbeltProfile(arena, writable_roots) catch return false;
+    const profile_z = arena.dupeZ(u8, profile) catch return false;
+    var message: ?[*:0]u8 = null;
+    if (sandbox_init(profile_z.ptr, 0, &message) != 0) {
+        sandbox_free_error(message);
+        return false;
+    }
+    return true;
+}
+
+/// Confines this process and everything it starts to writes under `writable_roots`, with the
+/// kernel's own mechanism: Landlock on Linux, Seatbelt on macOS. Returns false where the kernel
+/// does not enforce it, and the caller says so.
+pub fn applySandbox(arena: std.mem.Allocator, writable_roots: []const []const u8) bool {
+    return switch (builtin.os.tag) {
+        .linux => applyLandlock(arena, writable_roots),
+        .macos => applySeatbelt(arena, writable_roots),
+        else => false,
+    };
+}
+
 test "isPathWritable allows paths within writable roots and denies paths outside" {
     var state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer state.deinit();
@@ -243,4 +324,34 @@ test "isPathWritable resolves a relative path against the first root" {
 
     try std.testing.expect(isPathWritable(io, arena, "sub/new-file.txt", &writable_roots));
     try std.testing.expect(!isPathWritable(io, arena, "../outside.txt", &writable_roots));
+}
+
+test "seatbeltProfile denies writes, then allows the devices and each root" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    const roots = [_][]const u8{
+        "/work/project",
+        "/private/tmp",
+        "",
+        "/has\"quote/and\\slash",
+        "/new\nline",
+        "/del\x7f",
+    };
+    const profile = try seatbeltProfile(arena, &roots);
+    try std.testing.expectEqualStrings(
+        \\(version 1)
+        \\(allow default)
+        \\(deny file-write*)
+        \\(allow file-write*
+        \\  (literal "/dev/null")
+        \\  (literal "/dev/tty")
+        \\  (literal "/dev/dtracehelper")
+        \\  (subpath "/work/project")
+        \\  (subpath "/private/tmp")
+        \\  (subpath "/has\"quote/and\\slash")
+        \\)
+        \\
+    , profile);
 }

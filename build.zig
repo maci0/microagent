@@ -13,25 +13,38 @@ pub fn build(b: *std.Build) void {
             // Debug keeps symbols so a panic is readable; release builds are
             // stripped because nothing reads them at runtime.
             .strip = optimize != .Debug,
+            // Nothing unwinds the stack in a release build, and the tables are 62 KB of read-only
+            // data the kernel maps in around every page the program touches.
+            .unwind_tables = if (optimize == .Debug) null else .none,
         }),
     });
-    // A position-independent image, so the executable is mapped where the
-    // kernel's layout of this run puts it rather than at the fixed address
-    // every build of every machine agreed on. Full RELRO is the linker's own
-    // default here (Compile.link_z_relro), so the got table is read-only after
-    // startup, and a non-executable stack is what a Zig link already emits.
+    // A fixed-address image, not a position-independent one. Address-space randomization protects
+    // nothing this program keeps secret, and a PIE pays for it on every start: the loader applies
+    // over a thousand relative relocations (about 11,000 instructions) and dirties the pages they
+    // land in, which is resident memory the run holds for its whole life.
     //
     // There is no stack canary: Zig's -fstack-protector needs a libc to call
     // __stack_chk_fail through, and nothing here links one, so the flag is a
     // build error rather than a weaker binary. A canary arrives with the libc
     // link, not before.
-    exe.pie = true;
+    exe.pie = false;
     // The release version comes from build.zig.zon, so `--version` and the
     // update check compare against the same number the release was tagged with.
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "version", @import("build.zig.zon").version);
     const build_options_module = build_options.createModule();
     exe.root_module.addImport("build_options", build_options_module);
+    // A word-at-a-time `memcpy` for `ReleaseSmall`, whose compiler runtime copies a byte at a time.
+    // It is a module of its own because it has to be built with `-fno-builtin`: otherwise LLVM turns
+    // its copy loop back into a call to `memcpy`, which is itself.
+    const copy_module = b.createModule(.{
+        .root_source_file = b.path("src/copy.zig"),
+        .target = target,
+        .optimize = optimize,
+        .strip = optimize != .Debug,
+        .no_builtin = true,
+    });
+    exe.root_module.addImport("copy", copy_module);
     b.installArtifact(exe);
 
     const run = b.addRunArtifact(exe);
@@ -68,7 +81,10 @@ pub fn build(b: *std.Build) void {
         }
     }.pin;
     pin_test_env(run_tests);
-    b.step("test", "Run unit tests").dependOn(&run_tests.step);
+    const run_copy_tests = b.addRunArtifact(b.addTest(.{ .root_module = copy_module }));
+    const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&run_tests.step);
+    test_step.dependOn(&run_copy_tests.step);
 
     // The same suite again, compiled with the undefined-behavior sanitizer, so
     // an integer overflow, a misaligned load or a null dereference is a failed
@@ -90,6 +106,7 @@ pub fn build(b: *std.Build) void {
         .sanitize_c = .full,
     });
     sanitize_module.addImport("build_options", build_options_module);
+    sanitize_module.addImport("copy", copy_module);
     const sanitize_tests = b.addTest(.{
         .root_module = sanitize_module,
         .filters = if (test_filter) |f| &[_][]const u8{f} else &.{},

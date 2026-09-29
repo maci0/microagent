@@ -9,14 +9,15 @@
 //! it resolves, the provider request and the frames that come back. The parts it
 //! leans on are named modules, imported in one direction: `chat` (the value types
 //! a turn is made of and its JSON writer) is the leaf, `net` (sinks, deadlines,
-//! the CA bundle) and `style` (the reply-style levels the system prompt is built
-//! from) sit on it, `tool` and `session` sit on `net` (every tool call is reached
-//! by model-supplied text, and the per-run log is written from a finished
-//! response), `stream` (folding one provider frame into the response) and
-//! `conversation` (the system prompt, the message array and its compaction) sit
-//! on `chat` and `net`, and `update` (the one subcommand, `microagent update`)
-//! sits on `net` and `chat`. `fuzzargv` sits outside that layering: only the two command-line
-//! parsers, this one and `update`'s, import it, and only their fuzzers call it.
+//! the CA bundle, which urls may carry a credential) sits on it, `tool` and
+//! `session` sit on
+//! `net` (every tool call is reached by model-supplied text, and the per-run log
+//! is written from a finished response), `mcp` (the MCP servers, over a child's
+//! pipes or over HTTP) sits on `tool` and `net`, `config` (the one config file:
+//! the prompt addendum, skills, MCP servers, the tool set) on `mcp`, `stream`
+//! (folding one provider frame into the response) and `conversation` (the system
+//! prompt, the message array and its compaction) sit on `chat` and `net`, and
+//! `update` (the one subcommand, `microagent update`) sits on `net` and `chat`.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -37,14 +38,12 @@ const build_options = @import("build_options");
 const chat_mod = @import("chat.zig");
 const config_mod = @import("config.zig");
 const conversation_mod = @import("conversation.zig");
-const fuzzargv = @import("fuzzargv.zig");
 const mcp_mod = @import("mcp.zig");
 const net = @import("net.zig");
 const session_mod = @import("session.zig");
 const sandbox_mod = @import("sandbox.zig");
 const skill_mod = @import("skill.zig");
 const stream_mod = @import("stream.zig");
-const style_mod = @import("style.zig");
 const tool_mod = @import("tool.zig");
 const update_mod = @import("update.zig");
 
@@ -55,6 +54,11 @@ pub const std_options: std.Options = .{
 };
 
 const version = build_options.version;
+
+// Referenced so its `memcpy` is linked: the module exports it and nothing calls it by name.
+comptime {
+    _ = @import("copy");
+}
 
 const default_base_url = "https://openrouter.ai/api/v1";
 const default_model = "deepseek/deepseek-v4-flash";
@@ -121,7 +125,7 @@ const stream_read_chunk: usize = 8 * 1024;
 /// token-sized delta or a fragment of one call's arguments, so this is far
 /// past anything a real completion sends.
 const max_frame_bytes: usize = 1024 * 1024;
-/// The reply-style config is a handful of keys; a bigger file is not one.
+/// The config file is a handful of keys; a bigger file is not one.
 const max_config_bytes: usize = 64 * 1024;
 /// A provider's error body is a diagnostic, not a payload, so it is bounded
 /// tight: the text goes on stderr and nothing reads it as a tool result. The
@@ -131,13 +135,15 @@ const max_error_body_bytes: usize = 16 * 1024;
 
 const tools_json =
     \\[
-    \\{"type":"function","function":{"name":"bash","description":"Run a shell command in the working directory. Use for builds, tests, git, ripgrep, ast-grep.","parameters":{"type":"object","properties":{"command":{"type":"string","description":"Shell command"},"timeout_ms":{"type":"integer","description":"Timeout in milliseconds, default 120000, at most 600000"}},"required":["command"]}}},
-    \\{"type":"function","function":{"name":"read","description":"Read a file as text. Refuses a credentials file (.env, a private key or keystore, a file under .secrets or .ssh): what it returns is re-sent to the provider on every later turn.","parameters":{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","description":"1-based first line"},"limit":{"type":"integer","description":"Max lines"}},"required":["path"]}}},
-    \\{"type":"function","function":{"name":"write","description":"Create or overwrite a file. Parent directories are created. Refuses a credentials file (.env, a private key or keystore, a file under .secrets or .ssh): a run that cannot read one has no business replacing it.","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}},
-    \\{"type":"function","function":{"name":"edit","description":"Replace an exact string in a file. old_string must occur exactly once unless replace_all is true, and new_string must not contain old_string. Refuses a credentials file, the way `write` does.","parameters":{"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean"}},"required":["path","old_string","new_string"]}}},
-    \\{"type":"function","function":{"name":"search","description":"Search file contents with ripgrep. Returns file:line:text matches. Credentials files (.env, a private key or keystore, a file under .secrets or .ssh) are skipped, because every match is re-sent to the provider on every later turn.","parameters":{"type":"object","properties":{"pattern":{"type":"string","description":"Regular expression"},"path":{"type":"string","description":"Directory or file, default ."},"glob":{"type":"string","description":"Glob filter, e.g. *.zig"}},"required":["pattern"]}}},
-    \\{"type":"function","function":{"name":"ast","description":"Structural search or rewrite with ast-grep, matched on syntax rather than text. Credentials files (.env, a private key or keystore, a file under .secrets or .ssh) are skipped. Set rewrite to apply the change to every match. A rewrite whose result the pattern still matches is refused, the way an edit whose new_string contains old_string is, so a repeated call cannot apply it twice.","parameters":{"type":"object","properties":{"pattern":{"type":"string","description":"ast-grep pattern with metavariables, e.g. $A == $A"},"lang":{"type":"string","description":"Language, e.g. python, javascript, go, rust"},"path":{"type":"string","description":"Directory or file, default ."},"rewrite":{"type":"string","description":"Replacement pattern; when set the matches are rewritten in place"}},"required":["pattern","lang"]}}},
-    \\{"type":"function","function":{"name":"git","description":"Read repository state with git: status, diff, log, show, blame. A credentials file named as the path or the rev is refused. Use this instead of running git through bash.","parameters":{"type":"object","properties":{"cmd":{"type":"string","enum":["status","diff","log","show","blame"],"description":"What to read"},"path":{"type":"string","description":"File or directory to scope to"},"rev":{"type":"string","description":"Revision for diff/show/blame, e.g. HEAD~3"},"limit":{"type":"integer","description":"Max output lines, default 400"}},"required":["cmd"]}}}
+    \\{"type":"function","function":{"name":"bash","description":"Run a shell command in the working directory.","parameters":{"type":"object","properties":{"command":{"type":"string","description":"Shell command"},"timeout_ms":{"type":"integer","description":"Timeout in milliseconds, default 120000, at most 600000"}},"required":["command"]}}},
+    \\{"type":"function","function":{"name":"read","description":"Read a file as text. Refuses credentials files (.env, private keys, keystores, anything under .secrets or .ssh).","parameters":{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","description":"1-based first line"},"limit":{"type":"integer","description":"Max lines"}},"required":["path"]}}},
+    \\{"type":"function","function":{"name":"write","description":"Create or overwrite a file, creating parent directories. Refuses credentials files, as `read` does.","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}},
+    \\{"type":"function","function":{"name":"edit","description":"Replace an exact string in a file. old_string must occur once unless replace_all is set; new_string must not contain old_string. Refuses credentials files.","parameters":{"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean"}},"required":["path","old_string","new_string"]}}},
+    \\{"type":"function","function":{"name":"multi_edit","description":"Several `edit`s, in one file or across files, applied in order on the text the earlier ones left; nothing is written unless all are accepted. Prefer it to repeated `edit` calls.","parameters":{"type":"object","properties":{"edits":{"type":"array","items":{"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean"}},"required":["path","old_string","new_string"]}}},"required":["edits"]}}},
+    \\{"type":"function","function":{"name":"search","description":"Search file contents with ripgrep; returns file:line:text matches. Skips credentials files.","parameters":{"type":"object","properties":{"pattern":{"type":"string","description":"Regular expression"},"path":{"type":"string","description":"Directory or file, default ."},"glob":{"type":"string","description":"Glob filter, e.g. *.zig"}},"required":["pattern"]}}},
+    \\{"type":"function","function":{"name":"ast","description":"Structural search or rewrite with ast-grep, matching syntax, not text. Skips credentials files. Set rewrite to apply it to every match; a rewrite whose result the pattern still matches is refused.","parameters":{"type":"object","properties":{"pattern":{"type":"string","description":"ast-grep pattern with metavariables, e.g. $A == $A"},"lang":{"type":"string","description":"Language, e.g. python, javascript, go, rust"},"path":{"type":"string","description":"Directory or file, default ."},"rewrite":{"type":"string","description":"Replacement pattern; when set the matches are rewritten in place"}},"required":["pattern","lang"]}}},
+    \\{"type":"function","function":{"name":"git","description":"Read repository state: status, diff, log, show, blame. Refuses a credentials file as path or rev. Use it instead of git through bash.","parameters":{"type":"object","properties":{"cmd":{"type":"string","enum":["status","diff","log","show","blame"],"description":"What to read"},"path":{"type":"string","description":"File or directory to scope to"},"rev":{"type":"string","description":"Revision for diff/show/blame, e.g. HEAD~3"},"limit":{"type":"integer","description":"Max output lines, default 400"}},"required":["cmd"]}}},
+    \\{"type":"function","function":{"name":"todo","description":"Keep the steps of a long task. Send the whole list each time: it replaces the last one and is returned.","parameters":{"type":"object","properties":{"items":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"},"status":{"type":"string","enum":["pending","doing","done"]}},"required":["text","status"]}}},"required":["items"]}}}
     \\]
 ;
 
@@ -192,7 +198,7 @@ const Options = struct {
     /// while it is still going. Set by MICROAGENT_SESSION_DIR, else
     /// $HOME/.microagent/sessions; an empty value writes nothing.
     session_dir: []const u8 = "",
-    /// Reply-style config to read. Set by --config or MICROAGENT_CONFIG, else
+    /// Config file to read. Set by --config or MICROAGENT_CONFIG, else
     /// $HOME/.microagent/config.toml. A missing file is not an error.
     config: []const u8 = "",
     /// The skills this run found, discovered once before the first request:
@@ -207,6 +213,9 @@ const Options = struct {
     mcp: mcp_mod.Servers = .{},
     /// Commands denied from running via the bash tool.
     deny_commands: []const []const u8 = &.{},
+    /// The built-in tools the config file switched off. They are left out of
+    /// the schema and their calls are refused.
+    disabled_tools: std.EnumSet(chat_mod.Tool) = .initEmpty(),
     /// Sandbox settings to confine filesystem writes.
     sandbox: config_mod.Sandbox = .{},
     /// Absolute directory roots where writes are allowed when sandboxed.
@@ -245,35 +254,43 @@ var gpa_state: std.heap.DebugAllocator(if (builtin.mode == .Debug) .{} else .{
 const io_worker_stack_bytes = 1024 * 1024;
 const io_worker_limit = 4;
 
-/// `Environ.createMap` for an arena: the table is sized before the first entry, and every key and
-/// value is carved out of one buffer, where `createMap` regrows the table and allocates twice per
-/// variable. Nothing in the map is freed one by one before the arena goes; `swapRemove` on an
-/// interior slice is a no-op the arena tolerates. Only POSIX hands over a block to walk.
+const word_bytes = @sizeOf(usize);
+const lane_ones: usize = std.math.maxInt(usize) / 0xff;
+const lane_highs: usize = lane_ones * 0x80;
+
+/// The length of a C string, a word at a time: `std.mem.len` is a byte loop in a `ReleaseSmall`
+/// build, and the environment is about 8 KB of strings. An aligned word never crosses a page, so
+/// reading the whole word that holds the terminator cannot fault. Little-endian only, which every
+/// release target is.
+fn cstrlen(s: [*:0]const u8) usize {
+    comptime std.debug.assert(builtin.cpu.arch.endian() == .little);
+    const start = @intFromPtr(s);
+    var at = start;
+    while (at % word_bytes != 0) : (at += 1) {
+        if (@as(*const u8, @ptrFromInt(at)).* == 0) return at - start;
+    }
+    while (true) : (at += word_bytes) {
+        const word = @as(*const usize, @ptrFromInt(at)).*;
+        const zeros = (word -% lane_ones) & ~word & lane_highs;
+        if (zeros != 0) return at - start + @ctz(zeros) / 8;
+    }
+}
+
+/// `Environ.createMap` for an arena, without copying: every key and value is a slice of the
+/// process's own environment block, which outlives the map, and the table is sized before the first
+/// entry. Nothing frees them one by one: `Map.deinit` and `swapRemove` free through the arena, which
+/// ignores memory it did not hand out. A key is the text before the first `=`, so `validateKeyForPut`
+/// has nothing to reject and is not run. Only POSIX hands over a block to walk.
 fn environMap(arena: std.mem.Allocator, environ: std.process.Environ) !std.process.Environ.Map {
     if (comptime builtin.os.tag == .windows or builtin.os.tag == .wasi) return environ.createMap(arena);
     const entries = environ.block.view().slice;
-    const lens = try arena.alloc(usize, entries.len);
-    var bytes: usize = 0;
-    for (entries, lens) |entry, *len| {
-        len.* = std.mem.len(entry);
-        bytes += len.*;
-    }
-    const buf = try arena.alloc(u8, bytes);
     var map: std.process.Environ.Map = .init(arena);
     try map.array_hash_map.ensureTotalCapacity(arena, entries.len);
-    var at: usize = 0;
-    for (entries, lens) |entry, len| {
-        const line = entry[0..len];
-        const eq = std.mem.indexOfScalar(u8, line, '=') orelse line.len;
-        const key = buf[at..][0..eq];
-        @memcpy(key, line[0..eq]);
-        at += eq;
-        const value_len = line.len - @min(line.len, eq + 1);
-        const value = buf[at..][0..value_len];
-        @memcpy(value, line[@min(line.len, eq + 1)..]);
-        at += value_len;
-        // `putMove` frees the earlier copy of a repeated name; that is the same no-op.
-        try map.putMove(key, value);
+    for (entries) |entry| {
+        const line = entry[0..cstrlen(entry)];
+        const eq = std.mem.findScalar(u8, line, '=') orelse line.len;
+        const slot = map.array_hash_map.getOrPutAssumeCapacity(line[0..eq]);
+        slot.value_ptr.* = if (eq < line.len) line[eq + 1 ..] else "";
     }
     return map;
 }
@@ -368,13 +385,13 @@ fn runMain(init: std.process.Init) !u8 {
     key.value = try init.arena.allocator().dupe(u8, key.value);
     opts.api_key = key.value;
     // The message names every source, including the file, because a user who
-    // wrote a key there is not looking for the four variables. `$HOME` is
+    // wrote a key there is not looking for the variable. `$HOME` is
     // escaped the way `resolveKey` escapes it below, and for the reason that
     // function gives: a home carrying ESC or a byte that is not text is a value
     // the shell or a container image put there, and this line is the one a run
     // with no key at all reaches.
     if (opts.api_key.len == 0) return configError(io, "no API key: pass --api-key, set {s}, or put one in {s}/.secrets/openrouter", .{
-        key_var_names,
+        key_var,
         clip(net.homeDir(init.environ_map) orelse "$HOME"),
     });
     // Refused as a url before it is refused as a leak, because that is what it
@@ -382,10 +399,8 @@ fn runMain(init: std.process.Init) !u8 {
     // out in the clear, which is a security warning about a value that never
     // reaches the network.
     if (std.Uri.parse(opts.base_url)) |_| {} else |_| return configError(io, "{s} is not a url", .{clip(opts.base_url)});
-    if (!baseUrlCarriesKey(opts.base_url))
+    if (!net.urlCarriesKey(opts.base_url))
         return configError(io, "the API key would go to {s} in the clear; use an https base url, or http on loopback", .{clip(opts.base_url)});
-    if (keyNamesOtherProvider(opts.base_url, key.source))
-        net.note(io, init.arena.allocator(), "microagent: {s} is a key for another provider and the base url is still the default {s}; the run sends it there. Set MICROAGENT_BASE_URL to that provider, or MICROAGENT_API_KEY to say the key is for openrouter\n", .{ chat_mod.safeTextAll(init.arena.allocator(), key.source), default_base_url });
 
     var client: std.http.Client = .{ .allocator = gpa, .io = io };
     defer client.deinit();
@@ -397,17 +412,27 @@ fn runMain(init: std.process.Init) !u8 {
     defer msgs.deinit(gpa);
     const arena = init.arena.allocator();
     const loaded = loadConfig(io, init, arena, opts.config);
+    if (toolConfigError(arena, loaded)) |msg| return configError(io, "{s}", .{msg});
     opts.deny_commands = loaded.deny_commands;
+    opts.disabled_tools = loaded.disabled_tools;
     opts.sandbox = loaded.sandbox;
     if (opts.sandbox.enabled) {
         opts.writable_roots = try sandbox_mod.resolveWritableRoots(io, arena, init.environ_map, opts.sandbox.writable, opts.session_dir);
-        _ = sandbox_mod.applyLandlock(arena, opts.writable_roots);
+        if (!sandbox_mod.applySandbox(arena, opts.writable_roots)) {
+            // Not enforced: Landlock needs Linux 5.13 or newer and Seatbelt refused the profile. Saying so is
+            // what keeps `enabled = true` from reading as protection `bash` and the MCP servers
+            // do not have.
+            net.note(io, arena, "microagent: sandbox: the kernel sandbox could not be applied (Linux needs 5.13 or newer for Landlock, macOS uses Seatbelt); only `write` and `edit` are confined, not `bash` or MCP servers\n", .{});
+        }
     }
     // Built before the skills and the servers, because a tool subprocess and
     // an MCP server both inherit the environment it withholds the provider
     // key from. Built once for the run: a tool subprocess is spawned once per
     // call, and each one would otherwise inherit the provider key.
-    scrubSecrets(init.environ_map);
+    // The remote servers' keys are read first, from the environment as it
+    // came, and then the variables that held them are scrubbed with the rest.
+    const remote_entries = try mcp_mod.withKeys(arena, init.environ_map, loaded.mcp);
+    scrubSecrets(init.environ_map, remote_entries);
     const tool_env = init.environ_map;
     // Discovered before the trace and before the first request: the listing is
     // part of the system prompt, so a skill added between the two reads would
@@ -418,24 +443,11 @@ fn runMain(init: std.process.Init) !u8 {
     // their tools are in the schema the request carries. A server that fails
     // to start or to answer is reported and skipped, so this cannot fail the
     // run, and the ones that did connect are shut down with the run.
-    opts.mcp = mcp_mod.connect(io, arena, tool_env, loaded.mcp, version);
+    opts.mcp = mcp_mod.connect(io, arena, tool_env, &client, remote_entries, version);
     defer opts.mcp.shutdown(io);
     traceConfig(io, arena, opts, loaded, skill_roots, key.source);
-    const reply_style = try loaded.style.ruleset(arena);
     const skill_block = try opts.skills.prompt(arena);
-    // One string, so a run with no styles and no skills sends exactly the
-    // system prompt it sent before either feature existed.
-    var system_text: []const u8 = conversation_mod.system_prompt;
-    if (reply_style.len != 0 or skill_block.len != 0) {
-        var conversation: std.ArrayList(u8) = .empty;
-        try conversation.appendSlice(arena, conversation_mod.system_prompt);
-        if (reply_style.len != 0) {
-            try conversation.appendSlice(arena, "\n\n");
-            try conversation.appendSlice(arena, reply_style);
-        }
-        try conversation.appendSlice(arena, skill_block);
-        system_text = conversation.items;
-    }
+    const system_text = try systemText(arena, loaded.system_prompt_extra, skill_block, opts.disabled_tools);
     try conversation_mod.openConversation(gpa, &msgs, system_text, opts.prompt);
 
     const ended = run(&client, io, gpa, init.arena.allocator(), opts, &msgs, tool_env, &opts.mcp) catch |err| {
@@ -455,6 +467,53 @@ fn runMain(init: std.process.Init) !u8 {
     // one claim a ceiling-truncated answer cannot support.
     if (ended != .answered) return exit_incomplete;
     return 0;
+}
+
+/// The system prompt: one string, so a run with no addendum, no skills and every
+/// tool on sends exactly the prompt it sent before any of them existed. A run
+/// that turned built-in tools off ends it with one line naming them, so the
+/// model does not learn of them from a refusal.
+fn systemText(arena: std.mem.Allocator, extra: []const u8, skill_block: []const u8, disabled: std.EnumSet(chat_mod.Tool)) ![]const u8 {
+    if (extra.len == 0 and skill_block.len == 0 and disabled.count() == 0) return conversation_mod.system_prompt;
+    var text: std.ArrayList(u8) = .empty;
+    try text.appendSlice(arena, conversation_mod.system_prompt);
+    if (extra.len != 0) {
+        try text.appendSlice(arena, "\n\n");
+        try text.appendSlice(arena, extra);
+    }
+    try text.appendSlice(arena, skill_block);
+    if (disabled.count() != 0) {
+        try text.appendSlice(arena, "\n\nDisabled tools: ");
+        var first = true;
+        for (chat_mod.tools()) |tool| {
+            if (!disabled.contains(tool)) continue;
+            if (!first) try text.appendSlice(arena, ", ");
+            first = false;
+            try text.appendSlice(arena, tool.name());
+        }
+        try text.appendSlice(arena, ".");
+    }
+    return text.items;
+}
+
+/// The reason the config makes this run unable to start, or null. A tool
+/// table the run cannot honor stops it: a misspelled name that left the tool
+/// on, or a value that left an option at its default, is a run configured
+/// differently from the file that was read. So does a file that disables every
+/// built-in, which leaves the model nothing to work with.
+fn toolConfigError(arena: std.mem.Allocator, loaded: LoadedConfig) ?[]const u8 {
+    const path = chat_mod.safeTextAll(arena, loaded.source orelse "");
+    if (loaded.tool_problem) |problem| {
+        const name = chat_mod.safeText(arena, problem.name, net.quoted_value_bytes);
+        const key = chat_mod.safeText(arena, problem.key, net.quoted_value_bytes);
+        return switch (problem.kind) {
+            .unknown_tool => std.fmt.allocPrint(arena, "config {s}: [tools.{s}] is not a tool; the tools are {s}", .{ path, name, config_mod.tool_names }) catch "config: a [tools] table names no tool",
+            .bad_value => std.fmt.allocPrint(arena, "config {s}: {s} in [tools.{s}] is not a value this key takes", .{ path, key, name }) catch "config: a [tools] value is not usable",
+        };
+    }
+    if (loaded.disabled_tools.count() == chat_mod.tools().len)
+        return std.fmt.allocPrint(arena, "config {s}: every built-in tool is disabled; remove `enabled = false` from at least one [tools.<name>] table", .{path}) catch "config: every built-in tool is disabled";
+    return null;
 }
 
 /// Injected once when a run that already edited the tree stops without having
@@ -486,13 +545,10 @@ const help_text =
 ++ "\n                         " ++ default_base_url ++ ");\n" ++
     \\                         https, or http on loopback, because the api
     \\                         key goes to it in the clear otherwise
-    \\  -k, --api-key <key>    api key (env MICROAGENT_API_KEY, OPENAI_API_KEY,
-    \\                         OPENROUTER_API_KEY, DEEPSEEK_API_KEY). The key
+    \\  -k, --api-key <key>    api key (env MICROAGENT_API_KEY). The key
     \\                         goes to the base url, so name a base url from
     \\                         the same provider as the key: the default is
-    \\                         openrouter.ai, and a run that leaves it there
-    \\                         sends an OPENAI_API_KEY or DEEPSEEK_API_KEY to
-    \\                         openrouter and says so on stderr. A key on the
+    \\                         openrouter.ai. A key on the
     \\                         command line is in the process table, where any
     \\                         user of this machine can read it; a variable or
     \\                         the key file is not
@@ -504,8 +560,8 @@ const help_text =
     \\      --max-tokens <n>   max_tokens sent to the provider: the ceiling on
     \\                         one response's generated tokens, at least 1
 ++ (std.fmt.comptimePrint("\n                         (env MICROAGENT_MAX_TOKENS, default {d})\n", .{default_max_tokens})) ++
-    \\      --config <file>    TOML config: reply style, skills and MCP
-    \\                         servers (env MICROAGENT_CONFIG, default
+    \\      --config <file>    TOML config: system prompt addendum, skills, MCP servers
+    \\                         and tools (env MICROAGENT_CONFIG, default
     \\                         ~/.microagent/config.toml)
     \\      --ca-bundle <file>
     \\                         PEM file to trust instead of the system store
@@ -544,14 +600,6 @@ const help_text =
     \\second bare word is the one thing this does not read as a task: two prompts
     \\are a usage error.
     \\
-    \\reply style (MICROAGENT_CAVEMAN / MICROAGENT_PONYTAIL, or the same two keys
-    \\in the config named above):
-    \\  MICROAGENT_CAVEMAN     how terse the reply is: off, lite, full, ultra,
-    \\                         wenyan-lite, wenyan-full, wenyan-ultra
-    \\                         (default ultra)
-    \\  MICROAGENT_PONYTAIL    how lazy the code is: off, lite, full, ultra
-    \\                         (default full)
-    \\
     \\session log:
     \\  MICROAGENT_SESSION_DIR where the per-response JSONL session log goes
     \\                         (default ~/.microagent/sessions; empty writes none)
@@ -566,12 +614,23 @@ const help_text =
     \\  working directory is read unless the config or the variable names it.
     \\
     \\MCP servers (`[[mcp]]` tables in the config):
-    \\  each table names one server, with `name` and `command` required and
-    \\  `args` (a list of strings) and `env` (an inline table) optional, e.g.
+    \\  each table names one server, with `name` and one of `command` (a local
+    \\  server over stdio, with optional `args`, a list of strings, and `env`, an
+    \\  inline table) or `url` (a remote streamable-HTTP server, with optional
+    \\  `api_key_env`, `api_key_header` and `timeout`), e.g.
     \\  [[mcp]] name = "fs" command = "npx" args = ["-y", "server-fs", "/tmp"].
-    \\  Every server is run over stdio and its tools are offered to the model as
-    \\  mcp__<server>__<tool>, on the same deadline as any other tool. A server
-    \\  that cannot start or answer is reported on stderr and skipped.
+    \\  Its tools are offered to the model as mcp__<server>__<tool>, on the same
+    \\  deadline as any other tool. A server that cannot start, be reached or
+    \\  answer is reported on stderr and skipped.
+    \\
+    \\Tools (`[tools.<name>]` tables in the config):
+    \\  `enabled = false` removes a built-in tool (bash, read, write, edit,
+    \\  multi_edit, search, ast, git, todo) from the schema and refuses its calls;
+    \\  at least one must stay on. The presets web_search, context7 and grep_app
+    \\  are public remote MCP servers, off until `enabled = true`, and take `url`,
+    \\  `api_key_env` (the NAME of a variable holding the key), `api_key_header`
+    \\  and `timeout` (seconds). A name that is not a tool stops the run with exit
+    \\  status 2.
     \\
     \\subcommand:
     \\  update [--check] [--repo owner/name]
@@ -601,8 +660,8 @@ const help_text =
     \\
     \\MDEBUG=1                 trace a stuck stream on stderr, and print the
     \\                         configuration this run resolved: model, base
-    \\                         url, ceilings, style levels, the style config
-    \\                         file that was read, the skill roots, and the
+    \\                         url, ceilings, the config file that was
+    \\                         read, the skill roots, and the
     \\                         name of the source the api key came from, never
     \\                         the key.
     \\                         0, off, no, false and an empty value all leave
@@ -612,10 +671,10 @@ const help_text =
     \\MICROAGENT_BASE_URL, MICROAGENT_REASONING_EFFORT, MICROAGENT_BUDGET_SECONDS,
     \\MICROAGENT_MAX_SPEND_TOKENS, MICROAGENT_MAX_TURNS, MICROAGENT_MAX_TOKENS,
     \\MICROAGENT_STALL_TIMEOUT and MDEBUG keep their defaults, and
-    \\MICROAGENT_CA_BUNDLE, the four api key variables and
-    \\MICROAGENT_CAVEMAN/PONYTAIL fall through to whatever comes next.
+    \\MICROAGENT_CA_BUNDLE and MICROAGENT_API_KEY fall through to whatever
+    \\comes next.
     \\MICROAGENT_CONFIG, MICROAGENT_SESSION_DIR and MICROAGENT_SKILLS are the
-    \\three where empty means off: no style file, no session log, no skills. HOME
+    \\three where empty means off: no config file, no session log, no skills. HOME
     \\is trimmed like the rest, and an empty one is no home rather than a path
     \\off the root.
     \\
@@ -687,17 +746,6 @@ test "the help text names the default model and base url" {
     try std.testing.expect(std.mem.indexOf(u8, help_text, default_base_url) != null);
 }
 
-test "the help text groups each variable under what it configures" {
-    // The reply-style heading names the two variables that choose a style, so
-    // a session directory listed under it reads as a third style level. Each
-    // block runs to the blank line that ends it, which is what a reader sees
-    // as the block.
-    const style_at = std.mem.indexOf(u8, help_text, "reply style (").?;
-    const style_end = std.mem.indexOf(u8, help_text[style_at..], "\n\n").? + style_at;
-    try std.testing.expect(std.mem.indexOf(u8, help_text[style_at..style_end], "MICROAGENT_SESSION_DIR") == null);
-    try std.testing.expect(std.mem.indexOf(u8, help_text, "session log:\n  MICROAGENT_SESSION_DIR") != null);
-}
-
 test "the help text names the spend alarm the run prints" {
     // `--max-spend-tokens` warns on stderr once the share is spent, and the
     // usage reference says so. A flag documented without the warning is a flag whose
@@ -759,8 +807,8 @@ fn debugEnabled(env: *const std.process.Environ.Map) bool {
 /// value is set. An unknown level reaches the provider as a 400 and costs a
 /// whole turn to learn that a level was mistyped.
 const reasoning_efforts = [_][]const u8{ "minimal", "low", "medium", "high", "none" };
-/// The same list as the sentence an error needs, derived the way `key_var_names`
-/// is: a level added above is named by the message without either being told.
+/// The same list as the sentence an error needs, derived
+/// with `comptimePrint`: a level added above is named by the message without either being told.
 const reasoning_effort_names = std.fmt.comptimePrint("{s}, {s}, {s}, {s}, {s}", .{
     reasoning_efforts[0],
     reasoning_efforts[1],
@@ -914,97 +962,6 @@ fn reportEnvProblem(
         return;
     }
     configError(io, "{s}", .{msg});
-}
-
-/// The same list spelled as the sentence an error needs, so adding a provider
-/// touches one place.
-const key_var_names = std.fmt.comptimePrint("{s}, {s}, {s} or {s}", .{ key_vars[0], key_vars[1], key_vars[2], key_vars[3] });
-
-/// Whether the API key may be sent to this base url. The key rides in an
-/// Authorization header on every request, so a plaintext url hands it to
-/// whatever is on the path, and a typo that drops the `s` is the way that
-/// happens by accident. Loopback is exempt: there is no network path there to
-/// intercept, and `http://localhost:1234/v1` is how a gateway running on this
-/// machine is named.
-fn baseUrlCarriesKey(base_url: []const u8) bool {
-    const uri = std.Uri.parse(base_url) catch return false;
-    if (std.ascii.eqlIgnoreCase(uri.scheme, "https")) return true;
-    if (!std.ascii.eqlIgnoreCase(uri.scheme, "http")) return false;
-    var host_buf: [Io.net.HostName.max_len]u8 = undefined;
-    return isLoopbackHost((uri.getHost(&host_buf) catch return false).bytes);
-}
-
-/// The key variables that name a provider the default base url is not, so a
-/// run that takes one of them and leaves the base url at its built-in value
-/// hands that provider's credential to a third party. `MICROAGENT_API_KEY` and
-/// `OPENROUTER_API_KEY` are the two the default endpoint is for, so neither is
-/// here.
-const foreign_key_vars = [_][]const u8{ "OPENAI_API_KEY", "DEEPSEEK_API_KEY" };
-
-/// Whether this run would send one provider's key to another: the key came
-/// from a variable naming a provider, and the base url is still the built-in
-/// one, which is a different provider. Every request carries the key in an
-/// `Authorization` header, so the key leaves the machine for whoever serves
-/// that url.
-///
-/// Only the default base url is asked about, because it is the one a run
-/// reaches without anybody choosing it. A base url an operator named is their
-/// statement of where the key goes, including a self-hosted gateway that
-/// accepts a key from any provider.
-fn keyNamesOtherProvider(base_url: []const u8, key_source: []const u8) bool {
-    if (!std.mem.eql(u8, base_url, default_base_url)) return false;
-    for (foreign_key_vars) |name| if (std.mem.eql(u8, key_source, name)) return true;
-    return false;
-}
-
-test "a key is only sent to the default base url when its own provider is not named" {
-    // The default endpoint is openrouter, so the two keys minted for it are
-    // the ones a run may leave the base url alone with.
-    try std.testing.expect(!keyNamesOtherProvider(default_base_url, "MICROAGENT_API_KEY"));
-    try std.testing.expect(!keyNamesOtherProvider(default_base_url, "OPENROUTER_API_KEY"));
-    try std.testing.expect(!keyNamesOtherProvider(default_base_url, "--api-key"));
-    try std.testing.expect(!keyNamesOtherProvider(default_base_url, "none"));
-
-    // A key from another provider and no base url of its own: the run sends it
-    // to openrouter, which is the case the note is for.
-    for (foreign_key_vars) |name|
-        try std.testing.expect(keyNamesOtherProvider(default_base_url, name));
-
-    // A base url the operator named is where they said the key goes.
-    try std.testing.expect(!keyNamesOtherProvider("https://api.openai.com/v1", "OPENAI_API_KEY"));
-    try std.testing.expect(!keyNamesOtherProvider("https://api.deepseek.com/v1", "DEEPSEEK_API_KEY"));
-    // The url is compared whole rather than by host, so a path or a trailing
-    // slash on the same endpoint is an operator who typed something, and this
-    // is about the one nobody typed.
-    try std.testing.expect(!keyNamesOtherProvider(default_base_url ++ "/", "OPENAI_API_KEY"));
-}
-
-fn isLoopbackHost(host: []const u8) bool {
-    if (std.ascii.eqlIgnoreCase(host, "localhost")) return true;
-    if (std.ascii.endsWithIgnoreCase(host, ".localhost")) return true;
-    if (isIpv4Loopback(host)) return true;
-    return std.mem.eql(u8, std.mem.trim(u8, host, "[]"), "::1");
-}
-
-const max_ipv4_octet: u16 = 255;
-
-/// `127.x.y.z`, and only when every octet is a number in range: a name that
-/// merely begins `127.` is a host somebody else can point anywhere, and
-/// `127.256.0.1` is not an address at all, so a resolver is what answers it.
-fn isIpv4Loopback(host: []const u8) bool {
-    if (!std.mem.startsWith(u8, host, "127.")) return false;
-    var octets: usize = 0;
-    var it = std.mem.splitScalar(u8, host, '.');
-    while (it.next()) |part| {
-        if (part.len == 0 or part.len > 3) return false;
-        for (part) |c| if (!std.ascii.isDigit(c)) return false;
-        // Parsed wide enough that the comparison is the range check, rather
-        // than a parse that has already refused what it cannot hold.
-        const octet = std.fmt.parseInt(u16, part, 10) catch return false;
-        if (octet > max_ipv4_octet) return false;
-        octets += 1;
-    }
-    return octets == 4;
 }
 
 /// The url as the stderr notes name it, with any `user:password@` in front of
@@ -1306,16 +1263,11 @@ const Key = struct { value: []const u8, source: []const u8 };
 
 /// The key this run sends, and the name of the source it came from.
 ///
-/// `--api-key` wins, then the variables of `key_vars` in the order they are
-/// listed there, then `$HOME/.secrets/openrouter` as a last resort. The order
-/// is the run's security boundary as much as its convenience: `MDEBUG` prints
-/// the source by name, so an operator reading it can tell which of the four
-/// variables a `bash: env` will not see.
+/// `--api-key` wins, then `key_var`, then `$HOME/.secrets/openrouter` as a last
+/// resort. `MDEBUG` prints the source by name.
 fn resolveKey(io: Io, environ: *std.process.Environ.Map, arena_state: *std.heap.ArenaAllocator, given: []const u8) Key {
     if (given.len > 0) return .{ .value = given, .source = "--api-key" };
-    for (key_vars) |n| {
-        if (envValue(environ, n)) |v| return .{ .value = v, .source = n };
-    }
+    if (envValue(environ, key_var)) |v| return .{ .value = v, .source = key_var };
     const arena = arena_state.allocator();
     const fallback = std.fs.path.join(arena, &.{
         net.homeDir(environ) orelse return .{ .value = "", .source = "none" },
@@ -1363,27 +1315,22 @@ fn resolveKey(io: Io, environ: *std.process.Environ.Map, arena_state: *std.heap.
     return .{ .value = "", .source = "none" };
 }
 
-/// In the order they are tried, and the order the help text and usage reference name
-/// them: the project's own variable first, then the provider's.
-const key_vars = [_][]const u8{ "MICROAGENT_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY" };
+/// The one variable the API key is read from.
+const key_var = "MICROAGENT_API_KEY";
 
 /// Every environment variable the program reads, which is what a user has to
 /// know to configure it. The resolution order each one is read in is spelled by
 /// the reader that reads it; this list is the documentation check and nothing
 /// else, so a variable added to a reader and to neither `--help` nor the usage reference
-/// is one a user finds by reading the source. `key_vars` carries the order the
-/// four credentials are tried in, `net.caBundlePath` the bundle's two, and
-/// `secret_env_vars` the credentials scrubbed from a tool's environment; this is
-/// the union of those with the ceilings, the style levels, the paths and the
+/// is one a user finds by reading the source. `net.caBundlePath` carries the
+/// bundle's two and `secret_env_vars` the credentials scrubbed from a tool's
+/// environment; this is the union of those with the ceilings, the paths and the
 /// GitHub token, held to one list so the two documents cannot each name a
 /// different subset of it.
 const env_vars = [_][]const u8{
     "MICROAGENT_MODEL",
     "MICROAGENT_BASE_URL",
-    "MICROAGENT_API_KEY",
-    "OPENAI_API_KEY",
-    "OPENROUTER_API_KEY",
-    "DEEPSEEK_API_KEY",
+    key_var,
     "MICROAGENT_MAX_TURNS",
     "MICROAGENT_MAX_TOKENS",
     "MICROAGENT_STALL_TIMEOUT",
@@ -1394,8 +1341,6 @@ const env_vars = [_][]const u8{
     "MICROAGENT_SKILLS",
     "MICROAGENT_CA_BUNDLE",
     "SSL_CERT_FILE",
-    "MICROAGENT_CAVEMAN",
-    "MICROAGENT_PONYTAIL",
     "MICROAGENT_SESSION_DIR",
     "GITHUB_TOKEN",
     "MDEBUG",
@@ -1408,7 +1353,7 @@ const env_vars = [_][]const u8{
 /// than becoming a request the provider refuses. The rest of `env_vars` reads
 /// empty as something else, and the two documents below spell out which is
 /// which: `MICROAGENT_CONFIG` and `MICROAGENT_SESSION_DIR` turn their feature
-/// off, and the bundle and the style levels fall through to the next source.
+/// off, and the bundle falls through to the next source.
 ///
 /// The help text and docs/usage.md both state this in prose, and prose
 /// drifts: a variable one names here and the other leaves out means a reader
@@ -1428,12 +1373,12 @@ const empty_is_unset_vars = [_][]const u8{
 };
 
 /// Every variable this program reads a credential out of, and which a tool
-/// subprocess therefore never sees. The four provider keys plus the GitHub
+/// subprocess therefore never sees. The provider key plus the GitHub
 /// token `microagent update` presents to the releases API: all of them are
 /// credentials this binary sends in an `Authorization` header, so all of them
 /// belong to the same scrub, and a name read by one subcommand is a secret to
 /// the other.
-const secret_env_vars = key_vars ++ [_][]const u8{"GITHUB_TOKEN"};
+const secret_env_vars = [_][]const u8{ key_var, "GITHUB_TOKEN" };
 
 /// The environment every tool subprocess runs under: this process's, less the
 /// credentials.
@@ -1456,15 +1401,18 @@ const secret_env_vars = key_vars ++ [_][]const u8{"GITHUB_TOKEN"};
 /// everything but the names above. It is scrubbed in place, after the key is
 /// read: a copy of the whole environment was a fifth of the work before the
 /// first request.
-fn scrubSecrets(env: *std.process.Environ.Map) void {
+fn scrubSecrets(env: *std.process.Environ.Map, remote: []const mcp_mod.Entry) void {
     for (secret_env_vars) |name| _ = env.swapRemove(name);
+    // The variables that hold a remote server's key are credentials this
+    // binary sends over the wire, so a tool subprocess does not inherit them.
+    for (remote) |entry| _ = env.swapRemove(entry.api_key_env);
 }
 
-/// The reply-style levels for this run and the file they were read from, the
-/// latter for the trace: precedence here spans three sources, so a level on its
-/// own cannot say whether a file, a variable or a built-in default set it.
+/// What the config file said for this run, and the path it was read from, the
+/// latter for the trace.
 const LoadedConfig = struct {
-    style: style_mod.Style,
+    /// Text appended to the system prompt, empty for none.
+    system_prompt_extra: []const u8,
     /// The skill directories the config file named, or null when it named
     /// none, which is how the caller tells "use the default root" from "the
     /// file turned skills off".
@@ -1473,27 +1421,30 @@ const LoadedConfig = struct {
     mcp: []const mcp_mod.Entry,
     /// Commands denied from running via the bash tool.
     deny_commands: []const []const u8,
+    /// The built-in tools the config file switched off.
+    disabled_tools: std.EnumSet(chat_mod.Tool),
+    /// The `[tools.*]` mistake the run stops on, if there is one.
+    tool_problem: ?config_mod.ToolProblem,
     /// Sandbox settings to confine filesystem writes.
     sandbox: config_mod.Sandbox,
     source: ?[]const u8,
 };
 
 /// Everything the config file said, from the TOML named by --config,
-/// MICROAGENT_CONFIG or `$HOME/.microagent/config.toml`, with the
-/// MICROAGENT_CAVEMAN / MICROAGENT_PONYTAIL / MICROAGENT_SKILLS overrides
-/// applied on top of it. A missing file, an unreadable one, or a line the
+/// MICROAGENT_CONFIG or `$HOME/.microagent/config.toml`. A missing file, an unreadable one, or a line the
 /// reader could not use costs the run nothing: everything that was understood
 /// still applies. The source is the file that was looked for, readable or not,
 /// because the question the trace answers is which one was consulted.
 fn loadConfig(io: Io, init: std.process.Init, arena: std.mem.Allocator, config: []const u8) LoadedConfig {
-    const source = styleConfigPath(init.environ_map, arena, config);
+    const source = configSource(init.environ_map, arena, config);
     // Both a path and a key out of this file are quoted through `safeText`
     // rather than `clip`: a config is a file a reviewed repository can
     // commit, so its lines carry whatever bytes the commit did, and the same
     // is true of a path a directory name was spelled with. The two untrusted
     // byte paths this program already has normalize what they print, and a
     // diagnostic is the third.
-    var parsed: config_mod.Config = .{};
+    // No file is the same as an empty one, so the presets that are on by default are on.
+    var parsed = config_mod.parse(arena, "");
     if (source.path) |p| {
         const text = std.Io.Dir.cwd().readFileAlloc(io, p, arena, .limited(max_config_bytes)) catch |err| blk: {
             if (configReadWorthReporting(source.named, err))
@@ -1502,29 +1453,26 @@ fn loadConfig(io: Io, init: std.process.Init, arena: std.mem.Allocator, config: 
         };
         if (text) |t| parsed = config_mod.parse(arena, t);
     }
-    if (applyConfig(&parsed.style, parsed, envValue(init.environ_map, "MICROAGENT_CAVEMAN"), envValue(init.environ_map, "MICROAGENT_PONYTAIL"))) |unknown|
-        reportConfigProblem(io, arena, source, unknown);
+    if (parsed.problem) |problem| reportConfigProblem(io, arena, source, problem);
     return .{
-        .style = parsed.style,
+        .system_prompt_extra = parsed.system_prompt_extra,
         .skills = parsed.skills,
         .mcp = parsed.mcp,
         .deny_commands = parsed.deny_commands,
+        .disabled_tools = parsed.disabled_tools,
+        .tool_problem = parsed.tool_problem,
         .sandbox = parsed.sandbox,
         .source = source.path,
     };
 }
 
 /// One line on stderr for the first thing the config could not use. The kind
-/// decides the sentence: a level the build does not have, a key the file does
-/// not define, and a `[[mcp]]` table with no server in it are three different
-/// mistakes with three different fixes.
-fn reportConfigProblem(io: Io, arena: std.mem.Allocator, source: StyleSource, unknown: ConfigProblem) void {
-    const key = chat_mod.safeText(arena, unknown.key, net.quoted_value_bytes);
-    if (!unknown.from_config) {
-        net.note(io, arena, "microagent: {s} is not a level; keeping the default\n", .{key});
-        return;
-    }
-    switch (unknown.kind) {
+/// decides the sentence: a value the key does not take, a key the file does
+/// not define, and a `[[mcp]]` table with no server in it are different
+/// mistakes with different fixes.
+fn reportConfigProblem(io: Io, arena: std.mem.Allocator, source: ConfigSource, problem: config_mod.Problem) void {
+    const key = chat_mod.safeText(arena, problem.key, net.quoted_value_bytes);
+    switch (problem.kind) {
         .bad_value => net.note(io, arena, "microagent: config {s}: '{s}' is not a value this key takes; keeping the default\n", .{ configPathText(arena, source), key }),
         .unknown_key => net.note(io, arena, "microagent: config {s}: '{s}' is not a key this file uses; keeping the default\n", .{ configPathText(arena, source), key }),
         .bad_server => net.note(io, arena, "microagent: config {s}: a [[mcp]] entry with no usable name or command is skipped\n", .{configPathText(arena, source)}),
@@ -1543,7 +1491,7 @@ fn reportConfigProblem(io: Io, arena: std.mem.Allocator, source: StyleSource, un
 /// naming one that is not there. The key of a config problem is still cut,
 /// because a key is short by construction and a line quoting a whole file is
 /// not a diagnostic.
-fn configPathText(arena: std.mem.Allocator, source: StyleSource) []const u8 {
+fn configPathText(arena: std.mem.Allocator, source: ConfigSource) []const u8 {
     return chat_mod.safeTextAll(arena, source.path orelse "");
 }
 
@@ -1572,8 +1520,7 @@ fn traceConfig(
         \\[mdebug] model={s} base_url={s}
         \\[mdebug] max_turns={d} max_tokens={d} budget_s={s} max_spend_tokens={s} reasoning_effort={s}
         \\[mdebug] ca_bundle={s} session_dir={s}
-        \\[mdebug] style_config={s}
-        \\[mdebug] caveman={s} ponytail={s}
+        \\[mdebug] config={s} system_prompt_extra_bytes={d}
         \\[mdebug] skills={d} skill_roots={s}
         \\[mdebug] mcp_servers={d} mcp_tools={d}
         \\[mdebug] api key from {s}
@@ -1589,8 +1536,7 @@ fn traceConfig(
         traceText(arena, if (opts.ca_bundle.len == 0) "unset" else opts.ca_bundle),
         traceText(arena, if (opts.session_dir.len == 0) "off" else opts.session_dir),
         traceText(arena, loaded.source orelse "none"),
-        loaded.style.caveman.name(),
-        loaded.style.ponytail.name(),
+        loaded.system_prompt_extra.len,
         opts.skills.items.len,
         skillRootsText(arena, skill_roots),
         opts.mcp.items.len,
@@ -1622,7 +1568,7 @@ fn traceText(arena: std.mem.Allocator, value: []const u8) []const u8 {
     return chat_mod.safeText(arena, value, value.len *| chat_mod.safe_text_widening);
 }
 
-/// Whether a style config that could not be read is worth a line on stderr. A
+/// Whether a config that could not be read is worth a line on stderr. A
 /// config somebody named is one the caller believes is there, so any failure
 /// is said out loud. The default path is missing on most machines and that is
 /// not a fault, but a file that is there and is a directory, is unreadable,
@@ -1632,19 +1578,19 @@ fn configReadWorthReporting(named: bool, err: anyerror) bool {
     return named or err != error.FileNotFound;
 }
 
-/// The file the style config is read from, and whether anything named it. A
+/// The file the config is read from, and whether anything named it. A
 /// flag or a variable naming a file that cannot be read is a caller's mistake
 /// worth reporting; the default path is absent on most machines.
-const StyleSource = struct { path: ?[]const u8, named: bool };
+const ConfigSource = struct { path: ?[]const u8, named: bool };
 
-/// Where the style config is read from: --config, else MICROAGENT_CONFIG, else
+/// Where the config is read from: --config, else MICROAGENT_CONFIG, else
 /// `$HOME/.microagent/config.toml`. An empty MICROAGENT_CONFIG turns the
 /// file off, as does a home that is not there. A named path may start with
 /// `~`, which `net.expandHome` answers: a value that came out of a wrapper's
 /// environment file never went through a shell, and the help text prints the
 /// tilde spelling. Takes the environment map rather than the whole `Init`, so
 /// the precedence is testable without one.
-fn styleConfigPath(env: *const std.process.Environ.Map, arena: std.mem.Allocator, config: []const u8) StyleSource {
+fn configSource(env: *const std.process.Environ.Map, arena: std.mem.Allocator, config: []const u8) ConfigSource {
     if (config.len > 0) return .{ .path = std.fs.path.resolve(arena, &.{net.expandHome(env, arena, config)}) catch config, .named = true };
     if (env.get("MICROAGENT_CONFIG")) |raw| {
         const path = std.mem.trim(u8, raw, net.env_surrounding);
@@ -1655,66 +1601,6 @@ fn styleConfigPath(env: *const std.process.Environ.Map, arena: std.mem.Allocator
     const path = std.fs.path.join(arena, &.{ home, ".microagent", "config.toml" }) catch
         return .{ .path = null, .named = false };
     return .{ .path = std.fs.path.resolve(arena, &.{path}) catch path, .named = false };
-}
-
-/// A level named by a key or a variable that the parser does not have, so the
-/// caller can say so on stderr and keep what it understood.
-const ConfigProblem = struct {
-    key: []const u8,
-    /// The problem came from the config file, so the message can name the
-    /// file; a variable's own bad value cannot.
-    from_config: bool,
-    kind: config_mod.Problem.Kind,
-};
-
-/// The levels, in the order the doc comment names: the config file, then the
-/// environment overrides, over the built-in defaults. One value that is not a
-/// level does not cost the run the others, so every source is read to the end
-/// and the first offending value is the one named on stderr.
-///
-/// The config is taken already parsed, because the same document also carries
-/// the skill directories and the MCP servers and is read once; what this adds
-/// is the environment, which wins over the file for the two levels and for the
-/// skills list, since naming a value for one run is the more explicit
-/// statement.
-fn applyConfig(
-    style: *style_mod.Style,
-    config: config_mod.Config,
-    caveman_env: ?[]const u8,
-    ponytail_env: ?[]const u8,
-) ?ConfigProblem {
-    // The file's levels are the base the environment overrides: a key the
-    // file set survives a variable that names the other knob, and a key
-    // neither names stays at the built-in default.
-    style.* = config.style;
-    var problem: ?ConfigProblem = null;
-    if (config.problem) |from_file| {
-        problem = .{ .key = from_file.key, .from_config = true, .kind = from_file.kind };
-    }
-    // A level the environment names is applied whether or not the file's own
-    // line was usable: the two sources are independent statements.
-    if (caveman_env) |v| {
-        if (style_mod.parseCaveman(v)) |level| style.caveman = level else if (problem == null) problem = .{ .key = "MICROAGENT_CAVEMAN", .from_config = false, .kind = .bad_value };
-    }
-    if (ponytail_env) |v| {
-        if (style_mod.parsePonytail(v)) |level| style.ponytail = level else if (problem == null) problem = .{ .key = "MICROAGENT_PONYTAIL", .from_config = false, .kind = .bad_value };
-    }
-    return problem;
-}
-
-/// The config text through the reader and then the environment overrides,
-/// which is what a run does with both. The tests below drive this rather than
-/// the two halves, so a rule that only holds when the two are put together is
-/// a rule one of them has to state.
-fn applyConfigText(
-    arena: std.mem.Allocator,
-    style: *style_mod.Style,
-    text: ?[]const u8,
-    caveman_env: ?[]const u8,
-    ponytail_env: ?[]const u8,
-) ?ConfigProblem {
-    const parsed: config_mod.Config = if (text) |t| config_mod.parse(arena, t) else .{};
-    return applyConfig(style, parsed, caveman_env, ponytail_env);
 }
 
 /// The clock the run's budget is measured on: the one that keeps counting
@@ -2225,7 +2111,7 @@ fn runTurn(
     // above, so the record itself is the same either way; only the moment it
     // lands is not.
     session_mod.writeRecord(io, arena, session, model_ms, &result);
-    try finishTurn(io, arena, gpa, msgs, &result, usage, budget, tool_env, progress, opts.skills, mcp, opts.deny_commands, opts.writable_roots);
+    try finishTurn(io, arena, gpa, msgs, &result, usage, budget, tool_env, progress, opts.skills, mcp, opts.disabled_tools, opts.deny_commands, opts.writable_roots);
     if (result.calls.items.len != 0) return .wants_tools;
     // No tool call ends the loop, but only an answer ends the run. A refusal, a
     // provider that stopped generating, a response cut at `max_tokens` and a
@@ -2295,6 +2181,27 @@ fn incompleteAnswer(arena: std.mem.Allocator, result: *const chat_mod.ChatResult
 /// servers sent, and the buffer grows for them.
 const body_scaffolding_bytes = tools_json.len + skill_mod.tool_json.len + 1024;
 
+/// The start of every built-in entry in `tools_json`, up to the tool's name.
+const tool_entry_prefix = "{\"type\":\"function\",\"function\":{\"name\":\"";
+
+/// `tools_json` less the tools in `disabled`, in the same shape: one entry per
+/// line, `[` first and `]` last, so what a run adds is appended the same way.
+fn builtinToolsJson(arena: std.mem.Allocator, disabled: std.EnumSet(chat_mod.Tool)) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(arena, "[\n");
+    var lines = std.mem.splitScalar(u8, tools_json, '\n');
+    while (lines.next()) |line| {
+        const entry = std.mem.trimEnd(u8, line, ",");
+        const rest = std.mem.cutPrefix(u8, entry, tool_entry_prefix) orelse continue;
+        const tool = chat_mod.Tool.fromName(rest[0 .. std.mem.indexOfScalar(u8, rest, '"') orelse continue]) orelse continue;
+        if (disabled.contains(tool)) continue;
+        if (out.items.len != "[\n".len) try out.appendSlice(arena, ",\n");
+        try out.appendSlice(arena, entry);
+    }
+    try out.appendSlice(arena, "\n]");
+    return out.items;
+}
+
 /// The entries a run adds to the built-in seven: the `skill` entry when skills
 /// were found, and one entry per MCP tool. Comma-separated and without the
 /// surrounding brackets, and empty when the run adds nothing.
@@ -2331,11 +2238,12 @@ fn bodyPrefix(arena: std.mem.Allocator, opts: Options) ![]u8 {
     // entries. The bytes a run with nothing to add sends are the constant
     // itself, which is what keeps the request prefix the provider caches
     // identical to what it was before either feature existed.
+    const builtin_tools = if (opts.disabled_tools.count() == 0) tools_json else try builtinToolsJson(arena, opts.disabled_tools);
     const extra = try extraToolsJson(arena, opts);
     if (extra.len == 0) {
-        try w.writeAll(tools_json);
+        try w.writeAll(builtin_tools);
     } else {
-        try w.writeAll(tools_json[0 .. tools_json.len - 1]);
+        try w.writeAll(builtin_tools[0 .. builtin_tools.len - 1]);
         try w.writeAll(",");
         try w.writeAll(extra);
         try w.writeAll("]");
@@ -2506,6 +2414,7 @@ fn streamChat(
             return err;
         };
         req_slot = req;
+        net.releaseDeadStack();
         // A turn with no stall guard can hang until the caller kills it, so the
         // failure to install one ends the request rather than reading on.
         if (req_slot.?.connection) |connection|
@@ -2844,12 +2753,19 @@ fn dispatchCall(
     arena: std.mem.Allocator,
     skills: skill_mod.Skills,
     mcp: *mcp_mod.Servers,
+    disabled: std.EnumSet(chat_mod.Tool),
     call: chat_mod.ToolCall,
     ceiling_ms: ?u64,
     tool_env: ?*const std.process.Environ.Map,
     deny_commands: []const []const u8,
     writable_roots: []const []const u8,
 ) ![]const u8 {
+    // A tool the config switched off was left out of the schema, so a call to
+    // it is the model naming a tool from memory or from an earlier prompt.
+    if (chat_mod.Tool.fromName(call.name)) |tool| {
+        if (disabled.contains(tool))
+            return std.fmt.allocPrint(arena, "error: the tool '{s}' is disabled by configuration", .{tool.name()});
+    }
     if (std.mem.startsWith(u8, call.name, mcp_mod.tool_prefix)) {
         const remote = mcp.resolve(call.name) orelse
             return std.fmt.allocPrint(arena, "error: unknown tool '{s}'", .{chat_mod.safeText(arena, call.name, 40)});
@@ -2878,6 +2794,7 @@ fn finishTurn(
     progress: *Progress,
     skills: skill_mod.Skills,
     mcp: *mcp_mod.Servers,
+    disabled: std.EnumSet(chat_mod.Tool),
     deny_commands: []const []const u8,
     writable_roots: []const []const u8,
 ) !void {
@@ -2914,7 +2831,7 @@ fn finishTurn(
             // loads from belongs to the run, and a run that found no skills
             // never advertised the name, so a call to it here is the model
             // asking for a tool the schema did not offer.
-            break :blk dispatchCall(io, arena, skills, mcp, call, budget.toolCeilingMs(io), tool_env, deny_commands, writable_roots) catch |err|
+            break :blk dispatchCall(io, arena, skills, mcp, disabled, call, budget.toolCeilingMs(io), tool_env, deny_commands, writable_roots) catch |err|
                 // A tool that fails outright (rather than reporting its own
                 // failure as text) is named here, so a result reading
                 // `error: OutOfMemory` says which of the calls ran out.
@@ -3132,47 +3049,46 @@ fn waitMs(io: Io, ms: u64) !void {
 }
 
 // A file's tests are collected only when the root file's test block imports
-// it, so the conversation, stream frame, `update` subcommand, style level and
+// it, so the conversation, stream frame, `update` subcommand and
 // session log tests are pulled in here.
 test {
     _ = conversation_mod;
     _ = session_mod;
     _ = stream_mod;
-    _ = style_mod;
     _ = update_mod;
 }
 
 test "the api key is only sent over https, or to a loopback gateway" {
-    try std.testing.expect(baseUrlCarriesKey(default_base_url));
-    try std.testing.expect(baseUrlCarriesKey("https://gateway.internal:8443/v1"));
+    try std.testing.expect(net.urlCarriesKey(default_base_url));
+    try std.testing.expect(net.urlCarriesKey("https://gateway.internal:8443/v1"));
 
     // The loopback exemption is what makes a local gateway usable at all.
-    try std.testing.expect(baseUrlCarriesKey("http://localhost:1234/v1"));
-    try std.testing.expect(baseUrlCarriesKey("http://LocalHost:1234/v1"));
-    try std.testing.expect(baseUrlCarriesKey("http://127.0.0.1:1234/v1"));
-    try std.testing.expect(baseUrlCarriesKey("http://127.1.2.3/v1"));
-    try std.testing.expect(baseUrlCarriesKey("http://[::1]:1234/v1"));
+    try std.testing.expect(net.urlCarriesKey("http://localhost:1234/v1"));
+    try std.testing.expect(net.urlCarriesKey("http://LocalHost:1234/v1"));
+    try std.testing.expect(net.urlCarriesKey("http://127.0.0.1:1234/v1"));
+    try std.testing.expect(net.urlCarriesKey("http://127.1.2.3/v1"));
+    try std.testing.expect(net.urlCarriesKey("http://[::1]:1234/v1"));
     // A name that ends in the loopback spelling is the same machine: a
     // resolver sends `.localhost` nowhere, so the exemption has to read the
     // suffix and not only the whole name.
-    try std.testing.expect(baseUrlCarriesKey("http://gateway.localhost:1234/v1"));
-    try std.testing.expect(baseUrlCarriesKey("http://Gateway.LocalHost/v1"));
+    try std.testing.expect(net.urlCarriesKey("http://gateway.localhost:1234/v1"));
+    try std.testing.expect(net.urlCarriesKey("http://Gateway.LocalHost/v1"));
 
     // Anywhere else, plaintext would put the key on the wire in the clear.
-    try std.testing.expect(!baseUrlCarriesKey("http://openrouter.ai/api/v1"));
-    try std.testing.expect(!baseUrlCarriesKey("http://gateway.internal:1234/v1"));
+    try std.testing.expect(!net.urlCarriesKey("http://openrouter.ai/api/v1"));
+    try std.testing.expect(!net.urlCarriesKey("http://gateway.internal:1234/v1"));
     // A name that merely starts with the loopback prefix is somebody else's.
-    try std.testing.expect(!baseUrlCarriesKey("http://127.evil.com/api/v1"));
-    try std.testing.expect(!baseUrlCarriesKey("http://localhost.evil.com/api/v1"));
-    try std.testing.expect(!baseUrlCarriesKey("http://127.0.0/v1"));
+    try std.testing.expect(!net.urlCarriesKey("http://127.evil.com/api/v1"));
+    try std.testing.expect(!net.urlCarriesKey("http://localhost.evil.com/api/v1"));
+    try std.testing.expect(!net.urlCarriesKey("http://127.0.0/v1"));
     // Octets past 255 are not addresses, so a resolver is what answers a name
     // spelled that way, and the resolver is not this machine.
-    try std.testing.expect(!baseUrlCarriesKey("http://127.256.0.1/v1"));
-    try std.testing.expect(!baseUrlCarriesKey("http://127.0.0.999:1234/v1"));
-    try std.testing.expect(!baseUrlCarriesKey("http://[::2]:1234/v1"));
+    try std.testing.expect(!net.urlCarriesKey("http://127.256.0.1/v1"));
+    try std.testing.expect(!net.urlCarriesKey("http://127.0.0.999:1234/v1"));
+    try std.testing.expect(!net.urlCarriesKey("http://[::2]:1234/v1"));
     // Anything that is not a url at all carries nothing.
-    try std.testing.expect(!baseUrlCarriesKey("not a url"));
-    try std.testing.expect(!baseUrlCarriesKey(""));
+    try std.testing.expect(!net.urlCarriesKey("not a url"));
+    try std.testing.expect(!net.urlCarriesKey(""));
 }
 
 test "a base url that carries credentials does not print them" {
@@ -3306,14 +3222,14 @@ fn fuzzBaseUrl(_: void, smith: *std.testing.Smith) !void {
     // exemption is read from the parsed url rather than from its text: a
     // scheme that parses is the one the request will use, and a host that
     // parses out of it is the one the socket is opened to.
-    if (baseUrlCarriesKey(url)) {
+    if (net.urlCarriesKey(url)) {
         const uri = std.Uri.parse(url) catch return error.TestUnexpectedResult;
         if (std.ascii.eqlIgnoreCase(uri.scheme, "https")) return;
         // Plaintext. The host has to be this machine, spelled the four ways a
         // resolver sends to this machine and no other.
         var host_buf: [Io.net.HostName.max_len]u8 = undefined;
         const host = (uri.getHost(&host_buf) catch return error.TestUnexpectedResult).bytes;
-        try std.testing.expect(isLoopbackHost(host));
+        try std.testing.expect(net.isLoopbackHost(host));
         var lower: [256]u8 = undefined;
         if (host.len > lower.len) return error.TestUnexpectedResult;
         const h = std.ascii.lowerString(&lower, host);
@@ -3851,8 +3767,13 @@ fn fuzzArgs(_: void, smith: *std.testing.Smith) !void {
     var raw: [8 * 1024]u8 = undefined;
     const text: []const u8 = if (smith.in) |seed| seed else raw[0..smith.slice(&raw)];
 
+    // One word per run of blanks, up to the array: a parser is handed arguments
+    // rather than one opaque word.
     var argv: [64][]const u8 = undefined;
-    const words = fuzzargv.argv(text, &argv);
+    var split = std.mem.tokenizeAny(u8, text, " \t\n");
+    var n: usize = 0;
+    while (n < argv.len) : (n += 1) argv[n] = split.next() orelse break;
+    const words = argv[0..n];
 
     var buf: [512]u8 = undefined;
     var opts: Options = .{};
@@ -3978,6 +3899,8 @@ test "conversation and tool schema serialize as one valid request body" {
         .{ "read", "error: missing path" },
         .{ "write", "error: missing path" },
         .{ "edit", "error: missing path" },
+        .{ "multi_edit", "error: missing edits" },
+        .{ "todo", "error: missing items" },
         .{ "search", "error: missing pattern" },
         .{ "ast", "error: missing pattern" },
         .{ "git", "error: missing cmd" },
@@ -4086,11 +4009,11 @@ test "a skill call is served from the run's skill set" {
     var call: chat_mod.ToolCall = .{ .id = try arena.dupe(u8, ""), .name = try arena.dupe(u8, skill_mod.tool_name) };
     try call.args.appendSlice(arena, "{\"name\":\"pdf\"}");
     var mcp: mcp_mod.Servers = .{};
-    try std.testing.expectEqualStrings("use qpdf\n", try dispatchCall(io, arena, skills, &mcp, call, null, null, &.{}, &.{}));
+    try std.testing.expectEqualStrings("use qpdf\n", try dispatchCall(io, arena, skills, &mcp, .initEmpty(), call, null, null, &.{}, &.{}));
 
     // The same call on a run with no skills is the set's own refusal, not the
     // tool module's `unknown tool`.
-    const out = try dispatchCall(io, arena, .{}, &mcp, call, null, null, &.{}, &.{});
+    const out = try dispatchCall(io, arena, .{}, &mcp, .initEmpty(), call, null, null, &.{}, &.{});
     try std.testing.expect(std.mem.startsWith(u8, out, "error: unknown skill 'pdf'"));
 }
 
@@ -4109,7 +4032,7 @@ test "dispatchCall enforces sandbox writable roots on write" {
     var call: chat_mod.ToolCall = .{ .id = try arena.dupe(u8, ""), .name = try arena.dupe(u8, "write") };
     try call.args.appendSlice(arena, "{\"path\":\"/etc/forbidden.txt\",\"content\":\"hello\"}");
     var mcp: mcp_mod.Servers = .{};
-    const out = try dispatchCall(io, arena, .{}, &mcp, call, null, null, &.{}, &writable_roots);
+    const out = try dispatchCall(io, arena, .{}, &mcp, .initEmpty(), call, null, null, &.{}, &writable_roots);
     try std.testing.expect(std.mem.startsWith(u8, out, "refused:"));
     try std.testing.expect(std.mem.indexOf(u8, out, "outside the sandbox writable roots") != null);
 }
@@ -4126,15 +4049,12 @@ test "MCP tools join the schema with the server's own inputSchema" {
     try conversation_mod.appendMessage(arena, &msgs, "system", conversation_mod.system_prompt);
     try conversation_mod.appendMessage(arena, &msgs, "user", "hi");
 
-    // Only the tool list is read, so the pipe fields are never touched, and
-    // the list is never shut down: there is no child behind it.
+    // Only the tool list is read, so the transport is never touched, and
+    // the list is never shut down: there is nothing behind it.
     const items = try arena.alloc(mcp_mod.Server, 1);
     items[0] = .{
         .name = "srv",
-        .child = undefined,
-        .pgid = 0,
-        .to_server = undefined,
-        .from_server = undefined,
+        .transport = undefined,
         .tools = &.{.{
             .name = "echo",
             .exposed = "mcp__srv__echo",
@@ -4935,28 +4855,6 @@ test "a tool argument is a string or it is refused" {
     try std.testing.expect(chat_mod.str(.{ .bool = true }) == null);
 }
 
-// A level the parser does not have is reported, not fatal: the other knob and
-// the rest of the file still apply, because a typo in one variable is not a
-// reason to silently run the run the user did not ask for.
-test "one bad style value does not cost the run the levels it did understand" {
-    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer state.deinit();
-    const arena = state.allocator();
-    var style: style_mod.Style = .{};
-
-    const bad_env = applyConfigText(arena, &style, null, "brief", "off").?;
-    try std.testing.expectEqualStrings("MICROAGENT_CAVEMAN", bad_env.key);
-    try std.testing.expectEqual(style_mod.CavemanLevel.ultra, style.caveman);
-    try std.testing.expectEqual(style_mod.PonytailLevel.off, style.ponytail);
-
-    var from_file: style_mod.Style = .{};
-    const bad_file = applyConfigText(arena, &from_file, "ponytail = \"lazy\"\ncaveman = \"lite\"\n", null, null).?;
-    try std.testing.expectEqualStrings("ponytail", bad_file.key);
-    try std.testing.expectEqual(style_mod.PonytailLevel.full, from_file.ponytail);
-    // The key after the bad one is still read.
-    try std.testing.expectEqual(style_mod.CavemanLevel.lite, from_file.caveman);
-}
-
 /// Cheap env-gated trace, for debugging a stuck stream. Set once from MDEBUG
 /// before any turn runs.
 var debug_enabled: bool = false;
@@ -5364,78 +5262,6 @@ fn fuzzStream(_: void, smith: *std.testing.Smith) !void {
     try std.testing.expect(try std.json.validate(gpa, body));
 }
 
-test "the env levels override the config file's, and a bad one is named" {
-    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer state.deinit();
-    const arena = state.allocator();
-    var style: style_mod.Style = .{};
-    try std.testing.expect(applyConfigText(arena, &style, "caveman = \"off\"\nponytail = \"lite\"\n", "wenyan-ultra", "ultra") == null);
-    try std.testing.expectEqual(style_mod.CavemanLevel.wenyan_ultra, style.caveman);
-    try std.testing.expectEqual(style_mod.PonytailLevel.ultra, style.ponytail);
-
-    // The file still decides the knob the environment says nothing about.
-    try std.testing.expect(applyConfigText(arena, &style, "caveman = \"lite\"\n", null, null) == null);
-    try std.testing.expectEqual(style_mod.CavemanLevel.lite, style.caveman);
-
-    // A value that is not a level is reported, and the level that would have
-    // been replaced stands, whichever source it came from: the file is the
-    // base, and the variable that is wrong changes nothing.
-    const bad_env = applyConfigText(arena, &style, "caveman = \"lite\"\nponytail = \"ultra\"\n", "brief", null).?;
-    try std.testing.expectEqualStrings("MICROAGENT_CAVEMAN", bad_env.key);
-    try std.testing.expect(!bad_env.from_config);
-    try std.testing.expectEqual(style_mod.CavemanLevel.lite, style.caveman);
-    try std.testing.expectEqual(style_mod.PonytailLevel.ultra, style.ponytail);
-
-    // The file's own bad value is named, and the good key beside it still
-    // applies: one unusable line does not cost the run the rest of the file.
-    const bad_file = applyConfigText(arena, &style, "ponytail = \"lazy\"\ncaveman = \"lite\"\n", null, null).?;
-    try std.testing.expectEqualStrings("ponytail", bad_file.key);
-    try std.testing.expect(bad_file.from_config);
-    try std.testing.expectEqual(config_mod.Problem.Kind.bad_value, bad_file.kind);
-    try std.testing.expectEqual(style_mod.PonytailLevel.full, style.ponytail);
-    try std.testing.expectEqual(style_mod.CavemanLevel.lite, style.caveman);
-
-    // A misspelled key is named as a key, not as a level, and the default it
-    // would have replaced stands.
-    const typo = applyConfigText(arena, &style, "cavmen = \"off\"\n", "lite", null).?;
-    try std.testing.expectEqualStrings("cavmen", typo.key);
-    try std.testing.expect(typo.from_config);
-    try std.testing.expectEqual(config_mod.Problem.Kind.unknown_key, typo.kind);
-    try std.testing.expectEqual(style_mod.CavemanLevel.lite, style.caveman);
-
-    // Every level a config key may name, a variable may name too, because both
-    // are read by the same parser. A level that reached one and not the other
-    // is a spelling a wrapper exporting the variable cannot set, and the two
-    // disagreeing is only visible where both paths are, which is here.
-    for (std.enums.values(style_mod.CavemanLevel)) |level| {
-        var from_env: style_mod.Style = .{};
-        try std.testing.expect(applyConfigText(arena, &from_env, null, level.name(), null) == null);
-        try std.testing.expectEqual(level, from_env.caveman);
-
-        var cfg_buf: [96]u8 = undefined;
-        const cfg = try std.fmt.bufPrint(&cfg_buf, "caveman = \"{s}\"\n", .{level.name()});
-        var from_file: style_mod.Style = .{};
-        try std.testing.expect(applyConfigText(arena, &from_file, cfg, null, null) == null);
-        try std.testing.expectEqual(level, from_file.caveman);
-    }
-    for (std.enums.values(style_mod.PonytailLevel)) |level| {
-        var from_env: style_mod.Style = .{};
-        try std.testing.expect(applyConfigText(arena, &from_env, null, null, level.name()) == null);
-        try std.testing.expectEqual(level, from_env.ponytail);
-
-        var cfg_buf: [96]u8 = undefined;
-        const cfg = try std.fmt.bufPrint(&cfg_buf, "ponytail = \"{s}\"\n", .{level.name()});
-        var from_file: style_mod.Style = .{};
-        try std.testing.expect(applyConfigText(arena, &from_file, cfg, null, null) == null);
-        try std.testing.expectEqual(level, from_file.ponytail);
-    }
-    // The bare `wenyan` shorthand is a config spelling, and the environment
-    // reads the same table, so it answers there too.
-    var shorthand: style_mod.Style = .{};
-    try std.testing.expect(applyConfigText(arena, &shorthand, null, "wenyan", null) == null);
-    try std.testing.expectEqual(style_mod.CavemanLevel.wenyan_full, shorthand.caveman);
-}
-
 test "an environment variable set to nothing is not a value" {
     var env: std.process.Environ.Map = .init(std.testing.allocator);
     defer env.deinit();
@@ -5571,7 +5397,7 @@ test "a config path in a diagnostic is spelled whole rather than cut" {
     try std.testing.expectEqualStrings("", configPathText(arena, .{ .path = null, .named = false }));
 }
 
-test "a style config that cannot be read is reported, a missing one is not" {
+test "a config that cannot be read is reported, a missing one is not" {
     // The default path is absent on most machines and that is not a fault, but
     // a file that is there and is a directory, is unreadable, or is over the
     // cap is: running on the built-in levels with nothing said is the silent
@@ -5600,7 +5426,7 @@ test "the trace switch is on only for a value that says so" {
     try std.testing.expect(debugEnabled(&env));
 }
 
-test "the style config path follows flag, then variable, then home" {
+test "the config path follows flag, then variable, then home" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -5610,53 +5436,53 @@ test "the style config path follows flag, then variable, then home" {
     // A flag names the file outright, and it wins over the variable below it.
     try env.put("MICROAGENT_CONFIG", "/from/env.toml");
     try env.put("HOME", "/home/one");
-    try std.testing.expectEqualStrings("/from/flag.toml", styleConfigPath(&env, arena, "/from/flag.toml").path.?);
-    try std.testing.expect(styleConfigPath(&env, arena, "/from/flag.toml").named);
+    try std.testing.expectEqualStrings("/from/flag.toml", configSource(&env, arena, "/from/flag.toml").path.?);
+    try std.testing.expect(configSource(&env, arena, "/from/flag.toml").named);
 
     // The variable is next, and the flag does not name one when it is absent.
-    try std.testing.expectEqualStrings("/from/env.toml", styleConfigPath(&env, arena, "").path.?);
-    try std.testing.expect(styleConfigPath(&env, arena, "").named);
+    try std.testing.expectEqualStrings("/from/env.toml", configSource(&env, arena, "").path.?);
+    try std.testing.expect(configSource(&env, arena, "").named);
 
     // An empty variable is the documented way to turn the file off, and the
     // home below it must not answer it.
     try env.put("MICROAGENT_CONFIG", "");
-    try std.testing.expect(styleConfigPath(&env, arena, "").path == null);
+    try std.testing.expect(configSource(&env, arena, "").path == null);
 
     // A path exported from a file carries that file's newline, and a path with
     // one is a file nothing holds: the run would report on a config the caller
     // never wrote and fall back to the built-in levels.
     try env.put("MICROAGENT_CONFIG", "/from/env.toml\n");
-    try std.testing.expectEqualStrings("/from/env.toml", styleConfigPath(&env, arena, "").path.?);
+    try std.testing.expectEqualStrings("/from/env.toml", configSource(&env, arena, "").path.?);
 
     // Whitespace alone is the empty case: the file is off, as it is for "".
     try env.put("MICROAGENT_CONFIG", "  \n");
-    try std.testing.expect(styleConfigPath(&env, arena, "").path == null);
+    try std.testing.expect(configSource(&env, arena, "").path == null);
 
     // With neither, the home is where the file is looked for, and it is not
     // something the caller named, so its absence stays quiet.
     var home_only: std.process.Environ.Map = .init(std.testing.allocator);
     defer home_only.deinit();
     try home_only.put("HOME", "/home/one");
-    const home = styleConfigPath(&home_only, arena, "");
+    const home = configSource(&home_only, arena, "");
     try std.testing.expect(std.mem.endsWith(u8, home.path.?, "/home/one/.microagent/config.toml"));
     try std.testing.expect(!home.named);
 
     // No home at all is no file.
     var bare: std.process.Environ.Map = .init(std.testing.allocator);
     defer bare.deinit();
-    try std.testing.expect(styleConfigPath(&bare, arena, "").path == null);
+    try std.testing.expect(configSource(&bare, arena, "").path == null);
 
     // A home exported from a file carries that file's newline, and a directory
     // with one is a directory nothing holds: the config is never found, and its
     // absence from the default path is not a fault worth reporting, so the run
     // is on the built-in levels with nothing said.
     try home_only.put("HOME", "/home/one\n");
-    const wrapped = styleConfigPath(&home_only, arena, "");
+    const wrapped = configSource(&home_only, arena, "");
     try std.testing.expect(std.mem.endsWith(u8, wrapped.path.?, "/home/one/.microagent/config.toml"));
 
     // An empty home is no home, not a root-relative directory.
     try home_only.put("HOME", "");
-    try std.testing.expect(styleConfigPath(&home_only, arena, "").path == null);
+    try std.testing.expect(configSource(&home_only, arena, "").path == null);
 }
 
 test "a config path written with a leading tilde is read from the home directory" {
@@ -5671,8 +5497,8 @@ test "a config path written with a leading tilde is read from the home directory
     // read, but nothing expands it in a value that came out of a variable or a
     // wrapper's environment file, and the help text prints the tilde spelling.
     try env.put("MICROAGENT_CONFIG", "~/.microagent/other.toml");
-    try std.testing.expectEqualStrings("/home/one/.microagent/other.toml", styleConfigPath(&env, arena, "").path.?);
-    try std.testing.expectEqualStrings("/home/one/from/flag.toml", styleConfigPath(&env, arena, "~/from/flag.toml").path.?);
+    try std.testing.expectEqualStrings("/home/one/.microagent/other.toml", configSource(&env, arena, "").path.?);
+    try std.testing.expectEqualStrings("/home/one/from/flag.toml", configSource(&env, arena, "~/from/flag.toml").path.?);
 }
 
 // The threaded io, the temporary directory and the arena the three atomic
@@ -5831,12 +5657,11 @@ test "a write issued twice leaves the file the first run left" {
     try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), stat.permissions.toMode() & tool_mod.permission_bits);
 }
 
-// Where the key comes from is decided before the first turn, and the order
-// decides it: a `--api-key` beats every variable, the variables are tried in
-// the order the help text names them, and only when none of them carries one
-// is the file under `$HOME` read. The file is a fallback rather than the
-// first choice, and a variable that is set to nothing is not a key at all.
-test "the key is the flag, then the first variable, then the file" {
+// Where the key comes from is decided before the first turn: a `--api-key`
+// beats the variable, and only when the variable carries nothing is the file
+// under `$HOME` read. The file is a fallback rather than the first choice, and
+// a variable that is set to nothing is not a key at all.
+test "the key is the flag, then the variable, then the file" {
     var env: std.process.Environ.Map = .init(std.testing.allocator);
     defer env.deinit();
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -5844,43 +5669,35 @@ test "the key is the flag, then the first variable, then the file" {
     const io = std.testing.io;
 
     // A flag is a key and is not looked past, whatever the environment says.
-    try env.put(key_vars[0], "from-var");
+    try env.put(key_var, "from-var");
     {
         const k = resolveKey(io, &env, &arena_state, "from-flag");
         try std.testing.expectEqualStrings("from-flag", k.value);
         try std.testing.expectEqualStrings("--api-key", k.source);
     }
-
-    // Every variable set, the one the help text names first is the one used.
-    for (key_vars, 0..) |name, i| {
-        try env.put(name, try std.fmt.allocPrint(arena_state.allocator(), "from-{d}", .{i}));
-    }
     {
         const k = resolveKey(io, &env, &arena_state, "");
-        try std.testing.expectEqualStrings("from-0", k.value);
-        try std.testing.expectEqualStrings(key_vars[0], k.source);
+        try std.testing.expectEqualStrings("from-var", k.value);
+        try std.testing.expectEqualStrings(key_var, k.source);
     }
 
-    // Each variable in turn, so the order the help text and usage reference name is the
-    // order a key is looked for in, and not merely the order the array spells.
-    for (key_vars) |name| {
-        for (key_vars) |other| _ = env.swapRemove(other);
-        try env.put(name, "only-this-one");
-        const k = resolveKey(io, &env, &arena_state, "");
-        try std.testing.expectEqualStrings("only-this-one", k.value);
-        try std.testing.expectEqualStrings(name, k.source);
-    }
-
-    // A variable set to nothing is not a key, and the ones after it are still
-    // read rather than stopping at the empty one.
-    for (key_vars) |other| _ = env.swapRemove(other);
-    try env.put(key_vars[0], "");
-    try env.put(key_vars[1], "not-the-empty-one");
+    // The variable of another provider is not a key for this program.
+    _ = env.swapRemove(key_var);
+    try env.put("OPENAI_API_KEY", "not-read");
     {
         const k = resolveKey(io, &env, &arena_state, "");
-        try std.testing.expectEqualStrings("not-the-empty-one", k.value);
-        try std.testing.expectEqualStrings(key_vars[1], k.source);
+        try std.testing.expectEqualStrings("", k.value);
+        try std.testing.expectEqualStrings("none", k.source);
     }
+    _ = env.swapRemove("OPENAI_API_KEY");
+
+    // A variable set to nothing is not a key.
+    try env.put(key_var, "");
+    {
+        const k = resolveKey(io, &env, &arena_state, "");
+        try std.testing.expectEqualStrings("", k.value);
+    }
+    _ = env.swapRemove(key_var);
 
     // With no variable carrying one the file is read, and a key in it is named
     // by the path it came from rather than by a variable nobody set.
@@ -5888,7 +5705,6 @@ test "the key is the flag, then the first variable, then the file" {
     defer tmp.cleanup();
     try tmp.dir.createDirPath(io, ".secrets");
     try tmp.dir.writeFile(io, .{ .sub_path = ".secrets/openrouter", .data = "sk-from-the-file\n" });
-    for (key_vars) |name| _ = env.swapRemove(name);
     const home = try tmp.dir.realPathFileAlloc(io, ".", arena_state.allocator());
     try env.put("HOME", home);
     {
@@ -5922,13 +5738,13 @@ test "the tool environment is this one less the credentials" {
     try env.put("PATH", "/usr/bin");
     try env.put("HOME", "/home/agent");
     try env.put("CI", "1");
-    for (key_vars) |name| try env.put(name, "sk-live-not-a-real-key");
+    try env.put(key_var, "sk-live-not-a-real-key");
     // The token `microagent update` authenticates with is a credential of the
     // same shape, so the scrub that keeps the provider key out of a tool's
     // environment keeps this out of it too.
     try env.put("GITHUB_TOKEN", "ghp_not-a-real-token");
 
-    scrubSecrets(&env);
+    scrubSecrets(&env, &.{});
     const scrubbed = &env;
 
     for (secret_env_vars) |name| {
@@ -5944,21 +5760,18 @@ test "the tool environment is this one less the credentials" {
     var with_lookalike: std.process.Environ.Map = .init(std.testing.allocator);
     defer with_lookalike.deinit();
     try with_lookalike.put("MY_API_KEY", "not-a-provider-key");
-    scrubSecrets(&with_lookalike);
+    scrubSecrets(&with_lookalike, &.{});
     try std.testing.expectEqualStrings("not-a-provider-key", with_lookalike.get("MY_API_KEY").?);
 }
 
 // The Harbor adapter (`integrations/harbor/microagent_agent.py`) reads the
 // host's environment and hands this binary a subset of it, so it duplicates
-// the configuration this file owns: the order the provider key is read in, the
+// the configuration this file owns: the provider key variable, the
 // reasoning levels, the default endpoint, the grace the budget is derived
 // against, and the exit code a stopped run leaves. A duplicate is fine; a
 // silent divergence is not, and nothing else in the tree would notice one: the
 // adapter is Python, it never imports this file, and the values it disagrees
-// about are the ones a run is scored on. The key order already drifted once, so
-// a host exporting OPENAI_API_KEY and OPENROUTER_API_KEY together was an
-// OpenAI key on a direct run and an OpenRouter key in the container. The
-// adapter's values are read from its source here, against the constants
+// about are the ones a run is scored on. The adapter's values are read from its source here, against the constants
 // themselves rather than against a second copy of them.
 test "the harbor adapter mirrors this binary's configuration schema" {
     const gpa = std.testing.allocator;
@@ -5967,10 +5780,10 @@ test "the harbor adapter mirrors this binary's configuration schema" {
     const adapter = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, harbor_adapter_path, gpa, .limited(max_harbor_adapter_bytes));
     defer gpa.free(adapter);
 
-    // The key variables, in the order the loop reads them, and the reasoning
-    // levels in the order they are named. Each name has to appear after the
-    // last one before it, so a reordering is caught and not just a rename.
-    try expectNamesInOrder(adapter, "for name in (", &key_vars);
+    // The one key variable the adapter reads, and the reasoning levels in the
+    // order they are named. Each name has to appear after the last one before
+    // it, so a reordering is caught and not just a rename.
+    try expectSpelled(adapter, "trimmed_env(\"" ++ key_var ++ "\")");
     try expectNamesInOrder(adapter, "REASONING_EFFORTS = (", &reasoning_efforts);
 
     // The scalars the adapter spells as its own constant. Each is a value this
@@ -6143,7 +5956,7 @@ test "the help text and the usage reference name every variable the program read
 
     // The three that read empty as off are named in the same paragraph as the
     // exception, which is why they are not in the list above: an empty
-    // MICROAGENT_CONFIG means no style file rather than the default one, an
+    // MICROAGENT_CONFIG means no config file rather than the default one, an
     // empty MICROAGENT_SESSION_DIR means no session log rather than one
     // under $HOME, and an empty MICROAGENT_SKILLS means no skills rather than
     // the default directory. Requiring them here is what keeps a fourth
@@ -6278,8 +6091,223 @@ test "environMap holds what createMap holds" {
         try std.testing.expectEqualStrings(value, ours.get(key).?);
     }
     // The scrub `runMain` applies goes through the same map.
-    try ours.put("OPENAI_API_KEY", "sk");
-    scrubSecrets(&ours);
-    try std.testing.expectEqual(@as(?[]const u8, null), ours.get("OPENAI_API_KEY"));
+    try ours.put(key_var, "sk");
+    scrubSecrets(&ours, &.{});
+    try std.testing.expectEqual(@as(?[]const u8, null), ours.get(key_var));
     try std.testing.expectEqualStrings("/usr/bin", ours.get("PATH").?);
+}
+
+// The schema the model is offered. A run that turns nothing off sends the
+// constant, byte for byte, because the provider caches on that prefix; a run
+// that turns tools off sends the same entries less those, in the same order,
+// as JSON a provider parses.
+test "the built-in schema is the constant unless the config turned a tool off" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    // The filter, given nothing to drop, reproduces the constant, which is what
+    // says it splits `tools_json` on the right boundaries.
+    try std.testing.expectEqualStrings(tools_json, try builtinToolsJson(arena, .initEmpty()));
+    const default_prefix = try bodyPrefix(arena, .{ .model = "m" });
+    try std.testing.expect(std.mem.indexOf(u8, default_prefix, "\"tools\":" ++ tools_json ++ ",\"stream\"") != null);
+
+    var off: std.EnumSet(chat_mod.Tool) = .initEmpty();
+    off.insert(.ast);
+    off.insert(.bash);
+    off.insert(.todo);
+    const prefix = try bodyPrefix(arena, .{ .model = "m", .disabled_tools = off });
+    const body = try std.mem.concat(arena, u8, &.{ prefix, "[]}" });
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena, body, .{});
+    const tools = parsed.object.get("tools").?.array;
+    const expected = [_][]const u8{ "read", "write", "edit", "multi_edit", "search", "git" };
+    try std.testing.expectEqual(expected.len, tools.items.len);
+    for (expected, tools.items) |name, entry| {
+        try std.testing.expectEqualStrings(name, entry.object.get("function").?.object.get("name").?.string);
+    }
+    // What an entry says is untouched: the filter drops entries, it does not rewrite them.
+    try std.testing.expect(std.mem.indexOf(u8, prefix, "\"name\":\"git\",\"description\":\"Read repository state") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prefix, "\"name\":\"ast\"") == null);
+
+    // A skill and a server's tools still follow the built-ins, and the array
+    // is one array: a comma between the two halves and one closing bracket.
+    const items = try arena.alloc(mcp_mod.Server, 1);
+    items[0] = .{ .name = "srv", .transport = undefined, .tools = &.{.{
+        .name = "echo",
+        .exposed = "mcp__srv__echo",
+        .description = "Echo",
+        .schema = "{\"type\":\"object\"}",
+    }} };
+    const with_extras: Options = .{
+        .model = "m",
+        .disabled_tools = off,
+        .skills = .{ .items = &.{.{ .name = "pdf", .description = "fills forms", .path = "/pdf/SKILL.md" }} },
+        .mcp = .{ .items = items },
+    };
+    const extras_body = try buildBody(arena, with_extras, "[");
+    const extras = (try std.json.parseFromSliceLeaky(std.json.Value, arena, extras_body, .{})).object.get("tools").?.array;
+    const extra_names = [_][]const u8{ "read", "write", "edit", "multi_edit", "search", "git", "skill", "mcp__srv__echo" };
+    try std.testing.expectEqual(extra_names.len, extras.items.len);
+    for (extra_names, extras.items) |name, entry| {
+        try std.testing.expectEqualStrings(name, entry.object.get("function").?.object.get("name").?.string);
+    }
+
+    // With one built-in left the array is still valid, and with none it is empty
+    // rather than malformed; the run refuses that case before it is built.
+    var one_left: std.EnumSet(chat_mod.Tool) = .initFull();
+    one_left.remove(.read);
+    const lone = try std.json.parseFromSliceLeaky(std.json.Value, arena, try builtinToolsJson(arena, one_left), .{});
+    try std.testing.expectEqual(@as(usize, 1), lone.array.items.len);
+    const empty = try std.json.parseFromSliceLeaky(std.json.Value, arena, try builtinToolsJson(arena, .initFull()), .{});
+    try std.testing.expectEqual(@as(usize, 0), empty.array.items.len);
+}
+
+test "the system prompt names the tools that are off, and only then" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    // Nothing to add: the compile-time prompt itself, not a copy of it.
+    const stock = try systemText(arena, "", "", .initEmpty());
+    try std.testing.expectEqual(conversation_mod.system_prompt.ptr, stock.ptr);
+
+    var off: std.EnumSet(chat_mod.Tool) = .initEmpty();
+    off.insert(.git);
+    off.insert(.ast);
+    const text = try systemText(arena, "", "", off);
+    try std.testing.expect(std.mem.startsWith(u8, text, conversation_mod.system_prompt));
+    try std.testing.expectEqualStrings("\n\nDisabled tools: ast, git.", text[conversation_mod.system_prompt.len..]);
+
+    // The addendum follows the stock prompt after a blank line, and it and the
+    // skills keep their place ahead of the line.
+    const extended = try systemText(arena, "be brief", "\n\nSkills: x", off);
+    try std.testing.expect(std.mem.startsWith(u8, extended, conversation_mod.system_prompt ++ "\n\nbe brief"));
+    try std.testing.expect(std.mem.indexOf(u8, extended, "be brief").? < std.mem.indexOf(u8, extended, "Skills: x").?);
+    try std.testing.expect(std.mem.endsWith(u8, extended, "\n\nDisabled tools: ast, git."));
+}
+
+// The reason a run does not start is decided from the parsed file, before any
+// network, so it is the one place these three stops can be driven without a
+// process: `runMain` turns the message into exit status 2.
+test "a config the tool tables make unusable stops the run with the fix named" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    const load = struct {
+        fn of(a: std.mem.Allocator, text: []const u8) LoadedConfig {
+            const parsed = config_mod.parse(a, text);
+            return .{
+                .system_prompt_extra = parsed.system_prompt_extra,
+                .skills = parsed.skills,
+                .mcp = parsed.mcp,
+                .deny_commands = parsed.deny_commands,
+                .disabled_tools = parsed.disabled_tools,
+                .tool_problem = parsed.tool_problem,
+                .sandbox = parsed.sandbox,
+                .source = "/home/u/.microagent/config.toml",
+            };
+        }
+    }.of;
+
+    try std.testing.expect(toolConfigError(arena, load(arena, "")) == null);
+    try std.testing.expect(toolConfigError(arena, load(arena, "[tools.ast]\nenabled = false\n[tools.context7]\nenabled = true\n")) == null);
+
+    // A misspelled name is never quietly ignored: the message names it, the
+    // file, and every name that would have worked.
+    const typo = toolConfigError(arena, load(arena, "[tools.serach]\nenabled = false\n")).?;
+    try std.testing.expect(std.mem.indexOf(u8, typo, "/home/u/.microagent/config.toml") != null);
+    try std.testing.expect(std.mem.indexOf(u8, typo, "[tools.serach] is not a tool") != null);
+    try std.testing.expect(std.mem.indexOf(u8, typo, "bash, read, write, edit, multi_edit, search, ast, git, todo, web_search, context7, grep_app") != null);
+
+    const bad = toolConfigError(arena, load(arena, "[tools.grep_app]\nenabled = true\ntimeout = 0\n")).?;
+    try std.testing.expect(std.mem.indexOf(u8, bad, "timeout in [tools.grep_app]") != null);
+
+    // The name is the file's own bytes, so it is escaped before it is printed.
+    const hostile = toolConfigError(arena, load(arena, "[tools.a\x1b[2Jb]\n")).?;
+    try std.testing.expect(std.mem.indexOfScalar(u8, hostile, 0x1b) == null);
+
+    var all_off: std.ArrayList(u8) = .empty;
+    for (chat_mod.tools()) |tool| try all_off.print(arena, "[tools.{s}]\nenabled = false\n", .{tool.name()});
+    const nothing = toolConfigError(arena, load(arena, all_off.items)).?;
+    try std.testing.expect(std.mem.indexOf(u8, nothing, "every built-in tool is disabled") != null);
+    // One left is a run.
+    const one = try std.mem.replaceOwned(u8, arena, all_off.items, "[tools.todo]\nenabled = false\n", "");
+    try std.testing.expect(toolConfigError(arena, load(arena, one)) == null);
+}
+
+test "a call to a tool the config switched off is refused where it is dispatched" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+    const target = try std.fs.path.join(arena, &.{ root, "made.txt" });
+
+    var off: std.EnumSet(chat_mod.Tool) = .initEmpty();
+    off.insert(.write);
+    var call: chat_mod.ToolCall = .{ .id = try arena.dupe(u8, ""), .name = try arena.dupe(u8, "write") };
+    try call.args.appendSlice(arena, try std.fmt.allocPrint(arena, "{{\"path\":\"{s}\",\"content\":\"x\"}}", .{target}));
+    var mcp: mcp_mod.Servers = .{};
+
+    const refused = try dispatchCall(io, arena, .{}, &mcp, off, call, null, null, &.{}, &.{});
+    try std.testing.expectEqualStrings("error: the tool 'write' is disabled by configuration", refused);
+    // Refused before it ran: nothing was written.
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "made.txt", .{}));
+
+    // The same call with the tool on is served, and another tool is untouched by the switch.
+    const served = try dispatchCall(io, arena, .{}, &mcp, .initEmpty(), call, null, null, &.{}, &.{});
+    try std.testing.expect(!std.mem.startsWith(u8, served, "error: the tool"));
+    try tmp.dir.access(io, "made.txt", .{});
+    var read_call: chat_mod.ToolCall = .{ .id = try arena.dupe(u8, ""), .name = try arena.dupe(u8, "read") };
+    try read_call.args.appendSlice(arena, try std.fmt.allocPrint(arena, "{{\"path\":\"{s}\"}}", .{target}));
+    const read = try dispatchCall(io, arena, .{}, &mcp, off, read_call, null, null, &.{}, &.{});
+    try std.testing.expect(std.mem.indexOf(u8, read, "x") != null);
+}
+
+test "the variables that hold a remote server's key are scrubbed from the tool environment" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("EXA_API_KEY", "sk-exa");
+    try env.put("DOCS_KEY", "sk-docs");
+    try env.put("PATH", "/usr/bin");
+    const entries = try mcp_mod.withKeys(arena, &env, &.{
+        .{ .name = "web_search", .url = "https://mcp.exa.ai/mcp", .api_key_env = "EXA_API_KEY" },
+        .{ .name = "docs", .url = "https://docs.example/mcp", .api_key_env = "DOCS_KEY" },
+        .{ .name = "fs", .command = "npx" },
+    });
+    scrubSecrets(&env, entries);
+    try std.testing.expect(env.get("EXA_API_KEY") == null);
+    try std.testing.expect(env.get("DOCS_KEY") == null);
+    try std.testing.expectEqualStrings("/usr/bin", env.get("PATH").?);
+    // Read before the scrub, so the connection still has what it needs.
+    try std.testing.expectEqualStrings("sk-exa", entries[0].api_key);
+    try std.testing.expectEqualStrings("sk-docs", entries[1].api_key);
+}
+
+test "cstrlen agrees with std.mem.len at every alignment and length" {
+    // The string ends flush with the end of the allocation, the hardest place for a scan: it must
+    // stop at the terminator and must not depend on what follows it.
+    const gpa = std.testing.allocator;
+    for (0..word_bytes) |offset| {
+        for (0..41) |len| {
+            const buf = try gpa.alloc(u8, offset + len + 1);
+            defer gpa.free(buf);
+            @memset(buf, 'a');
+            buf[offset + len] = 0;
+            const s: [*:0]const u8 = @ptrCast(buf.ptr + offset);
+            try std.testing.expectEqual(len, cstrlen(s));
+            try std.testing.expectEqual(std.mem.len(s), cstrlen(s));
+        }
+    }
+    // A byte at or above 0x80 is not a terminator, and neither is 0x01 or 0xff next to one.
+    const tricky = [_:0]u8{ 0x80, 0xff, 0x01, 0x7f, 0x80, 0xff, 0x01, 0x7f, 0x80, 'x' };
+    try std.testing.expectEqual(@as(usize, tricky.len), cstrlen(&tricky));
 }

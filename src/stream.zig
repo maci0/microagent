@@ -223,9 +223,17 @@ const error_member = "\"error\":";
 /// by the generic parse instead. That is where a frame that is nothing but a
 /// failure report lands anyway, and the shapes would have found nothing in it.
 fn reportsError(payload: []const u8) bool {
-    const pos = std.mem.indexOf(u8, payload, error_member) orelse return false;
-    const value = std.mem.trim(u8, payload[pos + error_member.len ..], " \t");
-    return !std.mem.startsWith(u8, value, "null");
+    // The needle is one machine word, so each position is a load and a compare. `std.mem.indexOf`
+    // made a call per position, which was a quarter of a stream's instructions in `ReleaseSmall`.
+    comptime std.debug.assert(error_member.len == @sizeOf(u64));
+    const needle = std.mem.readInt(u64, error_member, .little);
+    var at: usize = 0;
+    while (at + error_member.len <= payload.len) : (at += 1) {
+        if (std.mem.readInt(u64, payload[at..][0..error_member.len], .little) != needle) continue;
+        const value = std.mem.trim(u8, payload[at + error_member.len ..], " \t");
+        return !std.mem.startsWith(u8, value, "null");
+    }
+    return false;
 }
 
 /// What a frame said went wrong, as the one line a note carries: the code the
@@ -1683,6 +1691,20 @@ test "a failure the provider reported in the stream is kept, in its own words" {
     // A model that writes the member into its own answer has it escaped, so the
     // bytes that spell a key cannot appear inside the string.
     try std.testing.expect(!reportsError("{\"choices\":[{\"delta\":{\"content\":\"look at {\\\"error\\\": 1} here\"}}]}"));
+    // The member is found wherever it sits, including flush against the end, and a frame shorter
+    // than the member cannot hold it.
+    for (0..24) |pad| {
+        var frame: [64]u8 = undefined;
+        @memset(frame[0..pad], ' ');
+        const text = std.fmt.bufPrint(frame[pad..], "\"error\":{{}}", .{}) catch unreachable;
+        try std.testing.expect(reportsError(frame[0 .. pad + text.len]));
+        try std.testing.expect(!reportsError(frame[0 .. pad + error_member.len - 1]));
+    }
+    try std.testing.expect(!reportsError(""));
+    try std.testing.expect(!reportsError("\"error\""));
+    // The first occurrence decides, as it did when this searched with `indexOf`.
+    try std.testing.expect(!reportsError("{\"error\":null,\"x\":{\"error\":{}}}"));
+    try std.testing.expect(reportsError("{\"error\":{},\"x\":{\"error\":null}}"));
 
     // A frame reporting a failure the provider sent no reason for still ends the
     // turn: the notice needs words, not silence.

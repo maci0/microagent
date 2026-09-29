@@ -2,18 +2,19 @@
 //! hatch, the home directory and the variables read out of the environment, a
 //! deadline, the two output sinks (stderr for notes and stdout for the
 //! answers a caller parses), the path a write through a symlink really lands on,
-//! the two budgets a value read out of the environment or off the wire is held
-//! to, the line framing a streamed body is cut on, the retry policy both
-//! network paths answer with, and the reading of an HTTP date off the wire,
-//! which is wire format rather than any one caller's policy.
+//! which urls a credential may be sent to, the two budgets a value read out of
+//! the environment or off the wire is held to, the line framing a streamed body
+//! is cut on, the retry policy both network paths answer with, and the reading
+//! of an HTTP date off the wire, which is wire format rather than any one
+//! caller's policy.
 //!
 //! A leaf module over the other leaf: it imports `chat` and nothing else, so
 //! the agent run, the session log and `update` can each use it without
 //! importing one another. `chat` is imported for the one escaping the notes
-//! here need, which is the escaping the rest of the program uses. The argv the
-//! two command-line fuzzers take is `fuzzargv`, beside this and not here.
+//! here need, which is the escaping the rest of the program uses.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 
 const chat = @import("chat.zig");
@@ -300,6 +301,49 @@ test "the line splitter resumes where the last call stopped, and does not skip a
     try std.testing.expectEqual(@as(usize, 0), scanned);
     try std.testing.expectEqual(@as(?usize, 12), nextLineEnd(pending.items, &scanned));
     try std.testing.expectEqual(@as(?usize, null), nextLineEnd(pending.items, &scanned));
+}
+
+/// Whether a credential may be sent to this url. The API key rides in an
+/// Authorization header on every request, so a plaintext url hands it to
+/// whatever is on the path, and a typo that drops the `s` is the way that
+/// happens by accident. Loopback is exempt: there is no network path there to
+/// intercept, and `http://localhost:1234/v1` is how a gateway running on this
+/// machine is named.
+pub fn urlCarriesKey(url: []const u8) bool {
+    const uri = std.Uri.parse(url) catch return false;
+    if (std.ascii.eqlIgnoreCase(uri.scheme, "https")) return true;
+    if (!std.ascii.eqlIgnoreCase(uri.scheme, "http")) return false;
+    var host_buf: [Io.net.HostName.max_len]u8 = undefined;
+    return isLoopbackHost((uri.getHost(&host_buf) catch return false).bytes);
+}
+
+/// Whether a host names this machine and no other.
+pub fn isLoopbackHost(host: []const u8) bool {
+    if (std.ascii.eqlIgnoreCase(host, "localhost")) return true;
+    if (std.ascii.endsWithIgnoreCase(host, ".localhost")) return true;
+    if (isIpv4Loopback(host)) return true;
+    return std.mem.eql(u8, std.mem.trim(u8, host, "[]"), "::1");
+}
+
+const max_ipv4_octet: u16 = 255;
+
+/// `127.x.y.z`, and only when every octet is a number in range: a name that
+/// merely begins `127.` is a host somebody else can point anywhere, and
+/// `127.256.0.1` is not an address at all, so a resolver is what answers it.
+fn isIpv4Loopback(host: []const u8) bool {
+    if (!std.mem.startsWith(u8, host, "127.")) return false;
+    var octets: usize = 0;
+    var it = std.mem.splitScalar(u8, host, '.');
+    while (it.next()) |part| {
+        if (part.len == 0 or part.len > 3) return false;
+        for (part) |c| if (!std.ascii.isDigit(c)) return false;
+        // Parsed wide enough that the comparison is the range check, rather
+        // than a parse that has already refused what it cannot hold.
+        const octet = std.fmt.parseInt(u16, part, 10) catch return false;
+        if (octet > max_ipv4_octet) return false;
+        octets += 1;
+    }
+    return octets == 4;
 }
 
 /// A monotonic duration for `Io.Timeout`, from milliseconds. A tool deadline
@@ -1347,4 +1391,87 @@ fn stdDaysFromCivil(year: i64, month: u32, day: u32) i64 {
     while (m < month) : (m += 1)
         total += std.time.epoch.getDaysInMonth(@intCast(year), @enumFromInt(m));
     return total + @as(i64, day) - 1;
+}
+
+/// The most /proc/self/maps text `releaseDeadStack` reads. The `[stack]` line is near the end of a
+/// listing this process keeps to a few kilobytes; a listing that outgrows the buffer loses that
+/// line, and the function then releases nothing.
+const maps_bytes = 16 * 1024;
+
+/// Room kept between the caller's frame and the range handed back: the red zone below the stack
+/// pointer, and a frame or a signal delivered while this runs.
+const stack_slack_bytes = 8 * 1024;
+
+/// Returns the pages of the main thread's stack below the caller's frame to the kernel.
+///
+/// A TLS handshake dirties a couple of hundred kilobytes of stack for a few milliseconds of work,
+/// and the pages stay resident for the rest of the run, which is spent waiting on a model. The range
+/// is clamped to the `[stack]` mapping that /proc/self/maps names and that holds the caller's frame,
+/// because `MADV_DONTNEED` on any other private mapping discards live data: a caller on another
+/// thread, or a listing with no such line, releases nothing. Best effort, so a failure is ignored.
+pub fn releaseDeadStack() void {
+    if (builtin.os.tag != .linux) return;
+    var marker: u8 = 0;
+    const sp = @intFromPtr(&marker);
+    var buf: [maps_bytes]u8 = undefined;
+    const linux = std.os.linux;
+    const opened = linux.openat(linux.AT.FDCWD, "/proc/self/maps", .{ .CLOEXEC = true }, 0);
+    if (linux.errno(opened) != .SUCCESS) return;
+    const fd: i32 = @intCast(opened);
+    defer _ = linux.close(fd);
+    const got = linux.read(fd, &buf, buf.len);
+    if (linux.errno(got) != .SUCCESS) return;
+    var lines = std.mem.splitScalar(u8, buf[0..got], '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.endsWith(u8, line, "[stack]")) continue;
+        const dash = std.mem.findScalar(u8, line, '-') orelse return;
+        const space = std.mem.findScalar(u8, line, ' ') orelse return;
+        const start = std.fmt.parseUnsigned(usize, line[0..dash], 16) catch return;
+        const end = std.fmt.parseUnsigned(usize, line[dash + 1 .. space], 16) catch return;
+        if (sp < start or sp >= end) return;
+        const top = std.mem.alignBackward(usize, sp -| stack_slack_bytes, std.heap.pageSize());
+        if (top <= start) return;
+        _ = linux.madvise(@ptrFromInt(start), top - start, linux.MADV.DONTNEED);
+        return;
+    }
+}
+
+/// Anonymous resident memory of this process in kB, from /proc/self/status.
+fn rssAnonKb() !usize {
+    const linux = std.os.linux;
+    const opened = linux.openat(linux.AT.FDCWD, "/proc/self/status", .{ .CLOEXEC = true }, 0);
+    if (linux.errno(opened) != .SUCCESS) return error.OpenFailed;
+    const fd: i32 = @intCast(opened);
+    defer _ = linux.close(fd);
+    var buf: [8192]u8 = undefined;
+    const got = linux.read(fd, &buf, buf.len);
+    if (linux.errno(got) != .SUCCESS) return error.ReadFailed;
+    const text = buf[0..got];
+    const at = std.mem.find(u8, text, "RssAnon:") orelse return error.MissingField;
+    var it = std.mem.tokenizeAny(u8, text[at + "RssAnon:".len ..], " \tkB\n");
+    return std.fmt.parseUnsigned(usize, it.next() orelse return error.MissingField, 10);
+}
+
+/// Writes every page of a large stack array, then returns, leaving them dirty and dead.
+fn dirtyStack() void {
+    var pages: [512 * 1024]u8 = undefined;
+    @memset(&pages, 0x5a);
+    std.mem.doNotOptimizeAway(&pages);
+}
+
+test "releaseDeadStack gives back stack pages the caller no longer uses" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    // A stack the test runner already grew is not this test's to release, so the helper's pages are
+    // measured as the difference, and only a drop of most of them counts.
+    const before = try rssAnonKb();
+    @call(.never_inline, dirtyStack, .{});
+    const dirty = try rssAnonKb();
+    releaseDeadStack();
+    const after = try rssAnonKb();
+    try std.testing.expect(dirty >= before + 384);
+    try std.testing.expect(after + 384 <= dirty);
+    // What the caller still uses is intact: a live array on this frame survives a release.
+    const live = [_]u8{0xa5} ** 4096;
+    releaseDeadStack();
+    for (live) |byte| try std.testing.expectEqual(@as(u8, 0xa5), byte);
 }

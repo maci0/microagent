@@ -107,7 +107,8 @@ measure() {
 	# and leaves no binary to run.
 	rm -f "$bin"
 	if ! "$zig" test -fno-strip -OReleaseFast \
-		--dep build_options -Mroot=src/main.zig -Mbuild_options="$opts" \
+		--dep build_options --dep copy -Mroot=src/main.zig -Mbuild_options="$opts" \
+		-fno-builtin -Mcopy=src/copy.zig \
 		--cache-dir "$root/.zig-cache" --global-cache-dir "$ZIG_GLOBAL_CACHE_DIR" \
 		--name test --test-filter "$filter" \
 		--zig-lib-dir "$lib" -femit-bin="$bin" >"$work/build.log" 2>&1; then

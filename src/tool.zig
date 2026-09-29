@@ -663,9 +663,11 @@ pub fn runTool(
         .read => toolRead(io, arena, args),
         .write => toolWrite(io, arena, args, writable_roots),
         .edit => toolEdit(io, arena, args, writable_roots),
+        .multi_edit => toolMultiEdit(io, arena, args, writable_roots),
         .search => toolSearch(io, arena, args, ceiling_ms, environ_map),
         .ast => toolAst(io, arena, args, ceiling_ms, environ_map),
         .git => toolGit(io, arena, args, ceiling_ms, environ_map),
+        .todo => toolTodo(arena, args),
     };
 }
 
@@ -695,11 +697,23 @@ fn noteToolCall(io: Io, arena: std.mem.Allocator, tool: chat.Tool, args: std.jso
     net.writeErr(io, toolCallLine(arena, &buf, tool, args) catch return);
 }
 
+/// The path of a `multi_edit` call's first edit, which is what its gutter line shows: the call has
+/// no `path` of its own, and the first file it touches says where the change starts.
+fn firstEditPath(args: std.json.ObjectMap) []const u8 {
+    const edits = args.get("edits") orelse return "";
+    if (edits != .array or edits.array.items.len == 0) return "";
+    const first = edits.array.items[0];
+    if (first != .object) return "";
+    return chat.str(first.object.get("path")) orelse "";
+}
+
 fn toolCallLine(arena: std.mem.Allocator, buf: []u8, tool: chat.Tool, args: std.json.ObjectMap) ![]const u8 {
     // The interesting argument is not the same one for every tool: a structural
     // search is identified by its pattern, a bash call by its command, a git
     // call by its subcommand, which `toolGit` reads as `cmd`.
-    const detail = if (tool == .git)
+    const detail = if (tool == .multi_edit)
+        firstEditPath(args)
+    else if (tool == .git)
         (chat.str(args.get("cmd")) orelse "")
     else if (tool == .ast)
         (chat.str(args.get("pattern")) orelse "")
@@ -1441,7 +1455,27 @@ fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, writable
 
     const raw = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_edit_bytes)) catch |err|
         return readFailed(arena, path, err);
-    if (old.len == 0) return "error: old_string is empty";
+    const edited = try applyEdit(arena, path, raw, old, new, all);
+    const done = switch (edited) {
+        .refused => |message| return message,
+        .text => |text| text,
+    };
+    writeFileAtomic(io, std.Io.Dir.cwd(), path, done.bytes) catch |err|
+        return writeFailed(arena, path, err);
+    return std.fmt.allocPrint(arena, "replaced {d} occurrence(s) in {s}", .{ done.count, path });
+}
+
+/// What one replacement made of a file's text, or the refusal the model reads. `edit` and
+/// `multi_edit` both ask it, so a replacement is judged by one set of rules however it arrives.
+const Edited = union(enum) {
+    text: struct { bytes: []const u8, count: usize },
+    refused: []const u8,
+};
+
+/// Replaces `old` with `new` in `raw`, once or everywhere with `all`, and writes nothing. The
+/// refusals are the ones an edit that could be issued twice has to make: see the comments below.
+fn applyEdit(arena: std.mem.Allocator, path: []const u8, raw: []const u8, old: []const u8, new: []const u8, all: bool) error{OutOfMemory}!Edited {
+    if (old.len == 0) return .{ .refused = "error: old_string is empty" };
     // An edit is a tool call the model can issue twice: a turn that was cut
     // before the result reached it, a re-read to check the change landed, a
     // retry after a transport fault. Every other shape is already safe, because
@@ -1452,7 +1486,7 @@ fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, writable
     // A replacement that is the text it replaces changes nothing, so it reports
     // that rather than rewriting the file with its own contents.
     if (std.mem.eql(u8, old, new)) {
-        return std.fmt.allocPrint(arena, "no change: new_string is the same text as old_string in {s}", .{path});
+        return .{ .refused = try std.fmt.allocPrint(arena, "no change: new_string is the same text as old_string in {s}", .{path}) };
     }
     // A replacement that still contains what it replaces cannot be run twice:
     // the second execution matches the same text inside the first execution's
@@ -1464,12 +1498,12 @@ fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, writable
     // the file again before asking for the edit with more context in
     // `old_string`, which is also what makes it unambiguous.
     if (std.mem.indexOf(u8, new, old) != null) {
-        return "error: new_string contains old_string, so a second run of this edit would match inside the first one's output and apply again; include more context in old_string";
+        return .{ .refused = "error: new_string contains old_string, so a second run of this edit would match inside the first one's output and apply again; include more context in old_string" };
     }
 
     const count = std.mem.count(u8, raw, old);
-    if (count == 0) return std.fmt.allocPrint(arena, "error: old_string not found in {s}", .{path});
-    if (count > 1 and !all) return std.fmt.allocPrint(arena, "error: old_string occurs {d} times in {s}; add context or set replace_all", .{ count, path });
+    if (count == 0) return .{ .refused = try std.fmt.allocPrint(arena, "error: old_string not found in {s}", .{path}) };
+    if (count > 1 and !all) return .{ .refused = try std.fmt.allocPrint(arena, "error: old_string occurs {d} times in {s}; add context or set replace_all", .{ count, path }) };
 
     // The checks above leave either every occurrence replaced or, without
     // `all`, exactly one to replace, and one match is the loop below run once.
@@ -1502,11 +1536,136 @@ fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, writable
     // is one this rewrite created, and the next run of this call would find it
     // and apply again.
     if (std.mem.indexOf(u8, buf.items, old) != null) {
-        return std.fmt.allocPrint(arena, "error: replacing old_string with new_string would leave old_string matchable in {s}, so a second run of this edit would apply again; include more context in old_string", .{path});
+        return .{ .refused = try std.fmt.allocPrint(arena, "error: replacing old_string with new_string would leave old_string matchable in {s}, so a second run of this edit would apply again; include more context in old_string", .{path}) };
     }
-    writeFileAtomic(io, std.Io.Dir.cwd(), path, buf.items) catch |err|
-        return writeFailed(arena, path, err);
-    return std.fmt.allocPrint(arena, "replaced {d} occurrence(s) in {s}", .{ count, path });
+    return .{ .text = .{ .bytes = buf.items, .count = count } };
+}
+
+/// The most replacements one `multi_edit` call carries. Every file it names is read whole before
+/// anything is written, so the bound is on the memory a call can hold as well as on the turn.
+const max_multi_edits: usize = 64;
+
+/// A file a `multi_edit` call touches, as the replacements so far have left it. Two spellings of
+/// one path share an entry by their resolved path, so a later edit sees an earlier one's result
+/// and the file is written once.
+const PendingFile = struct {
+    key: []const u8,
+    path: []const u8,
+    text: []const u8,
+    replacements: usize = 0,
+};
+
+/// The refusal for edit `n` of `total`, in the words `edit` uses for the same fault, with the fact
+/// that matters to the caller: none of the batch was applied.
+fn refusedAt(arena: std.mem.Allocator, n: usize, total: usize, message: []const u8) []const u8 {
+    const reason = if (std.mem.startsWith(u8, message, "error: ")) message["error: ".len..] else message;
+    return std.fmt.allocPrint(arena, "error: edit {d} of {d}: {s} (no file was changed)", .{ n, total, reason }) catch
+        "error: an edit was refused (no file was changed)";
+}
+
+/// Several replacements, in one file or across files, applied in order and written only if every
+/// one is accepted. Each is judged by `applyEdit`, on the text the earlier ones left, so a batch
+/// is exactly the same edits issued one after another with the writes held back to the end. A
+/// refusal names the edit and leaves every file as it was. The files are then written one at a
+/// time, each atomically: a write that fails part way says how many files had already landed,
+/// because that is the one state a batch cannot undo.
+fn toolMultiEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, writable_roots: []const []const u8) ![]const u8 {
+    const list = switch (args.get("edits") orelse return "error: missing edits") {
+        .array => |a| a.items,
+        else => return "error: edits must be an array",
+    };
+    if (list.len == 0) return "error: edits is empty";
+    if (list.len > max_multi_edits) {
+        return std.fmt.allocPrint(arena, "error: {d} edits in one call; the most is {d}", .{ list.len, max_multi_edits });
+    }
+
+    var files: std.ArrayList(PendingFile) = .empty;
+    for (list, 1..) |item, n| {
+        const entry = switch (item) {
+            .object => |o| o,
+            else => return refusedAt(arena, n, list.len, "error: an edit must be an object"),
+        };
+        const path = chat.str(entry.get("path")) orelse return refusedAt(arena, n, list.len, "error: missing path");
+        if (credentialPath(io, arena, path)) |refused| {
+            return refusedAt(arena, n, list.len, try credentialRefusal(arena, .multi_edit, refused, true));
+        }
+        if (!sandbox.isPathWritable(io, arena, path, writable_roots)) {
+            const message = try std.fmt.allocPrint(arena, "refused: path '{s}' is outside the sandbox writable roots", .{chat.safeText(arena, path, 80)});
+            return refusedAt(arena, n, list.len, message);
+        }
+        const old = chat.str(entry.get("old_string")) orelse return refusedAt(arena, n, list.len, "error: missing old_string");
+        const new = chat.str(entry.get("new_string")) orelse return refusedAt(arena, n, list.len, "error: missing new_string");
+        const all = if (entry.get("replace_all")) |v| v == .bool and v.bool else false;
+
+        const key = std.Io.Dir.cwd().realPathFileAlloc(io, path, arena) catch path;
+        var file: *PendingFile = for (files.items) |*f| {
+            if (std.mem.eql(u8, f.key, key)) break f;
+        } else blk: {
+            const raw = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_edit_bytes)) catch |err|
+                return refusedAt(arena, n, list.len, readFailed(arena, path, err));
+            try files.append(arena, .{ .key = key, .path = path, .text = raw });
+            break :blk &files.items[files.items.len - 1];
+        };
+        switch (try applyEdit(arena, path, file.text, old, new, all)) {
+            .refused => |message| return refusedAt(arena, n, list.len, message),
+            .text => |done| {
+                file.text = done.bytes;
+                file.replacements += done.count;
+            },
+        }
+    }
+
+    for (files.items, 0..) |file, written| {
+        writeFileAtomic(io, std.Io.Dir.cwd(), file.path, file.text) catch |err| {
+            return std.fmt.allocPrint(arena, "{s}; {d} of {d} file(s) had already been written", .{
+                writeFailed(arena, file.path, err), written, files.items.len,
+            });
+        };
+    }
+
+    var summary: std.ArrayList(u8) = .empty;
+    try summary.print(arena, "applied {d} edit(s) to {d} file(s):", .{ list.len, files.items.len });
+    for (files.items) |file| try summary.print(arena, " {s} ({d})", .{ file.path, file.replacements });
+    return summary.items;
+}
+
+/// The most items one `todo` list holds, and the bytes kept of an item's text. The list is the
+/// model's own scratch, echoed back on every call, so both bound what one call adds to the
+/// conversation.
+const max_todo_items: usize = 32;
+const max_todo_text_bytes: usize = 200;
+
+const TodoStatus = enum { pending, doing, done };
+
+/// The run's step list. The model sends the whole list each time and gets it back numbered, so the
+/// latest result in the conversation is the current list: nothing is kept here, and there is no
+/// state to lose when compaction elides an old result.
+fn toolTodo(arena: std.mem.Allocator, args: std.json.ObjectMap) ![]const u8 {
+    const list = switch (args.get("items") orelse return "error: missing items") {
+        .array => |a| a.items,
+        else => return "error: items must be an array",
+    };
+    if (list.len > max_todo_items) {
+        return std.fmt.allocPrint(arena, "error: {d} items; the most is {d}", .{ list.len, max_todo_items });
+    }
+    if (list.len == 0) return "todo list cleared";
+
+    var out: std.ArrayList(u8) = .empty;
+    var done: usize = 0;
+    for (list, 1..) |item, n| {
+        const entry = switch (item) {
+            .object => |o| o,
+            else => return std.fmt.allocPrint(arena, "error: item {d} is not an object", .{n}),
+        };
+        const text = chat.str(entry.get("text")) orelse return std.fmt.allocPrint(arena, "error: item {d} has no text", .{n});
+        const status_text = chat.str(entry.get("status")) orelse return std.fmt.allocPrint(arena, "error: item {d} has no status", .{n});
+        const status = std.meta.stringToEnum(TodoStatus, status_text) orelse
+            return std.fmt.allocPrint(arena, "error: item {d} status must be pending, doing or done", .{n});
+        if (status == .done) done += 1;
+        try out.print(arena, "{d}. [{s}] {s}\n", .{ n, @tagName(status), chat.safeText(arena, text, max_todo_text_bytes) });
+    }
+    try out.print(arena, "{d} of {d} done", .{ done, list.len });
+    return out.items;
 }
 
 /// Text search through ripgrep. `--max-count` bounds the matches per file, and
@@ -1938,14 +2097,12 @@ pub fn toolResult(arena: std.mem.Allocator, output: []const u8) ![]const u8 {
 /// no run budget and this process's environment. It is the entry point the
 /// tests drive, so a tool's real dispatch path is the one under test.
 pub fn dispatch(arena: std.mem.Allocator, name: []const u8, args: []const u8) ![]const u8 {
-    return dispatchFiltered(arena, name, args, &.{});
+    return dispatchWith(arena, name, args, &.{}, &.{});
 }
 
-pub fn dispatchFiltered(arena: std.mem.Allocator, name: []const u8, args: []const u8, deny_commands: []const []const u8) ![]const u8 {
-    return dispatchFull(arena, name, args, deny_commands, &.{});
-}
-
-pub fn dispatchFull(arena: std.mem.Allocator, name: []const u8, args: []const u8, deny_commands: []const []const u8, writable_roots: []const []const u8) ![]const u8 {
+/// `dispatch` with a command filter and sandbox roots, for the tests that
+/// exercise them.
+pub fn dispatchWith(arena: std.mem.Allocator, name: []const u8, args: []const u8, deny_commands: []const []const u8, writable_roots: []const []const u8) ![]const u8 {
     var call: chat.ToolCall = .{
         .id = try arena.dupe(u8, ""),
         .name = try arena.dupe(u8, name),
@@ -4905,7 +5062,7 @@ test "bash refuses a command matching the configured command filter" {
     for (refused) |cmd| {
         try std.testing.expect(deniedInCommand(cmd, &deny_list) != null);
         const args = try std.fmt.allocPrint(arena, "{{\"command\":\"{s}\"}}", .{cmd});
-        const out = try dispatchFiltered(arena, "bash", args, &deny_list);
+        const out = try dispatchWith(arena, "bash", args, &deny_list, &.{});
         try std.testing.expect(std.mem.startsWith(u8, out, "refused:"));
         try std.testing.expect(std.mem.indexOf(u8, out, "denied by configuration") != null);
     }
@@ -4932,7 +5089,6 @@ test "a tool subprocess cannot see the provider key" {
     var env: std.process.Environ.Map = .init(std.testing.allocator);
     defer env.deinit();
     try env.put("PATH", "/usr/bin");
-    try env.put("OPENROUTER_API_KEY", "sk-live-not-a-real-key");
     try env.put("MICROAGENT_API_KEY", "sk-live-not-a-real-key");
 
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -4940,7 +5096,7 @@ test "a tool subprocess cannot see the provider key" {
     const arena = arena_state.allocator();
 
     // The map the run hands its tools is built by main, which owns the list of
-    // key variables. Here the same two names are removed by hand so the
+    // key variables. Here the name is removed by hand so the
     // assertion is about the runner, not about main's copy loop.
     var clean: std.process.Environ.Map = .init(std.testing.allocator);
     defer clean.deinit();
@@ -4949,7 +5105,7 @@ test "a tool subprocess cannot see the provider key" {
     const res = try runCapped(
         std.testing.io,
         arena,
-        &.{ "/bin/sh", "-c", "printenv OPENROUTER_API_KEY; printenv PATH" },
+        &.{ "/bin/sh", "-c", "printenv MICROAGENT_API_KEY; printenv PATH" },
         4096,
         net.durationMs(10_000),
         &clean,
@@ -4963,7 +5119,7 @@ test "a tool subprocess cannot see the provider key" {
     const inherited = try runCapped(
         std.testing.io,
         arena,
-        &.{ "/bin/sh", "-c", "printenv OPENROUTER_API_KEY" },
+        &.{ "/bin/sh", "-c", "printenv MICROAGENT_API_KEY" },
         4096,
         net.durationMs(10_000),
         &env,
@@ -5073,4 +5229,209 @@ test "write and edit refuse paths outside sandbox writable roots" {
     const edit_res = try toolEdit(io, arena, edit_args, &writable_roots);
     try std.testing.expect(std.mem.startsWith(u8, edit_res, "refused:"));
     try std.testing.expect(std.mem.indexOf(u8, edit_res, "outside the sandbox writable roots") != null);
+}
+
+test "multi_edit applies every edit, across files, each on what the earlier ones left" {
+    var cwd = try CwdFixture.init();
+    defer cwd.deinit();
+    const arena = cwd.arena();
+    const io = std.testing.io;
+
+    try cwd.tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "one two three" });
+    try cwd.tmp.dir.writeFile(io, .{ .sub_path = "b.txt", .data = "alpha alpha" });
+
+    // The third edit matches text the first one wrote, which is the reason a batch is sequential.
+    const result = try dispatch(arena, "multi_edit",
+        \\{"edits":[
+        \\ {"path":"a.txt","old_string":"one","new_string":"1"},
+        \\ {"path":"b.txt","old_string":"alpha","new_string":"beta","replace_all":true},
+        \\ {"path":"a.txt","old_string":"1 two","new_string":"1 2"}
+        \\]}
+    );
+    try std.testing.expectEqualStrings("applied 3 edit(s) to 2 file(s): a.txt (2) b.txt (2)", result);
+    try std.testing.expectEqualStrings("1 2 three", try cwd.tmp.dir.readFileAlloc(io, "a.txt", arena, .limited(64)));
+    try std.testing.expectEqualStrings("beta beta", try cwd.tmp.dir.readFileAlloc(io, "b.txt", arena, .limited(64)));
+}
+
+test "multi_edit changes nothing when any edit is refused, and names it" {
+    var cwd = try CwdFixture.init();
+    defer cwd.deinit();
+    const arena = cwd.arena();
+    const io = std.testing.io;
+
+    try cwd.tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "one two" });
+    try cwd.tmp.dir.writeFile(io, .{ .sub_path = "b.txt", .data = "alpha" });
+
+    const result = try dispatch(arena, "multi_edit",
+        \\{"edits":[
+        \\ {"path":"a.txt","old_string":"one","new_string":"1"},
+        \\ {"path":"b.txt","old_string":"alpha","new_string":"beta"},
+        \\ {"path":"a.txt","old_string":"absent","new_string":"x"}
+        \\]}
+    );
+    try std.testing.expectEqualStrings("error: edit 3 of 3: old_string not found in a.txt (no file was changed)", result);
+    try std.testing.expectEqualStrings("one two", try cwd.tmp.dir.readFileAlloc(io, "a.txt", arena, .limited(64)));
+    try std.testing.expectEqualStrings("alpha", try cwd.tmp.dir.readFileAlloc(io, "b.txt", arena, .limited(64)));
+
+    // The same batch run twice is refused the second time at its first edit, the way a repeated
+    // `edit` is, and the files stay as the first run left them.
+    try std.testing.expect(std.mem.startsWith(u8, try dispatch(arena, "multi_edit",
+        \\{"edits":[{"path":"a.txt","old_string":"one","new_string":"1"}]}
+    ), "applied 1 edit(s)"));
+    try std.testing.expectEqualStrings("error: edit 1 of 1: old_string not found in a.txt (no file was changed)", try dispatch(arena, "multi_edit",
+        \\{"edits":[{"path":"a.txt","old_string":"one","new_string":"1"}]}
+    ));
+    try std.testing.expectEqualStrings("1 two", try cwd.tmp.dir.readFileAlloc(io, "a.txt", arena, .limited(64)));
+}
+
+test "multi_edit treats two spellings of one path as one file" {
+    var cwd = try CwdFixture.init();
+    defer cwd.deinit();
+    const arena = cwd.arena();
+    const io = std.testing.io;
+
+    try cwd.tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "x y" });
+    // Read separately, the second edit would start from the original and its write would replace
+    // the first one's.
+    const result = try dispatch(arena, "multi_edit",
+        \\{"edits":[
+        \\ {"path":"a.txt","old_string":"x","new_string":"1"},
+        \\ {"path":"./a.txt","old_string":"y","new_string":"2"}
+        \\]}
+    );
+    try std.testing.expectEqualStrings("applied 2 edit(s) to 1 file(s): a.txt (2)", result);
+    try std.testing.expectEqualStrings("1 2", try cwd.tmp.dir.readFileAlloc(io, "a.txt", arena, .limited(64)));
+}
+
+test "multi_edit refuses a credentials file and an outside path, and writes nothing" {
+    var cwd = try CwdFixture.init();
+    defer cwd.deinit();
+    const arena = cwd.arena();
+    const io = std.testing.io;
+
+    try cwd.tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "one" });
+    try cwd.tmp.dir.writeFile(io, .{ .sub_path = ".env", .data = "A=1" });
+
+    const env_result = try dispatch(arena, "multi_edit",
+        \\{"edits":[
+        \\ {"path":"a.txt","old_string":"one","new_string":"1"},
+        \\ {"path":".env","old_string":"A=1","new_string":"A=2"}
+        \\]}
+    );
+    try std.testing.expect(std.mem.startsWith(u8, env_result, "error: edit 2 of 2: "));
+    try std.testing.expect(std.mem.endsWith(u8, env_result, "(no file was changed)"));
+    try std.testing.expectEqualStrings("one", try cwd.tmp.dir.readFileAlloc(io, "a.txt", arena, .limited(64)));
+    try std.testing.expectEqualStrings("A=1", try cwd.tmp.dir.readFileAlloc(io, ".env", arena, .limited(64)));
+
+    // A root list that does not contain the file's directory refuses it, before any write.
+    const roots = [_][]const u8{"/nonexistent-root"};
+    const outside = try dispatchWith(arena, "multi_edit",
+        \\{"edits":[{"path":"a.txt","old_string":"one","new_string":"1"}]}
+    , &.{}, &roots);
+    try std.testing.expect(std.mem.startsWith(u8, outside, "error: edit 1 of 1: refused: path 'a.txt' is outside the sandbox writable roots"));
+    try std.testing.expectEqualStrings("one", try cwd.tmp.dir.readFileAlloc(io, "a.txt", arena, .limited(64)));
+}
+
+test "multi_edit refuses a call that is not a list of edits" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    try std.testing.expectEqualStrings("error: edits must be an array", try dispatch(arena, "multi_edit", "{\"edits\":\"x\"}"));
+    try std.testing.expectEqualStrings("error: edits is empty", try dispatch(arena, "multi_edit", "{\"edits\":[]}"));
+    try std.testing.expectEqualStrings("error: edit 1 of 1: an edit must be an object (no file was changed)", try dispatch(arena, "multi_edit", "{\"edits\":[3]}"));
+    try std.testing.expectEqualStrings("error: edit 1 of 1: missing old_string (no file was changed)", try dispatch(arena, "multi_edit", "{\"edits\":[{\"path\":\"a\"}]}"));
+
+    var many: std.ArrayList(u8) = .empty;
+    try many.appendSlice(arena, "{\"edits\":[");
+    for (0..max_multi_edits + 1) |i| {
+        if (i != 0) try many.append(arena, ',');
+        try many.appendSlice(arena, "{\"path\":\"a\",\"old_string\":\"x\",\"new_string\":\"y\"}");
+    }
+    try many.appendSlice(arena, "]}");
+    try std.testing.expectEqualStrings("error: 65 edits in one call; the most is 64", try dispatch(arena, "multi_edit", many.items));
+}
+
+test "a multi_edit gutter line names the first file it touches" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    var buf: [gutter_line_max]u8 = undefined;
+
+    var edit: std.json.ObjectMap = .empty;
+    try edit.put(arena, "path", .{ .string = "src/a.zig" });
+    var edits: std.json.Array = .init(arena);
+    try edits.append(.{ .object = edit });
+    var args: std.json.ObjectMap = .empty;
+    try args.put(arena, "edits", .{ .array = edits });
+    try std.testing.expectEqualStrings("\u{23fa} multi_edit src/a.zig\n", try toolCallLine(arena, &buf, .multi_edit, args));
+
+    // A call with no usable list still gets a line, with nothing after the name.
+    var bare: std.json.ObjectMap = .empty;
+    try bare.put(arena, "edits", .{ .string = "x" });
+    try std.testing.expectEqualStrings("\u{23fa} multi_edit \n", try toolCallLine(arena, &buf, .multi_edit, bare));
+}
+
+test "todo numbers the list it is given and counts what is done" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    const result = try dispatch(arena, "todo",
+        \\{"items":[
+        \\ {"text":"find the parser","status":"done"},
+        \\ {"text":"fix the off-by-one","status":"doing"},
+        \\ {"text":"run the tests","status":"pending"}
+        \\]}
+    );
+    try std.testing.expectEqualStrings(
+        \\1. [done] find the parser
+        \\2. [doing] fix the off-by-one
+        \\3. [pending] run the tests
+        \\1 of 3 done
+    , result);
+
+    // An empty list is how the model drops a plan it no longer follows.
+    try std.testing.expectEqualStrings("todo list cleared", try dispatch(arena, "todo", "{\"items\":[]}"));
+}
+
+test "todo refuses what is not a list of items with a text and a status" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    try std.testing.expectEqualStrings("error: items must be an array", try dispatch(arena, "todo", "{\"items\":\"x\"}"));
+    try std.testing.expectEqualStrings("error: item 1 is not an object", try dispatch(arena, "todo", "{\"items\":[3]}"));
+    try std.testing.expectEqualStrings("error: item 1 has no text", try dispatch(arena, "todo", "{\"items\":[{\"status\":\"done\"}]}"));
+    try std.testing.expectEqualStrings("error: item 2 has no status", try dispatch(arena, "todo", "{\"items\":[{\"text\":\"a\",\"status\":\"done\"},{\"text\":\"b\"}]}"));
+    try std.testing.expectEqualStrings(
+        "error: item 1 status must be pending, doing or done",
+        try dispatch(arena, "todo", "{\"items\":[{\"text\":\"a\",\"status\":\"finished\"}]}"),
+    );
+
+    var many: std.ArrayList(u8) = .empty;
+    try many.appendSlice(arena, "{\"items\":[");
+    for (0..max_todo_items + 1) |i| {
+        if (i != 0) try many.append(arena, ',');
+        try many.appendSlice(arena, "{\"text\":\"x\",\"status\":\"pending\"}");
+    }
+    try many.appendSlice(arena, "]}");
+    try std.testing.expectEqualStrings("error: 33 items; the most is 32", try dispatch(arena, "todo", many.items));
+}
+
+test "todo keeps a bounded, printable text for each item" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    var long: std.ArrayList(u8) = .empty;
+    try long.appendSlice(arena, "{\"items\":[{\"status\":\"pending\",\"text\":\"");
+    try long.appendNTimes(arena, 'a', max_todo_text_bytes * 3);
+    try long.appendSlice(arena, "\\u001b[31m\"}]}");
+    const result = try dispatch(arena, "todo", long.items);
+    // The line is the number, the status, the bounded text and a newline, then the count: no
+    // escape byte reaches the model's next turn or the operator's screen through it.
+    try std.testing.expect(std.mem.indexOfScalar(u8, result, 0x1b) == null);
+    try std.testing.expect(result.len < "1. [pending] ".len + max_todo_text_bytes * 2 + "\n0 of 1 done".len);
+    try std.testing.expect(std.mem.endsWith(u8, result, "\n0 of 1 done"));
 }

@@ -3,16 +3,17 @@
 # per-task summary. One harness at a time on purpose: two 23-task jobs at once
 # measured the machine's load, not the harnesses (see docs/benchmark.md).
 #
+#   bench/harbor.sh tb4                     # Terminal-Bench 4.0, stride sample
+#   bench/harbor.sh polyglot                # Aider polyglot, stride sample (the fast one)
+#   bench/harbor.sh deepswe                 # DeepSWE 1.1, stride sample
 #   bench/harbor.sh tb2                     # Terminal-Bench 2, stride sample
 #   bench/harbor.sh swebench                # SWE-bench Verified, stride sample
-#   bench/harbor.sh tb2 microagent          # one harness only
+#   bench/harbor.sh tb4 microagent          # one harness only (microagent, opencode, kimi)
 #
 # Environment:
 #   MICROAGENT_API_KEY / MICROAGENT_BASE_URL   provider (default OpenRouter)
-#   OPENAI_API_KEY / OPENROUTER_API_KEY / DEEPSEEK_API_KEY
-#                                              also read, in the adapter's order
 #   MICROAGENT_MAX_TOKENS                      raise only if the balance allows
-#   PROVIDER=nvidia                            use NVIDIA NIM + the opencode
+#   PROVIDER=nvidia|deepseek                   use NVIDIA NIM or DeepSeek's own API + the opencode
 #                                              provider overlay it needs
 #   TASKS="a b c"                              override the task list
 #   JOBS_DIR=~/harbor-jobs                     where results land
@@ -31,12 +32,53 @@ jobs=${HARBOR_JOBS:-4}
 harbor=${HARBOR:-harbor}
 python=${PYTHON:-python3}
 
+# Per benchmark: the dataset, the prefix its task ids carry, the in-container
+# process cap and working budget in seconds, and whether the task gives the agent
+# no network. The registry's newer datasets namespace their task ids
+# (`terminal-bench/<name>`, `datacurve/<name>`), and `-i <bare name>` matches
+# nothing in them, so the sample files keep bare names and the prefix is added
+# below.
+#
+# Terminal-Bench 4.0 gives every task an 8 hour agent timeout, and a harness run
+# to that would spend hours on one task it cannot solve. `agent_timeout_multiplier`
+# scales that limit for both harnesses alike, to 3600 s (0.125 of 28800 s). The
+# in-container cap sits under it, as the TB2 and SWE-bench figures do.
+id_prefix=""
+agent_timeout_multiplier=""
+agent_network_closed=""
 case "$bench" in
 tb2)
 	dataset=terminal-bench@2.0
 	default_tasks=$(cat "$root/bench/tb2-sample.txt" 2>/dev/null || true)
 	agent_timeout=880
 	budget=790
+	;;
+tb4)
+	dataset=terminal-bench/terminal-bench@4.0.0
+	id_prefix=terminal-bench/
+	default_tasks=$(cat "$root/bench/tb4-sample.txt" 2>/dev/null || true)
+	agent_timeout_multiplier=0.125
+	agent_timeout=3480
+	budget=3100
+	;;
+polyglot)
+	# Small single-file exercises in six languages, the shortest tasks here: a trial is minutes,
+	# where a Terminal-Bench 4.0 task can use its whole hour. Every task allows 1800 s, which the
+	# multiplier halves for both harnesses; the exercises a model can do finish long before it.
+	dataset=aider/aider-polyglot
+	id_prefix=aider/
+	default_tasks=$(cat "$root/bench/polyglot-sample.txt" 2>/dev/null || true)
+	agent_timeout_multiplier=0.5
+	agent_timeout=870
+	budget=500
+	;;
+deepswe)
+	dataset=datacurve/deep-swe-1-1
+	id_prefix=datacurve/
+	default_tasks=$(cat "$root/bench/deepswe-sample.txt" 2>/dev/null || true)
+	agent_timeout=5000
+	budget=4600
+	agent_network_closed=1
 	;;
 swebench)
 	dataset=swebench-verified@1.0
@@ -45,7 +87,7 @@ swebench)
 	budget=2700
 	;;
 *)
-	echo "unknown benchmark '$bench': use tb2 or swebench" >&2
+	echo "unknown benchmark '$bench': use tb2, tb4, polyglot, deepswe or swebench" >&2
 	exit 2
 	;;
 esac
@@ -54,35 +96,73 @@ tasks=${TASKS:-$default_tasks}
 [ -z "$tasks" ] && { echo "no tasks: set TASKS or provide bench/$bench-sample.txt" >&2; exit 2; }
 
 include=""
-for task in $tasks; do include="$include -i $task"; done
+for task in $tasks; do include="$include -i $id_prefix$task"; done
 
 # harbor refuses egress to a host it cannot infer from the model name, and a
 # custom base url is exactly that: a trial then hangs until its timeout.
 allow_host=""
+if [ -n "$agent_network_closed" ]; then
+	# The agent has no network at all here, so the provider is the one host it is
+	# let reach: the base url's, less scheme, path and port.
+	allow_host=${MICROAGENT_BASE_URL:-https://openrouter.ai/api/v1}
+	allow_host=${allow_host#*://}
+	allow_host=${allow_host%%/*}
+	allow_host=${allow_host%%:*}
+fi
 model_micro=deepseek/deepseek-v4-flash
 model_open=openrouter/deepseek/deepseek-v4-flash
-nvidia_config=""
+# The endpoint a provider other than the default serves, and the name opencode
+# files it under. Empty for OpenRouter, which every harness already reaches.
+provider_url=""
+opencode_provider=""
+opencode_name=""
+opencode_model=""
 key=""
-if [ "${PROVIDER:-openrouter}" = "nvidia" ]; then
+case "${PROVIDER:-openrouter}" in
+openrouter) ;;
+nvidia)
 	model_micro=deepseek-ai/deepseek-v4.1-flash
 	model_open=nvidia/deepseek-ai/deepseek-v4.1-flash
 	allow_host=integrate.api.nvidia.com
-	# The four names the adapter reads, in the order it reads them, so
-	# PROVIDER=nvidia works with the key this host's own runs already export
-	# instead of only with MICROAGENT_API_KEY. An empty one is refused here:
-	# harbor passes it into the container either way, and the trial then runs
-	# to its timeout against a provider with no credentials, which reads as a
-	# slow task rather than as a missing key.
-	key=${MICROAGENT_API_KEY:-${OPENAI_API_KEY:-${OPENROUTER_API_KEY:-${DEEPSEEK_API_KEY:-}}}}
+	provider_url=${MICROAGENT_BASE_URL:-https://integrate.api.nvidia.com/v1}
+	opencode_provider=nvidia
+	opencode_name=NVIDIA
+	opencode_model=deepseek-ai/deepseek-v4.1-flash
+	;;
+deepseek)
+	# DeepSeek's own API, which names V4.1 Flash `deepseek-flash`.
+	model_micro=deepseek-flash
+	model_open=deepseek/deepseek-flash
+	allow_host=api.deepseek.com
+	provider_url=${MICROAGENT_BASE_URL:-https://api.deepseek.com/v1}
+	opencode_provider=deepseek
+	opencode_name=DeepSeek
+	opencode_model=deepseek-flash
+	;;
+*)
+	echo "unknown PROVIDER '$PROVIDER': use openrouter, nvidia or deepseek" >&2
+	exit 2
+	;;
+esac
+# The window Kimi Code is told the model has; V4.1 Flash's is a million tokens.
+kimi_context_size=1048576
+opencode_config=""
+if [ -n "$provider_url" ]; then
+	# An empty key is refused here: harbor passes it into the container either
+	# way, and the trial then runs to its timeout against a provider with no
+	# credentials, which reads as a slow task rather than as a missing key.
+	key=${MICROAGENT_API_KEY:-}
 	if [ -z "$key" ]; then
-		echo "PROVIDER=nvidia needs a key in MICROAGENT_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY or DEEPSEEK_API_KEY" >&2
+		echo "PROVIDER=${PROVIDER} needs a key in MICROAGENT_API_KEY" >&2
 		exit 2
 	fi
-	# Assembled from single-quoted pieces around the one value that varies, so
+	# The microagent adapter reads the endpoint from the environment.
+	export MICROAGENT_BASE_URL="$provider_url"
+	# Assembled from single-quoted pieces around the values that vary, so
 	# the quotes in the JSON are the quotes of an argument. Written with
 	# backslashes inside one string, they reach harbor as literal backslashes
 	# whenever the string is expanded unquoted.
-	nvidia_config='{"provider":{"nvidia":{"npm":"@ai-sdk/openai-compatible","name":"NVIDIA","options":{"baseURL":"'${MICROAGENT_BASE_URL:-https://integrate.api.nvidia.com/v1}'","apiKey":"{env:OPENAI_API_KEY}"},"models":{"deepseek-ai/deepseek-v4.1-flash":{}}}}}'
+	opencode_config='{"provider":{"'$opencode_provider'":{"npm":"@ai-sdk/openai-compatible","name":"'$opencode_name'","options":{"baseURL":"'$provider_url'","apiKey":"{env:OPENAI_API_KEY}"},"models":{"'$opencode_model'":{}}}}}'
 fi
 
 # A job name no earlier run already holds, printed on stdout.
@@ -120,6 +200,9 @@ for harness in $harnesses; do
 	if [ -n "$allow_host" ]; then
 		set -- "$@" --allow-agent-host "$allow_host"
 	fi
+	if [ -n "$agent_timeout_multiplier" ]; then
+		set -- "$@" --agent-timeout-multiplier "$agent_timeout_multiplier"
+	fi
 	case "$harness" in
 	microagent)
 		# because: $include is " -i task" per task, built above, and has to
@@ -135,9 +218,25 @@ for harness in $harnesses; do
 		;;
 	opencode)
 		set -- "$@" -a opencode -m "$model_open"
-		if [ -n "$nvidia_config" ]; then
-			set -- "$@" --ak "opencode_config=$nvidia_config" --ae "OPENAI_API_KEY=$key"
+		if [ -n "$opencode_config" ]; then
+			set -- "$@" --ak "opencode_config=$opencode_config" --ae "OPENAI_API_KEY=$key"
 		fi
+		set -- "$@" --jobs-dir "$jobs_dir" -n "$jobs" --job-name "$job"
+		# because: the same $include as the microagent arm above, split the same way
+		# shellcheck disable=SC2086
+		$harbor run -d "$dataset" $include "$@" 2>&1 | tail -6
+		;;
+	kimi)
+		# Kimi Code takes any OpenAI-compatible endpoint from these variables, so
+		# it is only run against a provider this script has an endpoint and a key
+		# for.
+		if [ -z "$provider_url" ]; then
+			echo "the kimi arm needs PROVIDER=deepseek or PROVIDER=nvidia" >&2
+			exit 2
+		fi
+		set -- "$@" -a kimi-code -m "$model_micro" \
+			--ae "KIMI_MODEL_BASE_URL=$provider_url" --ae "KIMI_MODEL_API_KEY=$key" \
+			--ae "KIMI_MODEL_MAX_CONTEXT_SIZE=$kimi_context_size"
 		set -- "$@" --jobs-dir "$jobs_dir" -n "$jobs" --job-name "$job"
 		# because: the same $include as the microagent arm above, split the same way
 		# shellcheck disable=SC2086

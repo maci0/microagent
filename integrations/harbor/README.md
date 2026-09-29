@@ -1,7 +1,7 @@
 # Running microagent on Harbor benchmarks
 
 [Harbor](https://github.com/laude-institute/harbor) runs containerized agent
-benchmarks such as Terminal-Bench 2, SWE-bench Verified and aider-polyglot.
+benchmarks such as Terminal-Bench 4.0, DeepSWE, SWE-bench Verified and aider-polyglot.
 This directory holds the adapter that lets Harbor drive microagent.
 
 microagent is a static binary with its own shell and file tools, so it runs
@@ -15,7 +15,7 @@ make musl
 ```
 
 The [Makefile](../../Makefile) runs `zig build -Dtarget=<host arch>-linux-musl
--Doptimize=ReleaseFast` and copies the binary to
+-Doptimize=ReleaseSmall` and copies the binary to
 `microagent-<host arch>-linux-musl` next to the adapter, the name the adapter's
 `binary_path()` looks for. The architecture is the host's own, read with
 `uname -m`: Harbor runs the task container on the host's architecture, so
@@ -33,19 +33,26 @@ it runs in `python:slim`, bare `ubuntu` and distroless images alike.
 uv venv ~/harbor-venv && uv pip install --python ~/harbor-venv/bin/python \
   -r integrations/harbor/requirements.lock
 
-export MICROAGENT_API_KEY=...            # or OPENROUTER_API_KEY
+export MICROAGENT_API_KEY=...
 export MICROAGENT_REASONING_EFFORT=none  # see "Reasoning" below
 export MICROAGENT_BUDGET_SECONDS=1140    # working time; see the cap below
 
 PYTHONPATH=$PWD/integrations/harbor ~/harbor-venv/bin/harbor run \
-  -d terminal-bench@2.0 -i log-summary-date-ranges \
+  -d terminal-bench/terminal-bench@4.0.0 -i terminal-bench/html-js-filter \
   -a microagent_agent:Microagent \
   -m deepseek/deepseek-v4-flash \
   --jobs-dir ~/harbor-jobs -n 2
 ```
 
-`swebench-verified@1.0`, `swebenchpro@1.0`, `aider-polyglot@1.0` and the rest of
-Harbor's registry work the same way; only the dataset name changes.
+`aider/aider-polyglot`, `datacurve/deep-swe-1-1`, `terminal-bench@2.0`, `swebench-verified@1.0`, `swebenchpro@1.0`,
+and the rest of Harbor's registry work the same way; only the dataset name
+changes. The registry's newer datasets prefix their task ids with the dataset's namespace
+(`terminal-bench/<task>`, `datacurve/<task>`), and `-i <task>` alone matches none of them.
+`bench/harbor.sh tb4` and `bench/harbor.sh deepswe` run the fixed samples of the first two, against
+opencode as well; see [docs/benchmark.md](../../docs/benchmark.md#terminal-bench-40).
+
+DeepSWE tasks give the agent no network, so a run has to let the provider through with
+`--allow-agent-host <provider host>`; `bench/harbor.sh` does that from `MICROAGENT_BASE_URL`.
 
 Harbor itself is pinned in [requirements.txt](requirements.txt), because the
 adapter subclasses its agent API, and a score is comparable only against the
@@ -60,8 +67,9 @@ command that regenerates the lock is in the comment at the top of
 
 | variable | effect |
 | --- | --- |
-| `MICROAGENT_API_KEY` / `OPENAI_API_KEY` / `OPENROUTER_API_KEY` / `DEEPSEEK_API_KEY` | provider key, passed to the container process only, read in the order the binary reads it. One of the four is required, and a host with none is told so before the container starts |
+| `MICROAGENT_API_KEY` | provider key, passed to the container process only. It is required, and a host without it is told so before the container starts |
 | `MICROAGENT_BASE_URL` | OpenAI-compatible endpoint (default OpenRouter); https, or http on loopback, because the key goes to it in the clear, and a url the binary refuses stops the run here |
+| `MICROAGENT_CONFIG` | set by the adapter, not read from the host: the container gets a config that turns the four remote tool presets off, so a scored run has no web access beyond the provider |
 | `MICROAGENT_BUDGET_SECONDS` | elapsed-time budget inside the container, read from the monotonic clock (default 600), capped at `MICROAGENT_AGENT_TIMEOUT_SEC` less 360 s |
 | `MICROAGENT_MAX_TURNS` | `--max-turns` passed to the binary (default 150, above the binary's own 100) |
 | `MICROAGENT_REASONING_EFFORT` | `minimal`, `low`, `medium`, `high` or `none`; reasoning models otherwise spend the whole budget thinking. A level the binary does not have stops the run here |

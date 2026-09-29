@@ -21,7 +21,7 @@
 //!
 //! The frontmatter is the handful of `key: value` lines a skill file needs,
 //! not YAML: `name` and `description` are read and everything else is ignored,
-//! the same way `style.zig` reads its config.
+//! the same way `config.zig` reads its config.
 
 const std = @import("std");
 const Io = std.Io;
@@ -96,9 +96,9 @@ pub const Skills = struct {
         if (self.items.len == 0) return "";
         var buf: std.ArrayList(u8) = .empty;
         try buf.appendSlice(arena, "\n\nSKILLS\n" ++
-            "A skill is a procedure the operator installed. When a task matches one, call the " ++
-            "`" ++ tool_name ++ "` tool with its name first and follow what it returns; the listing " ++
-            "gives only when each applies.\n");
+            "Skills are procedures the operator installed. When a task matches one, call " ++
+            "`" ++ tool_name ++ "` with its name first and follow what it returns; the listing " ++
+            "says when each applies.\n");
         for (self.items, 0..) |skill, i| {
             const line = try std.fmt.allocPrint(arena, "- {s}: {s}\n", .{
                 skill.name,
@@ -127,11 +127,11 @@ pub const Root = struct { path: []const u8, named: bool };
 /// The roots this run reads skills from, in precedence order: the directories
 /// MICROAGENT_SKILLS names, else the `skills` list the config file declared,
 /// else `$HOME/.microagent/skills`. An empty MICROAGENT_SKILLS turns skills off,
-/// the way an empty MICROAGENT_CONFIG turns the style file off, and so does
+/// the way an empty MICROAGENT_CONFIG turns the config file off, and so does
 /// `skills = []` in the file; a home that is not there leaves no roots at all.
 ///
-/// The environment wins over the file for the reason it does on the style
-/// levels: naming the directories for one run is the more explicit statement.
+/// The environment wins over the file for the reason it does on the config
+/// file: naming the directories for one run is the more explicit statement.
 /// The variable's separator is `:`, the one PATH uses, because that is what an
 /// operator already reaches for when naming directories in an environment
 /// variable.
@@ -406,7 +406,7 @@ fn installedList(arena: std.mem.Allocator, set: Skills) ![]const u8 {
 /// `call` answers to, and the name the prompt tells the model to use are one
 /// constant.
 pub const tool_json =
-    \\{"type":"function","function":{"name":"skill","description":"Load the instructions of one installed skill by name. The SKILLS section of the system prompt lists them and says when each applies; call this before doing that kind of work.","parameters":{"type":"object","properties":{"name":{"type":"string","description":"Skill name, as the SKILLS section spells it"}},"required":["name"]}}}
+    \\{"type":"function","function":{"name":"skill","description":"Load one installed skill's instructions by name. The SKILLS section of the system prompt lists them and says when each applies; call this before that kind of work.","parameters":{"type":"object","properties":{"name":{"type":"string","description":"Skill name, as the SKILLS section spells it"}},"required":["name"]}}}
 ;
 
 // A skill file is the second input the tree hands the binary that the run did

@@ -16,6 +16,45 @@ release, and `microagent update` moves you to it.
 
 ### Added
 
+- `deepwiki` preset (`https://mcp.deepwiki.com/mcp`): `read_wiki_structure`, `read_wiki_contents`, `ask_question`.
+- The four presets are on by default, with or without a config file. The start-up handshake doubles as the health check: an unreachable endpoint is named on stderr and skipped. `enabled = false` in `[tools.<name>]` turns one off.
+
+- `[tools.<name>]` config tables switch the nine built-in tools on or off (`enabled = false` removes a tool
+  from the schema and refuses its calls; an unknown tool name stops the run with exit 2) and enable three
+  public remote MCP presets (`web_search`, `context7`, `grep_app`, off by default). `[[mcp]]` tables take
+  a `url` for a remote streamable-HTTP server, with optional `api_key_env` (a variable name, never the key;
+  scrubbed from tool subprocesses), `api_key_header` and `timeout`. When something is disabled the system
+  prompt says which tools, in one line; with nothing disabled the request is byte-identical.
+- `system_prompt_extra`: a top-level config string appended to the system prompt, up to 16 KB.
+- `todo`: the model sends the whole step list of a long task, each item `pending`, `doing` or `done`, and
+  gets it back numbered with a count. The latest result in the conversation is the current list, so the
+  harness keeps no state. Up to 32 items, 200 bytes each. It costs 416 bytes of tool schema.
+- `bench/maxrss.py` prints a command's peak resident memory, read from `/proc` at the moment the
+  process exits (ptrace `PTRACE_O_TRACEEXIT`), and `bench/overhead.sh` gains a `peak_kb` column from it.
+- `multi_edit`: several exact-string replacements, in one file or across files, in one call. Each is judged
+  as `edit` judges it (ambiguous, no-op and re-matching replacements are refused) on the text the earlier
+  ones left, and nothing is written unless every edit is accepted, so a refusal names the edit and changes
+  nothing. Two spellings of one path share one file. Up to 64 edits per call. It costs 621 bytes of tool
+  schema in the fixed part of every request. `docs/todo.md` lists what is planned or under evaluation next.
+- macOS enforces the sandbox with a Seatbelt profile (`sandbox_init`): file writes are denied except under
+  the writable roots, `$TMPDIR` and three device files, and `bash` and MCP servers inherit it, as they
+  inherit Landlock on Linux. A run whose kernel cannot apply the sandbox, an older Linux or a Seatbelt
+  refusal, now says so at startup, where `sandbox = true` used to read as protection it did not give.
+  The roots are resolved through symlinks, which fixes the in-process check refusing an existing file
+  under `/tmp` on macOS. The macOS build compiles and the profile text is tested; the enforcement itself
+  has not been run on a Mac.
+- `bench/harbor.sh polyglot` runs Aider polyglot (`aider/aider-polyglot`, 225 small exercises in six
+  languages) on a fixed 21-task stride sample (`bench/polyglot-sample.txt`), the quick benchmark: a
+  trial is minutes where a Terminal-Bench 4.0 task can take an hour. The reference solutions score 1.0
+  on three sampled tasks under Harbor 0.23.0; no microagent score is recorded yet.
+- `bench/harbor.sh tb4` and `bench/harbor.sh deepswe` run Terminal-Bench 4.0
+  (`terminal-bench/terminal-bench@4.0.0`, 66 tasks) and DeepSWE (`datacurve/deep-swe-1-1`, 113 tasks) on
+  Harbor, each on a fixed stride sample (`bench/tb4-sample.txt`, 22 tasks; `bench/deepswe-sample.txt`, 13
+  tasks). The script prefixes the namespaced task ids, scales Terminal-Bench 4.0's 8 hour agent timeout
+  to 3600 s for both harnesses, and lets the provider's host through for DeepSWE's no-network agent.
+  `PROVIDER=deepseek` runs every arm against DeepSeek's own API (`deepseek-flash`), and a `kimi` arm runs
+  Kimi Code beside microagent and opencode. No scores are recorded yet; `docs/benchmark.md` says what was
+  checked.
 - Command filter in configuration: `deny_commands = [...]` (or `[commands] deny = [...]`)
   in `config.toml` configures a list of command names or sequences to deny. Any `bash`
   command containing one of the denied commands (e.g. `sudo`, `/usr/bin/sudo`, `su`,
@@ -29,16 +68,72 @@ release, and `microagent update` moves you to it.
 
 ### Changed
 
+- The release binary is not position-independent and carries no unwind tables. `--version` retires 52,181 instructions instead of about 11,000 more, the binary is 850,936 bytes instead of 912,992, and a plain run is 592 kB resident instead of 636 kB.
+- The main thread's stack pages below the frame are returned to the kernel once the TLS handshake is done (`net.releaseDeadStack`, Linux). A streaming HTTPS run holds 1,324 kB instead of about 1,530 kB for the rest of its life; the peak is unchanged.
+
+- `make` and `make musl` build `ReleaseSmall`, as the release assets already did, because it holds the
+  least resident memory of the three release modes: 540 kB against 788 kB (`ReleaseFast`) and 1,120 kB
+  (`ReleaseSafe`) at `--version`, 764 kB against 1,244 kB and 2,156 kB up to the first request, and 1,300 kB
+  against 1,812 kB and 3,164 kB after 50,000 streamed frames. It retires about 1.4 times the instructions of
+  `ReleaseFast`. `make small` is gone (it was this build); `make OPT=ReleaseFast` builds the other. The
+  Harbor benchmark binary is now the shipped build, where it was `ReleaseFast`.
+- The documentation leads with memory footprint, not file size: the README, `docs/benchmark.md` and
+  `docs/performance.md` give peak resident memory for microagent and for `grok`, `codex`, `claude`,
+  `crush`, `opencode` and `kimi` at `--version` (0.6 MB against 25 MB to 326 MB).
+- The instructions the model is sent are shorter with the same rules: the system prompt, the tool
+  descriptions and the skills listing say each thing once, and the credential list lives in `read`'s
+  description, which the other tools point to. The fixed part of every request falls from 9,038 to 6,516
+  bytes (system prompt 2,831 to 2,273, tool schemas 4,468 to 4,123 with `todo` and `multi_edit` added; the
+  reply-style block is gone). The five tools of the remote presets ship compact descriptions and schemas,
+  3.4 KB where the servers send 8.4 KB, applied only to the preset's own host and to tools it knows.
+  It changes the prompt the model sees, so a benchmark run before and one after are not the same experiment.
 - Release builds no longer give every thread a 256 KB signal stack, which std zeroed at thread start
-  whether or not the segfault handler was on. `--version` retires 71,792 instructions instead of
-  477,472, the path to the first request 108,563 instead of 1,329,995, and a run that never connects
+  whether or not the segfault handler was on. `--version` retires 46,256 instructions instead of
+  477,472 (`ReleaseFast`), the path to the first request 82,786 instead of 1,329,995, and a run that never connects
   peaks at 1,304 kB resident instead of 2,164 kB.
-- The environment is copied once, into the run arena, and the credentials are removed from that copy
+- The environment map is built without copying: its keys and values are slices of the process's own
+  environment block, and the credentials are removed from it in place
   after the key is read, where it was copied twice and freed at exit.
 - The stock system prompt is escaped at compile time, and the JSON string writer skips plain text a
   word at a time. Compaction of a 1 MB conversation retires 31.0 M instructions instead of 37.2 M.
 - The sandbox path check resolves a relative path against the working directory it recorded at startup,
   saving one `realpath` (open, readlink, close) per `write` or `edit` call.
+- The shipped `ReleaseSmall` build is faster where its code generation was weakest. The environment map
+  needs no copy and no key validation, and its string lengths are found a word at a time; a word-at-a-time
+  `memcpy` (`src/copy.zig`, built with `-fno-builtin`, Linux `ReleaseSmall` only) replaces the compiler
+  runtime's byte loop; and the stream's `"error":` check compares a machine word per position. `--version`
+  retires 63,683 instructions instead of 154,657, a full one-frame run 171,991 instead of 255,644, and
+  a 5,000-frame stream 37.8 M instead of 54.3 M. `ReleaseFast` is unchanged apart from the environment map.
+- Remote MCP servers (`url` entries and the `web_search`, `context7` and `grep_app` presets) are connected
+  concurrently at startup instead of one after another. With all three presets on, time to the first
+  request drops from about 4.7 s to about 2.9 s on the test machine. Server and tool order still follow the
+  config, and a server that fails is still reported and skipped. Peak resident memory of that startup
+  rises by about 0.45 MB (1.8 MB to 2.2 MB), because three TLS handshakes are alive at once.
+- The API key is read from one variable, `MICROAGENT_API_KEY` (or `--api-key`, or `~/.secrets/openrouter`).
+  `OPENAI_API_KEY`, `OPENROUTER_API_KEY` and `DEEPSEEK_API_KEY` are no longer read, and the "key is for
+  another provider" warning is gone. If you exported one of those, export `MICROAGENT_API_KEY` instead.
+  `bench/harbor.sh` and the Harbor adapter read only that variable.
+- The config file has one spelling per setting. Booleans are `true` and `false` only, and `deny_commands`
+  and `writable` must be arrays.
+- `microagent update` is a third of its size (2,264 to 956 lines) with the same guarantees: GitHub hosts
+  only, the digest checked against the sidecar before the binary is replaced, an atomic replace that follows
+  symlinks, no downgrade. The digest check and the replace are one function with its own test. `--repo`,
+  `update help` and the fetch retry with backoff are gone; a failed download prints one line and exits 1.
+- The linters' hashed install is compiled by `uv` from `lint-requirements.in`, as the Harbor lock is, so its
+  transitive pins are correct by construction. `make lint-pins` and its scripts are gone, with `make
+  test-one`, `make watch` and `make check-targets`: `make test FILTER=...` refuses a filter that matches no
+  test, and `zig build test --watch` is the edit loop.
+
+### Removed
+
+- The reply-style module. `caveman`, `ponytail`, `[style]`, `MICROAGENT_CAVEMAN` and `MICROAGENT_PONYTAIL`
+  are gone; a config still holding them prints "'caveman' is not a key this file uses" and runs.
+  Migration: paste the level text you were using into the new top-level `system_prompt_extra = "..."` (or a
+  `"""` multi-line string), which is appended to the system prompt after a blank line, up to 16 KB.
+- Config aliases: the `[commands]` and `[command_filter]` tables, the keys `command_filter`,
+  `denied_commands`, `deny`, `denied` and `filter`, top-level `sandbox = true`, and the `[sandbox]` keys
+  `enable`, `allow_write` and `writeable`. Use top-level `deny_commands = [...]` and `[sandbox] enabled`,
+  `writable`. Boolean spellings `1`, `0`, `yes`, `no`, `on`, `off`, any case variant and the quoted form.
 
 ## [0.5.0] - 2026-09-29
 

@@ -5,12 +5,12 @@
 | path | what lives there |
 | --- | --- |
 | `src/` | the agent, one Zig file per concern, each with its tests and fuzz corpora beside the code: `main.zig` (command line, config resolution, the turn loop and the request), `stream.zig` (folding response frames into a turn), `conversation.zig` (the system prompt, message array and compaction), `chat.zig` (value types and the JSON writer), `net.zig`, `tool.zig`, `sandbox.zig`, `session.zig`, `skill.zig`, `style.zig`, `config.zig`, `mcp.zig`, `update.zig` |
-| `bench/` | the benchmark and gauntlet scripts, a loopback stub provider for profiling the harness alone (`stub_provider.py`), the task fixtures under `bench/tasks/`, the instruction gate's baseline, and the committed results (`results.jsonl`, `gauntlet-results.jsonl`) |
+| `bench/` | the benchmark and gauntlet scripts, a loopback stub provider for profiling the harness alone (`stub_provider.py`), the peak-memory probe (`maxrss.py`), the task fixtures under `bench/tasks/`, the fixed stride-sample task lists (`tb4-sample.txt`, `polyglot-sample.txt`, `deepswe-sample.txt`, `tb2-sample.txt`, `swe-sample.txt`), the instruction gate's baseline, and the committed results (`results.jsonl`, `gauntlet-results.jsonl`) |
 | `integrations/harbor/` | the adapter that runs microagent on [Harbor](integrations/harbor/README.md) benchmarks, and its pinned Python requirements |
-| `docs/` | reference and design docs: [usage](docs/usage.md), [benchmark](docs/benchmark.md), [performance](docs/performance.md), [threat model](docs/threat-model.md), and the logo |
+| `docs/` | reference and design docs: [usage](docs/usage.md), [benchmark](docs/benchmark.md), [performance](docs/performance.md), [threat model](docs/threat-model.md), the [to-do list](docs/todo.md), and the logo |
 | `reviews/` | this project's own [gauntlet](https://github.com/maci0/gauntlet) review prompts; run them with `gauntlet --prompt-dir reviews`, which replaces gauntlet's embedded set |
 | `.github/` | the `ci` and `release` workflows, the shared `setup-zig` and `setup-linters` actions, and the Dependabot config |
-| `scripts/` | the gate's own checks: the linter version pins (`lint-versions.sh`), the Harbor lock against its manifest (`lint-lock.sh`), and the linter pins against what the linters declare (`lint-pins.sh`, which asks the question in Python, one language per file) |
+| `scripts/` | the gate's own checks: the linter version pins (`lint-versions.sh`), the Harbor lock against its manifest (`lint-lock.sh`). The linters' hashed install is compiled from `lint-requirements.in` |
 
 At the root: `build.zig` and `build.zig.zon` (the build and the version), the
 [Makefile](Makefile) (every command below), `README.md`, `CHANGELOG.md`, this
@@ -30,15 +30,15 @@ zig-version` runs that check alone. 0.16.0 is also the newest stable release;
 compiler upgrade or build flag to take for speed.
 
 ```sh
-make            # zig-out/bin/microagent
-make small      # the ReleaseSmall binary
+make                     # zig-out/bin/microagent, built ReleaseSmall: the smallest resident memory
+make OPT=ReleaseFast     # the build the CPU counters are read on
 ```
 
 ### Linters
 
 `make check` also needs `shellcheck`, `ruff`, `yamllint`, `git` and `python3` on
 `PATH` (git because every linter reads its file list with `git ls-files`;
-python3 because `make lint-pins` reads the linters' package metadata with it).
+python3 because CI builds the linters' venv with it).
 `make preflight` names each missing tool with the command that installs it, and
 `make check` runs it first, so a clean clone missing a linter says which one
 instead of stopping at `make: ruff: No such file or directory`.
@@ -64,11 +64,9 @@ which pins them and the packages `yamllint` imports with one sha256 per
 published artifact. It installs with `--require-hashes` into a venv on `PATH`,
 so the job never writes into the runner image's externally managed Python.
 `make lint-versions` fails when that file and the Makefile disagree on a
-version, and `make lint-pins` fails when the file and the linters' own package
-metadata disagree: a pin nothing imports, a package a linter requires that the
-file does not pin, or a pin below a bound one asks for. That file is the one
-dependency set here that is hand-written rather than generated, so nothing else
-looks at it.
+version. The file is compiled by `uv` from `lint-requirements.in` (the command is in that
+file's header), so its transitive pins are whatever `yamllint` asks for and nothing is
+checked by hand.
 
 `zig fmt` covers the Zig and `build.zig.zon`, and needs nothing else.
 
@@ -83,9 +81,9 @@ say nothing about the interpreter the adapter is installed into.
 
 ```sh
 make check                  # the gate: zig fmt --check, the linters, the tests, an optimized build
-make test-one FILTER="..."  # one test, while you are mid-edit (make test FILTER=... is the same run)
+make test FILTER="..."      # one test, while you are mid-edit; a filter matching no test is refused
 make test-sanitize          # the same suite under the undefined-behavior sanitizer
-make watch                  # the suite again on every source change, until Ctrl-C
+zig build test --watch    # the suite again on every source change, until Ctrl-C
 make preflight              # name any tool check and lint need that is not on PATH
 make lint                   # the pin checks, shellcheck, ruff and yamllint on their own
 make check-asset-run        # the published asset for this host, cross-built and started
@@ -97,9 +95,9 @@ make check-unreleased       # the [Unreleased] entry has the five sections, once
 
 ### The gate
 
-`make check` runs, in order: `preflight`, `zig-version`, `check-targets`,
+`make check` runs, in order: `preflight`, `zig-version`,
 `check-unreleased`, `check-readme`, `fmt-check`, `lint` (`lint-versions`,
-`lint-lock`, `lint-pins`, shellcheck, `ruff check`, `ruff format --check`,
+`lint-lock`, shellcheck, `ruff check`, `ruff format --check`,
 yamllint), `zig build test`,
 `zig build test-sanitize`, and `check-binary` (a `ReleaseSmall` build whose
 binary it then starts). These are the checks
@@ -115,11 +113,9 @@ sanitizer. The plain run says the assertions hold; only the instrumented one
 says nothing inside them goes out of bounds or overflows, which is silent in
 the `ReleaseSmall` binary the release assets are made of.
 
-`make watch` is `zig build test --watch`, the build system's own mode, so the
-edit loop is one command. `FILTER` narrows it the way it narrows `test-one`,
-and both check it against the declared test names first, because a filter that
-matches nothing reports success while running no test. Neither is what `check`
-runs: a green watch is not a push.
+`make test FILTER=...` checks the filter against the declared test names first, because a filter that
+matches nothing reports success while running no test. `zig build test --watch` is the build system's own
+edit loop and is not what `check` runs: a green watch is not a push.
 
 `make fmt` applies `zig fmt` and `ruff format`; `make fmt-check` is what the
 gate runs. The three linters cover what `zig fmt` cannot: the bench shell, the

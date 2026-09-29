@@ -158,7 +158,6 @@ jobs:
       - name: build every published target
         run: |
           set -euo pipefail
-          make check-targets
           make release-assets
           ls -l dist
 

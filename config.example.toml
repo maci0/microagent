@@ -1,20 +1,23 @@
-# microagent configuration: the reply style, the skills, and the MCP servers.
+# microagent configuration: the system prompt addendum, the skills, the MCP
+# servers, the command filter, the sandbox and the tool set.
 # Copy to ~/.microagent/config.toml, or point MICROAGENT_CONFIG or --config at
 # it. Every key is optional. A missing key, a bad value or a missing file keeps
 # the built-in default, and the first line this file gets wrong is named on
-# stderr.
+# stderr. The exception is a [tools.<name>] table the run cannot honor, which
+# stops it.
 #
-# MICROAGENT_CAVEMAN, MICROAGENT_PONYTAIL and MICROAGENT_SKILLS set the same
-# values for one run and override this file, since a value named in the
-# environment is the more explicit statement.
+# MICROAGENT_SKILLS sets the skills for one run and overrides this file, since a
+# value named in the environment is the more explicit statement.
 
-# How terse the agent's own prose is. off, lite, full, ultra, or one of the
-# three wenyan levels (wenyan-lite, wenyan-full, wenyan-ultra) that write the
-# reply in classical Chinese. Default ultra.
-caveman = "ultra"
-
-# How lazy the code it writes is. off, lite, full, ultra. Default full.
-ponytail = "full"
+# Text appended to the system prompt after a blank line, at most 16 KB. A basic
+# string ("..." with the escapes \n \t \r \" \\), a literal string ('...'), or
+# either kind over several lines ("""...""" or '''...''').
+#
+# system_prompt_extra = "Answer in at most three sentences."
+# system_prompt_extra = '''
+# Keep replies short.
+# Name the file and the line when you cite code.
+# '''
 
 # Where skills are read from: one directory per root, each holding one
 # directory per skill, each with a SKILL.md in it. A relative path is resolved
@@ -27,11 +30,11 @@ ponytail = "full"
 #
 # skills = ["./skills", "~/.microagent/skills"]
 
-# One table per MCP server. `name` and `command` are required; `args` is a list
-# of strings and `env` is an inline table. The server is started over stdio
-# before the first request and its tools are offered to the model as
-# mcp__<server>__<tool>. A server that cannot start or answer is reported on
-# stderr and skipped.
+# One table per MCP server. `name` and one of `command` or `url` are required. A
+# `command` server is started over stdio before the first request; `args` is a
+# list of strings and `env` is an inline table. Its tools are offered to the
+# model as mcp__<server>__<tool>. A server that cannot start, be reached or
+# answer is reported on stderr and skipped.
 #
 # [[mcp]]
 # name = "fs"
@@ -43,17 +46,67 @@ ponytail = "full"
 # name = "git"
 # command = "mcp-server-git"
 # args = ["--repository", "."]
+#
+# A `url` server is a remote streamable-HTTP endpoint instead of a process. The
+# url is https, or http to this machine. Every key after it is optional:
+# api_key_env is the NAME of an environment variable that holds the key (never
+# the key itself; unset or empty sends no header), api_key_header is where the
+# key goes (default Authorization, sent as "Bearer <key>"; any other header gets
+# the key as it is), and timeout is seconds per request, 1 to 600, default 30.
+# The variable is removed from the environment tool subprocesses inherit.
+#
+# [[mcp]]
+# name = "docs"
+# url = "https://mcp.example.com/mcp"
+# api_key_env = "DOCS_MCP_KEY"
+# api_key_header = "Authorization"
+# timeout = 30
+
+# The tool set. `[tools.<name>]` takes `enabled` (true or false). The built-ins
+# (bash, read, write, edit, multi_edit, search, ast, git, todo) are on by
+# default; `enabled = false` removes one from the schema the model sees and
+# refuses its calls. At least one must stay on. A name that is not a tool stops
+# the run with exit status 2, so a misspelling cannot leave a tool as it was.
+#
+# [tools.ast]
+# enabled = false
+# [tools.git]
+# enabled = false
+
+# Four public remote MCP servers, on by default. Each is checked when the run starts, and one that
+# cannot be reached is named on stderr and skipped. `enabled = false` makes no request to it. Their tools are offered as mcp__<name>__<tool>
+# (mcp__context7__query-docs, mcp__grep_app__searchGitHub, ...). None needs a
+# key today. Each takes the same optional keys as a `url` server above: url
+# (another endpoint), api_key_env, api_key_header and timeout.
+#
+# Web search and page fetch (https://mcp.exa.ai/mcp).
+# [tools.web_search]
+# enabled = false
+# timeout = 30
+# api_key_env = "EXA_API_KEY"   # only for a plan that has a key
+#
+# Library documentation (https://mcp.context7.com/mcp).
+# [tools.context7]
+# enabled = false
+#
+# Code search over public GitHub repositories (https://mcp.grep.app).
+# [tools.grep_app]
+# enabled = false
+# url = "https://mcp.grep.app"
+#
+# Documentation and questions about a GitHub repository (https://mcp.deepwiki.com/mcp).
+# [tools.deepwiki]
+# enabled = false
 
 # Denied shell commands for the `bash` tool. Any command containing one of these
 # command names or sequences (e.g. `sudo`, `/usr/bin/sudo`, `rm -rf`) is refused
-# before execution. Can be a list of strings (`deny_commands = [...]`) or written
-# under `[commands]` (`deny = [...]`).
+# before execution. A top-level list of strings.
 #
 # deny_commands = ["sudo", "su", "shutdown", "reboot"]
 
 # Workspace sandbox confinement. When enabled, restricts filesystem modifications
 # to designated roots (by default: current working directory, /tmp, and session dir).
-# On Linux (kernel 5.13+), applies Landlock LSM rules to confine both microagent
+# On Linux (kernel 5.13+) Landlock, and on macOS a Seatbelt profile, confine both microagent
 # and all spawned child processes (bash, MCP, subcommands). In-process path checks
 # additionally refuse write and edit tool calls targeting paths outside writable roots.
 #

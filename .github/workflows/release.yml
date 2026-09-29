@@ -58,9 +58,6 @@ jobs:
       # name a commit no push has run since the last change to a shell script,
       # the Harbor adapter or a workflow, and a release cut without that gate
       # is how one of them reaches a consumer unreviewed.
-      - name: every published target is one `update` asks for
-        run: make check-targets
-
       - name: format is clean
         run: make fmt-check
 

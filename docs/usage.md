@@ -6,7 +6,7 @@ Everything a run reads and everything it writes. The [README](../README.md) is t
 - [Flags and environment](#flags-and-environment)
 - [How values resolve](#how-values-resolve)
 - [Providers and keys](#providers-and-keys)
-- [Config file](#config-file): [reply style](#reply-style), [skills](#skills), [MCP servers](#mcp-servers), [command filter](#command-filter)
+- [Config file](#config-file): [system prompt addendum](#system-prompt-addendum), [skills](#skills), [MCP servers](#mcp-servers), [tool set](#tool-set), [command filter](#command-filter)
 - [Tools](#tools)
 - [Output](#output): [stdout](#stdout), [exit status](#exit-status), [session log](#session-log)
 - [Failure handling](#failure-handling)
@@ -17,7 +17,7 @@ Everything a run reads and everything it writes. The [README](../README.md) is t
 ## Quick start
 
 ```sh
-export MICROAGENT_API_KEY=sk-or-...             # or OPENAI_API_KEY / OPENROUTER_API_KEY / DEEPSEEK_API_KEY
+export MICROAGENT_API_KEY=sk-or-...
 export MICROAGENT_BASE_URL=https://openrouter.ai/api/v1
 export MICROAGENT_MODEL=deepseek/deepseek-v4-flash
 
@@ -43,13 +43,10 @@ usage: microagent [options] "<prompt>"
                          https://openrouter.ai/api/v1);
                          https, or http on loopback, because the api
                          key goes to it in the clear otherwise
-  -k, --api-key <key>    api key (env MICROAGENT_API_KEY, OPENAI_API_KEY,
-                         OPENROUTER_API_KEY, DEEPSEEK_API_KEY). The key
+  -k, --api-key <key>    api key (env MICROAGENT_API_KEY). The key
                          goes to the base url, so name a base url from
                          the same provider as the key: the default is
-                         openrouter.ai, and a run that leaves it there
-                         sends an OPENAI_API_KEY or DEEPSEEK_API_KEY to
-                         openrouter and says so on stderr. A key on the
+                         openrouter.ai. A key on the
                          command line is in the process table, where any
                          user of this machine can read it; a variable or
                          the key file is not
@@ -61,8 +58,8 @@ usage: microagent [options] "<prompt>"
       --max-tokens <n>   max_tokens sent to the provider: the ceiling on
                          one response's generated tokens, at least 1
                          (env MICROAGENT_MAX_TOKENS, default 65536)
-      --config <file>    TOML config: reply style, skills and MCP
-                         servers (env MICROAGENT_CONFIG, default
+      --config <file>    TOML config: system prompt addendum, skills, MCP servers
+                         and tools (env MICROAGENT_CONFIG, default
                          ~/.microagent/config.toml)
       --ca-bundle <file>
                          PEM file to trust instead of the system store
@@ -101,14 +98,6 @@ update help" does; any other bare word, or a value of --print, is a task. A
 second bare word is the one thing this does not read as a task: two prompts
 are a usage error.
 
-reply style (MICROAGENT_CAVEMAN / MICROAGENT_PONYTAIL, or the same two keys
-in the config named above):
-  MICROAGENT_CAVEMAN     how terse the reply is: off, lite, full, ultra,
-                         wenyan-lite, wenyan-full, wenyan-ultra
-                         (default ultra)
-  MICROAGENT_PONYTAIL    how lazy the code is: off, lite, full, ultra
-                         (default full)
-
 session log:
   MICROAGENT_SESSION_DIR where the per-response JSONL session log goes
                          (default ~/.microagent/sessions; empty writes none)
@@ -123,12 +112,23 @@ colon-separated list that wins over it; default $HOME/.microagent/skills):
   working directory is read unless the config or the variable names it.
 
 MCP servers (`[[mcp]]` tables in the config):
-  each table names one server, with `name` and `command` required and
-  `args` (a list of strings) and `env` (an inline table) optional, e.g.
+  each table names one server, with `name` and one of `command` (a local
+  server over stdio, with optional `args`, a list of strings, and `env`, an
+  inline table) or `url` (a remote streamable-HTTP server, with optional
+  `api_key_env`, `api_key_header` and `timeout`), e.g.
   [[mcp]] name = "fs" command = "npx" args = ["-y", "server-fs", "/tmp"].
-  Every server is run over stdio and its tools are offered to the model as
-  mcp__<server>__<tool>, on the same deadline as any other tool. A server
-  that cannot start or answer is reported on stderr and skipped.
+  Its tools are offered to the model as mcp__<server>__<tool>, on the same
+  deadline as any other tool. A server that cannot start, be reached or
+  answer is reported on stderr and skipped.
+
+Tools (`[tools.<name>]` tables in the config):
+  `enabled = false` removes a built-in tool (bash, read, write, edit,
+  multi_edit, search, ast, git, todo) from the schema and refuses its calls;
+  at least one must stay on. The presets web_search, context7, grep_app and deepwiki
+  are public remote MCP servers, on until `enabled = false`, and take `url`,
+  `api_key_env` (the NAME of a variable holding the key), `api_key_header`
+  and `timeout` (seconds). A name that is not a tool stops the run with exit
+  status 2.
 
 subcommand:
   update [--check] [--repo owner/name]
@@ -158,8 +158,8 @@ answer and the token counters.
 
 MDEBUG=1                 trace a stuck stream on stderr, and print the
                          configuration this run resolved: model, base
-                         url, ceilings, style levels, the style config
-                         file that was read, the skill roots, and the
+                         url, ceilings, the config file that was
+                         read, the skill roots, and the
                          name of the source the api key came from, never
                          the key.
                          0, off, no, false and an empty value all leave
@@ -169,10 +169,10 @@ A variable set to an empty string is not a value: MICROAGENT_MODEL,
 MICROAGENT_BASE_URL, MICROAGENT_REASONING_EFFORT, MICROAGENT_BUDGET_SECONDS,
 MICROAGENT_MAX_SPEND_TOKENS, MICROAGENT_MAX_TURNS, MICROAGENT_MAX_TOKENS,
 MICROAGENT_STALL_TIMEOUT and MDEBUG keep their defaults, and
-MICROAGENT_CA_BUNDLE, the four api key variables and
-MICROAGENT_CAVEMAN/PONYTAIL fall through to whatever comes next.
+MICROAGENT_CA_BUNDLE and MICROAGENT_API_KEY fall through to whatever
+comes next.
 MICROAGENT_CONFIG, MICROAGENT_SESSION_DIR and MICROAGENT_SKILLS are the
-three where empty means off: no style file, no session log, no skills. HOME
+three where empty means off: no config file, no session log, no skills. HOME
 is trimmed like the rest, and an empty one is no home rather than a path
 off the root.
 ```
@@ -192,11 +192,11 @@ variable is the run's, and the message stops the run as a bad argument would. `-
 A variable set to an empty string is not a value:
 `MICROAGENT_MODEL`, `MICROAGENT_BASE_URL`, `MICROAGENT_REASONING_EFFORT`,
 `MICROAGENT_BUDGET_SECONDS`, `MICROAGENT_MAX_SPEND_TOKENS`, `MICROAGENT_MAX_TURNS`,
-`MICROAGENT_MAX_TOKENS`, `MICROAGENT_STALL_TIMEOUT` and `MDEBUG` keep their defaults, the four api
-key variables fall through to whatever comes next, `MICROAGENT_CA_BUNDLE` falls through to
-`SSL_CERT_FILE`, and `MICROAGENT_CAVEMAN`/`MICROAGENT_PONYTAIL` fall through to the config file.
+`MICROAGENT_MAX_TOKENS`, `MICROAGENT_STALL_TIMEOUT` and `MDEBUG` keep their defaults,
+`MICROAGENT_API_KEY` falls through to the key file, and `MICROAGENT_CA_BUNDLE` falls through to
+`SSL_CERT_FILE`.
 Three variables are the exception: `MICROAGENT_CONFIG`, `MICROAGENT_SESSION_DIR` and
-`MICROAGENT_SKILLS` read empty as off, so no style file, no session log and no skills.
+`MICROAGENT_SKILLS` read empty as off, so no config file, no session log and no skills.
 
 Every variable is trimmed before it is read, `HOME` included, and one holding only whitespace reads
 as empty. A wrapper that fills the environment from a file exports that file's trailing newline, and
@@ -207,7 +207,7 @@ monitor looks in, and a `HOME` ending in a newline moves every default path
 empty `HOME` is no home rather than a path off the root.
 
 `MDEBUG=1` prints the configuration the run resolved: model, base url (credentials in it redacted),
-the ceilings, the level each style key took, the config file that was read, the skill roots, and the
+the ceilings, the config file that was read and the size of its prompt addendum, the skill roots, and the
 name of the variable or file the api key came from. The key itself is never printed. Each option has
 up to three sources, and this is how you tell which one answered. The skill roots are named because
 `skills=0` on its own is the same line for a machine with no skills installed and one reading the
@@ -219,9 +219,8 @@ Any OpenAI-compatible endpoint works: OpenRouter, DeepSeek, OpenAI, vLLM, LiteLL
 `deepseek/deepseek-v4-flash` and `stealth/space-bunny-alpha` (OpenRouter) were used to verify it end
 to end; see [benchmark.md](benchmark.md).
 
-The key is looked up in `--api-key`, then `MICROAGENT_API_KEY`, `OPENAI_API_KEY`,
-`OPENROUTER_API_KEY` and `DEEPSEEK_API_KEY`. With none of them set, `~/.secrets/openrouter` is read
-as a last resort; an empty file there is named on stderr rather than passed off as no key.
+The key is looked up in `--api-key`, then `MICROAGENT_API_KEY`. With neither set,
+`~/.secrets/openrouter` is read as a last resort; an empty file there is named on stderr rather than passed off as no key.
 
 `--api-key` is the one source that is not private to this process: the whole command line is in the
 process table for as long as the run lasts, so any user on the machine can read the key out of it
@@ -230,8 +229,7 @@ there. A variable or the key file is not, which is why those are the sources to 
 The key goes to the base url in an `Authorization` header on every request. Two consequences:
 
 - A run that sets no base url talks to `https://openrouter.ai/api/v1` with
-  `deepseek/deepseek-v4-flash`, so a key read from `OPENAI_API_KEY` or `DEEPSEEK_API_KEY` goes to
-  OpenRouter. The run says so on stderr before the first request. A base url named with `--base-url`
+  `deepseek/deepseek-v4-flash`, so the key goes to OpenRouter. A base url named with `--base-url`
   or `MICROAGENT_BASE_URL` is where the key goes, including a self-hosted gateway that accepts a key
   from any provider.
 - A plain `http://` base url is refused unless the host is loopback (`localhost`, `127.0.0.0/8`,
@@ -243,7 +241,7 @@ the system store, for container images that ship no `ca-certificates`.
 
 ## What leaves the machine
 
-One run reaches three places, and writes one thing down. This is the whole list; a reader who wants
+One run reaches the places below, and writes one thing down. This is the whole list; a reader who wants
 to know what their data does does not have to infer it from the code.
 
 **The provider.** Every turn re-sends the whole conversation to the base url: the task as typed, the
@@ -263,10 +261,22 @@ GitHub sees this machine's IP address and, in the `User-Agent`, the version. Not
 makes an outbound request: there is no telemetry, no analytics, no crash report, and no update check
 on a run that was not asked to update. See [Update](#update).
 
-**MCP servers.** A configured server is a child process on this machine. One call sends it the tool
-name and the model's arguments for that call, and nothing else: no conversation, no system prompt,
-no token counts, no credential. What it returns is the tool result, so that goes to the provider in
-turn. See [MCP servers](#mcp-servers).
+**MCP servers.** A configured local server is a child process on this machine. One call sends it the
+tool name and the model's arguments for that call, and nothing else: no conversation, no system
+prompt, no token counts, no credential. What it returns is the tool result, so that goes to the
+provider in turn. See [MCP servers](#mcp-servers).
+
+**Remote MCP servers.** A `url` server, and each preset in the [tool set](#tool-set) that is
+switched on, is an HTTPS endpoint somebody else runs. A call sends it the same tool name and
+arguments, and the handshake sends the client name and version (`microagent`, this build's
+version); the operator of the endpoint sees this machine's IP address, the query the model built and
+the key the entry names, when it names one. Nothing else of the run is sent. The sandbox does not
+confine this traffic. The presets are on by default, so a run with no config connects to all four at start; set
+`enabled = false` in a `[tools.<name>]` table to make no request to one. The start-up handshake is the
+health check: an endpoint that cannot be reached is named on stderr
+(`microagent: MCP server web_search: NameServerFailure; it is skipped`) and its tools are left out of
+the run. With no network that costs one warning line a preset, in the time the failure takes to
+report, and at most 20 s a preset when packets are dropped without an answer.
 
 **On disk.** The [session log](#session-log) is the only file a run keeps of itself, apart from the
 files its tools were asked to write. It holds counters and the working directory, never prompt or
@@ -274,43 +284,40 @@ output text.
 
 ## Config file
 
-One TOML file carries the reply style, the skill roots, the MCP servers, denied shell commands, and workspace sandbox settings. It is `--config`, else
+One TOML file carries the system prompt addendum, the skill roots, the MCP servers, the tool set, denied shell commands, and workspace sandbox settings. It is `--config`, else
 `MICROAGENT_CONFIG`, else `~/.microagent/config.toml`. A named path may start with `~` or `~/`, which
 is the home directory: a shell expands the tilde in a command line before the flag is read, but a
 value that came out of `MICROAGENT_CONFIG` never went through one, so microagent expands it here.
 [`config.example.toml`](../config.example.toml) is a commented template.
 
 A missing file means the defaults. A file that cannot be read, is a directory, or is over the 64 KB
-cap is named on stderr and the run continues on the defaults. An unrecognized level, and a key the
+cap is named on stderr and the run continues on the defaults. A value a key does not take, and a key the
 file format does not define, are reported on stderr with that key's default kept, so a misspelled
-`caveman` cannot leave the default in force quietly.
+`system_prompt_extra` cannot leave the default in force quietly. One spelling exists per setting:
+a key or table this file once accepted under another name (`caveman`, `ponytail`, `[style]`,
+`[commands]`, `command_filter`, `sandbox = true`) is reported the same way. A [`[tools.<name>]`](#tool-set) table the run
+cannot honor is the exception: it stops the run.
 
-### Reply style
+### System prompt addendum
 
-Two prompt-level knobs. Neither touches the tools or the request shape: both are text appended to
-the system prompt, and the conversation stays the plain OpenAI message array.
+`system_prompt_extra` is text appended to the system prompt after a blank line, for a house rule such
+as the reply length or the language. It is the only prompt-level setting: the tools and the request
+shape are untouched, and the conversation stays the plain OpenAI message array. With the key absent
+or empty the system prompt is the built-in one, byte for byte.
 
 ```toml
-caveman  = "ultra"   # how terse the reply is
-ponytail = "full"    # how lazy the code is
+system_prompt_extra = "Answer in at most three sentences."
+
+# or over several lines
+system_prompt_extra = """
+Keep replies short.
+Name the file and the line when you cite code.
+"""
 ```
 
-The keys may also sit under a `[style]` table, and `#` comments are fine. That is the whole style
-surface, so these lines are read as `key = "value"` rather than through a full TOML parser.
-
-- **`caveman`** compresses the prose the agent writes back: `off`, `lite`, `full`, `ultra`, plus
-  `wenyan-lite`, `wenyan-full` and `wenyan-ultra`, which reply in classical Chinese (a bare `wenyan`
-  is `wenyan-full`). Default `ultra`: a coding agent is judged on the diff, and every paragraph about
-  it is re-sent on every later turn. Technical terms, code, commands, paths and exact error strings
-  are never compressed, a negation is never dropped, and security warnings stay in plain English.
-- **`ponytail`** biases what the agent builds: `off`, `lite`, `full`, `ultra`. Reuse a helper the
-  repository already has before writing a new one, prefer the standard library and the platform over
-  a dependency, and make the smallest diff that fixes the root cause. Default `full`. Never at the
-  cost of input validation at a trust boundary, error handling that prevents data loss, security,
-  accessibility, or anything the task asks for.
-
-`MICROAGENT_CAVEMAN` and `MICROAGENT_PONYTAIL` set a level for one run and win over the file. With
-both at `off`, the system prompt is exactly the one the harness sent before styles existed.
+The value is a TOML string: `"..."` with the escapes `\n`, `\t`, `\r`, `\"` and `\\`, a literal
+`'...'` with none, or either kind as a multi-line string. It is at most 16 KB, because it is re-sent
+on every turn; a longer value is reported as a bad value and the prompt stays the built-in one.
 
 ### Skills
 
@@ -351,7 +358,8 @@ a repository's directory is the operator saying those bytes are instructions.
 
 ### MCP servers
 
-An MCP server is a child process speaking JSON-RPC over stdio. One `[[mcp]]` table declares one:
+An MCP server speaks JSON-RPC, either as a child process over stdio or as a remote streamable-HTTP
+endpoint. One `[[mcp]]` table declares one:
 
 ```toml
 [[mcp]]
@@ -361,8 +369,9 @@ args    = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 env     = { LOG = "debug" }
 ```
 
-`name` and `command` are required; a table missing either is named on stderr and skipped. Every
-server is started before the first request and asked for its tool list, and each tool is offered to
+`name` and one of `command` or `url` are required; a table missing both, or carrying both, is
+named on stderr and skipped. Every local server is started before the first request and asked for its tool list, the remote ones are asked at the same time
+rather than one after another, and each tool is offered to
 the model as `mcp__<server>__<tool>` with the server's own `inputSchema`. A schema over 16 KB is
 replaced with an empty object schema that says so in its `description`, because a schema sits in the
 constant prefix of every request the run makes: a server that embeds a large `description`,
@@ -383,6 +392,85 @@ machine](#what-leaves-the-machine) has the whole list.
 Server and tool names may hold only letters, digits, dot, dash and underscore, and a name holding
 `__` is refused: the double underscore separates the three parts of an exposed name.
 
+A remote server is a table with a `url` in place of `command`:
+
+```toml
+[[mcp]]
+name           = "docs"
+url            = "https://mcp.example.com/mcp"
+api_key_env    = "DOCS_MCP_KEY"      # the NAME of a variable, never the key
+api_key_header = "Authorization"     # the default
+timeout        = 30                  # seconds, 1 to 600, the default
+```
+
+Every request is a `POST` to the url with `Content-Type: application/json` and
+`Accept: application/json, text/event-stream`, and the answer is read as a JSON body or as an event
+stream, whichever the server sends; notifications and server requests in a stream are ignored, and a
+stream that ends without the answer is an error. After `initialize` the client sends
+`MCP-Protocol-Version: 2025-03-26`, and echoes an `Mcp-Session-Id` the server assigned. Between
+requests the client keeps the tool table and that session id, and no connection of its own.
+
+| key | meaning |
+| --- | --- |
+| `url` | `https`, or `http` to this machine (`localhost`, `127.0.0.0/8`, `::1`). No `user:password@`. No redirect is followed. |
+| `api_key_env` | name of the environment variable holding the key. Unset or empty means no header, not an error. The key is never in the file, and the variable is removed from the environment tool subprocesses and local MCP servers get. |
+| `api_key_header` | header the key travels in, default `Authorization`. In `Authorization` the value is `Bearer <key>`; in any other header it is the key as it is. |
+| `timeout` | seconds one request may take, from connecting to the last byte, 1 to 600, default 30. Also bounded by the run's own budget. |
+
+Not spoken: OAuth (a key is a static header), the standalone `GET` event stream for server-initiated
+messages, and ending the session with a `DELETE`. A response over 4 MB is an error rather than a cut. A server that does not answer in time is not
+asked again for the rest of the run. The keys of one form are refused on the other (`args` on a `url` table,
+`timeout` on a `command` table), and a bad value drops the entry with a line on stderr, so a server never runs without the key or the limit the
+file asked for. What a remote server returns is untrusted text like any tool result: see the
+[threat model](threat-model.md).
+
+### Tool set
+
+`[tools.<name>]` switches a tool on or off and sets what a remote tool takes. The names are the
+built-ins (`bash`, `read`, `write`, `edit`, `multi_edit`, `search`, `ast`, `git`, `todo`) and the
+four presets (`web_search`, `context7`, `grep_app`, `deepwiki`).
+
+```toml
+[tools.ast]
+enabled = false
+
+[tools.context7]
+enabled = true
+```
+
+`enabled` takes the TOML booleans `true` and `false` and nothing else, like every boolean in this file.
+
+**Built-ins** are on unless the table says `enabled = false`, and they take no other key. A disabled
+built-in is left out of the tool schema sent to the model, its calls are answered with
+`error: the tool 'x' is disabled by configuration`, and the system prompt ends with one line,
+`Disabled tools: ast, git.`. A run that disables nothing sends the same schema and system prompt, byte
+for byte, as one with no `[tools]` table, so the provider's prompt cache is unaffected. At least one
+built-in must stay on.
+
+**Presets** are public MCP servers, and are on until `enabled = false`; one that cannot be reached is
+warned about and skipped, so a run with no network works. Each is served by the same
+transport as a `url` table of the same name, so its tools reach the model as
+`mcp__<preset>__<tool>`:
+
+| preset | endpoint | tools |
+| --- | --- | --- |
+| `web_search` | `https://mcp.exa.ai/mcp` | `mcp__web_search__web_search_exa`, `mcp__web_search__web_fetch_exa` |
+| `context7` | `https://mcp.context7.com/mcp` | `mcp__context7__resolve-library-id`, `mcp__context7__query-docs` |
+| `grep_app` | `https://mcp.grep.app` | `mcp__grep_app__searchGitHub` |
+| `deepwiki` | `https://mcp.deepwiki.com/mcp` | `mcp__deepwiki__read_wiki_structure`, `mcp__deepwiki__read_wiki_contents`, `mcp__deepwiki__ask_question` |
+
+The tools are the ones each server lists, so a server that changes its list changes this one. A
+preset takes the same `url`, `api_key_env`, `api_key_header` and `timeout` as a `url` table (see
+[MCP servers](#mcp-servers)), all optional: none of the four needs a key today, and `api_key_env`
+is for a plan that has one. A preset and an `[[mcp]]` table of the same name would collide on tool
+names, so the second is skipped and named on stderr.
+
+**Mistakes.** A table name that is not one of the twelve above, a value a key cannot take, and a
+config that disables every built-in stop the run before any request, with exit status 2 and a message
+naming the config path and the bad name or key; the message for a bad name lists the valid ones. A
+misspelled name never leaves a tool in a state the file did not ask for. A key the table does not
+have (`url` under `[tools.bash]`) is noted on stderr and ignored, like any unknown key in this file.
+
 ### Command filter
 
 Denied commands for the `bash` tool. Any command containing one of the configured words or sequences is refused before execution, returning `refused: command contains '...', which is denied by configuration` to the model.
@@ -391,12 +479,7 @@ Denied commands for the `bash` tool. Any command containing one of the configure
 deny_commands = ["sudo", "su", "shutdown", "reboot"]
 ```
 
-The filter can also be declared under a `[commands]` table:
-
-```toml
-[commands]
-deny = ["sudo", "rm -rf"]
-```
+`deny_commands` is a top-level list of strings; a bare string is refused as a bad value.
 
 Matching inspects command words and basenames (for example, denying `sudo` matches both `sudo apt install` and `/usr/bin/sudo ls` without false-positiving on safe names like `run_sudoku.py`), as well as multi-word sequences (such as `rm -rf`).
 
@@ -410,15 +493,18 @@ enabled = true
 writable = [".", "/tmp"]
 ```
 
-Or as a top-level boolean (`sandbox = true`), which defaults to allowing `.` (the working directory), `/tmp`, and the session log directory.
+The writable roots are always `.` (the working directory), `/tmp`, and the session log directory, plus each `writable` entry.
 
 When enabled, writes outside the designated roots are blocked:
 - **Kernel-level Landlock enforcement:** On Linux (kernels 5.13+), Landlock LSM rules are applied to microagent before executing tasks. The root `/` is marked read-only, while designated roots (current working directory, `/tmp`, the session directory, and any configured `writable` paths) remain read-write. Landlock restrictions are inherited across `execve` by all child processes (including `bash`, MCP servers, and child build tools).
+- **Kernel-level Seatbelt enforcement:** On macOS, a Seatbelt profile (`sandbox_init`, the call behind `sandbox-exec`) denies file writes everywhere except the same roots, plus `$TMPDIR` (where macOS keeps per-user scratch space, behind a symlink into `/private`) and the devices `/dev/null`, `/dev/tty` and `/dev/dtracehelper`. Reads, the network and process creation stay allowed. Children inherit the profile as they inherit Landlock's rules. Apple deprecates the call but still uses it, and it is not in the tests that run on Linux: the profile text is, the enforcement on a Mac is not.
+- **When the kernel does not enforce it:** an older Linux kernel, or a Seatbelt refusal, prints `microagent: sandbox: the kernel sandbox could not be applied ...` at startup, and only the in-process check below applies. That check covers `write` and `edit`, not `bash` or MCP servers.
 - **In-process path checking:** Both `write` and `edit` tools canonicalize paths and verify they resolve strictly within allowed roots before writing, returning `refused: path '...' is outside the sandbox writable roots`.
 
 ## Tools
 
-Seven built-in tools, each a thin wrapper over a program you already have:
+Nine built-in tools, each a thin wrapper over a program you already have. `[tools.<name>]` turns any of
+them off ([tool set](#tool-set)).
 
 | tool | what it does |
 | --- | --- |
@@ -426,12 +512,14 @@ Seven built-in tools, each a thin wrapper over a program you already have:
 | `read` | read a file, with optional line offset and limit. Refuses credentials (`.env`, key and keystore files, anything under `.secrets` or `.ssh`), including a symlink to one. |
 | `write` | create or overwrite a file, creating parents. Refuses a credentials path, a path outside sandbox roots when enabled, and a call with no `content`. |
 | `edit` | exact string replacement. Refuses a credentials path, a path outside sandbox roots when enabled, an ambiguous match unless `replace_all`, and an edit that would leave `old_string` matchable in the result, so a repeated call cannot apply the change twice. |
+| `multi_edit` | a list of `{path, old_string, new_string, replace_all}` replacements, in one file or across files, applied in order on the text the earlier ones left. Every edit is judged as `edit` judges it, and no file is written unless all are accepted, so a refusal names the edit and changes nothing; up to 64 edits per call. A file written part way says how many files had already landed. |
 | `search` | `rg --line-number --no-heading`, optional glob; credentials files excluded. |
 | `ast` | `ast-grep run` for a structural match, or `--rewrite --update-all` to apply one; credentials files excluded. |
 | `git` | read-only `status`, `diff`, `log`, `show`, `blame`, capped at 400 lines; a credentials path is refused. |
+| `todo` | keeps the steps of a long task: the whole list, each `pending`, `doing` or `done`, replaces the last one and is returned. |
 
 A config can add two more kinds: the `skill` tool when a skills root held something, and one
-`mcp__<server>__<tool>` per tool an MCP server reported.
+`mcp__<server>__<tool>` per tool an MCP server reported, local, `url` or preset.
 
 `search` needs `rg`, `ast` needs `ast-grep`, and `git` needs `git` on `PATH`. A stock macOS ships
 only the last, so a machine missing the others is told which program is missing and how to install
@@ -499,7 +587,7 @@ Two bounds keep a long run from re-sending without limit:
 | --- | --- |
 | 0 | the run finished |
 | 1 | the run failed |
-| 2 | wrong command line |
+| 2 | wrong command line, or a config the run cannot start with: a bad value, a `[tools.<name>]` that names no tool, every built-in disabled |
 | 3 | stopped without an answer: `--max-turns`, `--max-spend-tokens` or `--budget` reached, or the last response carried no text, was cut at `--max-tokens`, or the provider stopped generating it. stdout is a prefix of the work, not an answer. |
 | 130 | interrupted (Ctrl+C or kill), taking the tool subprocess with it |
 

@@ -48,9 +48,11 @@ pub const Tool = enum {
     read,
     write,
     edit,
+    multi_edit,
     search,
     ast,
     git,
+    todo,
 
     /// The name as the wire spells it, which is the one the schema advertises
     /// and the one the provider's stream carries.
@@ -71,14 +73,14 @@ pub const Tool = enum {
     /// not; a caller that knows a rewrite happened says so itself, the way
     /// `credentialRefusal` does with its `writes` parameter.
     pub fn writes(tool: Tool) bool {
-        return tool == .write or tool == .edit;
+        return tool == .write or tool == .edit or tool == .multi_edit;
     }
 };
 
 /// Every tool, in the order the schema advertises them. One list, so the tools
 /// a run offers and the ones a caller iterates cannot be two lists.
 pub inline fn tools() []const Tool {
-    return &.{ .bash, .read, .write, .edit, .search, .ast, .git };
+    return &.{ .bash, .read, .write, .edit, .multi_edit, .search, .ast, .git, .todo };
 }
 
 /// Token counters as gauntlet wants to read them: cumulative for the run, so
@@ -136,7 +138,7 @@ test "only the tools that change a file say they write" {
     // expected answers are spelled out in the order `tools()` advertises them
     // rather than recomputed from the rule under test, so a variant added to
     // the enum and to the schema but left out of `writes` fails here.
-    const by_schema_order = [_]bool{ false, false, true, true, false, false, false };
+    const by_schema_order = [_]bool{ false, false, true, true, true, false, false, false, false };
     try std.testing.expectEqual(by_schema_order.len, tools().len);
     for (tools(), by_schema_order) |tool, writes| {
         try std.testing.expectEqual(writes, tool.writes());
@@ -1084,7 +1086,7 @@ test "a leading byte order mark is not part of the value it precedes" {
     // An editor that saves UTF-8 with a BOM writes one ahead of the first byte
     // of the value, and it is invisible in that editor, so nothing on the way
     // here looks like an error to strip.
-    try std.testing.expectEqualStrings("caveman = \"lite\"\n", stripBom(bom ++ "caveman = \"lite\"\n"));
+    try std.testing.expectEqualStrings("skills = []\n", stripBom(bom ++ "skills = []\n"));
     // A mark anywhere else is content: a file whose second line opens with one
     // has a first line that is genuinely empty.
     try std.testing.expectEqualStrings("a\n" ++ bom ++ "b\n", stripBom("a\n" ++ bom ++ "b\n"));

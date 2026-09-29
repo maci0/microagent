@@ -10,13 +10,12 @@ binary, then runs one non-interactive turn with the task instruction.
 
 The binary is found at $MICROAGENT_BINARY, else next to this file as
 `microagent-<host arch>-linux-musl` (build with `make musl`, which is
-`zig build -Dtarget=<host arch>-linux-musl -Doptimize=ReleaseFast` followed by
+`zig build -Dtarget=<host arch>-linux-musl -Doptimize=ReleaseSmall` followed by
 the copy). The architecture is the host's, because Harbor runs the task
 container on the host's architecture: an arm64 host needs the aarch64 binary,
 and the x86_64 one does not execute there.
 
-The model provider key comes from the host environment ($MICROAGENT_API_KEY,
-else $OPENAI_API_KEY, $OPENROUTER_API_KEY or $DEEPSEEK_API_KEY) and is passed to
+The model provider key comes from the host environment ($MICROAGENT_API_KEY) and is passed to
 the container process only, never baked into the image.
 """
 
@@ -51,6 +50,12 @@ REMOTE_PATH = "/usr/local/bin/microagent"
 # fails before its first request. The host's bundle is uploaded and named
 # explicitly rather than relying on the image being kind.
 REMOTE_CA_PATH = "/usr/local/bin/microagent-ca.crt"
+REMOTE_CONFIG_PATH = "/usr/local/bin/microagent-config.toml"
+# The remote tool presets are on by default, and a benchmark run is scored on the task alone, so
+# the run gets no web search and no repository wikis.
+BENCH_CONFIG = "".join(
+    f"[tools.{name}]\nenabled = false\n" for name in ("web_search", "context7", "grep_app", "deepwiki")
+)
 # Probed, not selected by OS name: a host that ships its trust store somewhere
 # else is found by asking the filesystem. Debian/Ubuntu, RHEL/Fedora, macOS 12+
 # (which has no /etc/ssl/certs at all) and the two Homebrew prefixes, since a
@@ -136,19 +141,12 @@ def host_ca_bundle() -> Path | None:
 
 
 def api_key() -> str:
-    # The binary's own order (`key_vars` in src/main.zig): a host exporting both
-    # OPENAI_API_KEY and OPENROUTER_API_KEY was an OpenRouter key through this
-    # adapter and an OpenAI key on a direct run, so one environment billed two
-    # providers depending on whether the run went into a container. Pinned
-    # against that constant by a test in src/main.zig.
-    for name in ("MICROAGENT_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY"):
-        value = trimmed_env(name)
-        if value:
-            return value
-    raise RuntimeError(
-        "no model provider key in the host environment: set MICROAGENT_API_KEY, "
-        "OPENAI_API_KEY, OPENROUTER_API_KEY or DEEPSEEK_API_KEY before running harbor"
-    )
+    # The one variable the binary reads for its key (`key_var` in src/main.zig), pinned against it
+    # by a test there.
+    value = trimmed_env("MICROAGENT_API_KEY")
+    if value:
+        return value
+    raise RuntimeError("no model provider key in the host environment: set MICROAGENT_API_KEY before running harbor")
 
 
 def checked_int(name: str, raw: str) -> int:
@@ -351,10 +349,13 @@ class Microagent(BaseAgent):
         if not source.is_file():
             raise RuntimeError(
                 f"microagent binary not found at {source}; build it with "
-                f"`zig build -Dtarget={HOST_ARCH}-linux-musl -Doptimize=ReleaseFast` "
+                f"`zig build -Dtarget={HOST_ARCH}-linux-musl -Doptimize=ReleaseSmall` "
                 "(or `make musl`), or set MICROAGENT_BINARY"
             )
         await environment.upload_file(source_path=source, target_path=REMOTE_PATH)
+        config = self.logs_dir / "microagent-config.toml"
+        config.write_text(BENCH_CONFIG, encoding="utf-8")
+        await environment.upload_file(source_path=config, target_path=REMOTE_CONFIG_PATH)
         bundle = host_ca_bundle()
         self._ca_uploaded = False
         if bundle is not None:
@@ -481,6 +482,7 @@ class Microagent(BaseAgent):
         env = {
             "MICROAGENT_API_KEY": api_key(),
             "MICROAGENT_BASE_URL": base_url(),
+            "MICROAGENT_CONFIG": REMOTE_CONFIG_PATH,
         }
         if self._ca_uploaded:
             env["MICROAGENT_CA_BUNDLE"] = REMOTE_CA_PATH
