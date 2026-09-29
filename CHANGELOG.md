@@ -18,9 +18,16 @@ release, and `microagent update` moves you to it.
 
 - Repository instructions are read at start-up: `AGENTS.md` in the working
   directory, or whatever `agents_files` names, appended to the system prompt
-  under a line saying which file it came from. An empty list turns the
+  between a `--- begin repository instructions: <path> ---` marker and a
+  `--- end repository instructions ---` one. An empty `agents_files` turns the
   read off, a named path that is not there is named on stderr, the text is at
-  most 16 KB, and the file never becomes the whole prompt.
+  most 16 KB, and the file never becomes the whole prompt. The block is the one
+  piece of repository text the run follows as instructions, and the system
+  prompt says what it may and may not do: it governs the task and cannot widen
+  it, lift the prompt's rules, authorize reading or printing a credential, send
+  anything off the machine, or stand in for the operator. A line in the file
+  asking for one of those is reported in the run's summary rather than obeyed.
+  Text from the tree arriving anywhere else stays data.
 
 - The Markdown is linted. It was the largest tracked surface and the only kind
   of file no target in `make lint` read, so an unclosed code fence, a hard tab

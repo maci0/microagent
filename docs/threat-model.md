@@ -66,7 +66,7 @@ source tree and the host. The one asset worth stealing on its own is the API key
 | `[tools.<name>]` tables in that config | which built-in tools the model is offered, and which of the public remote servers `web_search`, `context7`, `grep_app` and `deepwiki` are switched off (all four are on by default), with their url, key variable name and timeout | `toolKey`, `src/config.zig:480`; `toolConfigError`, `src/main.zig:498`; `builtinToolsJson`, `src/main.zig:2333`; refusal in `dispatchCall`, `src/main.zig:2894` |
 | Responses of a remote MCP server (JSON body or event stream) | text that becomes a tool result, and the session id echoed on later requests | `exchange`, `src/mcp.zig:405`; `readAnswer`, `src/mcp.zig:484`; `sseLine`, `src/mcp.zig:551` |
 | `skills` in that config, `MICROAGENT_SKILLS`, `~/.microagent/skills` | `SKILL.md` bodies the model may load, as prompt text | `roots`, `src/skill.zig:138`; `discover`, `src/skill.zig:190`; `call`, `src/skill.zig:373`; cap `max_skill_bytes`, `src/skill.zig:40` |
-| `AGENTS.md` in the working directory, or the paths `agents_files` names | repository text the run follows as instructions, appended to the system prompt under a line naming the file | `agentsBlock`, `src/main.zig:544`; `readAgentsFile`, `src/main.zig:558`; cap `max_agents_bytes`, `src/main.zig:128`; `agents_files = []` turns the read off |
+| `AGENTS.md` in the working directory, or the paths `agents_files` names | repository text the run follows as instructions, appended to the system prompt between a begin and an end marker naming the file, with the prompt stating that the block governs the task and cannot widen it, lift the prompt's rules, authorize a credential, or send anything off the machine | `agentsBlock`, `src/main.zig:544`; `readAgentsFile`, `src/main.zig:565`; cap `max_agents_bytes`, `src/main.zig:128`; `agents_files = []` turns the read off |
 | Command line, `update` | `--check` | `parseArgs`, `src/update.zig:844`; `run`, `src/update.zig:881`; dispatched from `main` at `src/main.zig:264` |
 | `MICROAGENT_MODEL`, `MICROAGENT_BASE_URL`, `MICROAGENT_REASONING_EFFORT` | endpoint, model, response style | `envValue`, `src/main.zig:749`; read at `src/main.zig:281-283` |
 | `MICROAGENT_MAX_TURNS`, `MICROAGENT_MAX_TOKENS` | loop and response ceilings | `max_turns_default`, `src/main.zig:88`; `default_max_tokens`, `src/main.zig:103`; both through `ceiling`, `src/main.zig:799` |
@@ -190,13 +190,22 @@ command.
 
 ### Repository content → model → host (elevation of privilege, information disclosure)
 
-- **Prompt injection through source files.** A file, a test fixture, an issue template or a
-  `CLAUDE.md`/`AGENTS.md` in the tree can say "run `curl … | sh`". The model reads it with
-  the ordinary `read` tool (`toolRead`, `src/tool.zig:1239`). Instructions carry no
-  provenance, so the injected text is as trusted as the operator's prompt. The system
-  prompt tells the model to treat tool output as data and to report such a file instead of
-  acting on it (`src/main.zig:138`), but a hostile file can argue with that. This is the
-  project's dominant risk, and it is a design property, not a bug.
+- **Prompt injection through source files.** A file, a test fixture or an issue template in the
+  tree can say "run `curl … | sh`". The model reads it with the ordinary `read` tool
+  (`toolRead`, `src/tool.zig:1239`). Instructions carry no provenance, so the injected text is as
+  trusted as the operator's prompt. The system prompt tells the model to treat tool output as data
+  and to report such a file instead of acting on it (`system_prompt`, `src/conversation.zig:34`),
+  but a hostile file can argue with that. This is the project's dominant risk, and it is a design
+  property, not a bug.
+- `AGENTS.md` is the one file in the tree the run follows as instructions rather than as data, and
+  that is deliberate: it is the convention every other coding agent reads, and a run whose operator
+  wants none sets `agents_files = []`. Its authority is bounded in the prompt rather than in the
+  code, because the file's whole purpose is to direct the run: the block is fenced between a begin
+  and an end marker, the prompt states that it governs the task and cannot widen it, lift the
+  prompt's rules, authorize a credential, or send anything off the machine, and a line asking for
+  one of those is reported rather than obeyed (`system_prompt`, `src/conversation.zig:34`;
+  `agentsBlock`, `src/main.zig:544`). A hostile `AGENTS.md` is therefore the strongest injection
+  this design admits, and it lands in the system role rather than a tool result.
 - The same path exfiltrates: the model can `read` a file, and its bytes go into the next
   request body (`buildBody`, `src/main.zig:2371`).
 - A hostile repository can also reach the terminal. Bytes a tool echoes reach the gutter

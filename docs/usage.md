@@ -339,10 +339,18 @@ the header line.
 ### Repository instructions
 
 `AGENTS.md` in the working directory is read when the run starts and appended to the system prompt,
-after anything `system_prompt_extra` adds and before the skills listing, under a line saying where it
-came from. It is the convention every other coding agent reads, so a repository that carries one
-carries it for this run too: a run whose operator wants none sets `agents_files = []`, and a list
-names other paths, in order.
+after anything `system_prompt_extra` adds and before the skills listing, between a `--- begin
+repository instructions: <path> ---` marker and a `--- end repository instructions ---` one. It is
+the convention every other coding agent reads, so a repository that carries one carries it for this
+run too: a run whose operator wants none sets `agents_files = []`, and a list names other paths, in
+order.
+
+The block is the one piece of repository text the run follows as instructions, and the system prompt
+says so along with what the block cannot do: it governs the task and cannot widen it, lift the
+prompt's rules, authorize reading or printing a credential, send anything off the machine, or stand
+in for the operator. A line in the file asking for one of those is reported in the run's summary
+rather than obeyed. Text from the tree arriving anywhere else, through `read` or `search` or
+quoted in a tool result, stays data.
 
 ```toml
 agents_files = ["AGENTS.md", "docs/HOUSE.md"]
