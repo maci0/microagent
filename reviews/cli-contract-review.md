@@ -15,9 +15,9 @@ the widest thing in this repository and it changes in small ways every release, 
 the part most likely to have drifted since the last time anyone read all of it together.
 This review owns that contract only: it does not judge code quality, memory handling,
 the HTTP client, the tool-loop policy, or the prose quality of the documentation. The
-bundled `cli-review` reads the same surface and its exit-code item assumes the 0/1/2
-convention, which this binary does not use; where the two meet, the answer is the one an
-item here proves against the code, not the one a convention table prefers. A finding
+exit codes are this binary's own and there are five of them, 0, 1, 2, 3 and 130, so a
+reader arriving with the 0/1/2 convention finds two it cannot place; item 6 settles each
+code against the code that returns it rather than against a convention table. A finding
 here must be provable by reading the contract's own sources against each other,
 not by an opinion about how the program ought to behave.
 

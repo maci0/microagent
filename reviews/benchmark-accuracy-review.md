@@ -54,9 +54,12 @@ reduced to a fragment with nothing measured left to check.
    mentions without saying why it was left out, is a finding.
 
 3. **A comparison between rows measured differently.** Wall clock comes from
-   `bench/monotonic.sh` where the platform has it and falls back to whole
-   seconds where BSD `date` has no `%N`, so a millisecond figure and a rounded
-   one are not the same measurement. The tokens column is `-` for every harness
+   `monotonic_ns` in `bench/monotonic.sh`, and that call either answers or
+   fails: `date` is gone from these scripts, so a platform with no monotonic
+   source writes `"wall_s":null` beside a `result` of `no-clock` rather than a
+   coarser figure. A row measured that way did not run, so quoting it, or
+   averaging it into one that did, is this item's finding. The tokens column is
+   `-` for every harness
    that does not print `"total_tokens"`, which `run.sh` and `overhead.sh` both
    read with a `grep` on that literal: a row quoting tokens for a harness
    measured by another path, or a size quoted for a build the table does not
