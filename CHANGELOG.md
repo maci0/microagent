@@ -84,6 +84,15 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- `make build` compiles again. The `agents_file` the config parses and the flag saying whether the
+  path was named were read from a `LoadedConfig` that had no such fields, so every entry point failed
+  to compile while the test suite stayed green: no test reaches `main`, so Zig never analyzed it.
+- `zig build test` compiles the program as well as running the tests, so a break in the entry point
+  fails the loop a contributor runs mid-edit rather than the first `make build` after it.
+- `scripts/sbom.sh` reads an asset's digest and the pin count through a variable of its own, so
+  shellcheck's `check-extra-masked-returns`, which the gate enables, passes on a host with a current
+  shellcheck, and a hash that fails stops the run instead of writing an empty checksum.
+
 - A `[[mcp]]` `env` key is held to the same rule as `api_key_env`: a name carrying a `=`, a NUL or a
   control character drops the server, where it reached the child's environment block and took the run
   down. A quoted key is unquoted, so `env = { "LOG" = "debug" }` sets `LOG` and not a variable named

@@ -90,6 +90,17 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
     test_step.dependOn(&run_copy_tests.step);
+    // Compiling the program, not just running the tests. Zig analyzes a
+    // function body only when something calls it, and the test binary calls
+    // none of `main`'s: a change to the entry point that no test reaches is
+    // therefore not type-checked by the run above, so `zig build test` passed
+    // on a tree whose `make build` and `make check` both failed to compile,
+    // and the edit-test loop a contributor uses all day said green about a
+    // binary that did not exist. The compile is a cache hit whenever the
+    // sources behind the tests are unchanged, so it costs a run that edited
+    // the test fixtures nothing and a run that touched main the seconds an
+    // optimizing-less build of one file costs.
+    test_step.dependOn(&exe.step);
 
     // The same suite again, compiled with the undefined-behavior sanitizer, so
     // an integer overflow, a misaligned load or a null dereference is a failed
