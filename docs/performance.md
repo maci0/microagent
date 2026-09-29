@@ -86,7 +86,14 @@ run-to-run noise, so there is no build flag to reach for either.
 | a 3000-turn run's client CPU | 211.9 M instr | **177.8 M instr** | `sendBodyComplete` needs the whole body in one buffer, so the conversation was copied into a fresh one every turn; the prefix and the conversation now go to the wire from where they are |
 | the same run, peak resident | 13.3 MB | **11.0 MB** | with the body buffer gone, the turn arena crosses its retention ceiling less often |
 | an MCP answer read in 8 KB chunks, three servers of 1 MB each | 91.1 M instr | **75.3 M instr** | the newline scan restarted at the front of the buffer on every chunk, so a one megabyte line was searched 128 times over growing prefixes, about 66 MB of the same bytes; it resumes where it stopped now |
+| mappings at startup (`--version`) | 86 mmap | **19** | std's start-code allocator maps a 64 KB slab per size class on first use; the run builds its own around a bucket allocator instead. It costs about 1.2% of client instructions on a 3000-turn run, which is the price of the 67 mappings it saves |
 | three 4 MB MCP tool results | 19.1 MB resident | **12.8 MB** | the text was built whole and clamped to 24 KB a moment later, so the copy and the clamp both worked over bytes nobody keeps; it stops at the cap while it is built, and the note names the size it would have had |
+
+Four of the rows above are one body of work on one run, and they compound. Between `v0.4.0` and the
+tree that carries them, client instructions for 3000 turns of the always-calls-a-tool loop fall from
+211.2 M to 177.2 M (16%), peak resident from 12.2 MB to 9.8 MB, and peak address space from 110.4 MB
+to 46.8 MB. At 100 turns the same changes are inside the noise, which is the shape to expect: they
+pay for the conversation's size and the runtime's defaults, not for a turn.
 
 The two largest wins are not CPU at all. The request-bytes fix is the most valuable change in this
 file, and every counter the harness prints misses it: `cached_tokens` reports what was reused, never
@@ -211,6 +218,10 @@ wall figure is `hyperfine -w 3 -r 20` and it moves with the page cache (11.1 ms 
 run warm, 27.2 against 12.9 loaded and cold); the system time does not, 9.3 ms against 2.0 ms, which
 is the read volume. A library of ordinary size pays nothing either way: 2.9 MB against 2.9 MB with
 none, 5.5 against 5.9 for 200 skills of 4 KB.
+
+The allocator row is `strace -f -e trace=mmap -c` on `--version` against the same tree built around
+std's own start-code allocator, which is the only way to separate it from the other changes: the two
+builds differ in that one thing, and the CPU figure is the same 3000-turn loop measured on both.
 
 The worker-stack rows are peak `VmPeak` and `VmHWM` from `/proc/<pid>/status`, sampled every 10 ms
 through a run against the always-calls-a-tool stub at 300 and 3000 turns. The smaller stacks were
