@@ -1564,6 +1564,25 @@ const LoadedConfig = struct {
     source: ?[]const u8,
 };
 
+/// The subset of a parsed config this struct carries, tagged with the file it
+/// came from. One function, so a key added to `config_mod.Config` is copied
+/// here once rather than at every call site.
+fn fromConfig(parsed: config_mod.Config, source: ?[]const u8) LoadedConfig {
+    return .{
+        .system_prompt_extra = parsed.system_prompt_extra,
+        .model = parsed.model,
+        .base_url = parsed.base_url,
+        .api_key = parsed.api_key,
+        .skills = parsed.skills,
+        .mcp = parsed.mcp,
+        .deny_commands = parsed.deny_commands,
+        .disabled_tools = parsed.disabled_tools,
+        .tool_problem = parsed.tool_problem,
+        .sandbox = parsed.sandbox,
+        .source = source,
+    };
+}
+
 /// Everything the config file said, from the TOML named by --config,
 /// MICROAGENT_CONFIG or `$HOME/.microagent/config.toml`. A missing file, an unreadable one, or a line the
 /// reader could not use costs the run nothing: everything that was understood
@@ -1594,19 +1613,7 @@ fn loadConfig(io: Io, init: std.process.Init, arena: std.mem.Allocator, config: 
         if (text) |t| parsed = config_mod.parse(arena, t);
     }
     if (parsed.problem) |problem| reportConfigProblem(io, arena, source, problem);
-    return .{
-        .system_prompt_extra = parsed.system_prompt_extra,
-        .model = parsed.model,
-        .base_url = parsed.base_url,
-        .api_key = parsed.api_key,
-        .skills = parsed.skills,
-        .mcp = parsed.mcp,
-        .deny_commands = parsed.deny_commands,
-        .disabled_tools = parsed.disabled_tools,
-        .tool_problem = parsed.tool_problem,
-        .sandbox = parsed.sandbox,
-        .source = source.path,
-    };
+    return fromConfig(parsed, source.path);
 }
 
 /// One line on stderr for the first thing the config could not use. The kind
@@ -6598,20 +6605,7 @@ test "a config the tool tables make unusable stops the run with the fix named" {
 
     const load = struct {
         fn of(a: std.mem.Allocator, text: []const u8) LoadedConfig {
-            const parsed = config_mod.parse(a, text);
-            return .{
-                .system_prompt_extra = parsed.system_prompt_extra,
-                .model = parsed.model,
-                .base_url = parsed.base_url,
-                .api_key = parsed.api_key,
-                .skills = parsed.skills,
-                .mcp = parsed.mcp,
-                .deny_commands = parsed.deny_commands,
-                .disabled_tools = parsed.disabled_tools,
-                .tool_problem = parsed.tool_problem,
-                .sandbox = parsed.sandbox,
-                .source = "/home/u/.microagent/config.toml",
-            };
+            return fromConfig(config_mod.parse(a, text), "/home/u/.microagent/config.toml");
         }
     }.of;
 
