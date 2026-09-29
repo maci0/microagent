@@ -32,9 +32,25 @@ ASSET_PREFIX = microagent-$(if $(TAG),$(TAG)-)
 SHA256_CMD = if command -v sha256sum >/dev/null 2>&1; then echo sha256sum; \
 	elif command -v shasum >/dev/null 2>&1; then echo "shasum -a 256"; fi
 
-# The scratch root `check-reproducible` builds into. CI passes the runner's temp
-# directory; a local run gets the caller's TMPDIR.
-REPRO_DIR ?= $${TMPDIR:-/tmp}/microagent-repro
+# The scratch root `check-reproducible` builds into. It is a sibling of the
+# toolchain cache below, never a child, because every build wipes REPRO_DIR.
+#
+# It defaults to the tree's own gitignored .scratch/ rather than ${TMPDIR:-/tmp},
+# which is what a local run used to get. /tmp is a tmpfs on most Linux hosts, and
+# this target makes nine cold builds of four cross targets: the toolchain cache
+# alone is a few hundred megabytes, written into RAM by a check, and thrown away
+# by a reboot. CI passes the runner's temp directory, which is disk-backed and
+# discarded with the runner.
+REPRO_DIR ?= $(CURDIR)/.scratch/repro
+# The compiled toolchain and standard library `check-reproducible` builds
+# against, and the reason the CI job restores a global cache at all. It lives
+# outside REPRO_DIR because that directory is emptied on every one of the nine
+# builds, and a cache emptied with it is a cold build: measured here, compiling
+# one published target costs 4m25s into an empty toolchain cache and 2m52s into a
+# warm one, and nine of the former is most of a job whose ceiling is 40 minutes.
+# It is removed once before the loop so the run does not inherit a previous
+# one's, and by the trap so a failed comparison leaves nothing behind.
+REPRO_GLOBAL ?= $(CURDIR)/.scratch/repro-global
 
 # The linter versions the gate runs. `ruff format` rewrites files and
 # `yamllint` changes rules between releases, so a local run on a different
@@ -786,7 +802,12 @@ checksums:
 # caches are moved: `--cache-dir` covers the project's own artifacts, and
 # ZIG_GLOBAL_CACHE_DIR covers the compiled toolchain under the runner's
 # `$HOME/.cache`, which is otherwise state a previous build on the same machine
-# leaves behind and a fresh checkout does not. The scratch is removed on the way
+# leaves behind and a fresh checkout does not. That second cache is the one
+# REPRO_GLOBAL names, and it is deliberately a sibling of REPRO_DIR rather than
+# a child of it: the two build_once calls between them are what make the second
+# build real, and a toolchain cache inside the directory they empty is emptied
+# with them, so every one of the nine builds recompiles the standard library
+# from cold. The scratch is removed on the way
 # out by a trap, so a target that fails the comparison leaves nothing behind
 # either. The
 # clock, timezone and locale are varied between the two, so a timestamp or a
@@ -818,10 +839,11 @@ check-reproducible:
 	  exit 2; \
 	}; \
 	REPRO_SRC=$(REPRO_DIR)-src; \
-	trap 'rm -rf "$(REPRO_DIR)" "$$REPRO_SRC"' EXIT; \
+	trap 'rm -rf "$(REPRO_DIR)" "$$REPRO_SRC" "$(REPRO_GLOBAL)"' EXIT; \
+	rm -rf "$(REPRO_GLOBAL)"; \
 	build_once() { \
 	  rm -rf "$(REPRO_DIR)"; \
-	  SOURCE_DATE_EPOCH="$$1" LC_ALL="$$2" TZ="$$3" ZIG_GLOBAL_CACHE_DIR="$(REPRO_DIR)/global" $(ZIG) build \
+	  SOURCE_DATE_EPOCH="$$1" LC_ALL="$$2" TZ="$$3" ZIG_GLOBAL_CACHE_DIR="$(REPRO_GLOBAL)" $(ZIG) build \
 	    -Dtarget="$$4" -Doptimize=ReleaseSmall \
 	    --cache-dir "$(REPRO_DIR)/cache" -p "$(REPRO_DIR)/out"; \
 	  $$sum "$(REPRO_DIR)/out/bin/microagent" | cut -d' ' -f1; \
@@ -842,7 +864,7 @@ check-reproducible:
 	    echo "would compare a partial source tree against this one and say nothing about build paths" >&2; \
 	    exit 1; \
 	  }; \
-	  (cd "$$srcdir" && SOURCE_DATE_EPOCH="$$1" LC_ALL="$$2" TZ="$$3" ZIG_GLOBAL_CACHE_DIR="$(REPRO_DIR)/global" $(ZIG) build \
+	  (cd "$$srcdir" && SOURCE_DATE_EPOCH="$$1" LC_ALL="$$2" TZ="$$3" ZIG_GLOBAL_CACHE_DIR="$(REPRO_GLOBAL)" $(ZIG) build \
 	    -Dtarget="$$4" -Doptimize=ReleaseSmall \
 	    --cache-dir "$(REPRO_DIR)/cache" -p "$(REPRO_DIR)/out2"); \
 	  $$sum "$(REPRO_DIR)/out2/bin/microagent" | cut -d' ' -f1; \
@@ -871,7 +893,7 @@ check-reproducible:
 	  fi; \
 	  echo "$$target rebuilds to $$first"; \
 	done; \
-	rm -rf "$(REPRO_DIR)" "$$REPRO_SRC"
+	rm -rf "$(REPRO_DIR)" "$$REPRO_SRC" "$(REPRO_GLOBAL)"
 
 clean:
 	rm -rf zig-out .zig-cache dist $(HARBOR_DIR)/microagent-*-linux-musl $(HARBOR_DIR)/microagent-*-linux-musl.tmp
