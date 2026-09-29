@@ -96,6 +96,14 @@ jobs:
       - name: the man page documents the flags this build lists
         run: make check-man
 
+      # docs/usage.md opens with a copy of the built-in `--help`, and a copy is
+      # only worth having if it is the copy: a flag, an exit status or a default
+      # that moves in src/main.zig leaves the page most readers open describing
+      # the previous release. `make check` runs this and neither workflow did, so
+      # it gated a laptop and not a push.
+      - name: the usage reference quotes this build's help
+        run: make check-help
+
       # `make test`, not the `zig build test` it runs, for the reason the lint
       # job below calls `make lint`: the recipe is the one place the command is
       # written down, and it is the only place the build gets the LC_ALL and TZ

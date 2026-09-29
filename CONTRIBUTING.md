@@ -102,7 +102,7 @@ make check-unreleased       # the [Unreleased] entry has the five sections, once
 ### The gate
 
 `make check` runs, in order: `preflight`, `zig-version`,
-`check-unreleased`, `check-readme`, `check-man`, `fmt-check`, `lint`
+`check-unreleased`, `check-readme`, `check-help`, `check-man`, `fmt-check`, `lint`
 (`lint-versions`, `lint-lock`, `check-sbom`, shellcheck over the tracked scripts
 and over the `run:` steps in the workflows, `ruff check`, `ruff format --check`,
 yamllint, the Markdown check and `check-refs`), `zig build test`,
