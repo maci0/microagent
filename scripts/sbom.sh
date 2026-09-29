@@ -85,6 +85,9 @@ pins="$(
 	done | sort -u -t'|' -k1,1
 )"
 test -n "$pins" || { echo "no manifest names a package, so the inventory would claim the tree pins nothing" >&2; exit 1; }
+# The count is taken here rather than in the closing report, where a pipeline
+# inside a command substitution hides whether either half of it failed.
+pin_count="$(printf '%s\n' "$pins" | wc -l)"
 
 # The digest of one file, through the command the sidecars beside these assets
 # were written with. SHA256_CMD is that command, which the Makefile resolved
@@ -168,9 +171,21 @@ EOF
 		printf '      "SPDXID": "SPDXRef-File-%s",\n' "$name"
 		printf '      "fileName": "%s",\n' "$name"
 		printf '      "checksums": [\n'
+		# The digest is read into a variable with the command's own exit status
+		# rather than inside the printf: a command substitution's failure is
+		# discarded by the printf that reads it, so an unreadable asset wrote a
+		# document recording an empty checksumValue rather than failing the
+		# release that reads it. A bare assignment is the statement `set -e`
+		# exits on, and the empty test covers a hash command that printed
+		# nothing and succeeded.
+		asset_digest="$(digest "$dist/$name")"
+		test -n "$asset_digest" || {
+			echo "the digest of $name could not be read, so the inventory would record no checksum for it" >&2
+			exit 1
+		}
 		printf '        {\n'
 		printf '          "algorithm": "SHA256",\n'
-		printf '          "checksumValue": "%s"\n' "$(digest "$dist/$name")"
+		printf '          "checksumValue": "%s"\n' "$asset_digest"
 		printf '        }\n'
 		printf '      ],\n'
 		printf '      "licenseConcluded": "NOASSERTION",\n'
@@ -218,4 +233,4 @@ EOF
 	printf '}\n'
 } > "$out"
 
-echo "wrote $out: $asset_count assets, $(printf '%s\n' "$pins" | wc -l) declared pins"
+echo "wrote $out: $asset_count assets, $pin_count declared pins"

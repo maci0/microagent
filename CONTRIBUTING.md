@@ -10,7 +10,7 @@
 | `docs/` | reference and design docs: [usage](docs/usage.md), [benchmark](docs/benchmark.md), [performance](docs/performance.md), [threat model](docs/threat-model.md), the [to-do list](docs/todo.md), and the logo |
 | `reviews/` | this project's own [gauntlet](https://github.com/maci0/gauntlet) review prompts; run them with `gauntlet --prompt-dir reviews`, which replaces gauntlet's embedded set |
 | `.github/` | the `ci` and `release` workflows, the shared `setup-zig` and `setup-linters` actions, and the Dependabot config |
-| `scripts/` | the gate's own checks: the linter version pins (`lint-versions.sh`), the Harbor lock against its manifest (`lint-lock.sh`). The linters' hashed install is compiled from `lint-requirements.in` |
+| `scripts/` | the gate's own checks: the linter version pins (`lint-versions.sh`), the Harbor lock against its manifest (`lint-lock.sh`), the `run:` steps in the workflows (`lint-ci-shell.sh`), and the release inventory (`sbom.sh`). The linters' hashed install is compiled from `lint-requirements.in` |
 
 At the root: `build.zig` and `build.zig.zon` (the build and the version), the
 [Makefile](Makefile) (every command below), `README.md`, `CHANGELOG.md`, this
@@ -97,9 +97,9 @@ make check-unreleased       # the [Unreleased] entry has the five sections, once
 ### The gate
 
 `make check` runs, in order: `preflight`, `zig-version`,
-`check-unreleased`, `check-readme`, `fmt-check`, `lint` (`lint-versions`,
-`lint-lock`, `check-sbom`, shellcheck over the tracked scripts and over the `run:`
-steps in the workflows, `ruff check`, `ruff format --check`,
+`check-unreleased`, `check-readme`, `check-man`, `fmt-check`, `lint`
+(`lint-versions`, `lint-lock`, `check-sbom`, shellcheck over the tracked scripts
+and over the `run:` steps in the workflows, `ruff check`, `ruff format --check`,
 yamllint), `zig build test`,
 `zig build test-sanitize`, and `check-binary` (a `ReleaseSmall` build whose
 binary it then starts). These are the checks
