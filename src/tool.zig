@@ -4377,7 +4377,8 @@ test "ast refuses the rewrite through the tool, not after it ran" {
         "{{\"pattern\":\"return $X\",\"lang\":\"python\",\"path\":\"{s}\",\"rewrite\":\"raise $X\"}}",
         .{root},
     );
-    _ = try dispatch(arena, "ast", rename);
+    const rename_res = try dispatch(arena, "ast", rename);
+    if (std.mem.indexOf(u8, rename_res, "is not on PATH") != null) return error.SkipZigTest;
     const once = try tmp.dir.readFileAlloc(io, "a.py", arena, .limited(256));
     try std.testing.expectEqualStrings("def f():\n    raise 1\n", once);
     _ = try dispatch(arena, "ast", rename);
