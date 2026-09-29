@@ -91,7 +91,7 @@ run-to-run noise, so there is no build flag to reach for either.
 | the same library, system time to the first request | 9.3 ms | **2.0 ms** | the same change: 21 MB of reads become about 1.6 MB, and kernel time is the half that carries it |
 | three MCP servers with 1 MB `tools/list` answers | 12.2 MB resident | **4.5 MB** | a `tools/list` answer was parsed into the run arena, tree and line both, and the buffer it arrived in kept its size; the answer is parsed in a scratch arena now, only the schema bytes are copied out, and that buffer has its own allocator and is handed back |
 | one such server | 8.5 MB | **4.5 MB** | the same change |
-| worker stacks, a 300-turn run | 36.7 MB address space | **6.7 MB** | std gives each `Io.Threaded` worker a 16 MB stack and allows one per core; this program's batches hold one or two operations, so it asks for four workers of a megabyte |
+| worker stacks, a 300-turn run | 36.7 MB address space | **6.7 MB** | std gives each `Io.Threaded` worker a 16 MB stack and allows one per core; this program's batches hold one or two operations, so it asks for sixteen workers of a megabyte -- the fan-out row below is why it is not four, and a 300-turn run at sixteen measures 19.8 MB of `VmPeak` against 16.9 MB at four |
 | the same, a 3000-turn run | 91.8 MB address space | **46.8 MB** | the rest is the conversation and the arenas; peak resident on that run fell from 10.9 MB to 9.5 MB |
 | a 3000-turn run's client CPU | 211.9 M instr | **177.8 M instr** | `sendBodyComplete` needs the whole body in one buffer, so the conversation was copied into a fresh one every turn; the prefix and the conversation now go to the wire from where they are |
 | the same run, peak resident | 13.3 MB | **11.0 MB** | with the body buffer gone, the turn arena crosses its retention ceiling less often |
@@ -114,6 +114,7 @@ run-to-run noise, so there is no build flag to reach for either.
 | the stock system prompt | escaped per run (about 12 instr per byte) | **escaped at compile time** | a run with no reply style and no skills sends the same 3 KB every time |
 | a JSON string's plain runs | one table lookup per byte | **a word at a time** | after a plain byte, eight bytes are tested at once; compaction of a 1 MB conversation fell 37.2 M to 31.0 M instr, and the byte loop is unchanged for text that is mostly escapes or non-ASCII |
 | the sandbox path check | a `realpath` of `.` per `write` and `edit` | **none** | the working directory is `writable_roots[0]`, taken at startup; a `realpath` is an `openat`, a `readlink` and a `close` |
+| a connection to a host with several addresses, default config | 4,607 ms before the first request | **2,820 ms** | `std.net.HostName.connect` dials every address a name resolves to as its own async task and keeps the first, and `Io.Threaded` runs a task inline when every async slot is busy -- four slots for four handshakes and their fan-out, so a connection cost the sum of the host's addresses instead of the fastest and the handshakes queued behind each other. Sixteen slots is the measured knee; the wait is per connection and a run opens several |
 
 Four of the rows above are one body of work on one run, and they compound. Between `v0.4.0` and the
 tree that carries them, client instructions for 3000 turns of the always-calls-a-tool loop fall from
@@ -342,6 +343,24 @@ them) while the parsed answer no longer does. `hyperfine -w 3 -r 20` over an ins
 put the whole MCP path (spawn, two round trips, and the reap at the end) at 0.7 ms for one server,
 1.2 ms for three and 3.2 ms for ten, against 1.5 ms for a run with none, which is why nothing after
 the boot overlap was worth touching.
+
+The fan-out row is a product measurement, `hyperfine -N -w 1 -r 20` over one stub run
+(`bench/stub_provider.py` on loopback, 20 frames, `--max-turns 1`) with the default config, so all
+four presets are handshaken before the first request: median 4,607 ms at four async slots and
+2,820 ms at sixteen, and 1 ms either way with `enabled = false` on all four. The four presets are
+not four equal parts. One at a time, `mcp.context7.com` answers in 2.8 s and `mcp.deepwiki.com`,
+which resolves to five addresses at 0.16 s a connect, takes 4,368 ms at four slots against
+1,899 ms at sixteen; `mcp.grep.app` (1.1 s) and `mcp.exa.ai` (0.8 s) do not move. The three
+presets that predate `deepwiki` are already at 2.8 s at four slots -- the row above about connecting
+them concurrently is what bought that -- so what the fourth preset exposed is contention: four
+handshakes, each wanting its own address fan-out, against four slots. `strace -f -e connect` on the
+two binaries is the mechanism in one picture: five `connect` calls one after another on one thread
+at four, and five on five threads that all finish within 0.0002 s of each other at sixteen. The
+memory side is `/proc/<pid>/status` sampled in a loop through a 300-turn run: `VmPeak` 16.9 MB
+against 19.8 MB and `VmHWM` 3.4 MB against 3.9 MB, and `bench/maxrss.py --version` unchanged at
+788 kB, because a worker exists only while an operation is on it. There is no counter row for this
+one: the cost is a wait, which no instruction count carries, so the guard is a test that fails if
+the limit drops under the measured knee.
 
 The instruction gate needs `perf` and exits 1 when a row leaves its band, 2 when a row cannot be
 measured. It is not in `make check` because a shared runner may have performance counters switched

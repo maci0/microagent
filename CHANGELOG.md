@@ -109,6 +109,14 @@ release, and `microagent update` moves you to it.
   request drops from about 4.7 s to about 2.9 s on the test machine. Server and tool order still follow the
   config, and a server that fails is still reported and skipped. Peak resident memory of that startup
   rises by about 0.45 MB (1.8 MB to 2.2 MB), because three TLS handshakes are alive at once.
+- The async-slot limit is sixteen, not four. `Io.Threaded` runs an operation inline once every slot is
+  busy, and a connection dials every address its host resolves to at once, so at four the four default
+  remote presets cost about 4.6 s before the first request: the `deepwiki` preset's five addresses were
+  serialized against the three handshakes already there. At sixteen the same run is about 2.8 s, which is
+  the slowest server's own answer time. Every connection pays this, not just MCP: a provider reached over
+  a name with several addresses was serialized the same way. Address space rises about 2.9 MB (`VmPeak`,
+  300-turn run) and peak resident about 0.5 MB, only while an operation is on the extra workers; `--version`
+  resident is unchanged. No instruction row carries a wait, so the guard is a test.
 - The API key is read from one variable, `MICROAGENT_API_KEY` (or `--api-key`, or `~/.secrets/openrouter`).
   `OPENAI_API_KEY`, `OPENROUTER_API_KEY` and `DEEPSEEK_API_KEY` are no longer read, and the "key is for
   another provider" warning is gone. If you exported one of those, export `MICROAGENT_API_KEY` instead.

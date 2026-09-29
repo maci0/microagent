@@ -247,12 +247,43 @@ var gpa_state: std.heap.DebugAllocator(if (builtin.mode == .Debug) .{} else .{
 /// The worker threads behind `Io.Threaded` are the only threads this program
 /// starts. std gives each one a 16 MB stack and allows one per core, which on
 /// this 16-core machine is 240 MB of stacks for call paths that read and write
-/// files and sockets, and two of them at rest was 32 MB of address space. The
-/// batches this program issues hold one or two operations, so four workers is
-/// past what it asks for, and a megabyte is ten times what a read or a write
-/// behind one has ever used.
+/// files and sockets, and two of them at rest was 32 MB of address space. A
+/// megabyte is ten times what a read or a write behind one has ever used.
+///
+/// The limit is not four. `std.net.HostName.connect` dials every address a
+/// name resolves to as its own async task and keeps the first to connect,
+/// which is what makes a name with a dead address still connect. Past the
+/// limit those dials do not queue: `Io.Threaded` runs an operation inline on
+/// the calling thread when every slot is busy, so one connection costs the sum
+/// of the host's addresses instead of the fastest one, and the handshakes that
+/// overlap -- one per remote MCP server, before the first request -- contend
+/// with each other for the same slots. At four the four default presets cost
+/// 4,607 ms before the first request, and the same run is 2,820 ms at sixteen,
+/// which is the slowest server's own answer time and the floor until a provider
+/// answers faster than `mcp.context7.com` does. A host with five addresses
+/// alone (`mcp.deepwiki.com`, the new preset) is 4,368 ms at four against
+/// 1,899 ms at sixteen. Sixteen is the knee: 3,705 ms at eight, 2,814 ms at
+/// thirty-two. The price is address space, not resident memory -- 16.9 MB
+/// against 19.8 MB of `VmPeak` on a 300-turn run, 0.5 MB of `VmHWM` -- and only
+/// when that run asks for the threads. Nothing counts instructions for this
+/// one because the cost is a wait, so the guard is the limit itself.
 const io_worker_stack_bytes = 1024 * 1024;
-const io_worker_limit = 4;
+const io_worker_limit = 16;
+/// The measured knee, and what the guard below asserts: a limit under it is the
+/// regression that put four back.
+const io_worker_limit_floor = 16;
+
+test "the async limit covers the handshakes and their address fan-out" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{
+        .stack_size = io_worker_stack_bytes,
+        .async_limit = .limited(io_worker_limit),
+    });
+    defer threaded.deinit();
+    // Defeating the fix -- putting four back -- fails here, and no row of
+    // bench/instructions.sh moves either way: the regression is a wait, not
+    // work, so the guard is the configuration rather than a counter.
+    try std.testing.expect(@intFromEnum(threaded.async_limit) >= io_worker_limit_floor);
+}
 
 const word_bytes = @sizeOf(usize);
 const lane_ones: usize = std.math.maxInt(usize) / 0xff;
