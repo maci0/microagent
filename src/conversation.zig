@@ -31,6 +31,27 @@ const elision_marker = "[earlier tool output elided: {d} bytes]";
 /// elides nothing at all.
 const min_marker_bytes = "[earlier tool output elided: 0 bytes]".len;
 
+/// Whether a tool result is already a marker this file wrote, in which case the
+/// number it carries is the only record the model has of the result it is no
+/// longer being sent.
+///
+/// The second pass asks for results down to `min_marker_bytes`, and every marker
+/// naming a result of four digits or more is longer than that, so without this
+/// the pass rewrites the markers the first one just wrote: a marker reporting
+/// its own length is shorter than the marker it replaces, so each rewrite frees
+/// two bytes and replaces the size of the dropped result with the size of the
+/// marker that dropped it.
+fn isElisionMarker(text: []const u8) bool {
+    const head = "[earlier tool output elided: ";
+    if (!std.mem.startsWith(u8, text, head)) return false;
+    const rest = text[head.len..];
+    const tail = " bytes]";
+    const at = std.mem.indexOf(u8, rest, tail) orelse return false;
+    if (at + tail.len != rest.len) return false;
+    for (rest[0..at]) |c| if (!std.ascii.isDigit(c)) return false;
+    return at > 0;
+}
+
 pub const system_prompt =
     "You are microagent, a coding agent working on the repository in the current directory. " ++
     "Every `bash` call already starts there, with no shell carried over from the last one: run " ++
@@ -128,6 +149,7 @@ fn elideToolResults(
             else => continue,
         };
         if (text.len <= threshold) continue;
+        if (isElisionMarker(text)) continue;
         const marker = try std.fmt.allocPrint(arena, elision_marker, .{text.len});
         // A marker that is not shorter than the result it replaces saves
         // nothing, and the subtraction below wraps a usize rather than
@@ -447,6 +469,68 @@ test "a result a marker cannot shrink is left as it stands" {
     try std.testing.expectEqual(@as(usize, 0), size);
     const kept = parsed.value.array.items[2].object.get("content").?.string;
     try std.testing.expectEqualStrings(content, kept);
+}
+
+// The second pass asks for results down to `min_marker_bytes`, and every marker
+// naming a result of four digits or more is longer than that. A pass that did
+// not recognise its own markers rewrote them, and the number it left behind was
+// the length of the marker rather than of the result the marker stands for.
+test "a second compaction pass leaves the first pass's markers as they are" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const blob = "x" ** 8192;
+    var msgs: std.ArrayList(u8) = .empty;
+    defer msgs.deinit(gpa);
+    try msgs.appendSlice(gpa, "[{\"role\":\"user\",\"content\":\"look\"},");
+    try msgs.appendSlice(gpa, "{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call_0\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}]},");
+    try msgs.appendSlice(gpa, "{\"role\":\"tool\",\"tool_call_id\":\"call_0\",\"content\":\"" ++ blob ++ "\"}]");
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena, msgs.items, .{});
+    const array = parsed.value.array;
+    // The first pass, over a result it is certain to replace.
+    try std.testing.expectEqual(
+        @as(usize, blob.len - "[earlier tool output elided: 8192 bytes]".len),
+        try elideToolResults(arena, array, min_elided_bytes, std.math.maxInt(usize)),
+    );
+    const marker = array.items[2].object.get("content").?.string;
+    try std.testing.expectEqualStrings("[earlier tool output elided: 8192 bytes]", marker);
+
+    // The second pass, which is what used to rewrite that marker into one
+    // naming the marker's own length, for two bytes of saving.
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try elideToolResults(arena, array, min_marker_bytes, std.math.maxInt(usize)),
+    );
+    try std.testing.expectEqualStrings(marker, array.items[2].object.get("content").?.string);
+}
+
+// A tool result is the model's own file dump, and one that happens to begin
+// with the marker's own spelling must not be mistaken for a marker: it is
+// still a result, and eliding it is the only thing that frees its bytes.
+test "a result that reads like a marker is elided rather than skipped" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const blob = "[earlier tool output elided: 5 bytes] and then the file dump" ++ ("x" ** 8192);
+    var msgs: std.ArrayList(u8) = .empty;
+    defer msgs.deinit(gpa);
+    try msgs.appendSlice(gpa, "[{\"role\":\"user\",\"content\":\"look\"},");
+    try msgs.appendSlice(gpa, "{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call_0\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}]},");
+    try msgs.appendSlice(gpa, "{\"role\":\"tool\",\"tool_call_id\":\"call_0\",\"content\":\"" ++ blob ++ "\"}]");
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena, msgs.items, .{});
+    try std.testing.expect(
+        try elideToolResults(arena, parsed.value.array, min_elided_bytes, std.math.maxInt(usize)) > 0,
+    );
+    try std.testing.expectEqualStrings(
+        try std.fmt.allocPrint(arena, elision_marker, .{blob.len}),
+        parsed.value.array.items[2].object.get("content").?.string,
+    );
 }
 
 test "compaction elides old tool output and keeps the recent turns" {

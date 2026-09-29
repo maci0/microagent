@@ -119,7 +119,7 @@ server is this binary's, and the sandbox does not confine it.
    (`src/main.zig:5326`) appends it to the conversation verbatim.
 2. **Repository content → model → host.** The most important boundary in the project. The
    model reads files, source and tests, and issues tool calls from what it read
-   (`system_prompt`, `src/conversation.zig:34`). Nothing in the program separates the model's own
+   (`system_prompt`, `src/conversation.zig:55`). Nothing in the program separates the model's own
    plan from an instruction it found in a file; only an instruction in the prompt does.
 3. **Provider → agent.** The streamed reply decides the next action. The validation point
    is `applyFrame` (`src/stream.zig:559`), which bounds the shape, not the intent.
@@ -187,7 +187,7 @@ command.
   this is a threat only where an automated harness passes a task's text straight through
   (`bench/gauntlet.sh`).
 - A prompt of any length enters the conversation uncapped (`setPrompt`,
-  `src/main.zig:1106`; appended in `openConversation`, `src/conversation.zig:388`), and the
+  `src/main.zig:1106`; appended in `openConversation`, `src/conversation.zig:410`), and the
   request body grows with it.
 
 ### Repository content → model → host (elevation of privilege, information disclosure)
@@ -196,7 +196,7 @@ command.
   tree can say "run `curl … | sh`". The model reads it with the ordinary `read` tool
   (`toolRead`, `src/tool.zig:1613`). Instructions carry no provenance, so the injected text is as
   trusted as the operator's prompt. The system prompt tells the model to treat tool output as data
-  and to report such a file instead of acting on it (`system_prompt`, `src/conversation.zig:34`),
+  and to report such a file instead of acting on it (`system_prompt`, `src/conversation.zig:55`),
   but a hostile file can argue with that. This is the project's dominant risk, and it is a design
   property, not a bug.
 - `AGENTS.md` is the one file in the tree the run follows as instructions rather than as data, and
@@ -211,7 +211,7 @@ command.
 - The same path exfiltrates: the model can `read` a file, and its bytes go into the next
   request body (`buildBody`, `src/main.zig:2894`).
 - A hostile repository can also reach the terminal. Bytes a tool echoes reach the gutter
-  line (`toolCallLine`, `src/tool.zig:944`). The provider's text reaches stdout unescaped,
+  line (`toolCallLine`, `src/tool.zig:963`). The provider's text reaches stdout unescaped,
   deliberately: it is the answer the run was asked for.
 
 ### Provider → agent (spoofing, tampering, denial of service)
@@ -297,7 +297,7 @@ command.
   `src/main.zig:1457`: `MICROAGENT_API_KEY` plus `GITHUB_TOKEN`), so `bash env` and
   `bash printenv` cannot put the run's own key in the transcript. A command naming a
   credentials file is refused on the same name rule the other tools apply
-  (`credentialInCommand`, `src/tool.zig:1129`, applied at `src/tool.zig:888`). That rule
+  (`credentialInCommand`, `src/tool.zig:1148`, applied at `src/tool.zig:888`). That rule
   reads the command's words, not a parsed shell, so a file reached through indirection is
   not caught. A command matching a configured command filter (`deny_commands` in config) is
   refused before execution (`deniedInCommand`, `src/tool.zig:1221`).
@@ -394,7 +394,7 @@ the same bug returning.
 
 | Control | Covers | Where |
 | --- | --- | --- |
-| System prompt names tool output, file contents and command output as data, and tells the model to report a file that gives orders | prompt injection through a file, at the model rather than in the program | `system_prompt`, `src/conversation.zig:34` |
+| System prompt names tool output, file contents and command output as data, and tells the model to report a file that gives orders | prompt injection through a file, at the model rather than in the program | `system_prompt`, `src/conversation.zig:55` |
 | The repository the updater requests is a compile-time constant, so no caller text reaches a URL | URL injection through a repository name | `default_repo`, `src/update.zig:12`; `release_api_url`, `src/update.zig:14` |
 | Host allowlist: `https` on `github.com`, `*.github.com`, `*.githubusercontent.com`, no userinfo, checked on the page URL and both asset URLs | asset and page download from a lookalike host | `hostTrusted`, `src/update.zig:109`; `trustedGithubUrl`, `src/update.zig:120`; applied at `src/update.zig:551` and `src/update.zig:595` |
 | `GITHUB_TOKEN` is presented only to `https://api.github.com/`, prefix-compared octet by octet, so a lookalike host, a userinfo URL and a path carrying the API name all get nothing; the asset and the sidecar go out unauthenticated | a repository-scoped token handed to the asset CDN, to `api.github.com.evil.com`, or to a path that merely contains the API name | `bearerFor`, `src/update.zig:151`; read once at `src/update.zig:545` and applied per request at `src/update.zig:414` |
@@ -492,7 +492,7 @@ the same bug returning.
    or a harness that chose no ceilings, is bounded only by what the conversation happens
    to cost.
 9. **No audit trail beyond the gutter line.** Tool calls go to stderr as one line with no
-   timestamp, no exit status and no file (`noteToolCall`, `src/tool.zig:928`). The session
+   timestamp, no exit status and no file (`noteToolCall`, `src/tool.zig:947`). The session
    log records token counters, the working directory and the finish reason, never which
    commands ran (`writeRecord`, `src/session.zig:512`).
 10. **A symlinked install can point anywhere.** `replaceBinary` follows the link

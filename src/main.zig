@@ -3029,6 +3029,33 @@ fn reaskWaitMs(io: Io, budget: Budget, ask: u32, arena: std.mem.Allocator, shown
 ///
 /// One ask, not the whole turn: `streamChat` above is what turns a provider's
 /// own reported failure into another one.
+/// One `data:` line of a completion stream, as the raw bytes between the line
+/// breaks. Returns true where the line is the terminator.
+///
+/// Shared by the split inside `streamChatOnce` and the tail that split leaves
+/// at the end of a stream, so a line is read the same way through either: SSE
+/// dispatches an event that arrives without its terminating newline, and a
+/// `[DONE]` the provider closed the connection straight after is a frame like
+/// any other.
+fn applyStreamLine(
+    frames: *std.heap.ArenaAllocator,
+    gpa: std.mem.Allocator,
+    raw: []const u8,
+    result: *chat_mod.ChatResult,
+    calls: *std.ArrayList(chat_mod.ToolCall),
+    out_buf: *std.ArrayList(u8),
+    unparsable: *usize,
+) !bool {
+    const line = std.mem.trimEnd(u8, raw, "\r");
+    if (!std.mem.startsWith(u8, line, "data:")) return false;
+    const payload = std.mem.trim(u8, line[5..], " ");
+    if (payload.len == 0) return false;
+    if (std.mem.eql(u8, payload, "[DONE]")) return true;
+    try stream_mod.applyFrame(frames.allocator(), gpa, payload, result, calls, out_buf, unparsable);
+    _ = frames.reset(.retain_capacity);
+    return false;
+}
+
 fn streamChatOnce(
     client: *std.http.Client,
     io: Io,
@@ -3200,7 +3227,6 @@ fn streamChatOnce(
     // stream costs the size of its largest frame, not the sum of all of them.
     var frame_arena_state = std.heap.ArenaAllocator.init(arena);
     defer frame_arena_state.deinit();
-    const frame_arena = frame_arena_state.allocator();
 
     // stdout is buffered per read chunk rather than written per token: one
     // write per chunk the provider sent. Tokens that arrived in the same chunk
@@ -3235,23 +3261,26 @@ fn streamChatOnce(
             net.note(io, arena, "microagent: reading the completion stream from {s} failed after {d} byte(s) of content and {d} tool call(s): {s}\n", .{ shown_url, result.content.items.len, calls.items.len, @errorName(err) });
             return err;
         };
-        if (n == 0) break;
+        if (n == 0) {
+            // The stream ended with a line whose newline never arrived. SSE
+            // dispatches such a line, so it is read as the last one rather than
+            // dropped with the rest of the tail: a response that arrived whole
+            // is not a truncated one, and reading it as one costs the run the
+            // turn and a retry of everything up to it.
+            if (scanned < pending.items.len and
+                try applyStreamLine(&frame_arena_state, gpa, pending.items[scanned..], &result, &calls, &out_buf, &unparsable)) done = true;
+            break;
+        }
         pending.items.len += n;
 
         var start: usize = 0;
         while (net.nextLineEnd(pending.items, &scanned)) |pos| {
             const raw = pending.items[start..pos];
             start = pos + 1;
-            const line = std.mem.trimEnd(u8, raw, "\r");
-            if (!std.mem.startsWith(u8, line, "data:")) continue;
-            const payload = std.mem.trim(u8, line[5..], " ");
-            if (payload.len == 0) continue;
-            if (std.mem.eql(u8, payload, "[DONE]")) {
+            if (try applyStreamLine(&frame_arena_state, gpa, raw, &result, &calls, &out_buf, &unparsable)) {
                 done = true;
                 break;
             }
-            try stream_mod.applyFrame(frame_arena, gpa, payload, &result, &calls, &out_buf, &unparsable);
-            _ = frame_arena_state.reset(.retain_capacity);
         }
         // Drop what was consumed, so a long stream does not keep every frame.
         if (start > 0) {
@@ -6200,11 +6229,54 @@ const stream_corpus = [_][]const u8{
     "data: {\"usage\":\"nope\",\"choices\":[]}\n",
     "data: {\"choices\":[{\"delta\":{\"content\":123}},{\"delta\":\"x\"},null,5]}\n",
     "data: {\"choices\":[{\"delta\":{\"content\":\"unterminated}}\n",
+    "data: {}\ndata: [DONE]",
     "data: {}\ndata: [DONE]\n",
 };
 
 test "a fuzzed provider stream always leaves a request body the body writer can carry" {
     try std.testing.fuzz({}, fuzzStream, .{ .corpus = &stream_corpus });
+}
+
+// A stream the provider closed without a final newline still carried its last
+// frame, and SSE dispatches an unterminated line. The reader used to break on
+// the empty read with that frame still in its buffer, and a response that
+// arrived whole was reported as a truncated stream and the run failed on it.
+test "a last line with no newline after it is read as a line" {
+    const gpa = std.testing.allocator;
+    var frames = std.heap.ArenaAllocator.init(gpa);
+    defer frames.deinit();
+    var result: chat_mod.ChatResult = .{};
+    defer result.deinit(gpa);
+    var calls: std.ArrayList(chat_mod.ToolCall) = .empty;
+    defer chat_mod.deinitCalls(gpa, &calls);
+    var out_buf: std.ArrayList(u8) = .empty;
+    defer out_buf.deinit(gpa);
+    var unparsable: usize = 0;
+
+    // The tail a split leaves behind at the end of a stream, newline absent.
+    try std.testing.expect(
+        try applyStreamLine(&frames, gpa, "data: [DONE]", &result, &calls, &out_buf, &unparsable),
+    );
+    // The same frame the tail ends in when the newline did arrive.
+    try std.testing.expect(
+        try applyStreamLine(&frames, gpa, "data: [DONE]\r", &result, &calls, &out_buf, &unparsable),
+    );
+    // A line that is not the terminator says so, and a content frame in the
+    // same position is applied rather than reported as the end of the stream.
+    try std.testing.expect(!try applyStreamLine(
+        &frames,
+        gpa,
+        "data: {\"choices\":[{\"delta\":{\"content\":\"tail\"}}]}",
+        &result,
+        &calls,
+        &out_buf,
+        &unparsable,
+    ));
+    try std.testing.expectEqualStrings("tail", result.content.items);
+    // A comment or a blank tail is not a frame, and the end of the stream is
+    // not a terminator the reader may claim it saw.
+    try std.testing.expect(!try applyStreamLine(&frames, gpa, ": ping", &result, &calls, &out_buf, &unparsable));
+    try std.testing.expect(!try applyStreamLine(&frames, gpa, "data:", &result, &calls, &out_buf, &unparsable));
 }
 
 fn fuzzStream(_: void, smith: *std.testing.Smith) !void {
@@ -6216,7 +6288,8 @@ fn fuzzStream(_: void, smith: *std.testing.Smith) !void {
     defer sink.deinit();
 
     // The line loop from `streamChat`, so the harness splits and trims frames
-    // the way the reader does rather than a second, more forgiving way.
+    // the way the reader does rather than a second, more forgiving way. The
+    // reader's own rule about the tail is what `applyStreamLine` carries.
     var lines = std.mem.splitScalar(u8, stream, '\n');
     while (lines.next()) |raw| {
         const line = std.mem.trimEnd(u8, raw, "\r");

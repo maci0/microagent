@@ -645,10 +645,14 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
     return gitResult(arena, res, limit);
 }
 
-/// The fields a blame line carries after the author's name: the date, the time,
-/// the zone and the line number. What the name is worth on a line is a commit
-/// hash, and the hash is on the same line.
-const blame_fields_after_name = 4;
+/// The fixed-width fields git prints between a blame line's name and its line
+/// number: the date, the time and the zone. What the name is worth on a line is
+/// a commit hash, and the hash is on the same line.
+const blame_date_len = 10; // 2026-09-29
+const blame_time_len = 8; // 23:23:33
+const blame_zone_len = 5; // +0800
+/// The one space git puts between each pair of those fields.
+const blame_sep = 1;
 
 /// `git blame`'s output with the author's name taken out of every line.
 ///
@@ -660,11 +664,15 @@ const blame_fields_after_name = 4;
 /// reads a blame for is in the name: the commit hash beside it already answers
 /// "who last touched this line", and the model can `show` that hash.
 ///
-/// git spells the line `<hash> (<name> <date> <time> <zone> <number>) <code>`,
-/// so the name is everything from the paren to the fourth space back from its
-/// close. A line without that shape is passed through as git printed it, which
-/// is the same bytes the tool returned before this and not a line this has
-/// mangled to hide something.
+/// git spells the line `<hash> (<name> <date> <time> <zone> <number>) <code>`
+/// and right-aligns the number to the width of the widest one in the file, so
+/// the run of spaces before the number is longer on every line but the widest
+/// few. The fields are therefore read off the close paren rather than counted
+/// from it: digits back to the number, spaces back through the padding, then
+/// the zone, whose sign and four digits are what say the line has that shape at
+/// all. A line without it is passed through as git printed it, which is the same
+/// bytes the tool returned before this and not a line this has mangled to hide
+/// something.
 fn redactBlameNames(arena: std.mem.Allocator, text: []const u8) error{OutOfMemory}![]u8 {
     if (std.mem.indexOf(u8, text, " (") == null) return arena.dupe(u8, text);
     var out: std.ArrayList(u8) = .empty;
@@ -704,11 +712,22 @@ fn blameNameCut(line: []const u8) ?BlameCut {
     // close. A line ending at the close has nothing after it, and the name's
     // fields come after the name, so that close is the real one.
     if (close + 1 < line.len and line[close + 1] != '\t' and line[close + 1] != ' ') return null;
-    var cut = close;
-    for (0..blame_fields_after_name) |_| {
-        cut = std.mem.lastIndexOfScalar(u8, line[0..cut], ' ') orelse return null;
-    }
-    return .{ .head = paren + " (".len, .tail = line[cut + 1 ..] };
+    // The line number, then the padding git aligns it with.
+    var at = close;
+    while (at > paren and std.ascii.isDigit(line[at - 1])) at -= 1;
+    if (at == close) return null;
+    while (at > paren and line[at - 1] == ' ') at -= 1;
+    if (at < paren + " (".len + blame_zone_len) return null;
+    const zone = at - blame_zone_len;
+    if (line[zone] != '+' and line[zone] != '-') return null;
+    for (line[zone + 1 .. at]) |c| if (!std.ascii.isDigit(c)) return null;
+    // The space between the zone and the time, and the one between the time and
+    // the date, are what put the date where the name ends.
+    if (zone < blame_date_len + blame_time_len + 2 * blame_sep) return null;
+    const date = zone - blame_sep - blame_time_len - blame_sep - blame_date_len;
+    if (date <= paren + " (".len) return null;
+    if (line[date - 1] != ' ' or line[date + blame_date_len] != ' ') return null;
+    return .{ .head = paren + " (".len, .tail = line[date..] };
 }
 
 /// What a `git` that printed nothing at all answers with. A call that failed
@@ -4897,7 +4916,10 @@ test "a blamed line does not carry the name of whoever wrote it" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDirPath(io, "src");
-    try tmp.dir.writeFile(io, .{ .sub_path = "src/main.zig", .data = "pub fn main() void {}\n" });
+    // Eleven lines, so git aligns the first line's number to the width of the
+    // eleventh's and pads it, which is where a cut by field count loses the date.
+    try tmp.dir.writeFile(io, .{ .sub_path = "src/main.zig", .data = "pub fn main() void {}\nconst a = 1;\nconst b = 2;\nconst c = 3;\nconst d = 4;\n" ++
+        "const e = 5;\nconst f = 6;\nconst g = 7;\nconst h = 8;\nconst i = 9;\nconst j = 10;\n" });
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
@@ -4924,14 +4946,63 @@ test "a blamed line does not carry the name of whoever wrote it" {
             return error.TestUnexpectedResult;
         }
     }
-    // The control: the hash, the line number and the line itself are what a
-    // coding task reads a blame for, and none of them is the name.
-    for ([_][]const u8{ "pub fn main() void {}", " 1)" }) |kept| {
+    // The control: the hash, the date, the line number and the line itself are
+    // what a coding task reads a blame for, and none of them is the name. The
+    // fixture runs past nine lines so git pads the first number's field to the
+    // width of the last, which is where a cut by field count loses the date.
+    for ([_][]const u8{ "pub fn main() void {}", "  1)", dateField(res.stdout) }) |kept| {
         if (std.mem.indexOf(u8, text, kept) == null) {
             std.debug.print("git blame lost '{s}': {s}\n", .{ kept, text });
             return error.TestUnexpectedResult;
         }
     }
+}
+
+// The `YYYY-MM-DD` git printed on the first line it gave, which the cut has to
+// leave standing. The name can hold spaces of its own, so the date is found by
+// its shape rather than by the first gap after the paren.
+fn dateField(blame: []const u8) []const u8 {
+    const line_end = std.mem.indexOfScalar(u8, blame, '\n') orelse blame.len;
+    var at: usize = 0;
+    while (at + blame_date_len <= line_end) : (at += 1) {
+        if (at == 0 or blame[at - 1] != ' ') continue;
+        const d = blame[at..][0..blame_date_len];
+        if (std.ascii.isDigit(d[0]) and d[4] == '-' and d[7] == '-' and
+            std.ascii.isDigit(d[1]) and std.ascii.isDigit(d[2]) and std.ascii.isDigit(d[3]) and
+            std.ascii.isDigit(d[5]) and std.ascii.isDigit(d[6]) and
+            std.ascii.isDigit(d[8]) and std.ascii.isDigit(d[9])) return d;
+    }
+    return "";
+}
+
+// git right-aligns the line number to the width of the widest one in the file,
+// so every line but the widest few carries padding spaces before its number. A
+// cut that counts spaces back from the close paren reads the padding as fields
+// and takes the date and the time with the name; these are the bytes git prints
+// for src/copy.zig (61 lines, so two digits) and src/tool.zig (6566, so four).
+test "a blame line keeps its date on every line, however the number is padded" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    try std.testing.expectEqualStrings(
+        "c290f01 (2026-09-29 23:23:33 +0800  1) pub fn main() void {}",
+        try redactBlameNames(arena, "c290f01 (Marcel W. Wysocki 2026-09-29 23:23:33 +0800  1) pub fn main() void {}"),
+    );
+    try std.testing.expectEqualStrings(
+        "04aa06f3 (2026-09-29 01:37:52 +0800    1) //! Every tool",
+        try redactBlameNames(arena, "04aa06f3 (Marcel W. Wysocki 2026-09-29 01:37:52 +0800    1) //! Every tool"),
+    );
+    try std.testing.expectEqualStrings(
+        "50f8f504 (2026-09-29 06:44:53 +0800 2000)     // it",
+        try redactBlameNames(arena, "50f8f504 (Marcel W. Wysocki 2026-09-29 06:44:53 +0800 2000)     // it"),
+    );
+    // A negative zone is the same five bytes with a different sign.
+    try std.testing.expectEqualStrings(
+        "50f8f504 (2026-09-29 06:44:53 -0730   42) x",
+        try redactBlameNames(arena, "50f8f504 (Marcel W. Wysocki 2026-09-29 06:44:53 -0730   42) x"),
+    );
 }
 
 // The rewrite is a shape, not a guess: a line git printed in another shape is

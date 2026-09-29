@@ -243,7 +243,11 @@ Added to the sandbox writable roots whenever
 .B enabled
 is true under
 .BR [sandbox] ,
-on macOS only, where the system keeps per-user scratch space there.
+on any platform, where it names an absolute directory no root above already
+covers. On macOS that is where the system keeps per-user scratch space; a Linux
+host exporting it elsewhere gets the same root, and one exporting it at
+.I /tmp
+gains nothing.
 .SH FILES
 .TP
 .I ~/.microagent/config.toml
