@@ -71,7 +71,7 @@ It also spent about 1.9x the input tokens. Details, caveats and error bars are i
 
 Prebuilt binaries for `x86_64-linux-musl`, `aarch64-linux-musl`, `x86_64-macos` and `aarch64-macos`
 are on the [releases page](https://github.com/maci0/microagent/releases), each with a `.sha256`
-sidecar. Pick the target your machine runs:
+sidecar and the `LICENSE` they are distributed under. Pick the target your machine runs:
 
 ```sh
 v=v0.7.0 t=x86_64-linux-musl
@@ -89,7 +89,12 @@ Or build it. Zig 0.16.0 or newer is the only requirement:
 
 ```sh
 zig build -Doptimize=ReleaseSmall     # zig-out/bin/microagent
+make install                         # into ~/.local/bin
 ```
+
+A distro or homebrew-style packager stages the same binary with
+`make install PREFIX=/usr DESTDIR=$pkgdir`, which writes `$pkgdir/usr/bin/microagent` mode 755
+and nothing else. The binary is static, so the package declares no runtime dependencies.
 
 The `search`, `ast` and `git` tools call `rg`, `ast-grep` and `git`, so put those on `PATH` too.
 

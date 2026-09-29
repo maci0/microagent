@@ -1,0 +1,275 @@
+.\" Man page for microagent. The option and environment lists below are checked
+.\" against `microagent --help` by `make check-man`, so the two cannot drift.
+.TH MICROAGENT 1 "2026-09-30" "microagent 0.7.0" "User Commands"
+.SH NAME
+microagent \- tiny OpenAI-compatible coding agent
+.SH SYNOPSIS
+.B microagent
+.RI [ options ]
+.RI "\(dqprompt\(dq"
+.br
+.B microagent update
+.RB [ \-c | \-\-check ]
+.br
+.B "microagent help"
+.SH DESCRIPTION
+.B microagent
+runs one non-interactive turn of an OpenAI-compatible coding agent: it sends a
+task to a provider, calls the tools the model asks for until it stops, and
+writes the model's text to stdout. It is a single static binary with no runtime
+dependency, and it links no C library on Linux.
+.PP
+The task is the bare argument, or the value of
+.BR \-\-print .
+Two bare arguments are a usage error rather than a prompt. A bare
+.B help
+prints the built-in usage text when the prompt is still empty. A bare
+.B \-\-
+ends the flags, so a task beginning with a dash is passed after it.
+.PP
+Tools: bash, read, write, edit, multi_edit, search, ast, git, todo, and the
+.B skill
+loader. The search, ast and git tools call
+.BR rg (1),
+.BR "ast\-grep" (1)
+and
+.BR git (1),
+so those three have to be on
+.BR PATH .
+Tools can be removed and MCP servers added in the config file; see
+.B FILES
+and the full reference in
+.IR docs/usage.md .
+.SH OPTIONS
+Every long option also takes
+.BI \-\-flag= value \fR.
+A flag wins over the environment variable for the same option, and over one the
+run could not use.
+.TP
+.BR \-p ", " \-\-print " " \fIprompt\fR
+Task to run, also accepted as a bare argument.
+.TP
+.BR \-m ", " \-\-model " " \fImodel\fR
+Model id sent to the provider. Environment
+.BR MICROAGENT_MODEL ,
+config key
+.BR model ,
+default
+.BR deepseek/deepseek\-v4\-flash .
+.TP
+.BR \-b ", " \-\-base\-url " " \fIurl\fR
+OpenAI-compatible base url. Environment
+.BR MICROAGENT_BASE_URL ,
+config key
+.BR base_url .
+One of the three has to name an endpoint: there is no default provider. https,
+or http on loopback, because the api key goes to it in the clear otherwise.
+.TP
+.BR \-k ", " \-\-api\-key " " \fIkey\fR
+Api key. Environment
+.BR MICROAGENT_API_KEY ,
+config key
+.BR api_key ;
+no key file is read. A key on the command line is in the process table, where
+any user of the machine can read it; a variable or a file mode 600 is not.
+.TP
+.BI \-\-max\-turns " n"
+Ceiling on tool-loop turns, at least 1. Environment
+.BR MICROAGENT_MAX_TURNS ,
+default 100.
+.TP
+.BI \-\-stall\-timeout " s"
+Seconds the response socket may stay silent before the read fails. Environment
+.BR MICROAGENT_STALL_TIMEOUT ,
+default 120.
+.TP
+.BI \-\-max\-tokens " n"
+.B max_tokens
+sent to the provider, the ceiling on one response's generated tokens, at least
+1. Environment
+.BR MICROAGENT_MAX_TOKENS ,
+default 65536.
+.TP
+.BI \-\-config " file"
+TOML config: system prompt addendum, skills, MCP servers and tools.
+Environment
+.BR MICROAGENT_CONFIG ,
+default
+.IR ~/.microagent/config.toml .
+.TP
+.BI \-\-ca\-bundle " file"
+PEM file to trust instead of the system store. Environment
+.BR MICROAGENT_CA_BUNDLE ,
+else
+.BR SSL_CERT_FILE .
+Needed in images that ship no ca-certificates.
+.TP
+.BI \-\-budget " seconds"
+Stop starting turns after this long, and say so. At least 1; leaving it out
+says "no budget". The last turn it takes may run five minutes past it, and a
+turn cut off there is discarded rather than half-applied. Environment
+.BR MICROAGENT_BUDGET_SECONDS .
+.TP
+.BI \-\-max\-spend\-tokens " n"
+Stop starting turns once the run has billed this many tokens, prompt and
+completion together. At least 1; leaving it out says "no ceiling", the way an
+unset
+.B \-\-budget
+says "no deadline". The turn that reaches the ceiling is the one that finishes,
+and the run says on stderr once 80% of it is spent. Environment
+.BR MICROAGENT_MAX_SPEND_TOKENS .
+.TP
+.BI \-\-reasoning\-effort " level"
+.B reasoning.effort
+sent to the provider:
+.BR minimal ,
+.BR low ,
+.BR medium ,
+.B high
+or
+.B none
+to disable. Environment
+.BR MICROAGENT_REASONING_EFFORT .
+.TP
+.BR \-h ", " \-\-help
+Print the built-in usage text and exit. Also reached by a bare
+.BR help .
+.TP
+.BR \-V ", " \-\-version
+Print the version and exit.
+.SH UPDATE SUBCOMMAND
+.B microagent update
+downloads
+.I microagent\-<tag>\-<target>
+and its
+.I .sha256
+sidecar from the latest GitHub release and replaces the running binary only
+when the digest matches. A refusal touches nothing.
+.TP
+.BR \-c ", " \-\-check
+Report the latest release as the release page URL on stdout, install nothing.
+.TP
+.BR \-h ", " \-\-help
+Print the update usage text and exit.
+.PP
+.B GITHUB_TOKEN
+is a bearer for api.github.com only, past the anonymous rate limit; the public
+asset hosts never see it. So does
+.BR MICROAGENT_CA_BUNDLE ,
+for the same reason it is a run option. Exit 0 checked, installed or current; 1
+failed; 2 usage error.
+.SH ENVIRONMENT
+.TP
+.B MICROAGENT_MODEL
+Model id, as
+.B \-\-model
+says.
+.TP
+.B MICROAGENT_BASE_URL
+Base url, as
+.B \-\-base\-url
+says.
+.TP
+.B MICROAGENT_API_KEY
+Api key, as
+.B \-\-api\-key
+says.
+.TP
+.BR MICROAGENT_MAX_TURNS ", " MICROAGENT_MAX_TOKENS ", " MICROAGENT_STALL_TIMEOUT ", " MICROAGENT_BUDGET_SECONDS ", " MICROAGENT_MAX_SPEND_TOKENS
+The ceilings and timeouts above.
+.TP
+.BR MICROAGENT_REASONING_EFFORT ", " GITHUB_TOKEN
+As above.
+.TP
+.BR MICROAGENT_CONFIG ", " MICROAGENT_SESSION_DIR ", " MICROAGENT_SKILLS
+These three take an empty value as off: no config file, no session log, no
+skills.
+.TP
+.B MDEBUG
+Set to 1 to trace a stuck stream on stderr and print the configuration the run
+resolved: model, base url, ceilings, the config file read, the skill roots, and
+the name of the source the api key came from, never the key.
+.SH FILES
+.TP
+.I ~/.microagent/config.toml
+System prompt addendum, skills, MCP servers, tool set, sandbox and command
+filter. A first run that finds no config writes the shipped template here, so
+the keys are discovered by editing a file that already documents itself.
+.TP
+.I ~/.microagent/sessions
+Per-response JSONL session log, or
+.BR MICROAGENT_SESSION_DIR .
+An empty directory writes no log.
+.TP
+.I ~/.microagent/skills
+Skill directories, each holding a
+.IR SKILL.md ,
+or
+.BR MICROAGENT_SKILLS ,
+a colon-separated list that wins over the config.
+.SH EXIT STATUS
+.TP
+.B 0
+The run finished.
+.TP
+.B 1
+The run failed.
+.TP
+.B 2
+The command line was wrong.
+.TP
+.B 3
+The run stopped without an answer, so the text on stdout is a prefix of the work
+rather than an answer.
+.TP
+.B 130
+Interrupted by Ctrl+C or a signal, which takes the tool subprocess with it.
+.SH OUTPUT
+stdout carries the model's text and one JSON line per response,
+.BR {\(dqtype\(dq:\(dqusage\(dq,...\(dq} ,
+and nothing else. stderr carries the tool gutter, the notes and every error, so
+a script reading stdout gets the answer and the token counters.
+.SH EXAMPLES
+.PP
+Fix a failing test and run it:
+.PP
+.RS
+.EX
+microagent "fix the failing test in src/net.zig and run it"
+.EE
+.RE
+.PP
+Review a diff under a turn ceiling:
+.PP
+.RS
+.EX
+microagent --max-turns 20 "review the diff and stop"
+.EE
+.RE
+.PP
+Run a task whose text is in a file:
+.PP
+.RS
+.EX
+microagent --print "$(cat task.txt)"
+.EE
+.RE
+.PP
+Pass a task that begins with a dash:
+.PP
+.RS
+.EX
+microagent -- "explain why \-Werror is failing in src/net.zig"
+.EE
+.RE
+.SH SEE ALSO
+.BR rg (1),
+.BR "ast\-grep" (1),
+.BR git (1)
+.PP
+The full reference, including the config file, the tool set and the sandbox, is
+in
+.I docs/usage.md
+in the source tree. The built-in
+.B \-\-help
+text is authoritative where this page summarizes.

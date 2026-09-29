@@ -15,7 +15,7 @@ BIN := zig-out/bin/microagent
 export LC_ALL := C
 export TZ := UTC
 
-.PHONY: default help preflight version build musl test test-sanitize fmt fmt-check fmt-python lint lint-versions lint-lock zig-version required-zig-version release-targets check-assets check-asset-run check-binary check-changelog check-changelog-links check-changelog-sections check-unreleased check-readme check-release check-reproducible lint-shell lint-python lint-yaml check bench gauntlet instructions overhead install release-assets checksums clean
+.PHONY: default help preflight version build musl test test-sanitize fmt fmt-check fmt-python lint lint-versions lint-lock zig-version required-zig-version release-targets check-assets check-asset-run check-binary check-changelog check-changelog-links check-changelog-sections check-unreleased check-readme check-man check-release check-reproducible lint-shell lint-python lint-yaml check bench gauntlet instructions overhead install release-assets checksums clean
 
 # The targets `microagent update` asks for, in the names release.yml publishes.
 # ci.yml rehearses the same list on every push and release.yml publishes it, so
@@ -125,7 +125,7 @@ help:
 	  'gauntlet AGENTS=...   the same gauntlet review on a fresh clone, per harness' \
 	  'instructions [CHECK=--check]  retired instructions per unit, against bench/instructions.baseline' \
 	  'overhead              startup and first-request cost per harness' \
-	  'install               install the binary into ~/.local/bin' \
+	  'install               install the binary into ~/.local/bin, or PREFIX= and DESTDIR= elsewhere' \
 	  'release-assets        cross-build every published target into dist/' \
 	  'release-assets TAG=vX.Y.Z  the same, named as release.yml publishes them' \
 	  'release-targets       the published target triples, one per line' \
@@ -138,6 +138,7 @@ help:
 	  'check-changelog-sections SECTION=...  the same five-section shape under one named heading' \
 	  'check-changelog-links  every heading has the compare link its version implies' \
 	  'check-readme      the README installs and names the version build.zig.zon declares' \
+	  'check-man         the man page documents every flag --help lists, as the declared version' \
 	  'check-release TAG=vX.Y.Z  the tag names build.zig.zon, nothing is stranded unreleased' \
 	  'check-reproducible    every published target rebuilds byte-identical' \
 	  'checksums             sha256 sidecars for dist/ (after a tagged build)' \
@@ -181,6 +182,16 @@ MUSL_ARCH_arm64 := aarch64
 MUSL_ARCH ?= $(or $(MUSL_ARCH_$(shell uname -m)),$(shell uname -m))
 MUSL_BINARY := integrations/harbor/microagent-$(MUSL_ARCH)-linux-musl
 
+# A cross build's own install prefix. Every cross build below names one, because
+# they all share zig-out otherwise: zig writes the artifact it just built into
+# the one prefix, so the last cross build of a release rehearsal is what is
+# sitting in zig-out/bin, and `make install`, `check-binary` and the bench
+# scripts read that path as the host build. The binary that survives a
+# `make release-assets` there is a macOS Mach-O, and a packager who then ran
+# `make install PREFIX=/usr DESTDIR=$pkgdir` would stage a file the machine
+# cannot execute. One prefix per target leaves the host build where it belongs.
+CROSS_PREFIX ?= .scratch/cross
+
 # The published target that starts on this host, read from uname rather than
 # named. The four published targets cover two architectures on two systems, so
 # a name written out here is one a third of the hosts cannot run: an Apple
@@ -210,8 +221,8 @@ endif
 # against a pin. The dependency is what makes a rehearsal on a laptop the same
 # bytes the tag publishes, which is the claim CONTRIBUTING.md makes.
 musl: zig-version
-	$(ZIG) build -Dtarget=$(MUSL_ARCH)-linux-musl -Doptimize=$(OPT)
-	cp $(BIN) $(MUSL_BINARY).tmp
+	$(ZIG) build -Dtarget=$(MUSL_ARCH)-linux-musl -Doptimize=$(OPT) --prefix $(CROSS_PREFIX)/$(MUSL_ARCH)-linux-musl
+	cp $(CROSS_PREFIX)/$(MUSL_ARCH)-linux-musl/bin/microagent $(MUSL_BINARY).tmp
 	mv $(MUSL_BINARY).tmp $(MUSL_BINARY)
 
 # A filter that matches no declared test would report success without running one, so it is checked
@@ -433,6 +444,7 @@ check:
 	$(MAKE) zig-version
 	$(MAKE) check-unreleased
 	$(MAKE) check-readme
+	$(MAKE) check-man
 	$(MAKE) fmt-check
 	$(MAKE) lint
 	$(ZIG) build test --summary all
@@ -471,11 +483,54 @@ gauntlet: build
 instructions: test
 	sh bench/instructions.sh $(CHECK)
 
-# `install -D` is GNU coreutils; macOS ships BSD install, so the parent
-# directory is created here instead.
+# Where a plain `make install` puts the binary and its man page, and the
+# variables a distro or homebrew-style packager needs instead. PREFIX defaults
+# to the per-user location the README installs into, so an unpackaged run is
+# unchanged, while `make install PREFIX=/usr DESTDIR=$$pkgdir` stages the same
+# recipe into a package root. BINDIR and MANDIR default under PREFIX and
+# DESTDIR defaults to empty, which is what makes the unprefixed call write to
+# the real prefix rather than to a staging directory nobody asked for.
+PREFIX ?= $(HOME)/.local
+BINDIR ?= $(PREFIX)/bin
+MANDIR ?= $(PREFIX)/share/man
+DESTDIR ?=
+
+# `install -d -m 755` is one command on GNU coreutils and on BSD install, unlike
+# `install -D`, which macOS does not have; the mode is named so a prefix that
+# does not exist yet is not created with whatever umask left behind. The man
+# page is installed under man1, the section every `man microagent` reaches, and
+# it lands next to the binary, because a package that ships an executable with
+# no page leaves `man` reading nothing and the reader reading the release notes.
 install: build
-	mkdir -p $(HOME)/.local/bin
-	install -m755 $(BIN) $(HOME)/.local/bin/microagent
+	install -d -m 755 $(DESTDIR)$(BINDIR)
+	install -m755 $(BIN) $(DESTDIR)$(BINDIR)/microagent
+	install -d -m 755 $(DESTDIR)$(MANDIR)/man1
+	install -m644 docs/microagent.1 $(DESTDIR)$(MANDIR)/man1/microagent.1
+
+# The man page and `--help` are two renderings of one interface, and the one
+# that is wrong is whichever a reader happens to reach first. Every long flag
+# the built-in help lists has to be in the page, and the page names the version
+# build.zig.zon declares, so a release cannot publish a binary under a man page
+# describing the previous one. A flag the page documents that the help does not
+# is left alone: a man page may summarize, but a man page that invents an
+# option is the failure this cannot catch by reading flags, so the direction
+# that can be checked is the one that is checked.
+check-man: build
+	@set -eu; \
+	want="$$($(MAKE) --no-print-directory version)"; \
+	grep -q '^\.TH MICROAGENT 1 .* "microagent '"$$want"'"' docs/microagent.1 || { \
+	  echo "docs/microagent.1 does not name microagent $$want, the version build.zig.zon declares" >&2; \
+	  echo "a release would then ship a binary under a man page describing the previous version" >&2; \
+	  exit 1; \
+	}; \
+	for flag in $$($(BIN) --help 2>&1 | sed -n 's/^ *\(-[A-Za-z], \)\{0,1\}--\([a-z0-9-]*\).*/\2/p' | sort -u) \
+	             $$($(BIN) update --help 2>&1 | sed -n 's/^ *\(-[A-Za-z], \)\{0,1\}--\([a-z0-9-]*\).*/\2/p' | sort -u); do \
+	  tr -d '\\' < docs/microagent.1 | grep -q -e "--$$flag" || { \
+	    echo "docs/microagent.1 documents no --$$flag, which 'microagent --help' lists" >&2; \
+	    exit 1; \
+	  }; \
+	done; \
+	echo "docs/microagent.1 documents every flag --help lists, as microagent $$want"
 
 # Every target here is a target `microagent update` asks for, and every target
 # it asks for is published here. The two are separate files that a rename in
@@ -835,9 +890,9 @@ check-asset-run: zig-version
 	  echo "TARGET=$(TARGET), but this host ($(HOST_OS) $(MUSL_ARCH)) publishes $(HOST_TARGET)" >&2; \
 	  exit 1; \
 	}; \
-	$(ZIG) build -Dtarget=$(HOST_TARGET) -Doptimize=ReleaseSmall
-	./$(BIN) --version
-	./$(BIN) update --help >/dev/null
+	$(ZIG) build -Dtarget=$(HOST_TARGET) -Doptimize=ReleaseSmall --prefix $(CROSS_PREFIX)/$(HOST_TARGET)
+	$(CROSS_PREFIX)/$(HOST_TARGET)/bin/microagent --version
+	$(CROSS_PREFIX)/$(HOST_TARGET)/bin/microagent update --help >/dev/null
 	@echo "the $(HOST_TARGET) asset builds and starts on this host"
 
 # Every published target, cross-built, under the name release.yml publishes and
@@ -851,6 +906,13 @@ check-asset-run: zig-version
 # `dist/microagent-*`, so a second run on a machine that once built another
 # version would upload that version's binaries under this tag, and `checksums`
 # would sidecar them as if they were the ones just built.
+#
+# A tagged build also carries the LICENSE next to the binaries, under the
+# versioned prefix so the glob above and `checksums` both pick it up. The
+# release hands a user a bare executable, and the license it is distributed
+# under is the one thing about it a user cannot see in the file. A rehearsal
+# emits no license asset, because it names nothing by version and the sidecars
+# have nothing to describe.
 # version a release is published with, for the reason musl names: this is the
 # target whose output is published, and a compiler other than the pinned one
 # produces an asset no checksum ever described, reproducibly enough to pass
@@ -859,9 +921,12 @@ release-assets: zig-version
 	rm -rf dist
 	mkdir -p dist
 	@set -eu; for target in $(RELEASE_TARGETS); do \
-		$(ZIG) build -Dtarget="$$target" -Doptimize=ReleaseSmall; \
-		install -m755 $(BIN) "dist/$(ASSET_PREFIX)$$target"; \
+		$(ZIG) build -Dtarget="$$target" -Doptimize=ReleaseSmall --prefix "$(CROSS_PREFIX)/$$target"; \
+		install -m755 "$(CROSS_PREFIX)/$$target/bin/microagent" "dist/$(ASSET_PREFIX)$$target"; \
 	done
+	@if [ -n "$(TAG)" ]; then \
+		install -m644 LICENSE "dist/$(ASSET_PREFIX)LICENSE"; \
+	fi
 
 # The sha256 sidecar `microagent update` verifies before it replaces anything.
 # Only a tagged build names its assets after a version, so a rehearsal in dist/
@@ -1000,4 +1065,4 @@ check-reproducible:
 	rm -rf "$(REPRO_DIR)" "$$REPRO_SRC" "$(REPRO_GLOBAL)"
 
 clean:
-	rm -rf zig-out .zig-cache dist $(HARBOR_DIR)/microagent-*-linux-musl $(HARBOR_DIR)/microagent-*-linux-musl.tmp
+	rm -rf zig-out .zig-cache dist $(CROSS_PREFIX) $(HARBOR_DIR)/microagent-*-linux-musl $(HARBOR_DIR)/microagent-*-linux-musl.tmp
