@@ -131,7 +131,7 @@ Tools (`[tools.<name>]` tables in the config):
   status 2.
 
 subcommand:
-  update [--check] [--repo owner/name]
+  update [--check]
                          replace this binary with the latest GitHub
                          release after verifying its .sha256 sidecar
                          (--check only reports; GITHUB_TOKEN lifts the
@@ -693,8 +693,10 @@ required.
 ```sh
 microagent update                         # replace this binary with the latest release
 microagent update --check                 # report the latest release, install nothing
-microagent update --repo you/microagent   # track a fork
 ```
+
+The repository it installs from is the one this binary was built for, named by `default_repo` in
+`src/update.zig`; a fork builds its own. There is no flag for it.
 
 Each release publishes `microagent-<tag>-<triple>` for `x86_64-linux-musl`, `aarch64-linux-musl`,
 `x86_64-macos` and `aarch64-macos`, each with a `.sha256` sidecar. Linux has one static asset per

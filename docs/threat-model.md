@@ -66,7 +66,7 @@ source tree and the host. The one asset worth stealing on its own is the API key
 | `[tools.<name>]` tables in that config | which built-in tools the model is offered, and which of the public remote servers `web_search`, `context7`, `grep_app` and `deepwiki` are switched off (all four are on by default), with their url, key variable name and timeout | `toolKey`, `src/config.zig:480`; `toolConfigError`, `src/main.zig:498`; `builtinToolsJson`, `src/main.zig:2333`; refusal in `dispatchCall`, `src/main.zig:2894` |
 | Responses of a remote MCP server (JSON body or event stream) | text that becomes a tool result, and the session id echoed on later requests | `exchange`, `src/mcp.zig:405`; `readAnswer`, `src/mcp.zig:484`; `sseLine`, `src/mcp.zig:551` |
 | `skills` in that config, `MICROAGENT_SKILLS`, `~/.microagent/skills` | `SKILL.md` bodies the model may load, as prompt text | `roots`, `src/skill.zig:138`; `discover`, `src/skill.zig:190`; `call`, `src/skill.zig:373`; cap `max_skill_bytes`, `src/skill.zig:40` |
-| Command line, `update` | `--check`, `--repo` | `parseArgs`, `src/update.zig:844`; `run`, `src/update.zig:881`; dispatched from `main` at `src/main.zig:264` |
+| Command line, `update` | `--check` | `parseArgs`, `src/update.zig:844`; `run`, `src/update.zig:881`; dispatched from `main` at `src/main.zig:264` |
 | `MICROAGENT_MODEL`, `MICROAGENT_BASE_URL`, `MICROAGENT_REASONING_EFFORT` | endpoint, model, response style | `envValue`, `src/main.zig:749`; read at `src/main.zig:281-283` |
 | `MICROAGENT_MAX_TURNS`, `MICROAGENT_MAX_TOKENS` | loop and response ceilings | `max_turns_default`, `src/main.zig:88`; `default_max_tokens`, `src/main.zig:103`; both through `ceiling`, `src/main.zig:799` |
 | `MICROAGENT_API_KEY` | provider credential | `key_var`; resolved in `resolveKey` |
@@ -180,9 +180,9 @@ command.
 
 ### Operator → agent (STRIDE: spoofing, tampering, information disclosure)
 
-- A prompt that names a hostile base URL or a hostile `--repo` steers the whole run. Both
-  are operator inputs, so this is a threat only where an automated harness passes a task's
-  text straight through (`bench/gauntlet.sh`).
+- A prompt that names a hostile base URL steers the whole run. It is an operator input, so
+  this is a threat only where an automated harness passes a task's text straight through
+  (`bench/gauntlet.sh`).
 - A prompt of any length enters the conversation uncapped (`setPrompt`,
   `src/main.zig:1106`; appended in `openConversation`, `src/conversation.zig:380`), and the
   request body grows with it.
@@ -316,10 +316,12 @@ command.
 - The release JSON is attacker-shaped: every field becomes a tag, an asset name or a URL
   the updater acts on (`parseRelease`, `src/update.zig:375`). It is fuzzed against exactly
   that (`fuzzRelease`, `src/update.zig:2128`; `fuzzSidecar`, `src/update.zig:2222`).
-- The `--repo` the updater requests is the caller's own text. It is fuzzed from the command
-  line to the URL it becomes: a missing repo argument fails, a repo `validRepo` refuses
-  never reaches a request, and one it accepts only ever names `api.github.com`
-  (`releaseApiUrl`, `src/update.zig:215`; harness `fuzzUpdateArgs`, `src/update.zig:1486`).
+- The repository the updater requests is a constant compiled into the binary (`default_repo`,
+  `src/update.zig:12`), not caller text, so a command line cannot steer it. The validation that
+  used to guard a caller-supplied name still holds that constant to `owner/name` before a URL
+  exists: one `validRepo` refuses never reaches a request, and one it accepts only ever names
+  `api.github.com` (`releaseApiUrl`, `src/update.zig:215`; harness `fuzzUpdateArgs`,
+  `src/update.zig:1486`).
 - A body over the cap is refused while it streams, not after (`fetchInto`,
   `src/update.zig:533`, against `Capped` at `src/update.zig:426`). The API body is capped
   at 10 MB, the asset at 256 MB, the sidecar at 64 KB (`src/update.zig:22-24`).
@@ -381,7 +383,7 @@ the same bug returning.
 | Control | Covers | Where |
 | --- | --- | --- |
 | System prompt names tool output, file contents and command output as data, and tells the model to report a file that gives orders | prompt injection through a file, at the model rather than in the program | `system_prompt`, `src/conversation.zig:34` |
-| `owner/name` validation before a URL exists | URL injection through `--repo` | `repoPartOk`, `src/update.zig:188`; `validRepo`, `src/update.zig:198`; `releaseApiUrl`, `src/update.zig:215` |
+| `owner/name` validation before a URL exists | URL injection through a repository name | `repoPartOk`, `src/update.zig:188`; `validRepo`, `src/update.zig:198`; `releaseApiUrl`, `src/update.zig:215` |
 | Host allowlist: `https` on `github.com`, `*.github.com`, `*.githubusercontent.com`, no userinfo, checked on the page URL and both asset URLs | asset and page download from a lookalike host | `hostTrusted`, `src/update.zig:225`; `trustedGithubUrl`, `src/update.zig:237`; applied inside `decide` at `src/update.zig:310` |
 | `GITHUB_TOKEN` is presented only to `https://api.github.com/`, prefix-compared octet by octet, so a lookalike host, a userinfo URL and a path carrying the API name all get nothing; the asset and the sidecar go out unauthenticated | a repository-scoped token handed to the asset CDN, to `api.github.com.evil.com`, or to a path that merely contains the API name | `bearerFor`, `src/update.zig:263`; applied at `src/update.zig:943`, `src/update.zig:1022`, `src/update.zig:1024` |
 | A CA bundle that cannot be read, or holds no certificate, is refused and the system store used instead | a bundle silently emptying the trust store, so every request fails as if the machine shipped no certificates | `loadCaBundle`, `src/net.zig:39` |
