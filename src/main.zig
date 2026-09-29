@@ -379,12 +379,12 @@ const help_text =
     \\
     \\  -p, --print <prompt>   task to run (also accepted as a bare argument)
     \\  -m, --model <model>    model id (env MICROAGENT_MODEL,
-++ " default " ++ default_model ++ ")\n" ++
+++ " default\n" ++ "                         " ++ default_model ++ ")\n" ++
     \\  -b, --base-url <url>   OpenAI-compatible base url (env
     \\                         MICROAGENT_BASE_URL, default
-++ " " ++ default_base_url ++ "); https, or http on\n" ++
-    \\                         loopback, because the api key goes to it in
-    \\                         the clear otherwise
+++ " " ++ default_base_url ++ ");\n" ++
+    \\                         https, or http on loopback, because the api
+    \\                         key goes to it in the clear otherwise
     \\  -k, --api-key <key>    api key (env MICROAGENT_API_KEY, OPENAI_API_KEY,
     \\                         OPENROUTER_API_KEY, DEEPSEEK_API_KEY). The key
     \\                         goes to the base url, so name a base url from
@@ -395,8 +395,8 @@ const help_text =
     \\      --max-turns <n>    tool-loop turn ceiling, at least 1
 ++ (std.fmt.comptimePrint("\n                         (env MICROAGENT_MAX_TURNS, default {d})\n", .{max_turns_default})) ++
     \\      --stall-timeout <s>  seconds the response socket may stay silent
-    \\                         before the read fails (default 120; env
-    \\                         MICROAGENT_STALL_TIMEOUT)
+    \\                         before the read fails
+++ (std.fmt.comptimePrint("\n                         (env MICROAGENT_STALL_TIMEOUT, default {d})\n", .{default_stall_timeout_s})) ++
     \\      --max-tokens <n>   max_tokens sent to the provider: the ceiling on
     \\                         one response's generated tokens, at least 1
 ++ (std.fmt.comptimePrint("\n                         (env MICROAGENT_MAX_TOKENS, default {d})\n", .{default_max_tokens})) ++
@@ -423,8 +423,9 @@ const help_text =
     \\                         says on stderr once 80% of it is spent
     \\                         (env MICROAGENT_MAX_SPEND_TOKENS)
     \\      --reasoning-effort <level>
-    \\                         reasoning.effort sent to the provider: minimal, low,
-    \\                         medium, high, or none to disable (env MICROAGENT_REASONING_EFFORT)
+    \\                         reasoning.effort sent to the provider: minimal,
+    \\                         low, medium, high, or none to disable (env
+    \\                         MICROAGENT_REASONING_EFFORT)
     \\  -h, --help             this text ("help" as the only argument too)
     \\  -V, --version          version
     \\
@@ -432,7 +433,8 @@ const help_text =
     \\variable for the same option. A bare -- ends the flags, so a task that
     \\begins with a dash is passed after it. A bare "help" asks for this text
     \\when the prompt is still empty, the way "microagent update help" does; any
-    \\other bare word, a later one, or a value of --print is a task.
+    \\other bare word, or a value of --print, is a task. A second bare word is
+    \\the one thing this does not read as a task: two prompts are a usage error.
     \\
     \\reply style (MICROAGENT_CAVEMAN / MICROAGENT_PONYTAIL, or the same two keys
     \\in the config named above):
@@ -482,12 +484,13 @@ const help_text =
     \\
     \\A variable set to an empty string is not a value: MICROAGENT_MODEL,
     \\MICROAGENT_BASE_URL, MICROAGENT_REASONING_EFFORT, MICROAGENT_BUDGET_SECONDS,
-    \\MICROAGENT_MAX_SPEND_TOKENS, MICROAGENT_MAX_TURNS, MICROAGENT_MAX_TOKENS
-    \\and MDEBUG keep their defaults, and MICROAGENT_CA_BUNDLE, the four api
-    \\key variables and MICROAGENT_CAVEMAN/PONYTAIL fall through to whatever
-    \\comes next. MICROAGENT_CONFIG and MICROAGENT_SESSION_DIR are the two
-    \\where empty means off: no style file, no session log. HOME is trimmed
-    \\like the rest, and an empty one is no home rather than a path off the root.
+    \\MICROAGENT_MAX_SPEND_TOKENS, MICROAGENT_MAX_TURNS, MICROAGENT_MAX_TOKENS,
+    \\MICROAGENT_STALL_TIMEOUT and MDEBUG keep their defaults, and
+    \\MICROAGENT_CA_BUNDLE, the four api key variables and
+    \\MICROAGENT_CAVEMAN/PONYTAIL fall through to whatever comes next.
+    \\MICROAGENT_CONFIG and MICROAGENT_SESSION_DIR are the two where empty means
+    \\off: no style file, no session log. HOME is trimmed like the rest, and an
+    \\empty one is no home rather than a path off the root.
     \\
 ;
 

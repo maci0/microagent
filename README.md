@@ -66,10 +66,10 @@ The flags, abridged; `microagent --help` is the full text.
                        OPENROUTER_API_KEY, DEEPSEEK_API_KEY); sent to the base
                        url, so name a base url from the same provider as the key
     --max-turns <n>    tool-loop turn ceiling, at least 1
+                       (env MICROAGENT_MAX_TURNS, default 100)
     --stall-timeout <s>
                        seconds the response socket may stay silent before
-                       the read fails (default 120; env MICROAGENT_STALL_TIMEOUT)
-                       (env MICROAGENT_MAX_TURNS, default 100)
+                       the read fails (env MICROAGENT_STALL_TIMEOUT, default 120)
     --max-tokens <n>   max_tokens sent to the provider: the ceiling on one
                        response's generated tokens, at least 1
                        (env MICROAGENT_MAX_TOKENS, default 65536)
