@@ -805,6 +805,27 @@ test "a tools/list answer is parsed in a scratch arena and its buffer is handed 
     try std.testing.expect(run_state.queryCapacity() < 1024 * 1024);
 }
 
+// The rule `validName` holds a server and a tool name to, asked directly
+// rather than through a config file: the length bound is a property of the
+// function, and a config table can only say it about one name at a time.
+test "a name is half of an exposed tool name only when it can be spelled" {
+    try std.testing.expect(validName("fs"));
+    try std.testing.expect(validName("a-b_c.d9"));
+    try std.testing.expect(!validName(""));
+    // The pair that separates the three parts of an exposed name, so a name
+    // holding it is refused however else it is spelled.
+    try std.testing.expect(!validName("a__b"));
+    try std.testing.expect(!validName("bad name"));
+    try std.testing.expect(!validName("a/b"));
+    try std.testing.expect(!validName("a\u{1b}[31m"));
+
+    // The bound is on the bytes, not the characters: the name is written into
+    // the schema and read back off the wire, and a 65-byte name that was 33
+    // characters is still past what a tool name may hold.
+    try std.testing.expect(validName("a" ** 64));
+    try std.testing.expect(!validName("a" ** 65));
+}
+
 test "a server that cannot be started, or that exits, is skipped" {
     var state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer state.deinit();
@@ -942,6 +963,53 @@ fn carriedFrame(arena: std.mem.Allocator, bytes: []const u8) ![]const u8 {
     return jb.items();
 }
 
+// A server that answers the handshake and then goes away is the ordinary way
+// one dies mid-run: the model has the tool in its schema and calls it again
+// after the child is gone. The first call says the server did not answer and
+// names why, the second says it is no longer running rather than spending the
+// whole call budget on a second wait for a pipe that has already ended, and
+// the run keeps the servers it did connect.
+test "a server that dies after the handshake is named once and then left" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+    // The two handshake answers, then the call ends the process without
+    // answering it. A `read` that sees end of stream is how a server that
+    // exited is told from one that is slow: a server that ignored the call and
+    // kept reading would time out instead, which is a different fault.
+    const script = try std.fmt.allocPrint(arena,
+        \\while IFS= read -r line; do
+        \\  case "$line" in
+        \\    *'"method":"initialize"'*) printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"{s}","capabilities":{{"tools":{{}}}}}}}}' ;;
+        \\    *'"method":"tools/list"'*) printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"tools":[{{"name":"echo","inputSchema":{{"type":"object"}}}}]}}}}' ;;
+        \\    *'"method":"tools/call"'*) exit 0 ;;
+        \\  esac
+        \\done
+    , .{protocol_version});
+    try tmp.dir.writeFile(io, .{ .sub_path = "dying.sh", .data = script });
+    const path = try std.fs.path.join(arena, &.{ base, "dying.sh" });
+
+    var env: std.process.Environ.Map = .init(arena);
+    const entries = [_]Entry{.{ .name = "dying", .command = "/bin/sh", .args = &.{path} }};
+    var servers = connect(io, arena, &env, &entries, "test");
+    defer servers.shutdown(io);
+    const resolved = servers.resolve("mcp__dying__echo") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!resolved.server.dead);
+
+    const first = try Servers.call(io, arena, resolved, "{}", net.durationMs(10_000));
+    try std.testing.expect(std.mem.indexOf(u8, first, "did not answer mcp__dying__echo") != null);
+    try std.testing.expect(resolved.server.dead);
+
+    const second = try Servers.call(io, arena, resolved, "{}", net.durationMs(10_000));
+    try std.testing.expectEqualStrings("error: MCP server dying is no longer running (ServerGone)", second);
+}
+
 test "a non-text result block is named rather than dropped" {
     var state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer state.deinit();
@@ -957,4 +1025,22 @@ test "a non-text result block is named rather than dropped" {
 
     const structured = try std.json.parseFromSliceLeaky(std.json.Value, arena, "{\"structuredContent\":{\"n\":1}}", .{});
     try std.testing.expectEqualStrings("{\"n\":1}", try resultText(arena, "srv", structured));
+
+    // The shapes that are not a result object, and the one that is an object
+    // with nothing in it, are each said rather than handed to the model as
+    // empty text it cannot act on.
+    const not_object = try std.json.parseFromSliceLeaky(std.json.Value, arena, "\"pong\"", .{});
+    try std.testing.expectEqualStrings("error: MCP server srv answered with string, not a result object", try resultText(arena, "srv", not_object));
+    const no_content = try std.json.parseFromSliceLeaky(std.json.Value, arena, "{\"isError\":false}", .{});
+    try std.testing.expectEqualStrings("error: MCP result carried no content", try resultText(arena, "srv", no_content));
+
+    // A result whose blocks are all unusable names each of them rather than
+    // adding up to nothing, so the model is told the server answered.
+    const unnamed = try std.json.parseFromSliceLeaky(std.json.Value, arena, "{\"content\":[{\"type\":\"image\"}]}", .{});
+    try std.testing.expectEqualStrings("[image content from MCP server srv, not shown]", try resultText(arena, "srv", unnamed));
+
+    // And a result with no blocks at all says so, rather than returning the
+    // empty string a call clamps and hands on as a tool result.
+    const empty = try std.json.parseFromSliceLeaky(std.json.Value, arena, "{\"content\":[]}", .{});
+    try std.testing.expectEqualStrings("(the MCP server returned no text)", try resultText(arena, "srv", empty));
 }
