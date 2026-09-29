@@ -20,7 +20,15 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 # shellcheck source=bench/harness.sh
 . "$root/bench/harness.sh"
 tasks_dir="$root/bench/tasks"
-work_root="${BENCH_WORK:-${TMPDIR:-/tmp}/microagent-bench}"
+# The tree's own gitignored .scratch/, for the reason the Makefile builds
+# `check-reproducible` there rather than under ${TMPDIR:-/tmp}: /tmp is a
+# tmpfs on most Linux hosts, and a run writes a whole task tree per
+# (task, agent), with the harness's build products beside it, so the
+# measurement's disk is the host's RAM. It is inside the tree rather than
+# beside it so `rm -rf` in a harness leaves nothing to sweep up by hand, and
+# it is still the tree's, not a path two accounts on a shared machine share.
+# BENCH_WORK overrides it for a contributor who names a scratch disk.
+work_root="${BENCH_WORK:-$root/.scratch/bench}"
 results="$root/bench/results.jsonl"
 timeout_s="${BENCH_TIMEOUT:-600}"
 # Every row of this invocation carries the same `run`, because the file is

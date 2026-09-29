@@ -22,10 +22,14 @@ reviews="${GAUNTLET_REVIEWS:-quick}"
 max_reviews="${GAUNTLET_MAX_REVIEWS:-3}"
 timeout_per_review="${GAUNTLET_TIMEOUT:-8m}"
 verify_cmd="${GAUNTLET_VERIFY:-}"
-# TMPDIR first, as bench/run.sh does: macOS points it at a per-user scratch
-# directory, and /tmp is a world-writable sticky shared by every account on the
-# machine, so two gauntlet runs on one host collide there.
-work_root="${GAUNTLET_WORK:-${TMPDIR:-/tmp}/microagent-gauntlet}"
+# The tree's own gitignored .scratch/, as bench/run.sh and the Makefile's
+# `check-reproducible` use it, for the two reasons that tree's comment gives:
+# /tmp is a world-writable sticky shared by every account on the machine, so
+# two runs on one host collide there, and it is a tmpfs on most Linux hosts, so
+# the clone of this repository and its .git are read out of and written back
+# to RAM. A review diffs the clone, never this tree, so a clone kept under
+# `.scratch/` is invisible to the repository it was made from.
+work_root="${GAUNTLET_WORK:-$root/.scratch/gauntlet}"
 # Every row of this invocation carries the same `run`, because the file is
 # appended to and a second run of this script writes its rows beside the ones
 # already there: a reader cannot otherwise tell a re-measurement of an agent
