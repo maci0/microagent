@@ -371,6 +371,19 @@ EOF
 	printf '    }\n'
 	printf '  ]\n'
 	printf '}\n'
-} > "$out"
+# The document is written beside its destination and renamed into it, the way
+# `make release-assets` stages an asset and `make checksums` stages a sidecar.
+# The block above can stop halfway: an asset whose digest cannot be read exits
+# from inside it, and a redirect into the final name leaves half a document
+# there. Both asset loops above already skip `*.spdx.json` and `*.tmp`, and
+# `make checksums` skips `*.tmp` as well, so a leftover is never sidecarred and
+# never hashed into the package, but nothing downstream can tell a truncated
+# document from a complete one: `check-checksums` reads every `dist/microagent-*`
+# back, hashes whatever is there and compares it with the sidecar written from
+# the same truncated bytes, so a release would publish an inventory that is not
+# JSON. A rename is atomic, so the name holds the previous document or the new
+# one and never half of either.
+} > "$out.tmp"
+mv "$out.tmp" "$out"
 
 echo "wrote $out: $asset_count assets, $pin_count declared pins"

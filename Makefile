@@ -663,9 +663,19 @@ DESTDIR ?=
 # require it: dpkg and rpm take it as the copyright file, and the per-package
 # directory under share/licenses is the FHS place both read. A package built from
 # the recipe without it ships a grant the user cannot read.
+# The binary is staged beside its destination and renamed into it, the way
+# `musl` and `checksums` stage theirs: `install -m755` opens the path it is
+# given, so a copy interrupted halfway leaves a truncated executable at the
+# name the shell resolves on every later run, and a truncated binary reads as a
+# broken install rather than a broken build. A rename is atomic, so the path
+# holds the old binary or the new one and never a half of either. The man page
+# and the license are copied in place: a truncated page fails to render and a
+# truncated grant is still readable text, and a `.tmp` beside them would be a
+# file `man` and dpkg's copyright scanner both have to know to skip.
 install: build
 	install -d -m 755 $(DESTDIR)$(BINDIR)
-	install -m755 $(BIN) $(DESTDIR)$(BINDIR)/microagent
+	install -m755 $(BIN) $(DESTDIR)$(BINDIR)/microagent.tmp
+	mv -f $(DESTDIR)$(BINDIR)/microagent.tmp $(DESTDIR)$(BINDIR)/microagent
 	install -d -m 755 $(DESTDIR)$(MANDIR)/man1
 	install -m644 docs/microagent.1 $(DESTDIR)$(MANDIR)/man1/microagent.1
 	install -d -m 755 $(DESTDIR)$(LICENSEDIR)
@@ -1134,7 +1144,8 @@ release-assets: zig-version
 	mkdir -p dist
 	@set -eu; for target in $(RELEASE_TARGETS); do \
 		$(ZIG) build -Dtarget="$$target" -Doptimize=ReleaseSmall --prefix "$(CROSS_PREFIX)/$$target"; \
-		install -m755 "$(CROSS_PREFIX)/$$target/bin/microagent" "dist/$(ASSET_PREFIX)$$target"; \
+		install -m755 "$(CROSS_PREFIX)/$$target/bin/microagent" "dist/$(ASSET_PREFIX)$$target.tmp"; \
+		mv "dist/$(ASSET_PREFIX)$$target.tmp" "dist/$(ASSET_PREFIX)$$target"; \
 	done
 	@if [ -n "$(TAG)" ]; then \
 		install -m644 LICENSE "dist/$(ASSET_PREFIX)LICENSE"; \
@@ -1154,9 +1165,27 @@ release-assets: zig-version
 # asset, and it names no version of its own: the version is read out of the
 # asset names, because the files in dist/ are what a release publishes. A
 # rehearsal emits no inventory, the way it emits no license.
+#
+# The document carries a creation time, and the generator reads it out of
+# SOURCE_DATE_EPOCH when the environment names one and off the wall clock when
+# it does not. Nothing named it, so a release published the inventory with the
+# minute it was generated in it: the same commit and the same dist/ produce a
+# different document on every run, and the sha256 sidecar written beside it
+# then describes bytes no second run can produce, which is the property every
+# other asset in that directory has and this one did not. The value defaulted
+# here is the commit's own author date, so the document is a function of the
+# source rather than of when the release was cut, which is what
+# reproducible-builds.org means by honoring SOURCE_DATE_EPOCH. A caller that
+# sets it, `SOURCE_DATE_EPOCH=... make sbom`, still decides, and an epoch the
+# generator cannot convert fails the release rather than falling back to a
+# clock.
 sbom:
 	@test -d dist || { echo "no dist/, run 'make release-assets TAG=v0.2.0' first" >&2; exit 2; }; \
-SHA256_CMD="$$($(SHA256_CMD))" SHA1_CMD="$$($(SHA1_CMD))" \
+	: "$${SOURCE_DATE_EPOCH:=$$(git log -1 --format=%at)}"; \
+	test -n "$$SOURCE_DATE_EPOCH" || { \
+	  echo "this tree has no commit, so there is no date to stamp the inventory with" >&2; exit 1; }; \
+	SOURCE_DATE_EPOCH="$$SOURCE_DATE_EPOCH" \
+	SHA256_CMD="$$($(SHA256_CMD))" SHA1_CMD="$$($(SHA1_CMD))" \
 	sh scripts/sbom.sh dist lint-requirements.txt $(HARBOR_DIR)/requirements.lock
 
 # The sha256 sidecar `microagent update` verifies before it replaces anything.
@@ -1240,13 +1269,20 @@ sha256-of:
 # chosen here, for the reason `SHA256_CMD` exists: on a runner without GNU
 # coreutils the sidecar was written by `shasum -a 256` and a comparison beside it
 # by a command that does not exist.
+#
+# `*.tmp` is skipped for the reason `checksums` skips it: an asset or an
+# inventory staged beside its final name and renamed into it leaves a `.tmp`
+# there when a run is cut short, and the glob below would then read that as an
+# asset with no sidecar beside it and refuse a dist/ whose real assets are all
+# sidecarred. `make release-assets` empties dist/ first, so the leftover only
+# exists within a run that already failed.
 check-checksums:
 	@set -eu; \
 	test -d dist || { echo "no dist/, run 'make release-assets TAG=v0.2.0' first" >&2; exit 2; }; \
 	assets=0; \
 	for asset in dist/microagent-*; do \
 	  test -e "$$asset" || continue; \
-	  case "$$asset" in *.sha256) continue;; esac; \
+	  case "$$asset" in *.sha256 | *.tmp) continue;; esac; \
 	  assets=$$((assets + 1)); \
 	  if [ ! -f "$$asset.sha256" ]; then \
 	    echo "$$asset has no sha256 sidecar beside it, so 'microagent update' cannot verify it" >&2; \
