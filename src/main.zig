@@ -1889,7 +1889,11 @@ fn loadConfig(io: Io, init: std.process.Init, arena: std.mem.Allocator, config: 
     // No file is the same as an empty one, so the presets that are on by default are on.
     var parsed = config_mod.parse(arena, "");
     if (source.path) |p| {
-        const text = std.Io.Dir.cwd().readFileAlloc(io, p, arena, .limited(max_config_bytes)) catch |err| blk: {
+        // `readFileAlloc` refuses the moment the limit is reached, so a file of
+        // exactly `max_config_bytes` was reported over the cap it fits, and the
+        // documented rule is a file *over* the cap that is refused. One byte of
+        // headroom is what makes the ceiling the size a file may be.
+        const text = std.Io.Dir.cwd().readFileAlloc(io, p, arena, .limited(max_config_bytes + 1)) catch |err| blk: {
             // The default path with nothing at it is a first run, and a first
             // run gets the template: the commented file the repository ships,
             // written where the next edit will find it. A path somebody named
@@ -6405,6 +6409,59 @@ test "a config path written with a leading tilde is read from the home directory
     try env.put("MICROAGENT_CONFIG", "~/.microagent/other.toml");
     try std.testing.expectEqualStrings("/home/one/.microagent/other.toml", configSource(&env, arena, "").path.?);
     try std.testing.expectEqualStrings("/home/one/from/flag.toml", configSource(&env, arena, "~/from/flag.toml").path.?);
+}
+
+// The cap is on a file *over* 64 KB, and `readFileAlloc` refuses the moment the
+// limit it is given is reached, so a file of exactly the cap was read as over it
+// and every setting in it was dropped for the built-in defaults.
+test "a config file of exactly the 64 KB cap is read, and one byte over is not" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+
+    // The setting has to be at the front, because the rest of the file is
+    // comment bytes this parser reads and drops.
+    const setting = "model = \"mine\"\n";
+    const body = try arena.alloc(u8, max_config_bytes);
+    @memcpy(body[0..setting.len], setting);
+    @memset(body[setting.len..], '#');
+    const over = try arena.alloc(u8, max_config_bytes + 1);
+    @memcpy(over[0..setting.len], setting);
+    @memset(over[setting.len..], '#');
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "at.toml", .data = body });
+    try tmp.dir.writeFile(io, .{ .sub_path = "over.toml", .data = over });
+
+    var process_arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer process_arena.deinit();
+    var empty_map: std.process.Environ.Map = .init(std.testing.allocator);
+    defer empty_map.deinit();
+    // `loadConfig` reads one field, and a named `--config` is the other input,
+    // so the environment it consults is an empty one.
+    const init: std.process.Init = .{
+        .minimal = .{
+            .environ = .empty,
+            .args = .{ .vector = &.{} },
+        },
+        .arena = &process_arena,
+        .gpa = std.testing.allocator,
+        .io = io,
+        .environ_map = &empty_map,
+        .preopens = .empty,
+    };
+    const at = loadConfig(io, init, arena, try std.fs.path.join(arena, &.{ root, "at.toml" }));
+    try std.testing.expectEqualStrings("mine", at.model);
+
+    const past = loadConfig(io, init, arena, try std.fs.path.join(arena, &.{ root, "over.toml" }));
+    try std.testing.expectEqualStrings("", past.model);
 }
 
 // The first run that finds nothing at the default config path gets the

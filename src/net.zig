@@ -328,6 +328,106 @@ pub fn resolveSymlinkTarget(
 /// limit, so a path that reaches either is not one any of these platforms opens.
 const max_symlink_depth = 32;
 
+/// The file `path` names once every symlink on it is followed, including a link
+/// in a directory component rather than only one on the last name. This is the
+/// order the kernel opens a path in, so it is the order a check that asks "what
+/// file would opening this reach" has to walk.
+///
+/// `resolveSymlinkTarget` settles the chain the last component holds, which is
+/// what a rename through a link needs. It answers a path whose middle is a link
+/// with the path itself, because `readLink` on `docs/keys/openrouter` says
+/// `NotLink` and stops: the link is `docs/keys`, and the kernel follows it on
+/// the way to the file. So a directory committed as an ordinary name and
+/// pointing at `~/.secrets` walked straight past every name check, and the
+/// credential behind it opened under a name the checks had already cleared.
+///
+/// The buffers are the caller's and each has one job, so no step ever writes
+/// over bytes another step is still reading: `cur_buf` holds the prefix the
+/// components read so far resolved to, `next_buf` is split in half into the
+/// path currently under test and the path a link names, and `name_buf` holds
+/// each link's own bytes as it does in `resolveSymlinkTarget`. Every one of them
+/// is `max_path_bytes` or more, which is what the old two-buffer walk needed for
+/// a composed path to fit.
+pub fn resolveEveryComponent(
+    io: Io,
+    dir: Io.Dir,
+    path: []const u8,
+    name_buf: []u8,
+    cur_buf: []u8,
+    next_buf: []u8,
+) ![]const u8 {
+    const half = next_buf.len / 2;
+    const under_test = next_buf[0..half];
+    const link_store = next_buf[half..];
+    // A rooted path stays rooted: the leading separator is a component the
+    // kernel reads as the root, and a walk that dropped it would read every
+    // component after it against the working directory instead.
+    const rooted = path.len != 0 and path[0] == path_sep;
+    var prefix: []const u8 = if (rooted) try copyInto(cur_buf, path[0..1]) else &.{};
+    var rest: []const u8 = if (rooted) path[1..] else path;
+    var steps: usize = 0;
+    while (steps < max_symlink_depth) : (steps += 1) {
+        if (rest.len == 0) break;
+        const sep_at = std.mem.indexOfScalar(u8, rest, path_sep) orelse rest.len;
+        const part = rest[0..sep_at];
+        const after = if (sep_at < rest.len) rest[sep_at + 1 ..] else rest[sep_at..];
+        if (part.len == 0 or std.mem.eql(u8, part, ".")) {
+            // A separator and a `.` are components the kernel skips, so the
+            // prefix keeps the shape it had.
+            rest = after;
+            continue;
+        }
+        if (std.mem.eql(u8, part, "..")) {
+            // A `..` drops the component under it, and a link still ahead of the
+            // path is resolved against what is left.
+            if (std.fs.path.dirname(prefix)) |up| prefix = up;
+            rest = after;
+            continue;
+        }
+        const whole = if (prefix.len == 0)
+            try copyInto(under_test, part)
+        else
+            try joinOnto(under_test, prefix, part);
+        const n = dir.readLink(io, whole, name_buf) catch |err| switch (err) {
+            error.NotLink, error.FileNotFound => {
+                prefix = try copyInto(cur_buf, whole);
+                rest = after;
+                continue;
+            },
+            else => |e| return e,
+        };
+        // A link is replaced by what it names, and what it names is a path of
+        // its own, so the walk continues there with the rest of the original
+        // path behind it, which is the order the kernel reads components in. A
+        // relative target is read against the directory holding the link, which
+        // is the prefix; a bare name has no prefix of its own and one in the
+        // working directory.
+        const target = name_buf[0..n];
+        // Only a link makes the walk start over on a path it has not read, so
+        // only a link is counted: a path of forty ordinary components is a path
+        // the kernel opens, and the bound is here for a cycle between two links
+        // rather than for depth.
+        steps += 1;
+        if (std.fs.path.isAbsolute(target)) {
+            prefix = try copyInto(cur_buf, target[0..1]);
+            rest = try copyInto(link_store, target[1..]);
+        } else {
+            rest = if (prefix.len == 0)
+                try copyInto(link_store, target)
+            else
+                try joinOnto(link_store, prefix, target);
+            prefix = &.{};
+        }
+    }
+    if (rest.len != 0) return error.SymlinkLoop;
+    return prefix;
+}
+
+/// The separator a path is split on. `std.fs.path.sep` is the host's, and a
+/// config path, a tool path and a link target on these platforms all spell it
+/// the host's way, so the walk splits on the same one the join writes.
+const path_sep: u8 = std.fs.path.sep;
+
 fn copyInto(buf: []u8, bytes: []const u8) error{NameTooLong}![]const u8 {
     if (bytes.len > buf.len) return error.NameTooLong;
     @memcpy(buf[0..bytes.len], bytes);

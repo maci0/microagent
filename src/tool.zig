@@ -1326,24 +1326,23 @@ fn isCredentialPath(path: []const u8) bool {
 /// asked of the file those bytes reach, once every symlink on the path is
 /// followed, which is the only place the target's own name appears.
 ///
-/// The walk costs one readlink per call and nothing more: a path that is not a
-/// link is returned as it went in, so the read is the whole of it. A link the
-/// walk cannot settle (a chain longer than the kernel allows, a name it cannot
-/// hold) answers null, and the tool does what it would have done: a write then
-/// fails on its own `SymlinkLoop` rather than on a guess made here.
+/// The walk costs one readlink per component and nothing more: a path that is
+/// not a link is returned as it went in, so the read is the whole of it. A link
+/// the walk cannot settle (a chain longer than the kernel allows, a name it
+/// cannot hold) answers null, and the tool does what it would have done: a write
+/// then fails on its own `SymlinkLoop` rather than on a guess made here.
 ///
-/// The chain followed is the one the last component holds, which is where a
-/// committed link sits. A directory link in the middle of a path is not
-/// followed here, and does not have to be for the common case: a credential
-/// under such a directory carries a name the rule already refuses, so
-/// `links/.aws/credentials` is turned away on its own spelling and only a
-/// `links/.aws/config` is the name rule's own hole rather than this one's.
+/// Every component is followed, not only the last one, because that is the order
+/// the kernel opens a path in. A committed `docs/keys -> ~/.secrets` is a link
+/// the last component does not hold, and reading it that way answered the path
+/// unchanged: `docs`, `keys` and `openrouter` are ordinary names the rule above
+/// clears, and the key behind the link came back as a tool result.
 fn credentialPath(io: Io, arena: std.mem.Allocator, path: []const u8) ?[]const u8 {
     if (isCredentialPath(path)) return path;
     var name_buf: [std.fs.max_path_bytes]u8 = undefined;
     var cur_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
     var next_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
-    const target = net.resolveSymlinkTarget(io, std.Io.Dir.cwd(), path, &name_buf, &cur_buf, &next_buf) catch return null;
+    const target = net.resolveEveryComponent(io, std.Io.Dir.cwd(), path, &name_buf, &cur_buf, &next_buf) catch return null;
     if (!isCredentialPath(target)) return null;
     // The name to report is the file that was actually refused, which is the
     // target's own path rather than the link the model named. The slices above
@@ -3741,6 +3740,64 @@ test "a link with an ordinary name is refused when it reaches a credential" {
         .{root},
     ));
     try std.testing.expectEqualStrings("ordinary\n", allowed);
+}
+
+// The link above is on the last name, which is where a committed one usually
+// sits. A link in a directory component is the same escape the other way: the
+// model spells `docs/keys/openrouter`, every name in that path is ordinary, and
+// `readlink` on it says NotLink because the link is `docs/keys` and the kernel
+// follows it on the way to the file. Every component is walked for the same
+// reason the last one is.
+test "a link in a directory component is refused when it reaches a credential" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const keys = try std.fmt.allocPrint(arena, "{s}/.secrets", .{root});
+    try tmp.dir.createDirPath(io, ".secrets");
+    try tmp.dir.writeFile(io, .{
+        .sub_path = ".secrets/openrouter",
+        .data = "OR_SK-real-one\n",
+    });
+    try tmp.dir.createDirPath(io, "docs");
+    try tmp.dir.symLink(io, keys, "docs/keys", .{});
+    const through = try std.fmt.allocPrint(arena, "{s}/docs/keys/openrouter", .{root});
+
+    const read = try dispatch(arena, "read", try std.fmt.allocPrint(arena, "{{\"path\":\"{s}\"}}", .{through}));
+    try std.testing.expect(std.mem.startsWith(u8, read, "refused: "));
+    try std.testing.expect(std.mem.indexOf(u8, read, "OR_SK-real-one") == null);
+    try std.testing.expect(std.mem.indexOf(u8, read, ".secrets") != null);
+
+    const wrote = try dispatch(arena, "write", try std.fmt.allocPrint(
+        arena,
+        "{{\"path\":\"{s}\",\"content\":\"OR_SK-a-guess\"}}",
+        .{through},
+    ));
+    try std.testing.expect(std.mem.startsWith(u8, wrote, "refused: "));
+    try std.testing.expectEqualStrings("OR_SK-real-one\n", try tmp.dir.readFileAlloc(
+        std.testing.io,
+        ".secrets/openrouter",
+        arena,
+        .limited(64),
+    ));
+
+    // A directory link to an ordinary directory is still followed, so what the
+    // refusal turns away is the credential the target names and not the walk.
+    try tmp.dir.createDirPath(io, "notes");
+    try tmp.dir.writeFile(io, .{ .sub_path = "notes/todo.txt", .data = "ordinary\n" });
+    try tmp.dir.symLink(io, try std.fmt.allocPrint(arena, "{s}/notes", .{root}), "docs/notes", .{});
+    try std.testing.expectEqualStrings("ordinary\n", try dispatch(
+        arena,
+        "read",
+        try std.fmt.allocPrint(arena, "{{\"path\":\"{s}/docs/notes/todo.txt\"}}", .{root}),
+    ));
 }
 
 // The refusal `read` makes is no protection to the operator when the same

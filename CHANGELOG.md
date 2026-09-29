@@ -259,6 +259,26 @@ release, and `microagent update` moves you to it.
   `.gitignore` does not exclude, so a build product still leaves the gate
   alone.
 
+- A `#` comment on a table header no longer hides the table. The closing
+  bracket was read off the whole header line, so a `]` inside the comment
+  closed the header there: `[tools.ast] # off ] per the review` named a key
+  this file does not use, and every setting under it was dropped without a
+  word. A tool the operator switched off stayed on, and a `[sandbox]` table
+  left the sandbox unconfined. The comment comes off the header first.
+
+- A config file of exactly 64 KB is read. `readFileAlloc` refuses the moment the
+  limit it is given is reached, and it was given the cap itself, so the largest
+  file the documentation says a run accepts was reported as over it and every
+  setting in it was dropped for the built-in defaults.
+
+- The credential check follows a link in a directory component, not only one on
+  the last name. `docs/keys -> ~/.secrets` is a link the last component does
+  not hold, and `readlink` on `docs/keys/openrouter` answers `NotLink`, so a
+  model that spelled an ordinary path reached the key behind it: `read` returned
+  it as a tool result, which is re-sent to the provider on every later turn,
+  and `write` replaced the operator's key with whatever the model guessed. Every
+  component is now walked, in the order the kernel opens a path in.
+
 - The source citation gate fails again. `scripts/check-refs.sh` ended with an
   `echo` and the `exit 1` on the same line, so the exit was one more argument to
   the echo: every stale `src/path:line` citation in the tree was printed to

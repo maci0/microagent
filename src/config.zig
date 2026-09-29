@@ -608,18 +608,24 @@ const Header = struct { name: []const u8, array: bool };
 fn tableName(line: []const u8) ?Header {
     const array = std.mem.startsWith(u8, line, "[[");
     const open_at: usize = if (array) 2 else 1;
-    const close = std.mem.lastIndexOfScalar(u8, line, ']') orelse return null;
+    // The bracket that closes the header is the last one the header itself
+    // carries, and a `#` comment trails a header the way it trails a key, so
+    // the comment comes off first: `[tools.ast] # off ] per the review` closed
+    // at the bracket in the comment, and the name after it was not a comment
+    // and not empty, so the whole table was reported as a key this file does
+    // not use and every setting under it was dropped in silence.
+    const header = std.mem.trim(u8, stripComment(line), " \t\r");
+    const close = std.mem.lastIndexOfScalar(u8, header, ']') orelse return null;
     // The name ends before the bracket that closes it: one for a single table,
     // and two for an array, whose inner bracket is part of the header and not
     // of the name.
     const name_end = if (array) blk: {
-        if (close == 0 or line[close - 1] != ']') return null;
+        if (close == 0 or header[close - 1] != ']') return null;
         break :blk close - 1;
     } else close;
     if (name_end < open_at) return null;
-    const rest = std.mem.trim(u8, line[close + 1 ..], " \t");
-    if (rest.len != 0 and rest[0] != '#') return null;
-    const name = std.mem.trim(u8, line[open_at..name_end], " \t");
+    if (std.mem.trim(u8, header[close + 1 ..], " \t").len != 0) return null;
+    const name = std.mem.trim(u8, header[open_at..name_end], " \t");
     if (name.len == 0) return null;
     return .{ .name = name, .array = array };
 }
@@ -1021,6 +1027,23 @@ test "a comment trails a key, a value and a table header" {
     const labelled = parse(arena, "[model] # somebody else's\nskills = [\"x\"]\n");
     try std.testing.expect(labelled.problem == null);
     try std.testing.expect(labelled.skills == null);
+
+    // A bracket in the comment closes the header, so `[tools.ast] # off ]` was
+    // read as a name that was neither empty nor a comment: the whole table was
+    // reported as a key this file does not use, and every key under it was
+    // dropped without a word. The tool stayed on, and nothing named it.
+    const bracketed = parse(
+        arena,
+        "[sandbox] # see ] here\nenabled = true\n",
+    );
+    try std.testing.expect(bracketed.problem == null);
+    try std.testing.expect(bracketed.sandbox.enabled);
+
+    // And a name that is not ours, with a bracket in the comment, is still not
+    // ours: this is about where the header ends, not about what follows it.
+    const bracketed_ours = parse(arena, "[tools.ast] # off ] per the review\nenabled = false\n");
+    try std.testing.expect(bracketed_ours.problem == null);
+    try std.testing.expect(bracketed_ours.disabled_tools.contains(.ast));
 }
 
 // A `#` between the quotes is text, so the closing quote is found before any
