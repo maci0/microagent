@@ -55,7 +55,7 @@ def main() -> int:
     print(f"{job.name}: {stats.get('n_completed_trials', 0)} trials, {stats.get('n_errored_trials', 0)} errored")
     print(f"in={stats.get('n_input_tokens')} out={stats.get('n_output_tokens')} tokens")
 
-    rows = []
+    scored = []
     for trial in sorted(job.iterdir()):
         trial_result = trial / "result.json"
         if not trial_result.is_file():
@@ -64,15 +64,11 @@ def main() -> int:
         verifier = data.get("verifier_result") or {}
         reward = (verifier.get("rewards") or {}).get("reward")
         agent = data.get("agent_result") or {}
-        started, finished = data.get("started_at"), data.get("finished_at")
-        rows.append((data.get("task_name") or trial.name, reward, agent, started, finished))
-    if not rows:
-        return 0
-    for name, reward, agent, started, finished in rows:
         tokens = f"{agent.get('n_input_tokens', 0)}/{agent.get('n_output_tokens', 0)}"
-        wall = seconds_between(started, finished)
-        print(f"  {reward!s:>5}  in/out {tokens:>14}  {wall:>7}  {name}")
-    scored = [r for _, r, *_ in rows if r is not None]
+        wall = seconds_between(data.get("started_at"), data.get("finished_at"))
+        print(f"  {reward!s:>5}  in/out {tokens:>14}  {wall:>7}  {data.get('task_name') or trial.name}")
+        if reward is not None:
+            scored.append(reward)
     if scored:
         print(f"mean reward over {len(scored)} scored: {sum(scored) / len(scored):.3f}")
     return 0

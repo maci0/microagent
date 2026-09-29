@@ -633,7 +633,15 @@ fn debugEnabled(env: *const std.process.Environ.Map) bool {
 /// value is set. An unknown level reaches the provider as a 400 and costs a
 /// whole turn to learn that a level was mistyped.
 const reasoning_efforts = [_][]const u8{ "minimal", "low", "medium", "high", "none" };
-const reasoning_effort_names = "minimal, low, medium, high, none";
+/// The same list as the sentence an error needs, derived the way `key_var_names`
+/// is: a level added above is named by the message without either being told.
+const reasoning_effort_names = std.fmt.comptimePrint("{s}, {s}, {s}, {s}, {s}", .{
+    reasoning_efforts[0],
+    reasoning_efforts[1],
+    reasoning_efforts[2],
+    reasoning_efforts[3],
+    reasoning_efforts[4],
+});
 
 /// The level, written through `out`, or the message saying it is not one.
 /// The caller decides what a message does with it, because the flag path
@@ -5190,7 +5198,7 @@ test "a conversation with nothing to elide is not re-parsed every turn" {
     // anything to replace and the conversation is well past the soft limit.
     try openConversation(gpa, &msgs, "you are a coding agent", "fix the bug");
     var i: usize = 0;
-    while (i < 100) : (i += 1) try growConversation(gpa, &msgs, "assistant", "x" ** 8192);
+    while (i < 100) : (i += 1) try appendMessage(gpa, &msgs, "assistant", "x" ** 8192);
     const before = msgs.items.len;
     try std.testing.expect(before > conversation_soft_limit);
 
@@ -5201,25 +5209,17 @@ test "a conversation with nothing to elide is not re-parsed every turn" {
 
     // Still over the soft limit, but below the floor: the turn is skipped
     // rather than paying the parse again.
-    try growConversation(gpa, &msgs, "assistant", "y" ** 8192);
+    try appendMessage(gpa, &msgs, "assistant", "y" ** 8192);
     try compactMessages(std.testing.io, gpa, &msgs, scratch_state.allocator(), &floor);
     try std.testing.expect(msgs.items.len > before);
     try std.testing.expectEqual(before + conversation_soft_limit, floor);
 
     // Past the floor, a tool result big enough to elide is picked up again.
-    while (msgs.items.len <= floor) try growConversation(gpa, &msgs, "tool", "z" ** 8192);
+    while (msgs.items.len <= floor) try appendMessage(gpa, &msgs, "tool", "z" ** 8192);
     const grown = msgs.items.len;
     try compactMessages(std.testing.io, gpa, &msgs, scratch_state.allocator(), &floor);
     try std.testing.expectEqual(conversation_soft_limit, floor);
     try std.testing.expect(msgs.items.len < grown);
-}
-
-// Appends a message to a conversation, the way a turn does: the message goes
-// on in `appendMessage`'s own spelling, separator included, and the array stays
-// open because the run's buffer is open, which is the shape `compactMessages`
-// reads back.
-fn growConversation(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), role: []const u8, blob: []const u8) !void {
-    try appendMessage(gpa, msgs, role, blob);
 }
 
 // Reads a conversation back the way compaction does: the buffer is the open

@@ -151,7 +151,7 @@ def api_key() -> str:
     )
 
 
-def checked_int(name: str, raw: str, minimum: int = 1) -> int:
+def checked_int(name: str, raw: str) -> int:
     """One whole-number value, refused here for the reason `int_env` gives. The
     value and its name are passed in, so a knob with no default of its own is
     checked by the same rules as one that has."""
@@ -159,18 +159,18 @@ def checked_int(name: str, raw: str, minimum: int = 1) -> int:
         value = int(raw)
     except ValueError:
         raise RuntimeError(f"{name} must be a whole number, got {raw!r}") from None
-    if value < minimum:
-        raise RuntimeError(f"{name} must be at least {minimum}, got {raw!r}")
+    if value < 1:
+        raise RuntimeError(f"{name} must be at least 1, got {raw!r}")
     return value
 
 
-def int_env(name: str, default: str, minimum: int = 1) -> int:
+def int_env(name: str, default: str) -> int:
     """A whole-number knob read from the host environment. An empty value is
     not a value, and a bad one names the variable instead of surfacing as a
     ValueError from int() with no indication of which knob it was. A knob the
     binary reads as a ceiling is refused here too, so a mistyped value stops
     the run before a container is started rather than inside one."""
-    return checked_int(name, trimmed_env(name) or default, minimum)
+    return checked_int(name, trimmed_env(name) or default)
 
 
 def max_tokens() -> str | None:
