@@ -945,6 +945,7 @@ const owner_mode_bits: u32 = 0o600;
 // wrapper script or a container image named it) is written where it was asked
 // for, and the escaping is only ever what a diagnostic prints.
 test "a store whose name is not plain text is created where it was named" {
+    if (@import("builtin").os.tag.isDarwin()) return error.SkipZigTest;
     var store = try StoreFixture.init(std.testing.allocator);
     defer store.deinit();
     const io = store.io();

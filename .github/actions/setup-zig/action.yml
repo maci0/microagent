@@ -22,7 +22,7 @@ runs:
 
     - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
       with:
-        zig-version: ${{ steps.zig.outputs.version }}
+        version: ${{ steps.zig.outputs.version }}
 
     # A cold runner compiles the toolchain's own cache and std from scratch,
     # which is most of a job's wall clock, and the cross build of every

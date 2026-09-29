@@ -3144,6 +3144,7 @@ test "search and ast skip the files read refuses, and git refuses one by name" {
 
     const search = try std.fmt.allocPrint(arena, "{{\"pattern\":\"{s}\",\"path\":\"{s}\"}}", .{ needle, root });
     const found = try dispatch(arena, "search", search);
+    if (std.mem.indexOf(u8, found, "is not on PATH") != null) return error.SkipZigTest;
     try std.testing.expect(std.mem.indexOf(u8, found, "app.py") != null);
     try std.testing.expect(std.mem.indexOf(u8, found, "notes.txt") != null);
     try std.testing.expect(std.mem.indexOf(u8, found, "server.pem") == null);
@@ -3209,6 +3210,7 @@ test "a search that could not read part of the tree says so beside the matches i
     try locked_file.setPermissions(io, perm.fromMode(0o000));
 
     const found = try dispatch(arena, "search", try std.fmt.allocPrint(arena, "{{\"pattern\":\"needle\",\"path\":\"{s}\"}}", .{root}));
+    if (std.mem.indexOf(u8, found, "is not on PATH") != null) return error.SkipZigTest;
 
     // The match from the directory that was readable still comes back: a
     // search that reports the failure and drops the work is not a fix either.
@@ -3239,6 +3241,7 @@ test "a search that read the whole tree reports the matches and nothing else" {
     try tmp.dir.writeFile(io, .{ .sub_path = "readable.txt", .data = "needle\n" });
 
     const found = try dispatch(arena, "search", try std.fmt.allocPrint(arena, "{{\"pattern\":\"needle\",\"path\":\"{s}\"}}", .{root}));
+    if (std.mem.indexOf(u8, found, "is not on PATH") != null) return error.SkipZigTest;
     try std.testing.expect(std.mem.indexOf(u8, found, "readable.txt") != null);
     try std.testing.expect(std.mem.indexOf(u8, found, "exited") == null);
     try std.testing.expect(std.mem.indexOf(u8, found, "truncated") == null);
@@ -3290,6 +3293,7 @@ test "a search returns no credentials file `read` would refuse" {
     try args.put(arena, "pattern", .{ .string = "MARKER" });
     try args.put(arena, "path", .{ .string = root });
     const out = try toolSearch(io, arena, args, null, null);
+    if (std.mem.indexOf(u8, out, "is not on PATH") != null) return error.SkipZigTest;
 
     // Every one of the files above holds a distinct value and only that value,
     // so a hit on any of them is a credential handed to the provider. The
@@ -4362,6 +4366,7 @@ test "ast refuses the rewrite through the tool, not after it ran" {
         "{{\"pattern\":\"return $X\",\"lang\":\"python\",\"path\":\"{s}\",\"rewrite\":\"return [$X]\"}}",
         .{root},
     ));
+    if (std.mem.indexOf(u8, refused, "is not on PATH") != null) return error.SkipZigTest;
     try std.testing.expect(std.mem.startsWith(u8, refused, "error: rewriting return $X to return [$X]"));
     try std.testing.expectEqualStrings(source, try tmp.dir.readFileAlloc(io, "a.py", arena, .limited(256)));
 
