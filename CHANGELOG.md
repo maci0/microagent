@@ -61,6 +61,12 @@ release, and `microagent update` moves you to it.
 
 ### Changed
 
+- The session log store is walked and sorted once per run rather than twice. A run listed, copied
+  and sorted the whole store before opening its log and again after, over a directory of up to 200
+  names, and both passes settled on the same size. The retention window is applied once, with the
+  run's own log already in place, and on the path where no log could be opened, which is the case
+  the pre-open pass was there for.
+
 - The run reads `AGENTS.md` from the working directory when it starts and appends it to the system
   prompt, after the operator's own addendum. `agents_files` names other paths, in order, and an
   empty list turns the read off. Repository content the run follows as instructions is the

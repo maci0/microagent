@@ -195,25 +195,26 @@ pub fn open(io: Io, arena: std.mem.Allocator, session_dir: []const u8, model: []
         net.note(io, arena, "microagent: the session directory {s} could not be created ({s}); the rest of this run is not recorded\n", .{ shown, @errorName(err) });
         return null;
     };
-    // The store is pruned before the log is opened, not after: a run whose
-    // stamp is a name the store already holds is exactly the run that needs
-    // the retention window, and it is the one that returned above without
-    // reaching a prune placed after the open. The clock a wrong machine reads
-    // is the ordinary way to get there, and every pre-1970 stamp is zero, so
-    // every later run collides on the same names.
     const now_ns = Io.Clock.real.now(io).nanoseconds;
-    pruneSessions(io, arena, session_dir, now_ns);
     const stamp = logStamp(now_ns);
-    const file = createSessionLog(io, arena, session_dir, stamp) orelse {
+    // The store is pruned once, with this run's own log already in place, so
+    // the count window counts the log the run is writing rather than leaving the
+    // store one past it. Pruning before the open as well cost a second full
+    // walk and a second sort of the whole store on every run start, over a
+    // directory of a couple of hundred names.
+    //
+    // A run whose stamp is a name the store already holds is the case the
+    // ordering was for, and it is the one that returns here without a log: a
+    // clock set before 1970 reads zero, so every later run collides on the same
+    // names. The prune below runs on that path too, so the retention window is
+    // applied whether or not a log was opened.
+    const file = createSessionLog(io, arena, session_dir, stamp);
+    pruneSessions(io, arena, session_dir, now_ns);
+    const opened = file orelse {
         net.note(io, arena, "microagent: no session log could be opened under {s}; the rest of this run is not recorded\n", .{shown});
         return null;
     };
-    // The prune above counts the store before this run's own log joins it, so
-    // a machine that keeps ending its turn here settles on one more than the
-    // window the store is kept at. Pruning again with the log in place ends it
-    // on the number rather than one past it.
-    pruneSessions(io, arena, session_dir, now_ns);
-    return .{ .file = file, .cwd = cwd, .model = model, .dir = session_dir };
+    return .{ .file = opened, .cwd = cwd, .model = model, .dir = session_dir };
 }
 
 /// The stamp a run's log is named from, from a clock reading in nanoseconds. A
@@ -912,6 +913,39 @@ test "the session store keeps the most recent logs and drops the rest" {
     const newest = try std.fmt.allocPrint(arena, "{d}.jsonl", .{total});
     try store.tmp.dir.access(io, newest, .{});
     try std.testing.expectError(error.FileNotFound, store.tmp.dir.access(io, "1.jsonl", .{}));
+}
+
+// The store `open` leaves behind is the window, not one past it. The prune runs
+// after the log is created, so the run's own log is one of the names the count
+// window sees. This holds the size the run settles on rather than the order the
+// two prunes ran in: either ordering ends on the window, and what the single
+// prune buys is that the store is walked and sorted once per run rather than
+// twice.
+test "a run's own log is counted by the retention window, not left past it" {
+    var store = try StoreFixture.init(std.testing.allocator);
+    defer store.deinit();
+    const io = store.io();
+    const arena = store.arena();
+    const dir_path = try store.path();
+
+    // A store already at the window, so this run's log is the one that has to
+    // push it over for the ordering to show anything. The stamps are a
+    // nanosecond apart ending just before the real clock `open` reads, because
+    // a store seeded with 1970 stamps is one the age window empties before the
+    // count window is ever asked.
+    const now_ns = Io.Clock.real.now(io).nanoseconds;
+    var i: usize = 0;
+    while (i < max_session_logs) : (i += 1) {
+        const name = try std.fmt.allocPrint(arena, "{d}.jsonl", .{@as(u128, @intCast(now_ns)) - (max_session_logs - i)});
+        try store.tmp.dir.writeFile(io, .{ .sub_path = name, .data = "{}" });
+    }
+
+    var session: ?Session = open(io, arena, dir_path, "test/model") orelse return error.TestUnexpectedResult;
+    defer close(io, &session);
+
+    // The window, with the log this run opened among them: not the window plus
+    // one, and not the window minus one either.
+    try std.testing.expectEqual(max_session_logs, try countSessionLogs(io, arena, dir_path));
 }
 
 // A record's `cwd` is the directory the run worked in, which on most machines

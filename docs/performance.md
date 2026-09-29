@@ -116,6 +116,7 @@ run-to-run noise, so there is no build flag to reach for either.
 | the sandbox path check | a `realpath` of `.` per `write` and `edit` | **none** | the working directory is `writable_roots[0]`, taken at startup; a `realpath` is an `openat`, a `readlink` and a `close` |
 | a connection to a host with several addresses, default config | 4,607 ms before the first request | **2,820 ms** | `std.net.HostName.connect` dials every address a name resolves to as its own async task and keeps the first, and `Io.Threaded` runs a task inline when every async slot is busy -- four slots for four handshakes and their fan-out, so a connection cost the sum of the host's addresses instead of the fastest and the handshakes queued behind each other. Sixteen slots is the measured knee; the wait is per connection and a run opens several |
 | the four presets at run start, default config | 2,820 ms before the first request | **0.6 ms** | none of them is handshaken: their tools and schemas are in this binary, so the model sees them with no request, and the first call to one of their tools is what connects. The row above still governs that call, and every keyed preset, `url` server and provider connection |
+| the session store walked per run | two full walks and two sorts | **one walk, one sort** | `session.open` pruned before creating the log and again after, so every run start listed, copied and sorted the whole store twice over a directory of up to 200 names. Pruning once with the run's own log already in place settles on the same size, and it runs on the path where no log could be opened as well, which is the case the pre-open prune was for |
 
 Four of the rows above are one body of work on one run, and they compound. Between `v0.4.0` and the
 tree that carries them, client instructions for 3000 turns of the always-calls-a-tool loop fall from
@@ -255,6 +256,7 @@ guard fails, not merely that the guard exists.
 | retry waits inside the budget | `a wait the budget cannot cover` | present |
 | bounded turn-arena retention | `a turn that outgrows the retained size` | present |
 | session pruning by path | `a log in a subdirectory is pruned` | present |
+| the session store walked once per run | `a run's own log is counted by the retention window, not left past it` | not defeated: both orderings end on the window, so the guard holds the size rather than the count of walks |
 | escaper correctness | `a fuzzed byte string leaves a JSON string that reads back as itself` | fuzzer |
 | MCP servers started before any handshake | `every server is started before any of them is asked to initialize` | defeated: two servers connected to one, test fails |
 | a large skill listed from its head | `a large skill is listed from its head, and loads whole` | defeated: the run arena holds the file, and the 64 KB bound fails by 3x |
