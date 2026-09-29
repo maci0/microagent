@@ -2042,8 +2042,7 @@ fn streamChat(
                 // each retry is a second billable
                 // refusal. The header wins where it is a number this run is
                 // willing to wait, and the schedule stands where it is not.
-                const asked = net.retryAfterMs(response.head.bytes, net.nowSeconds(io));
-                const wait = asked orelse net.retryBackoffMs(attempt, max_backoff_ms);
+                const wait = retryWaitMs(response.head.bytes, net.nowSeconds(io), attempt);
                 // Three outcomes, each with its own reason. They are spelled
                 // out rather than as a block with a `break` out of it, because
                 // the break landed on the budget note below and reported a
@@ -3323,6 +3322,29 @@ fn waitBeforeRetry(io: Io, arena: std.mem.Allocator, url: []const u8, attempt: u
         return false;
     };
     return true;
+}
+
+/// The wait before attempt `attempt + 1` to a response the provider refused:
+/// the one its `Retry-After` names, and the run's own backoff where the header
+/// names none this run is willing to wait.
+///
+/// The header wins where it names a wait, and the schedule stands where it does
+/// not, because the schedule is 1 s and 2 s and a provider that says "come
+/// back in 30" is still refusing at second 2. Zero is not a wait, so a header
+/// that reads as one does not get to spend the backoff's place. A `Retry-After`
+/// date the run's clock has already passed is the ordinary way to reach it: the
+/// date form is the one a CDN or gateway computes against its own clock sends,
+/// and two machines' clocks a minute apart is a smaller disagreement than the
+/// run is likely to have with either of them. A literal `retry-after: 0`
+/// reaches it too. Either way the header named a wait that has already
+/// elapsed, which is a reason to try again and not a reason to try again at
+/// once: taking the zero sent all three attempts within milliseconds of each
+/// other, three billable refusals from a provider that had asked for a pause,
+/// and the backoff this schedule exists for never ran at all.
+fn retryWaitMs(head: []const u8, now_seconds: i64, attempt: u32) u64 {
+    const backoff = net.retryBackoffMs(attempt, max_backoff_ms);
+    const asked = net.retryAfterMs(head, now_seconds) orelse return backoff;
+    return if (asked > 0) asked else backoff;
 }
 
 /// The wait a backoff or a `Retry-After` asks for. It sleeps on
@@ -6262,6 +6284,54 @@ test "a Retry-After date becomes a wait, read against the clock it names" {
     // A deadline further out than this run will sit out is the ceiling, on
     // either form.
     try std.testing.expectEqual(@as(?u64, net.max_retry_after_ms), net.retryAfterMs(retryAfterDateHead(&head, now, 3600), now));
+}
+
+// The parser reading a past date as zero is right: the wait it names has
+// elapsed. Spending that zero as the run's wait is not, and the two are read
+// apart here. The date form is what a CDN or gateway computes against its own
+// clock sends, so a run whose clock runs a minute ahead of the provider's reads
+// every one of those headers as a deadline already past, and a run that took
+// the zero sent all three attempts within milliseconds of each other: three
+// billable refusals from a provider that had asked for a pause, and the backoff
+// that exists for exactly that never ran.
+test "a Retry-After that names no wait falls back to the backoff, not to zero" {
+    const now = net.nowSeconds(std.testing.io);
+    var head: [160]u8 = undefined;
+
+    // A real wait is the provider's, taken whole: the header wins over the
+    // schedule because the schedule is 1 s and 2 s and a provider asking for
+    // thirty is still refusing at second two.
+    try std.testing.expectEqual(@as(u64, 30_000), retryWaitMs(retryAfterDateHead(&head, now, 30), now, 1));
+    try std.testing.expectEqual(
+        @as(u64, 30_000),
+        retryWaitMs("HTTP/1.1 429 Too Many Requests\r\nretry-after: 30\r\n\r\n", now, 1),
+    );
+
+    // A date the run's clock has already passed, and a literal zero, both name
+    // no wait at all. Each is the schedule for the attempt, which is what the
+    // three attempts between a first refusal and a fourth would be without a
+    // header saying otherwise.
+    for ([_]i64{ -5, -1, 0 }) |past| {
+        try std.testing.expectEqual(
+            net.retryBackoffMs(1, max_backoff_ms),
+            retryWaitMs(retryAfterDateHead(&head, now, past), now, 1),
+        );
+    }
+    try std.testing.expectEqual(
+        net.retryBackoffMs(1, max_backoff_ms),
+        retryWaitMs("HTTP/1.1 429 Too Many Requests\r\nretry-after: 0\r\n\r\n", now, 1),
+    );
+
+    // The schedule moves with the attempt, so the fallback is a backoff rather
+    // than a constant that happens to be nonzero.
+    try std.testing.expectEqual(@as(u64, 1000), retryWaitMs("HTTP/1.1 429 Too Many Requests\r\nretry-after: 0\r\n\r\n", now, 1));
+    try std.testing.expectEqual(@as(u64, 2000), retryWaitMs("HTTP/1.1 429 Too Many Requests\r\nretry-after: 0\r\n\r\n", now, 2));
+
+    // No header is the same case as a header naming nothing.
+    try std.testing.expectEqual(
+        net.retryBackoffMs(2, max_backoff_ms),
+        retryWaitMs("HTTP/1.1 429 Too Many Requests\r\ncontent-length: 0\r\n\r\n", now, 2),
+    );
 }
 
 /// A 429 head whose `Retry-After` is an IMF-fixdate naming an instant

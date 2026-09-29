@@ -256,6 +256,19 @@ release, and `microagent update` moves you to it.
   signs commits has no key the runner holds, and the fixture commit was then
   the only thing in the test that failed, for a reason unrelated to what it
   tests.
+- A `Retry-After` that names no wait no longer spends the backoff's place. The
+  date form is the one a CDN or gateway computes against its own clock sends, so
+  a run whose clock runs a minute ahead of the provider's read every one of those
+  headers as a deadline already past, and a literal `retry-after: 0` reaches the
+  same value. The zero was taken as the wait, so all three attempts went out
+  within milliseconds of each other: three billable refusals from a provider that
+  had asked for a pause, with the backoff that exists for exactly that never
+  running. A header naming a real wait still wins over the schedule; a header
+  naming none, and a header absent, both fall back to it.
+- `MICROAGENT_STALL_TIMEOUT` is checked by the Harbor adapter before the
+  container starts, like every other knob it hands the binary. A mistyped value
+  was forwarded verbatim and refused inside the container, after a container
+  start and a binary upload.
 - A session record's `elapsed_ms` no longer counts a suspend as model time. The
   stamp and the reading were both taken on the clock `--budget` is measured on,
   which keeps counting while the machine is off, so a laptop closed for eight

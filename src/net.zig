@@ -360,7 +360,10 @@ pub fn retryAfterMs(head_bytes: []const u8, now_seconds: i64) ?u64 {
 /// and comes back while the server is still refusing, once per step.
 ///
 /// A date already past is zero rather than null: the wait it names has elapsed,
-/// and the backoff schedule would add to it.
+/// so the value off the wire is a wait of none rather than an absent one. What
+/// the caller does with a none is its own policy and not this header's: the
+/// agent run spends its backoff there, so a gateway whose clock runs ahead of
+/// the run's does not talk it into three refusals in a row.
 fn retryAfterValueMs(raw: []const u8, now_seconds: i64) ?u64 {
     if (std.fmt.parseInt(u64, raw, 10)) |seconds| {
         // Saturating, so a count too large for milliseconds is the ceiling

@@ -289,6 +289,31 @@ def validate_env() -> None:
     reasoning_effort()
     max_tokens()
     base_url()
+    # The stall timeout is a knob with no default of its own, so it is checked
+    # by the reader the rest use: the binary reads it as a ceiling and refuses
+    # anything that is not a whole number of at least 1, and refusing it there
+    # costs a container start and a binary upload before the reason is printed.
+    stall_timeout()
+    # The same value read here is the one `run` forwards, so a knob checked for
+    # one timeout and handed another cannot happen.
+
+
+def stall_timeout() -> str | None:
+    """The response-socket stall timeout, as the string the container is
+    handed, or None when the operator set none and the binary's own default
+    stands.
+
+    Read as a whole number of seconds by the same reader as the other numeric
+    knobs, so a mistyped value stops the run at the command line rather than
+    inside a container that has already been brought up and paid for. The value
+    is returned as written rather than as the int it parses to, because it is
+    handed to the container as the string the operator wrote.
+    """
+    value = trimmed_env("MICROAGENT_STALL_TIMEOUT")
+    if not value:
+        return None
+    checked_int("MICROAGENT_STALL_TIMEOUT", value)
+    return value
 
 
 def normalize_model(model_name: str | None) -> str:
@@ -472,8 +497,9 @@ class Microagent(BaseAgent):
         # A provider that is merely slow hits the 120 s stall default (NVIDIA
         # NIM took over two minutes to a first token on a large prompt), and the
         # timeout is the caller's to raise, so it has to reach the container.
-        stall = trimmed_env("MICROAGENT_STALL_TIMEOUT")
-        if stall:
+        # Read through the same reader `validate_env` checked, so the value
+        # refused at the command line is the one this run would have been given.
+        if stall := stall_timeout():
             env["MICROAGENT_STALL_TIMEOUT"] = stall
 
         started = self.logs_dir / "microagent-stdout.txt"
