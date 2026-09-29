@@ -2028,6 +2028,12 @@ fn streamChat(
             // carries the refusal.
             if (response.head.status == .bad_request and !dropped_optional and opts.reasoning_effort != null) {
                 dropped_optional = true;
+                // The count is the attempt within one request body, so a body
+                // that changed restarts it. Carrying it over spent one of the
+                // three attempts the transient-failure schedule below is
+                // documented to have, and a provider that then answered 429
+                // got one retry where it gets two.
+                attempt = 0;
                 var plain = opts;
                 plain.reasoning_effort = null;
                 body_now = try buildBody(arena, plain, msgs);
@@ -2654,13 +2660,21 @@ fn applyUsage(result: *chat_mod.ChatResult, u: UsageFields, unparsable: *usize) 
         if (v != 0) result.total_from_provider = true;
     }
     if (chat_mod.maybeNum(u.reasoning, unparsable)) |v| result.reasoning_tokens = v;
-    if (chat_mod.maybeNum(u.cached, unparsable)) |v| result.cached_tokens = v;
-    if (result.cached_tokens == 0) {
-        if (chat_mod.maybeNum(u.cache_hit, unparsable)) |v| result.cached_tokens = v;
+    // The three spellings are ranked within the frame, not against the folded
+    // total, so a frame carrying none of them leaves what the earlier frames
+    // billed. A zero is the field left where it started rather than a count
+    // the provider stands behind, the same reason a zero total is summed from
+    // the parts above: a stream that spreads its usage over frames and closes
+    // with the counter at its default reported no cached prompt for a run the
+    // provider served out of its cache.
+    var frame_cached: ?u64 = null;
+    for ([_]?std.json.Value{ u.cached, u.cache_hit, u.cache_read }) |spelling| {
+        if (frame_cached != null) break;
+        if (chat_mod.maybeNum(spelling, unparsable)) |v| {
+            if (v != 0) frame_cached = v;
+        }
     }
-    if (result.cached_tokens == 0) {
-        if (chat_mod.maybeNum(u.cache_read, unparsable)) |v| result.cached_tokens = v;
-    }
+    if (frame_cached) |v| result.cached_tokens = v;
     // A provider that has sent no total of its own gets the sum of the parts
     // recomputed on every frame, so a stream that splits the parts across
     // frames reports what all of them add up to rather than the first frame's
@@ -4854,6 +4868,23 @@ test "a later usage frame does not zero the counters an earlier one set" {
     try std.testing.expectEqual(@as(u64, 18), sink.result.completion_tokens);
     try std.testing.expectEqual(@as(u64, 768), sink.result.cached_tokens);
     try std.testing.expectEqual(@as(u64, 918), sink.result.total_tokens);
+}
+
+// A frame that spells the cache counter as a plain zero carries no count, the
+// same way a frame that leaves the field out does. The three spellings are
+// ranked within the frame, so reading them against the folded total let a
+// later zero erase what the frame before it billed: the usage line then
+// reported no cached prompt for a run that was served almost entirely from
+// the provider's cache.
+test "a later frame spelling the cache counter zero keeps the count folded in" {
+    var sink = FrameSink.init(std.testing.allocator);
+    defer sink.deinit();
+
+    try sink.feed("{\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":900,\"cache_read_input_tokens\":768}}");
+    try std.testing.expectEqual(@as(u64, 768), sink.result.cached_tokens);
+
+    try sink.feed("{\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":900,\"prompt_tokens_details\":{\"cached_tokens\":0}}}");
+    try std.testing.expectEqual(@as(u64, 768), sink.result.cached_tokens);
 }
 
 // A stream that splits the parts across frames is the same stream: the total
