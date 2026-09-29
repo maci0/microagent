@@ -484,12 +484,20 @@ SHELLCHECK_OPTS := -x --enable=$(SHELLCHECK_CHECKS)
 # takes a trailing reason (shellcheck parses the rest of the line as more
 # checks and fails the directive), and an unmarked comment above a suppression
 # is indistinguishable from the comment that explains the code, so the marker
-# is what makes the two tellable apart. The scripts carry seven suppressions
-# today, six of them `# shellcheck disable=SC2086` for a word list that has to
-# arrive as several words and one `# shellcheck disable=SC2016,SC2086` on a
-# line that needs both, and each silences a finding that is still there, so
-# this asks a new one to say the same thing the existing ones do. The two more
-# in release.yml are held to the same rule by lint-ci.
+# is what makes the two tellable apart. The scripts carry their suppressions
+# today, most of them `# shellcheck disable=SC2086` for a word list that has to
+# arrive as several words, and each silences a finding that is still there, so
+# this asks a new one to say the same thing the existing ones do. The two in
+# release.yml are held to the same rule by lint-ci.
+#
+# A reason is not what makes a suppression narrow. `# shellcheck disable=` and
+# `# shellcheck disable=all` both parse, and a `# because:` line above either
+# one satisfies the rule above, so a blanket directive could have arrived with
+# its reason written out and the gate would have called it justified. The first
+# silences nothing at all; the second silences every check, the six optional
+# ones below included, which is a finding nobody can judge later in a much
+# worse place. So a directive also has to name what it silences, the way a
+# `# noqa` names its rule for ruff's PGH004.
 #
 # awk, not grep, because the question spans the comment block above a line and
 # grep reads a file a line at a time. The marker is matched as three whole
@@ -503,13 +511,15 @@ lint-shell:
 	tmp="$$(mktemp)"; \
 	trap 'rm -f "$$tmp"' EXIT; \
 	awk 'function why(line,   words) { sub(/^[[:space:]]+/, "", line); return split(line, words, /[[:space:]]+/) >= 3 && words[1] == "#" && words[2] == "because:" && length(words[3]) > 0 } \
-	  /^[[:space:]]*#[[:space:]]*shellcheck[= ]disable=/ { if (!marked) print FILENAME ":" FNR ": " $$0; marked = 0; next } \
+	  function unscoped(line,   words, n, i) { sub(/^[[:space:]]*#[[:space:]]*shellcheck[= ]disable=/, "", line); gsub(/[[:space:]]/, "", line); if (line == "") return 1; n = split(line, words, ","); for (i = 1; i <= n; i++) if (words[i] == "" || words[i] == "all") return 1; return 0 } \
+	  /^[[:space:]]*#[[:space:]]*shellcheck[= ]disable=/ { if (!marked) print FILENAME ":" FNR ": " $$0; if (unscoped($$0)) print FILENAME ":" FNR ": " $$0 " names no check of its own, and a reason does not make a blanket one narrow"; marked = 0; next } \
 	  /^[[:space:]]*#/ { if (why($$0)) marked = 1; next } \
 	  { marked = 0 }' $$files > "$$tmp"; \
 	test ! -s "$$tmp" || { cat "$$tmp" >&2; \
-	  echo "every shellcheck disable is preceded by a '# because:' line saying what it silences:" >&2; \
+	  echo "every shellcheck disable is preceded by a '# because:' line saying what it silences, and names the checks it silences:" >&2; \
 	  echo "  # because: the include flags hold two words per task and have to arrive as two" >&2; \
 	  echo "  # shellcheck disable=SC2086" >&2; \
+	  echo "'disable=' and 'disable=all' are refused: the first silences nothing and the second silences every check the gate enables" >&2; \
 	  exit 1; }; \
 	known="$$(shellcheck --list-optional | sed -n 's/^name:  *//p')"; \
 	test -n "$$known" || { echo "shellcheck --list-optional printed nothing, so SHELLCHECK_CHECKS cannot be checked against it" >&2; exit 1; }; \

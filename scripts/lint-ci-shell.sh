@@ -25,6 +25,12 @@
 # need two of them. Without that, the second silenced itself in silence and the
 # gate reported a body with an unreasoned suppression as a clean one.
 #
+# A body also has to name the checks it silences, for the reason the same rule
+# is enforced in the scripts: `disable=` and `disable=all` both parse, so
+# without it a step could have arrived silencing every check with its reason
+# written out, and the reason would be the only thing standing between a
+# blanket suppression and a body nothing checks.
+#
 # Usage: lint-ci-shell.sh <workflow.yaml> [workflow.yaml ...]
 set -eu
 
@@ -149,19 +155,27 @@ test -s "$tmp/manifest" || { echo "no run: body was extracted, so the workflows 
 awk -F'\t' '
   FNR == NR { where[$1] = $2; shift_of[$1] = $3; next }
   function why(line,   words) { sub(/^[[:space:]]+/, "", line); return split(line, words, /[[:space:]]+/) >= 3 && words[1] == "#" && words[2] == "because:" && length(words[3]) > 0 }
+  function unscoped(line,   words, n, i) {
+    sub(/^[[:space:]]*#[[:space:]]*shellcheck[= ]disable=/, "", line); gsub(/[[:space:]]/, "", line);
+    if (line == "") return 1;
+    n = split(line, words, ",");
+    for (i = 1; i <= n; i++) if (words[i] == "" || words[i] == "all") return 1;
+    return 0;
+  }
   function origin(   name) {
     name = FILENAME;
     sub("^.*/", "", name);
     sub("[.]sh$", "", name);
     return where[name];
   }
-  /^[[:space:]]*#[[:space:]]*shellcheck[= ]disable=/ { if (!marked) print origin() ": " $0; marked = 0; next }
+  /^[[:space:]]*#[[:space:]]*shellcheck[= ]disable=/ { if (!marked) print origin() ": " $0; if (unscoped($0)) print origin() ": " $0 " names no check of its own, and a reason does not make a blanket one narrow"; marked = 0; next }
   /^[[:space:]]*#/ { if (why($0)) marked = 1; next }
   { marked = 0 }
 ' "$tmp/manifest" "$tmp"/*.sh > "$tmp/reasons"
 if [ -s "$tmp/reasons" ]; then
   cat "$tmp/reasons" >&2
-  echo "every shellcheck disable in a workflow run: body is preceded by a '# because:' line saying what it silences:" >&2
+  echo "every shellcheck disable in a workflow run: body is preceded by a '# because:' line saying what it silences, and names the checks it silences:" >&2
+  echo "'disable=' and 'disable=all' are refused: the first silences nothing and the second silences every check the gate enables" >&2
   exit 1
 fi
 
