@@ -750,21 +750,12 @@ fn indexOutsideQuotes(raw: []const u8, sep: u8) ?usize {
 /// A line without its trailing `#` comment, for the values that are lists
 /// rather than single strings. `unquote` already does this for one value by
 /// looking for the closing quote first; a list has several, so the cut is made
-/// here, on a `#` that is not inside quotes.
+/// here, on a `#` that is not inside quotes. A line whose quote is never closed
+/// has no comment to cut and is taken whole, which is what a null from
+/// `indexOutsideQuotes` says either way.
 fn stripComment(raw: []const u8) []const u8 {
-    var quote: u8 = 0;
-    for (raw, 0..) |c, i| {
-        if (quote != 0) {
-            if (c == quote) quote = 0;
-            continue;
-        }
-        if (c == '"' or c == '\'') {
-            quote = c;
-            continue;
-        }
-        if (c == '#') return raw[0..i];
-    }
-    return raw;
+    const at = indexOutsideQuotes(raw, '#') orelse return raw;
+    return raw[0..at];
 }
 
 /// The pieces of a bracketed value, split on `sep` outside quotes, so a comma
