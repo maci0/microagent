@@ -115,7 +115,7 @@ help:
 	  'small                 ReleaseSmall binary' \
 	  'musl                  static musl binary for integrations/harbor, for this host ($(MUSL_ARCH))' \
 	  'version               the version build.zig.zon declares' \
-	  'test                  the whole unit test suite' \
+	  'test [FILTER=...]     the whole unit test suite, or only the tests FILTER names' \
 	  'test-sanitize         the same suite under the undefined-behavior sanitizer' \
 	  'test-one FILTER=...   only tests whose name contains FILTER' \
 	  'watch [FILTER=...]    rerun the suite on every source change, until Ctrl-C' \
@@ -230,8 +230,11 @@ musl: zig-version
 	cp $(BIN) $(MUSL_BINARY).tmp
 	mv $(MUSL_BINARY).tmp $(MUSL_BINARY)
 
+# `make test FILTER=...` is the same run `make test-one` makes, so the spelling
+# a contributor reaches for first is not the one that quietly ignores the
+# filter and runs the whole suite.
 test:
-	$(ZIG) build test --summary all
+	@if [ -n "$(FILTER)" ]; then $(MAKE) --no-print-directory test-one FILTER="$(FILTER)"; else $(ZIG) build test --summary all; fi
 
 # The same tests, compiled with the undefined-behavior sanitizer. The suite
 # passing tells a reader the assertions hold, not that no load, store or

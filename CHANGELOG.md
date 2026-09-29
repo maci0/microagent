@@ -46,6 +46,10 @@ release, and `microagent update` moves you to it.
   those two lines are written by hand: a release that skipped them published
   notes whose diff still pointed at the release before the one being read, and
   nothing downstream of a green gate read the link to notice.
+- `make test FILTER=...` runs the tests whose names contain `FILTER`, the same
+  run `make test-one` makes. `make test FILTER=...` was accepted and ignored, so
+  the obvious spelling of the one-test loop ran the whole suite, and the filter
+  that named nothing was never the one that said so.
 
 ### Changed
 
@@ -92,6 +96,12 @@ release, and `microagent update` moves you to it.
   base url and stop there. It is in the process table for the length of the
   run, where any user of the machine can read it, which is the reason a
   variable or the key file is the source to reach for.
+- A test skipped for want of a program the host does not have said nothing. The
+  `search` and `ast` tests delegate to `rg` and `ast-grep`, which a stock macOS
+  ships neither of, and one session test is macOS-only; each returned
+  `error.SkipZigTest`, which the runner counts as a pass, so a laptop without
+  ripgrep reported a green suite that had never run the search tool and named
+  no reason. Each now prints what it skipped and why.
 
 - The session store kept its 200 newest logs and nothing else, which is a size
   and not a period. On a machine that runs a few times a week, two hundred

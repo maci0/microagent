@@ -83,7 +83,7 @@ say nothing about the interpreter the adapter is installed into.
 
 ```sh
 make check                  # the gate: zig fmt --check, the linters, the tests, an optimized build
-make test-one FILTER="..."  # one test, while you are mid-edit
+make test-one FILTER="..."  # one test, while you are mid-edit (make test FILTER=... is the same run)
 make test-sanitize          # the same suite under the undefined-behavior sanitizer
 make watch                  # the suite again on every source change, until Ctrl-C
 make preflight              # name any tool check and lint need that is not on PATH
@@ -98,8 +98,9 @@ make check-unreleased       # the [Unreleased] entry has the five sections, once
 ### The gate
 
 `make check` runs, in order: `preflight`, `zig-version`, `check-targets`,
-`check-unreleased`, `fmt-check`, `lint` (`lint-versions`, `lint-lock`,
-`lint-pins`, shellcheck, `ruff check`, `ruff format --check`, yamllint), `zig build test`,
+`check-unreleased`, `check-readme`, `fmt-check`, `lint` (`lint-versions`,
+`lint-lock`, `lint-pins`, shellcheck, `ruff check`, `ruff format --check`,
+yamllint), `zig build test`,
 `zig build test-sanitize`, and `check-binary` (a `ReleaseSmall` build whose
 binary it then starts). These are the checks
 [.github/workflows/ci.yml](.github/workflows/ci.yml) runs, on the same Zig
@@ -188,6 +189,14 @@ spawns, and the Makefile exports the same two. Several tests assert on the
 exact bytes a `/bin/sh` printed, and a shell started under an `LC_ALL` naming a
 locale the host lacks opens with a `setlocale` warning on stderr, which fails
 them on a correct tree.
+
+A handful of tests need a program the host may not have: the `search` and `ast`
+tests delegate to `rg` and `ast-grep`, which a stock macOS ships neither of, and
+one session test is macOS-only. Each of those prints `skipped: ...` on stderr and
+returns `error.SkipZigTest`, which the test runner counts as a pass, so a green
+run on a machine without `rg` says nothing about the search tool. A local run
+with both programs on `PATH` is the run that covers them, and the macOS runners
+are what cover the session one.
 
 There is no generated code, and the Zig build regenerates no lockfile. The two
 lockfiles are inputs to the Python around the Zig, refreshed by hand:

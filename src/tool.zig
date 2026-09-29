@@ -3143,7 +3143,7 @@ test "search and ast skip the files read refuses, and git refuses one by name" {
 
     const search = try std.fmt.allocPrint(arena, "{{\"pattern\":\"{s}\",\"path\":\"{s}\"}}", .{ needle, root });
     const found = try dispatch(arena, "search", search);
-    if (std.mem.indexOf(u8, found, "is not on PATH") != null) return error.SkipZigTest;
+    try skipWithoutDelegatedProgram(found);
     try std.testing.expect(std.mem.indexOf(u8, found, "app.py") != null);
     try std.testing.expect(std.mem.indexOf(u8, found, "notes.txt") != null);
     try std.testing.expect(std.mem.indexOf(u8, found, "server.pem") == null);
@@ -3209,7 +3209,7 @@ test "a search that could not read part of the tree says so beside the matches i
     try locked_file.setPermissions(io, perm.fromMode(0o000));
 
     const found = try dispatch(arena, "search", try std.fmt.allocPrint(arena, "{{\"pattern\":\"needle\",\"path\":\"{s}\"}}", .{root}));
-    if (std.mem.indexOf(u8, found, "is not on PATH") != null) return error.SkipZigTest;
+    try skipWithoutDelegatedProgram(found);
 
     // The match from the directory that was readable still comes back: a
     // search that reports the failure and drops the work is not a fix either.
@@ -3240,7 +3240,7 @@ test "a search that read the whole tree reports the matches and nothing else" {
     try tmp.dir.writeFile(io, .{ .sub_path = "readable.txt", .data = "needle\n" });
 
     const found = try dispatch(arena, "search", try std.fmt.allocPrint(arena, "{{\"pattern\":\"needle\",\"path\":\"{s}\"}}", .{root}));
-    if (std.mem.indexOf(u8, found, "is not on PATH") != null) return error.SkipZigTest;
+    try skipWithoutDelegatedProgram(found);
     try std.testing.expect(std.mem.indexOf(u8, found, "readable.txt") != null);
     try std.testing.expect(std.mem.indexOf(u8, found, "exited") == null);
     try std.testing.expect(std.mem.indexOf(u8, found, "truncated") == null);
@@ -3292,7 +3292,7 @@ test "a search returns no credentials file `read` would refuse" {
     try args.put(arena, "pattern", .{ .string = "MARKER" });
     try args.put(arena, "path", .{ .string = root });
     const out = try toolSearch(io, arena, args, null, null);
-    if (std.mem.indexOf(u8, out, "is not on PATH") != null) return error.SkipZigTest;
+    try skipWithoutDelegatedProgram(out);
 
     // Every one of the files above holds a distinct value and only that value,
     // so a hit on any of them is a credential handed to the provider. The
@@ -4365,7 +4365,7 @@ test "ast refuses the rewrite through the tool, not after it ran" {
         "{{\"pattern\":\"return $X\",\"lang\":\"python\",\"path\":\"{s}\",\"rewrite\":\"return [$X]\"}}",
         .{root},
     ));
-    if (std.mem.indexOf(u8, refused, "is not on PATH") != null) return error.SkipZigTest;
+    try skipWithoutDelegatedProgram(refused);
     try std.testing.expect(std.mem.startsWith(u8, refused, "error: rewriting return $X to return [$X]"));
     try std.testing.expectEqualStrings(source, try tmp.dir.readFileAlloc(io, "a.py", arena, .limited(256)));
 
@@ -4377,11 +4377,24 @@ test "ast refuses the rewrite through the tool, not after it ran" {
         .{root},
     );
     const rename_res = try dispatch(arena, "ast", rename);
-    if (std.mem.indexOf(u8, rename_res, "is not on PATH") != null) return error.SkipZigTest;
+    try skipWithoutDelegatedProgram(rename_res);
     const once = try tmp.dir.readFileAlloc(io, "a.py", arena, .limited(256));
     try std.testing.expectEqualStrings("def f():\n    raise 1\n", once);
     _ = try dispatch(arena, "ast", rename);
     try std.testing.expectEqualStrings(once, try tmp.dir.readFileAlloc(io, "a.py", arena, .limited(256)));
+}
+
+/// Skips the calling test when the tool it delegates to is not installed, which
+/// is the ordinary case on a stock macOS: it ships git and neither ripgrep nor
+/// ast-grep, and the tool names the missing one and how to install it rather
+/// than failing. A skipped test is counted as passed, so the run is green
+/// either way and the summary names nothing: without this line a laptop with no
+/// ripgrep reports a suite that never ran the search or the ast tool, and the
+/// green says so about code it did not execute.
+fn skipWithoutDelegatedProgram(result: []const u8) error{SkipZigTest}!void {
+    if (std.mem.indexOf(u8, result, "is not on PATH") == null) return;
+    std.debug.print("\nskipped: the program this test delegates to is not on PATH, so it ran nothing\n", .{});
+    return error.SkipZigTest;
 }
 
 /// Asserts that a tool call took its whole process tree down with it. The
