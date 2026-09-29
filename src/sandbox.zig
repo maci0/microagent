@@ -574,6 +574,93 @@ test "seatbeltProfile denies writes, then allows the devices and each root" {
     , profile);
 }
 
+// A writable root is a value from the config file, and the profile it is
+// written into is an s-expression the kernel reads: a root that ended the
+// string early, or a line that ended the rule early, would grant writes the
+// deny above it closed. The profile is the whole boundary, so the harness
+// reads it back the way the parser does and holds every rule to the root it
+// came from. The corpus is the roots a config really carries, plus the ones a
+// hand-written case stops short of: quotes and backslashes, a control byte, a
+// non-ASCII path, a NUL, and an empty root.
+// `std.testing.fuzz` runs this corpus on every `zig build test`, and through the
+// fuzzer's mutations when the test binary is built in fuzz mode.
+const profile_corpus = [_][]const u8{
+    "",
+    "/",
+    "/work/project",
+    "/work/\"quoted\"",
+    "/work/back\\slash",
+    "/work/new\nline",
+    "/work/del\x7f",
+    "/work/nul\x00byte",
+    "/work/caf\u{00e9}/\u{65e5}\u{8a00}",
+    "/work/sp ace\t",
+    "\"\")\n(allow file-write*)\n",
+    "..",
+    "/a" ** 300,
+};
+
+test "a fuzzed writable root comes back out of the profile as itself" {
+    try std.testing.fuzz({}, fuzzSeatbeltProfile, .{ .corpus = &profile_corpus });
+}
+
+fn fuzzSeatbeltProfile(_: void, smith: *std.testing.Smith) !void {
+    var raw: [8 * 1024]u8 = undefined;
+    const root: []const u8 = if (smith.in) |seed| seed else raw[0..smith.slice(&raw)];
+
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    const roots = [_][]const u8{root};
+    const profile = try seatbeltProfile(arena, &roots);
+
+    // A root the writer leaves out is a root the run does not promise, and the
+    // only two reasons for it are the two the writer gives: nothing, or a
+    // control byte that could end the line.
+    const dropped = root.len == 0 or std.mem.indexOfAny(u8, root, &control_bytes) != null;
+
+    // Every rule on the profile is one rule of the shape the writer emits, and
+    // reading it back the way the kernel's parser does yields exactly the root
+    // that asked for it, once. A root that ended the string or the line early
+    // shows up here as a rule that will not parse or as a second one.
+    var read: std.ArrayList([]u8) = .empty;
+    defer read.deinit(arena);
+    var lines = std.mem.splitScalar(u8, profile, '\n');
+    while (lines.next()) |line| {
+        const rule = (try unquoteRule(arena, line)) orelse continue;
+        try read.append(arena, rule);
+    }
+    if (dropped) {
+        try std.testing.expectEqual(@as(usize, 0), read.items.len);
+        return;
+    }
+    try std.testing.expectEqual(@as(usize, 1), read.items.len);
+    try std.testing.expectEqualStrings(root, read.items[0]);
+}
+
+/// The bytes between the quotes of a `  (subpath "...")` line, unescaped the
+/// way the profile's own writer escaped them, or null when the line is not one
+/// rule of that shape.
+fn unquoteRule(arena: std.mem.Allocator, line: []const u8) std.mem.Allocator.Error!?[]u8 {
+    const rest = std.mem.trim(u8, line, " ");
+    if (!std.mem.startsWith(u8, rest, "(subpath \"")) return null;
+    if (!std.mem.endsWith(u8, rest, "\")")) return null;
+    const inner = rest["(subpath \"".len .. rest.len - "\")".len];
+    var out: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    while (i < inner.len) : (i += 1) {
+        if (inner[i] != '\\') {
+            try out.append(arena, inner[i]);
+            continue;
+        }
+        i += 1;
+        if (i >= inner.len) return null;
+        try out.append(arena, inner[i]);
+    }
+    return out.items;
+}
+
 test "a writable root the kernel refuses is named, escaped, with the reason" {
     var state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer state.deinit();

@@ -5438,6 +5438,126 @@ test "a deny entry longer than the token buffer is matched whole or not at all" 
     try std.testing.expect(deniedInCommand("echo alpha bravo charlie done", &short_list) != null);
 }
 
+// The deny list is what an operator writes to keep a command from running, and
+// the command is the model's, read out of the tree the run is pointed at, so
+// the matcher between them is a parser over untrusted bytes on a security
+// boundary: a shape it fails to match is a command the operator refused and
+// the run executes anyway. The hand-written cases above spell the words they
+// check; the corpus below is the entries and commands a config and a model
+// really produce (a bare name, a name with a path, an entry with a flag and a
+// path, a shell string with quoting and chaining, separators, empty entries,
+// a credential path, escapes and non-ASCII) and the fuzzer's mutations are the
+// mixtures of separators and casing nobody wrote down.
+// `std.testing.fuzz` runs this corpus on every `zig build test`, and through
+// the fuzzer's mutations when the test binary is built in fuzz mode.
+const deny_corpus = [_][]const u8{
+    "\nsudo\nsudo apt update",
+    "sudo\n",
+    "\npython3 run_sudoku.py",
+    "rm -rf\nrm -rf /tmp/scratch",
+    "rm -rf\n/bin/rm -rf /tmp",
+    "git push --force\n  GIT_DIR=. git push --force origin  ",
+    "curl -H 'a: b'\ncurl -H 'a: b' https://example.test",
+    "docker run\nFOO=1 docker run -v /:/host x",
+    "/usr/bin/sudo\n/bin/sudo whoami",
+    "SUDO\nsudo ls",
+    "\t\n\t",
+    "a;b\nx a ; b y",
+    "\"\"\n''",
+    "a&&b\ncmd a&&b",
+    "..env\ncat .env",
+    "credentials.json\ncat credentials.json",
+    "env\n\n.env",
+    "\ncat /home/u/.aws/credentials",
+    "-rf -\nrm -rf -",
+    "sudo\nsh -c 'sudo test'",
+};
+
+test "a fuzzed deny entry refuses the command it spells, in any shape around it" {
+    try std.testing.fuzz({}, fuzzDenyList, .{ .corpus = &deny_corpus });
+}
+
+fn fuzzDenyList(_: void, smith: *std.testing.Smith) !void {
+    var scratch: [8 * 1024]u8 = undefined;
+    const text = if (smith.in) |seed| seed else scratch[0..smith.slice(&scratch)];
+
+    // The entry and the command are two lines, so the fuzzer's bytes reach the
+    // operator's half and the model's half rather than only the pair a
+    // hand-written case spells out.
+    var fields = std.mem.splitScalar(u8, text, '\n');
+    const entry = fields.next() orelse return;
+    const command = fields.next() orelse "";
+
+    var deny_list = [_][]const u8{entry};
+    const verdict = deniedInCommand(command, &deny_list);
+
+    // A refusal names the entry it came from, so the operator is told which
+    // line of their config stopped the call: anything else is a slice of a
+    // list this run does not have.
+    if (verdict) |matched| {
+        try std.testing.expectEqualStrings(entry, matched);
+    }
+
+    // An entry that spells at least one word refuses a command that spells the
+    // entry and nothing else, however the two are cased and whatever separators
+    // sit between the words. A matcher that missed this would let the plainest
+    // form of a denied command through.
+    var entry_words: usize = 0;
+    var entry_tokens = std.mem.tokenizeAny(u8, std.mem.trim(u8, entry, " \t\r\n"), command_word_separators);
+    while (entry_tokens.next()) |_| entry_words += 1;
+    if (entry_words != 0) {
+        try std.testing.expect(deniedInCommand(entry, &deny_list) != null);
+    }
+
+    // Casing is not a way in: the match is case-insensitive on both branches,
+    // so a command in capitals reaches the verdict the same command in
+    // lower case does.
+    var upper_buf: [256]u8 = undefined;
+    var lower_buf: [256]u8 = undefined;
+    const take = @min(command.len, upper_buf.len);
+    for (command[0..take], 0..) |c, i| {
+        upper_buf[i] = std.ascii.toUpper(c);
+        lower_buf[i] = std.ascii.toLower(c);
+    }
+    const uppered = upper_buf[0..take];
+    const lowered = lower_buf[0..take];
+    if (take == command.len) {
+        try std.testing.expectEqual(deniedInCommand(lowered, &deny_list) != null, deniedInCommand(uppered, &deny_list) != null);
+    }
+
+    // A command that is only separators and whitespace runs nothing, so no
+    // entry refuses it: a refusal here is a call the model could not make.
+    var command_words: usize = 0;
+    var command_tokens = std.mem.tokenizeAny(u8, command, command_word_separators);
+    while (command_tokens.next()) |_| command_words += 1;
+    if (command_words == 0) try std.testing.expect(verdict == null);
+
+    // Wrapping a refused command in a shell string keeps it refused, which is
+    // what a model does with a command it was refused once: it runs it through
+    // `sh -c` and asks again.
+    if (verdict != null) {
+        const wrapped = try std.fmt.allocPrint(std.testing.allocator, "sh -c '{s}'\necho hi && {s} ; true", .{ command, command });
+        defer std.testing.allocator.free(wrapped);
+        var halves = std.mem.splitScalar(u8, wrapped, '\n');
+        try std.testing.expect(deniedInCommand(halves.next().?, &deny_list) != null);
+        try std.testing.expect(deniedInCommand(halves.next().?, &deny_list) != null);
+    }
+
+    // The credential check is the same split over the same separators, so what
+    // it names is a word of the command that spells a credential path and
+    // nothing else. A word it invented would refuse a command that never read
+    // a key.
+    if (credentialInCommand(command)) |word| {
+        try std.testing.expect(isCredentialPath(word));
+        var found = false;
+        var words = std.mem.tokenizeAny(u8, command, command_word_separators);
+        while (words.next()) |w| {
+            if (std.mem.eql(u8, w, word)) found = true;
+        }
+        try std.testing.expect(found);
+    }
+}
+
 // The provider key lives in this process's environment, and a tool subprocess
 // must not inherit it. The result of `printenv` is a tool result, so an
 // inherited key would be in the request body of every remaining turn of a run.
