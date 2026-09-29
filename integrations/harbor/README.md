@@ -30,7 +30,7 @@ it runs in `python:slim`, bare `ubuntu` and distroless images alike.
 ## Run
 
 ```sh
-uv venv ~/harbor-venv && uv pip install --python ~/harbor-venv/bin/python \
+uv venv ~/harbor-venv && uv pip install --require-hashes --python ~/harbor-venv/bin/python \
   -r integrations/harbor/requirements.lock
 
 export MICROAGENT_API_KEY=...

@@ -8,7 +8,7 @@
 #
 # Install into the venv the README names:
 #
-#     uv pip install --python ~/harbor-venv/bin/python \
+#     uv pip install --require-hashes --python ~/harbor-venv/bin/python \
 #       -r integrations/harbor/requirements.lock
 #
 # requirements.lock is this pin plus Harbor's whole dependency tree, every
