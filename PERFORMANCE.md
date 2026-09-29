@@ -46,7 +46,7 @@ path, and nothing per turn beyond one session-log write and one stdout write per
 | --- | --- | --- | --- |
 | un-cacheable request bytes | 3,775 B/turn | **2 B/turn** | the tool schemas were written after `messages`, so they fell outside the cacheable prefix every turn |
 | streamed frame parse | 7,204 instr | **4,101 instr** | declared shapes instead of a `std.json.Value` tree, with the generic parse kept behind them |
-| ranged read of a long line | quadratic | **linear** | each 8 KB read re-searched and re-copied the whole accumulated buffer |
+| ranged read of a long line | quadratic | **linear** | each 8 KB read copied the whole accumulated buffer onto itself; the self-copy, not the re-scan, was the cost (see below) |
 | a retry wait past the budget | up to 6 min asleep | **refused** | `--budget` was defeated by the `Retry-After` path |
 | turn arena after a ceiling-sized response | 48 MB resident | **4 MB** | the reset retained without bound |
 
@@ -72,6 +72,24 @@ Kept out on the numbers, not on taste:
 The escaper tests that came out of the second attempt were kept, because they cover a real edge:
 the escaper takes a byte's width from its lead byte, and an escapable byte or a multi-byte character
 landing at an arbitrary offset is a body that stops being valid JSON when it is wrong.
+
+### Which half of that quadratic mattered
+
+I attributed it to "a full re-scan and a full self-copy per read". Measured
+afterwards by defeating one half at a time and running the gate:
+
+| defeated | gate row | result |
+| --- | --- | --- |
+| the search cursor | 7,515,139 | **inside the band** — 0.4% |
+| the self-copy guard | 47,965,253 | **6.4x, reported, exit 1** |
+
+So the copy was the quadratic and the re-scan was not. The cursor is still
+right to keep -- it removes a real second pass and the scan is O(n) rather than
+O(n^2) once the copy is gone -- but it was never the expensive half, and the
+original description credited both equally.
+
+That check also proves the gate row is not decorative: the fix it guards cannot
+be reverted without the row failing.
 
 ## Four classes a profiler cannot see
 
