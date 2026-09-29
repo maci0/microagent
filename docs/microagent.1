@@ -213,6 +213,13 @@ the name of the source the api key came from, never the key.
 .BR NO_COLOR ", " TERM=dumb
 The tool gutter draws the tool name in bold on a terminal and in plain text
 everywhere else.
+.TP
+.B TMPDIR
+Added to the sandbox writable roots whenever
+.B enabled
+is true under
+.BR [sandbox] ,
+on macOS only, where the system keeps per-user scratch space there.
 .B NO_COLOR
 set to anything but an empty string, or
 .B TERM=dumb

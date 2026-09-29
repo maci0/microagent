@@ -888,6 +888,12 @@ const help_text =
     \\                         value is not read, only the name) or TERM=dumb
     \\                         leaves the bold out even at a terminal
     \\
+    \\TMPDIR, on macOS        added to the sandbox writable roots whenever
+    \\                         [sandbox] enabled is true, because that is where
+    \\                         the system keeps per-user scratch space. Read on
+    \\                         no other platform, so a run elsewhere is
+    \\                         unaffected by it.
+    \\
     \\A variable set to an empty string is not a value: MICROAGENT_MODEL,
     \\MICROAGENT_BASE_URL, MICROAGENT_REASONING_EFFORT, MICROAGENT_BUDGET_SECONDS,
     \\MICROAGENT_MAX_SPEND_TOKENS, MICROAGENT_MAX_TURNS, MICROAGENT_MAX_TOKENS,
@@ -1612,9 +1618,9 @@ test "a key carrying a control character is refused, from every source" {
 /// else, so a variable added to a reader and to neither `--help` nor the usage reference
 /// is one a user finds by reading the source. `net.caBundlePath` carries the
 /// bundle's two and `secret_env_vars` the credentials scrubbed from a tool's
-/// environment; this is the union of those with the ceilings, the paths and the
-/// GitHub token, held to one list so the two documents cannot each name a
-/// different subset of it.
+/// environment; this is the union of those with the ceilings, the paths, the
+/// sandbox's scratch root and the GitHub token, held to one list so the two
+/// documents cannot each name a different subset of it.
 const env_vars = [_][]const u8{
     "MICROAGENT_MODEL",
     base_url_var,
@@ -1634,6 +1640,7 @@ const env_vars = [_][]const u8{
     "MDEBUG",
     "NO_COLOR",
     "TERM",
+    "TMPDIR",
     "HOME",
 };
 

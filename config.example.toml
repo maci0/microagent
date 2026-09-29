@@ -135,12 +135,16 @@
 # deny_commands = ["sudo", "su", "shutdown", "reboot"]
 
 # Workspace sandbox confinement. When enabled, restricts filesystem modifications
-# to designated roots (by default: current working directory, /tmp, and session dir).
+# to designated roots (by default: current working directory, /tmp, the session
+# dir, and $TMPDIR on macOS, where that is where scratch space is kept).
 # On Linux (kernel 5.13+) Landlock, and on macOS a Seatbelt profile, confine both microagent
 # and all spawned child processes (bash, MCP, subcommands). In-process path checks
 # additionally refuse write and edit tool calls targeting paths outside writable roots.
 # `writable` on its own confines nothing: a file that declares it without
-# `enabled = true` says so on stderr and runs unconfined.
+# `enabled = true` says so on stderr and runs unconfined. Each entry is read the
+# way this program reads its own paths: a leading `~` or `~/` is the home
+# directory, and a relative path is resolved against the working directory, so
+# "build" names the working directory's build.
 #
 # [sandbox]
 # enabled = true

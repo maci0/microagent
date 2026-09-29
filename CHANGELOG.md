@@ -197,6 +197,13 @@ release, and `microagent update` moves you to it.
   the repository row says what holds now: the repository is a compile-time
   constant, so no caller text reaches a URL.
 
+- `$TMPDIR` is trimmed before the sandbox takes it for a writable root. A value
+  carrying the newline an `export` fed from a file ends with is absolute by every
+  test the reader makes, so the root was the path plus that newline,
+  canonicalized to a directory no machine holds, and the scratch space a tool
+  expects to write to was refused. Every other variable this program reads is
+  trimmed the same way.
+
 - A `[mcp]` table is named instead of passed over. The servers are declared as
   `[[mcp]]`, and a file that writes one bracket took the whole table as somebody
   else's, so its servers never started and their tools were simply absent from

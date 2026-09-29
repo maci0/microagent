@@ -87,8 +87,10 @@ source tree and the host. The one asset worth stealing on its own is the API key
 
 There is no network listener, webhook, message consumer, scheduled job or IPC. microagent
 itself talks only to the provider's base URL and to GitHub, plus the remote MCP servers the config
-names: a `url` table, or a preset switched on with `[tools.<name>]`. No preset is on by default, so
-a run with no such table makes no other request. An MCP server it starts is a separate program and
+names: a `url` table, or a preset. All four presets (web_search, context7, grep_app, deepwiki) are
+on by default, so a run that calls none of their tools makes no request to them, and a run that
+does sends the tool call there. `enabled = false` under `[tools.<name>]` makes no request to one at
+all. An MCP server it starts is a separate program and
 may talk to whatever its operator configured. That traffic is the server's, not this binary's, and
 the config entry is the operator's statement that the program is trusted. The traffic to a remote
 server is this binary's, and the sandbox does not confine it.
@@ -143,7 +145,7 @@ server is this binary's, and the sandbox does not confine it.
    cannot be spelled in a tool name is refused (`validName`, `src/mcp.zig:1195`). What a
    configured server does with its own authority is the operator's decision, as with a
    `bash` command they write.
-10. **Remote MCP server → model, and agent → remote server.** A `url` table or an enabled preset
+10. **Remote MCP server → model, and agent → remote server.** A `url` table or a preset that is on
    sends each tool call's name and arguments to an HTTPS endpoint the operator named, and the text
    it answers with becomes a tool result, as a file's contents do. Validation points: the url
    must be `https`, or `http` on loopback, with no userinfo (`validUrl`, `src/mcp.zig:1151`); a

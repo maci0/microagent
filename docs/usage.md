@@ -178,6 +178,12 @@ NO_COLOR, TERM=dumb     the tool gutter draws its name in bold on a
                          value is not read, only the name) or TERM=dumb
                          leaves the bold out even at a terminal
 
+TMPDIR, on macOS        added to the sandbox writable roots whenever
+                         [sandbox] enabled is true, because that is where
+                         the system keeps per-user scratch space. Read on
+                         no other platform, so a run elsewhere is
+                         unaffected by it.
+
 A variable set to an empty string is not a value: MICROAGENT_MODEL,
 MICROAGENT_BASE_URL, MICROAGENT_REASONING_EFFORT, MICROAGENT_BUDGET_SECONDS,
 MICROAGENT_MAX_SPEND_TOKENS, MICROAGENT_MAX_TURNS, MICROAGENT_MAX_TOKENS,
@@ -586,7 +592,9 @@ enabled = true
 writable = [".", "/tmp"]
 ```
 
-The writable roots are always `.` (the working directory), `/tmp`, and the session log directory, plus each `writable` entry, plus `$TMPDIR` where it names an absolute directory none of those already covers (on macOS that is where per-user scratch space lives; on Linux it is usually `/tmp` already, so it adds nothing).
+The writable roots are always `.` (the working directory), `/tmp`, and the session log directory, plus each `writable` entry, plus `$TMPDIR` where it names an absolute directory none of those already covers (on macOS that is where per-user scratch space lives; on Linux it is usually `/tmp` already, so it adds nothing). The value is trimmed like every other variable this program reads, and a relative one adds no root.
+
+`writable` entries are read the way this program reads its own paths: a leading `~` or `~/` is the home directory, and a relative path is resolved against the working directory, so `writable = ["build"]` names the working directory's `build` rather than the one the process was started in. Every root is canonicalized, so a path through a symlink names the directory the link resolves to.
 
 `writable` on its own confines nothing: a file that declares it without `enabled = true` prints `microagent: config ...: [sandbox] writable names N path(s) the sandbox is not in force for, because enabled is not true` and runs unconfined.
 

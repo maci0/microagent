@@ -505,6 +505,32 @@ test "resolveWritableRoots adds $TMPDIR where a root does not already cover it" 
     try std.testing.expect(found_trimmed);
 }
 
+// The value is trimmed before it is judged a path, because a value carrying the
+// newline an `export` fed from a file ends with is absolute by every test but
+// names no directory, and a root that names none grants nothing: on macOS the
+// scratch space every tool expects to write to is then refused by `write`.
+test "resolveWritableRoots trims $TMPDIR before taking it for a root" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    const io = std.testing.io;
+
+    const tmpdir = "/nonexistent-tmpdir-for-the-sandbox-test";
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("TMPDIR", "  " ++ tmpdir ++ "\r\n");
+
+    const roots = try resolveWritableRoots(io, arena, &env, &.{}, null);
+    for (roots) |root| {
+        try std.testing.expect(!std.mem.endsWith(u8, root, "\n"));
+        try std.testing.expect(!std.mem.endsWith(u8, root, " "));
+    }
+    const found = for (roots) |root| {
+        if (std.mem.eql(u8, root, tmpdir)) break true;
+    } else false;
+    try std.testing.expect(found);
+}
+
 test "isPathWritable resolves a relative path against the first root" {
     var state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer state.deinit();
