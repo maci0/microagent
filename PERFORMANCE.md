@@ -70,6 +70,8 @@ returns the socket after each response is read.
 | a retry wait past the budget | up to 6 min asleep | **refused** | `--budget` was defeated by the `Retry-After` path |
 | turn arena after a ceiling-sized response | 48 MB resident | **4 MB** | the reset retained without bound |
 | MCP server startup, 3 servers | 1.513 s | **0.506 s** | every server is spawned before any is asked to initialize, so their boots overlap: the run waits for the slowest server instead of the sum |
+| a 200 x 100 KB skill library | 21.6 MB resident | **13.1 MB** | the listing read every `SKILL.md` whole and kept the text in the run arena, because the name and description it lists are slices of it; it reads the head of the file now, and a `skill` call reads the body |
+| the same library, to the first request | 27.2 ms | **12.9 ms** | the same change, measured as wall on a loaded machine: 21 MB of reads become about 1.6 MB |
 
 The two largest wins are not CPU at all. The request-bytes one is the single most valuable change in
 the file and it is invisible to every counter the harness prints: `cached_tokens` reports what was
@@ -89,14 +91,6 @@ Kept out on the numbers, not on taste:
   run concurrently.
 - **A byte-level compaction rewrite.** Compaction is 4.7 ms per megabyte, about 0.02% of a run, and
   the replacement would hand-rewrite the exact bytes the prompt cache depends on.
-- **A prefix read for skill discovery.** The listing reads each `SKILL.md` whole and keeps it in the
-  run arena, because the name and description it lists are slices of that text. Measured with
-  `hyperfine -w 3 -r 15` against the stub provider: 20 skills of 4 KB are inside the noise of no
-  skills at all (p50 1.28 against 1.36 ms), 200 of them add 0.7 ms, and 200 of 100 KB add 5 ms and
-  about 20 MB resident. A head-only read helps only the last case, since a file smaller than the cap
-  is read whole either way, so it is not worth the open-and-read-to-a-limit loop it needs. Revisit if
-  a skill library that size turns up.
-
 The escaper tests that came out of the second attempt were kept, because they cover a real edge:
 the escaper takes a byte's width from its lead byte, and an escapable byte or a multi-byte character
 landing at an arbitrary offset is a body that stops being valid JSON when it is wrong.
@@ -196,8 +190,13 @@ server has run, so a sequential connect drops it and the test sees one server wh
 On a machine where `/bin/sh` has no fractional `sleep` the waiter's bounded wait spins instead of
 sleeping and the guard still works, only faster to give up.
 
-The skill-discovery row is the same shape of measurement: `MICROAGENT_SKILLS` pointed at a directory
-of N generated `SKILL.md` files, `hyperfine -w 3 -r 15`, and the numbers above are the medians.
+The skill rows are measured with `MICROAGENT_SKILLS` pointed at a directory of generated `SKILL.md`
+files: `hyperfine -w 3 -r 20` for the two wall figures, which moved run to run on a machine with
+other work on it (27.2 and 12.9 ms are medians of twenty, and the system time is the half that tells
+the story: 15.0 ms of reads against 2.9 ms), and peak RSS from `getrusage(RUSAGE_CHILDREN)` for the
+resident figures. The guard is a counter, not either of those: `a large skill is listed from its
+head, and loads whole` asserts the run arena holds under 64 KB after listing a 200 KB skill, which a
+whole-file read fails by 3x.
 `hyperfine -w 3 -r 20` over an instant-answer server put the whole MCP path — spawn, two round
 trips, and the reap at the end — at 0.7 ms for one server, 1.2 ms for three and 3.2 ms for ten,
 against 1.5 ms for a run with none, which is why nothing after the boot overlap was worth touching.

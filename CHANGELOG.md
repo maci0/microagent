@@ -22,6 +22,13 @@ release, and `microagent update` moves you to it.
   three servers that each take 0.5 s to answer: 1.51 s before, 0.51 s after.
   With six servers it is still 0.51 s, because the run now waits for the
   slowest server rather than the sum of them.
+- A skills directory no longer keeps every `SKILL.md` resident for the whole
+  run. The listing read each file whole to find the name and description in its
+  frontmatter and held that text in the run arena, so 200 skills of 100 KB were
+  21.6 MB of memory and 21 MB of reads before the first request left; it reads
+  the head of each file now, and a `skill` call reads the body it needs.
+  Measured: 21.6 MB to 13.1 MB resident, 27.2 ms to 12.9 ms to the first
+  request. A library of ordinary size pays nothing either way.
 
 ## [0.2.0] - 2026-09-29
 
