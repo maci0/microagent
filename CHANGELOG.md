@@ -543,6 +543,11 @@ release, and `microagent update` moves you to it.
   release workflow needs beside the binary it builds. It is listed in `make help`
   and `.PHONY` beside the other targets.
 
+- 68 of the `src/path:line` citations in `docs/threat-model.md` named a line the
+  symbol had moved off, so `make check` failed on a clean clone before it reached
+  the tests and the lint job could not have been red for it. Every citation is
+  rewritten to the line its symbol is on; `make check-refs` is green again.
+
 ### Security
 
 - A writable path is resolved before it is compared to the sandbox roots. The
