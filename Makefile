@@ -37,6 +37,13 @@ ASSET_PREFIX = microagent-$(if $(TAG),$(TAG)-)
 SHA256_CMD = if command -v sha256sum >/dev/null 2>&1; then echo sha256sum; \
 	elif command -v shasum >/dev/null 2>&1; then echo "shasum -a 256"; fi
 
+# The same question asked for the SHA1 the SPDX verification code is built from,
+# decided here for the same reason: `sbom` and `check-sbom` hash the same assets
+# with it, so a host that has one command answers for both rather than one
+# script finding the command and the other spelling it out again.
+SHA1_CMD = if command -v sha1sum >/dev/null 2>&1; then echo sha1sum; \
+	elif command -v shasum >/dev/null 2>&1; then echo "shasum -a 1"; fi
+
 # The scratch root `check-reproducible` builds into. It is a sibling of the
 # toolchain cache below, never a child, because every build wipes REPRO_DIR.
 #
@@ -144,7 +151,7 @@ help:
 	  'gauntlet AGENTS=...   the same gauntlet review on a fresh clone, per harness' \
 	  'instructions [CHECK=--check]  retired instructions per unit, against bench/instructions.baseline' \
 	  'overhead              startup and first-request cost per harness' \
-	  'install               install the binary into ~/.local/bin, or PREFIX= and DESTDIR= elsewhere' \
+	  'install               install the binary, man page and license into ~/.local, or PREFIX= and DESTDIR= elsewhere' \
 	  'release-assets        cross-build every published target into dist/' \
 	  'release-assets TAG=vX.Y.Z  the same, named as release.yml publishes them' \
 	  'release-targets       the published target triples, one per line' \
@@ -553,12 +560,13 @@ instructions: test
 # variables a distro or homebrew-style packager needs instead. PREFIX defaults
 # to the per-user location the README installs into, so an unpackaged run is
 # unchanged, while `make install PREFIX=/usr DESTDIR=$$pkgdir` stages the same
-# recipe into a package root. BINDIR and MANDIR default under PREFIX and
-# DESTDIR defaults to empty, which is what makes the unprefixed call write to
+# recipe into a package root. BINDIR, MANDIR and LICENSEDIR default under PREFIX
+# and DESTDIR defaults to empty, which is what makes the unprefixed call write to
 # the real prefix rather than to a staging directory nobody asked for.
 PREFIX ?= $(HOME)/.local
 BINDIR ?= $(PREFIX)/bin
 MANDIR ?= $(PREFIX)/share/man
+LICENSEDIR ?= $(PREFIX)/share/licenses/microagent
 DESTDIR ?=
 
 # `install -d -m 755` is one command on GNU coreutils and on BSD install, unlike
@@ -567,11 +575,17 @@ DESTDIR ?=
 # page is installed under man1, the section every `man microagent` reaches, and
 # it lands next to the binary, because a package that ships an executable with
 # no page leaves `man` reading nothing and the reader reading the release notes.
+# The license rides with the binary because the formats that carry this recipe
+# require it: dpkg and rpm take it as the copyright file, and the per-package
+# directory under share/licenses is the FHS place both read. A package built from
+# the recipe without it ships a grant the user cannot read.
 install: build
 	install -d -m 755 $(DESTDIR)$(BINDIR)
 	install -m755 $(BIN) $(DESTDIR)$(BINDIR)/microagent
 	install -d -m 755 $(DESTDIR)$(MANDIR)/man1
 	install -m644 docs/microagent.1 $(DESTDIR)$(MANDIR)/man1/microagent.1
+	install -d -m 755 $(DESTDIR)$(LICENSEDIR)
+	install -m644 LICENSE $(DESTDIR)$(LICENSEDIR)/LICENSE
 
 # The man page and `--help` are two renderings of one interface, and the one
 # that is wrong is whichever a reader happens to reach first. Every long flag
@@ -1010,7 +1024,8 @@ release-assets: zig-version
 # rehearsal emits no inventory, the way it emits no license.
 sbom:
 	@test -d dist || { echo "no dist/, run 'make release-assets TAG=v0.2.0' first" >&2; exit 2; }; \
-SHA256_CMD="$$($(SHA256_CMD))" sh scripts/sbom.sh dist lint-requirements.txt $(HARBOR_DIR)/requirements.lock
+SHA256_CMD="$$($(SHA256_CMD))" SHA1_CMD="$$($(SHA1_CMD))" \
+	sh scripts/sbom.sh dist lint-requirements.txt $(HARBOR_DIR)/requirements.lock
 
 # The sha256 sidecar `microagent update` verifies before it replaces anything.
 # Only a tagged build names its assets after a version, so a rehearsal in dist/
@@ -1185,6 +1200,14 @@ check-reproducible:
 # scratch directory the recipe removes, so the real dist/ and the toolchain a
 # release needs are not part of it. python3 parses the JSON and nothing else
 # needs it: the rest is grep, so the check runs where the linters run.
+#
+# Two more fields a scanner reads are recomputed rather than read back. The SPDX
+# verification code is the SHA1 of the assets' SHA1 digests concatenated in
+# file-name order, so a generator that emitted the field with anything in it, or
+# with the digests in another order, is caught here. The declared license is
+# the one LICENSE's first line names, taken over the package and every file with
+# the pins' NOASSERTION left out and sort -u collapsing the rest, so a single
+# line is left only when the document and the tree agree on the grant.
 check-sbom:
 	@set -eu; \
 	dir="$$(mktemp -d)"; \
@@ -1192,7 +1215,8 @@ check-sbom:
 	for name in microagent-v0.0.0-x86_64-linux-musl microagent-v0.0.0-LICENSE; do \
 	  printf 'a stand-in for %s\n' "$$name" > "$$dir/$$name"; \
 	done; \
-SHA256_CMD="$$($(SHA256_CMD))" sh scripts/sbom.sh "$$dir" lint-requirements.txt $(HARBOR_DIR)/requirements.lock >/dev/null; \
+	SHA256_CMD="$$($(SHA256_CMD))" SHA1_CMD="$$($(SHA1_CMD))" \
+	  sh scripts/sbom.sh "$$dir" lint-requirements.txt $(HARBOR_DIR)/requirements.lock >/dev/null; \
 	doc="$$dir/microagent-v0.0.0.spdx.json"; \
 	test -f "$$doc" || { echo "the generator wrote no $doc" >&2; exit 1; }; \
 	python3 -m json.tool "$$doc" >/dev/null || { echo "$doc is not JSON" >&2; exit 1; }; \
@@ -1201,6 +1225,19 @@ SHA256_CMD="$$($(SHA256_CMD))" sh scripts/sbom.sh "$$dir" lint-requirements.txt 
 	  want="$$($(MAKE) --no-print-directory sha256-of "FILE=$$dir/$$name")"; \
 	  grep -q "\"checksumValue\": \"$$want\"" "$$doc" || { echo "$$doc records no digest of $$name" >&2; exit 1; }; \
 	done; \
+	code="$$(for name in microagent-v0.0.0-LICENSE microagent-v0.0.0-x86_64-linux-musl; do \
+		$$($(SHA1_CMD)) "$$dir/$$name" | cut -d' ' -f1; done | tr -d '\n' | $$($(SHA1_CMD)) | cut -d' ' -f1)"; \
+	recorded="$$(sed -n 's/.*"packageVerificationCodeValue": "\([0-9a-f]*\)".*/\1/p' "$$doc")"; \
+	test "$$recorded" = "$$code" || { \
+	  echo "$$doc records the verification code as '$$recorded' and the stand-in assets hash to '$$code'" >&2; \
+	  exit 1; \
+	}; \
+	declared="$$(sed -n 's/.*"licenseDeclared": "\([A-Za-z0-9.-]*\)".*/\1/p' "$$doc" | grep -v '^NOASSERTION$$' | sort -u)"; \
+	wanted="$$(sed -n '1{s/[[:space:]]*[Ll]icen[cs]e[[:space:]]*$$//;p;}' LICENSE)"; \
+	test "$$declared" = "$$wanted" || { \
+	  echo "$$doc declares '$$declared' where LICENSE names '$$wanted'" >&2; \
+	  exit 1; \
+	}; \
 	pins="$$(awk '/^[A-Za-z0-9_.-]+==/ { print $$1 }' lint-requirements.txt $(HARBOR_DIR)/requirements.lock | sort -u | wc -l)"; \
 	named="$$(grep -c '"referenceLocator": "pkg:pypi/' "$$doc")"; \
 	test "$$pins" -eq "$$named" || { \

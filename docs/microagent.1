@@ -16,8 +16,14 @@ microagent \- tiny OpenAI-compatible coding agent
 .B microagent
 runs one non-interactive turn of an OpenAI-compatible coding agent: it sends a
 task to a provider, calls the tools the model asks for until it stops, and
-writes the model's text to stdout. It is a single static binary with no runtime
-dependency, and it links no C library on Linux.
+writes the model's text to stdout. It is a single static binary that links no C
+library on Linux; the
+.BR search ", " ast " and " git
+tools run
+.BR rg ", " ast-grep " and " git
+from
+.BR PATH ,
+which a package should depend on.
 .PP
 The task is the bare argument, or the value of
 .BR \-\-print .

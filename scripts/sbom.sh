@@ -20,6 +20,7 @@ set -eu
 
 : "${1:?usage: sbom.sh <dist directory>}"
 : "${SHA256_CMD:?SHA256_CMD is required}"
+: "${SHA1_CMD:?SHA1_CMD is required}"
 
 dist="$1"
 # The two manifests the pins are read from, in the order they are listed in the
@@ -75,6 +76,28 @@ commit="$(git log -1 --format=%H)" || {
 test -n "$commit" || { echo "this tree has no commit, so there is nothing for the inventory to name" >&2; exit 1; }
 copyright="$(sed -n 's/^\(Copyright .*\)$/\1/p' LICENSE | head -1)"
 test -n "$copyright" || { echo "LICENSE names no copyright line, so the inventory would carry NOASSERTION where the grant is" >&2; exit 1; }
+# The grant, as the SPDX identifier the document records, read out of LICENSE
+# rather than written here: an inventory that claims MIT over a relicensed tree
+# is a document a scanner and a reader both believe, and the reader is the one
+# it misleads. An identifier this script does not know stops the release, so a
+# relicensing is a line added to the list below and nothing else to find.
+license_named="$(sed -n '1{s/[[:space:]]*[Ll]icen[cs]e[[:space:]]*$//;p;}' LICENSE)"
+license=
+# Case folded with the locale's own ranges on both sides, so a LICENSE whose
+# first line reads "mit" or "Mit" is the identifier the list spells rather than
+# a release that stops on a spelling.
+license_folded="$(printf '%s' "$license_named" | tr '[:upper:]' '[:lower:]')"
+for identifier in MIT Apache-2.0 ISC BSD-2-Clause BSD-3-Clause MPL-2.0 Unlicense Zlib CC0-1.0; do
+	folded="$(printf '%s' "$identifier" | tr '[:upper:]' '[:lower:]')"
+	if [ "$license_folded" = "$folded" ]; then
+		license="$identifier"
+		break
+	fi
+done
+test -n "$license" || {
+	echo "LICENSE names '$license_named', which is no SPDX identifier this script writes" >&2
+	exit 1
+}
 created="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 # One line per pin, the manifest that declares it last, deduplicated on the pin
@@ -107,6 +130,38 @@ digest() {
 	"$@" "$path" | cut -d' ' -f1
 }
 
+# SPDX 2.3 requires a package whose files were analyzed to carry a
+# verification code, and a consumer checking the document against the files it
+# names has nothing to recompute without one. The code is the SHA1 of the
+# SHA1 digests of the files, concatenated in file-name order, so the digest is
+# of digests and the outer hash is the one the format names. SHA1 is specified
+# here and is not the digest the sidecars use: a package manager recomputes this
+# one with a SHA1 implementation, and a SHA256 code would be no code at all. It
+# arrives as SHA1_CMD, the command the Makefile resolved, for the reason
+# SHA256_CMD does: one place decides which hashing command this host has.
+sha1_command="$SHA1_CMD"
+test -n "$sha1_command" || {
+	echo "SHA1_CMD is empty, so the SPDX verification code cannot be computed" >&2
+	exit 2
+}
+sha1() {
+	# because: sha1_command is a word list, and "shasum -a 1" is three of them
+	# shellcheck disable=SC2086
+	set -- $sha1_command
+	"$@"
+}
+file_digests=
+# because: assets is a space-separated list and each name is one word
+# shellcheck disable=SC2086
+for name in $(printf '%s\n' $assets | sort); do
+	file_digests="$file_digests$(sha1 < "$dist/$name" | cut -d' ' -f1)"
+done
+verification_code="$(printf '%s' "$file_digests" | sha1 | cut -d' ' -f1)"
+test -n "$verification_code" || {
+	echo "the verification code could not be computed, so the inventory would carry none where SPDX requires one" >&2
+	exit 1
+}
+
 out="$dist/microagent-$tag.spdx.json"
 {
 	printf '{\n'
@@ -129,8 +184,11 @@ out="$dist/microagent-$tag.spdx.json"
 	printf '      "versionInfo": "%s",\n' "$version"
 	printf '      "downloadLocation": "https://github.com/maci0/microagent/releases/tag/v%s",\n' "$version"
 	printf '      "filesAnalyzed": true,\n'
-	printf '      "licenseConcluded": "MIT",\n'
-	printf '      "licenseDeclared": "MIT",\n'
+	printf '      "packageVerificationCode": {\n'
+	printf '        "packageVerificationCodeValue": "%s"\n' "$verification_code"
+	printf '      },\n'
+	printf '      "licenseConcluded": "%s",\n' "$license"
+	printf '      "licenseDeclared": "%s",\n' "$license"
 	printf '      "copyrightText": "%s",\n' "$copyright"
 	printf '      "primaryPackagePurpose": "APPLICATION",\n'
 	printf '      "comment": "The published assets. The binaries link no libc and carry no third-party code: build.zig.zon declares no dependency, and the files listed below are the whole of what a release is."\n'
@@ -188,8 +246,8 @@ EOF
 		printf '          "checksumValue": "%s"\n' "$asset_digest"
 		printf '        }\n'
 		printf '      ],\n'
-		printf '      "licenseConcluded": "NOASSERTION",\n'
-		printf '      "licenseDeclared": "NOASSERTION",\n'
+		printf '      "licenseConcluded": "%s",\n' "$license"
+		printf '      "licenseDeclared": "%s",\n' "$license"
 		printf '      "copyrightText": "%s"\n' "$copyright"
 		printf '    }'
 		separator=,
@@ -227,7 +285,7 @@ EOF
 	printf '      "annotationType": "OTHER",\n'
 	printf '      "annotator": "Tool: scripts/sbom.sh",\n'
 	printf '      "annotationDate": "%s",\n' "$created"
-	printf '      "comment": "No published asset has a third-party component: build.zig.zon declares no dependency, the binaries are statically linked, and every package it names is a development or benchmark pin that no release artifact contains. The licenses are NOASSERTION because no manifest in this tree records one; a consumer who needs the license text for a package reads the project it names."\n'
+	printf '      "comment": "No published asset has a third-party component: build.zig.zon declares no dependency, the binaries are statically linked, and every package it names is a development or benchmark pin that no release artifact contains. Each pin carries NOASSERTION because no manifest in this tree records one; a consumer who needs the license text for a pin reads the project it names. The package and the assets carry the license LICENSE grants."\n'
 	printf '    }\n'
 	printf '  ]\n'
 	printf '}\n'

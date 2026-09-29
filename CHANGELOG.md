@@ -100,6 +100,29 @@ release, and `microagent update` moves you to it.
 
 ### Changed
 
+- `make install` stages the license beside the binary and the man page, at
+  `$PREFIX/share/licenses/microagent/LICENSE` with `LICENSEDIR` to move it. The
+  recipe is the one a distro or homebrew-style packager runs, and every format
+  carrying it wants the grant in the package: dpkg and rpm take it as the
+  copyright file, and the per-package directory under `share/licenses` is the
+  FHS place both read. A package built from the recipe without it shipped a
+  license no user could read.
+
+- The SPDX inventory records the fields a scanner recomputes rather than the
+  ones a reader trusts: `packageVerificationCode`, which SPDX 2.3 requires for
+  a package whose files were analyzed and which nothing in the document
+  carried, and the license, read out of `LICENSE`'s first line and written to
+  the package and every file rather than the `MIT` the generator had written in
+  place of it. A LICENSE naming an identifier the generator does not know stops
+  the release. `make check-sbom` recomputes both from the assets it stages, so a
+  document that claims a grant the tree no longer offers, or a verification code
+  over digests in another order, fails the gate rather than the release.
+
+- The README and the man page no longer call the package dependency-free. The
+  binary links no library, but `search`, `ast` and `git` run `rg`, `ast-grep`
+  and `git` from `PATH`, so a packager told the package needs no dependencies
+  shipped a package whose tools all fail on the machine it was installed on.
+
 - The session log store is walked and sorted once per run rather than twice. A run listed, copied
   and sorted the whole store before opening its log and again after, over a directory of up to 200
   names, and both passes settled on the same size. The retention window is applied once, with the

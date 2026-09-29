@@ -94,15 +94,18 @@ Or build it. Zig 0.16.0 or newer is the only requirement:
 
 ```sh
 zig build -Doptimize=ReleaseSmall     # zig-out/bin/microagent
-make install                         # the binary and docs/microagent.1 into ~/.local
+make install                         # the binary, docs/microagent.1 and LICENSE into ~/.local
 ```
 
-A distro or homebrew-style packager stages the same two files with
-`make install PREFIX=/usr DESTDIR=$pkgdir`, which writes `$pkgdir/usr/bin/microagent` mode 755 and
-`$pkgdir/usr/share/man/man1/microagent.1` mode 644, and nothing else. `BINDIR` and `MANDIR` move
-those two directories. The binary is static, so the package declares no runtime dependencies.
-
-The `search`, `ast` and `git` tools call `rg`, `ast-grep` and `git`, so put those on `PATH` too.
+A distro or homebrew-style packager stages the same three files with
+`make install PREFIX=/usr DESTDIR=$pkgdir`, which writes `$pkgdir/usr/bin/microagent` mode 755,
+`$pkgdir/usr/share/man/man1/microagent.1` and `$pkgdir/usr/share/licenses/microagent/LICENSE` mode
+644, and nothing else. `BINDIR`, `MANDIR` and `LICENSEDIR` move those three directories. The binary
+is static and links no library, but it is not dependency-free: the `search`, `ast` and `git` tools
+exec `rg`, `ast-grep` and `git`, so a package should depend on the three executables under whatever
+names its distribution packages them, rather than declare none and leave the tools failing on a
+machine that has the package installed. An install from a release asset needs the same three on
+`PATH`.
 
 ## First run
 
