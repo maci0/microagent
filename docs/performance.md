@@ -86,6 +86,7 @@ run-to-run noise, so there is no build flag to reach for either.
 | a 3000-turn run's client CPU | 211.9 M instr | **177.8 M instr** | `sendBodyComplete` needs the whole body in one buffer, so the conversation was copied into a fresh one every turn; the prefix and the conversation now go to the wire from where they are |
 | the same run, peak resident | 13.3 MB | **11.0 MB** | with the body buffer gone, the turn arena crosses its retention ceiling less often |
 | an MCP answer read in 8 KB chunks, three servers of 1 MB each | 91.1 M instr | **75.3 M instr** | the newline scan restarted at the front of the buffer on every chunk, so a one megabyte line was searched 128 times over growing prefixes, about 66 MB of the same bytes; it resumes where it stopped now |
+| one compaction's closing byte | a 400 KB copy | **appended in place** | the conversation was copied whole to add the `]` `std.json` needs for a complete document, once per compaction; the byte is appended to the buffer and taken back before the rewrite |
 | mappings at startup (`--version`) | 86 mmap | **19** | std's start-code allocator maps a 64 KB slab per size class on first use; the run builds its own around a bucket allocator instead. It costs about 1.2% of client instructions on a 3000-turn run, which is the price of the 67 mappings it saves |
 | three 4 MB MCP tool results | 19.1 MB resident | **12.8 MB** | the text was built whole and clamped to 24 KB a moment later, so the copy and the clamp both worked over bytes nobody keeps; it stops at the cap while it is built, and the note names the size it would have had |
 
@@ -174,11 +175,20 @@ Two fixes are measured and not taken.
   saves is about half a millisecond a turn. This file's whole ordering says the wire comes first,
   and the trade goes the other way.
 - **A byte-level rewrite was refused here before**, because it hands the exact bytes the prompt
-  cache depends on to a hand-written scanner. The safer shape of the same idea, not yet built:
-  record the byte range of each tool result over the threshold as `finishTurn` writes it, since
-  that side knows where the value starts and ends, and splice markers into those ranges instead of
-  parsing the conversation to find them. It is a change to the compaction path with its own tests
-  to write, and it is the next thing to try if a run of this shape shows up in the benchmark.
+  cache depends on to a hand-written scanner. The safer shape of the same idea was sized and is
+  also not taken: `finishTurn` knows where each tool result's content value starts and ends as it
+  writes it, so those byte ranges could be recorded and markers spliced into them without parsing
+  the conversation at all. It removes the scan, but it means a second elision path that has to
+  reproduce `elideToolResults`' two thresholds, its target and its floor exactly, on the one path
+  where a mistake corrupts every request after it. What it buys is about a third of a millisecond a
+  turn in the worst case, less than 0.1% of a run measured in minutes. That is under this file's
+  bar, which already refuses a change worth ten milliseconds. The design is written down here for a
+  run whose shape shows it matters, not built on the chance that one does.
+
+One thing was taken from this path anyway, and it is small and changes no behavior: the closing `]`
+the parser needs is appended to the conversation in place and taken back afterwards, rather than the
+whole conversation being copied to add one byte. That is 532.7 M instructions to 530.8 M on the
+300-turn loop above.
 
 ## Are these fixes still guarded?
 

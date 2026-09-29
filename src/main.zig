@@ -3258,18 +3258,28 @@ fn compactMessages(
 
     // The buffer is the array `buildBody` closes when it writes the request, so
     // the `]` the run never appends is added here to read the whole thing back,
-    // and taken off the rewrite below to leave the buffer the shape the request
-    // builder expects. `std.json` reads a complete document, and an array that
-    // stops at the end of its input sends its parser to a token type it has no
-    // case for. Every test that drove this closed the buffer itself and so never
-    // reached that.
-    const closed = try std.mem.concat(arena, u8, &.{ msgs.items, "]" });
-    const parsed = std.json.parseFromSlice(std.json.Value, arena, closed, .{}) catch |err| {
+    // and taken off again before the rewrite below to leave the buffer the
+    // shape the request builder expects. `std.json` reads a complete document,
+    // and an array that stops at the end of its input sends its parser to a
+    // token type it has no case for. Every test that drove this closed the
+    // buffer itself and so never reached that.
+    //
+    // The byte is appended in place rather than into a copy of the
+    // conversation: the conversation is the largest thing the run holds, and
+    // copying all of it to add one byte is a copy per compaction that nothing
+    // reads. The parse's strings point into the buffer when they need no
+    // escape, and taking the byte back only lowers a length, so nothing parsed
+    // out of it is invalidated before the rewrite replaces it.
+    try msgs.ensureUnusedCapacity(gpa, 1);
+    msgs.appendAssumeCapacity(']');
+    const parsed = std.json.parseFromSlice(std.json.Value, arena, msgs.items, .{}) catch |err| {
+        msgs.items.len -= 1;
         net.note(io, arena, "microagent: the {d} byte conversation could not be read back for compaction ({s}); it is sent as it stands\n", .{
             msgs.items.len, @errorName(err),
         });
         return;
     };
+    msgs.items.len -= 1;
     const array = switch (parsed.value) {
         .array => |a| a,
         else => {

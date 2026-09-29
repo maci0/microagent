@@ -14,6 +14,10 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- Compaction no longer copies the whole conversation to add the closing bracket
+  the JSON parser needs. The byte is appended to the conversation buffer and
+  taken back before the rewrite, which is about 0.4% of a run whose tool results
+  keep crossing the conversation limit.
 - The Io worker threads are built with a megabyte of stack each and a ceiling of
   four, instead of std's 16 MB and one per core. Two workers at rest were 32 MB
   of address space for call paths that read and write files and sockets: a run
