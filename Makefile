@@ -311,25 +311,36 @@ watch:
 test-sanitize:
 	$(ZIG) build test-sanitize --summary all
 
+# Every list below is `TRACKED`: the files git has plus the ones it has never
+# been told about, minus everything .gitignore excludes. Both halves matter.
+# The tracked half is why a glob is not used: a glob names the paths as they
+# stand, so a Zig file added outside src/ is formatted by nothing and the gate
+# still passes. The untracked half is the same defect one step earlier in the
+# life of a change: a file a contributor has written and not yet added is on
+# disk and in the build, and `git ls-files` alone names neither it nor its
+# formatting, so `make check` is green on the tree that will fail in CI the
+# moment the file is committed. `--exclude-standard` keeps every build product
+# and scratch tree out of the lists, so a gate run after a build is the same one
+# a clean clone gets.
+TRACKED = git ls-files --cached --others --exclude-standard
+
 # The Zig sources the test names are read out of, for `test`, and the ones
-# `fmt` and `fmt-check` read. Taken from git for the reason lint-shell names: a
-# glob names the paths as they stand, so a Zig file added outside src/ is
-# formatted by nothing and the gate still passes.
-ZIG_SOURCES := $(shell git ls-files '*.zig')
+# `fmt` and `fmt-check` read.
+ZIG_SOURCES := $(shell $(TRACKED) '*.zig')
 # `zig fmt` formats .zon as well as .zig, and build.zig.zon is where the
 # version every release is published from is written down, so it is read by a
 # hand edit that nothing checks the shape of. It is listed apart from
 # ZIG_SOURCES because that list is also what `test` greps for test names,
 # and a manifest has none.
-ZON_SOURCES := $(shell git ls-files '*.zon')
+ZON_SOURCES := $(shell $(TRACKED) '*.zon')
 
 # The Python and YAML the linters read, for the same reason.
-PY_SOURCES := $(shell git ls-files '*.py')
-YAML_SOURCES := $(shell git ls-files '*.yml' '*.yaml')
+PY_SOURCES := $(shell $(TRACKED) '*.py')
+YAML_SOURCES := $(shell $(TRACKED) '*.yml' '*.yaml')
 # The prose, for the same reason and one more on top of it: it is the only
 # tracked file kind nothing else here reads, so a defect in a code fence or a
 # trailing space is checked by no target in this file and the gate passes.
-MD_SOURCES := $(shell git ls-files '*.md')
+MD_SOURCES := $(shell $(TRACKED) '*.md')
 # The script's own -f, as a make variable, so the repair a stale citation needs
 # is a target a contributor can run: `make check-refs FIX=1` rewrites each to
 # the line its symbol is on and prints what it moved. Spelled as `make
@@ -337,10 +348,10 @@ MD_SOURCES := $(shell git ls-files '*.md')
 # reports for a flag where a target belongs.
 FIX ?=
 # The workflows and composite actions, which `lint-yaml` reads for shape and
-# `lint-ci` reads for the shell in their `run:` steps. Taken from git for the
-# same reason as the lists above: a workflow added outside .github/ would be
-# checked by nothing and the gate would still pass.
-CI_SOURCES := $(shell git ls-files '.github/*.yml' '.github/**/*.yml')
+# `lint-ci` reads for the shell in their `run:` steps. Listed for the same
+# reason as the ones above: a workflow added outside .github/ would be checked
+# by nothing and the gate would still pass.
+CI_SOURCES := $(shell $(TRACKED) '.github/*.yml' '.github/**/*.yml')
 
 fmt:
 	@test -n "$(ZIG_SOURCES)" || { echo "no tracked .zig file to format" >&2; exit 1; }
@@ -469,7 +480,7 @@ SHELLCHECK_OPTS := -x --enable=$(SHELLCHECK_CHECKS)
 
 lint-shell:
 	@set -eu; \
-	files="$$(git ls-files '*.sh')"; \
+	files="$$($(TRACKED) '*.sh')"; \
 	test -n "$$files" || { echo "no tracked .sh file to lint" >&2; exit 1; }; \
 	tmp="$$(mktemp)"; \
 	trap 'rm -f "$$tmp"' EXIT; \
@@ -492,7 +503,7 @@ lint-shell:
 	    exit 1; \
 	  }; \
 	done; \
-	git ls-files -z '*.sh' | xargs -0 shellcheck $(SHELLCHECK_OPTS)
+	$(TRACKED) -z '*.sh' | xargs -0 shellcheck $(SHELLCHECK_OPTS)
 
 # The shell in the workflows is the same language under the same options, and
 # it is where a release is published from, so it is checked rather than

@@ -138,8 +138,10 @@ no other linter reads. It checks the things a rendered page hides and a diff
 does not: a hard tab or a trailing space outside a code fence, two blank lines
 in a row, a fence that is never closed, and a file with no final newline.
 There is no Markdown formatter, so this is the whole of that gate rather than
-a proxy for one. Each target takes its file list from git, so a shell, Python,
-YAML or Markdown file added anywhere is linted too. Both workflows call `make lint`
+a proxy for one. Each target takes its file list from git, as the tracked tree plus the
+untracked files `.gitignore` does not exclude, so a shell, Python, YAML or
+Markdown file added anywhere is linted too, and one written but not yet
+`git add`ed is linted before it is committed rather than after. Both workflows call `make lint`
 rather than repeating its targets, so a linter added to the Makefile gates a
 push and a tag as well as a laptop.
 

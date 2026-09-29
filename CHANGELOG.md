@@ -249,6 +249,16 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- The gate reads a file the contributor has not committed yet. Every linter's
+  file list came from `git ls-files`, which names the tracked tree and nothing
+  else, so a `.zig`, `.py`, `.sh`, `.yml` or `.md` file that existed on disk but
+  had never been `git add`ed was formatted, linted and checked by no target:
+  `make check` was green on the tree that fails the moment the file is
+  committed. The lists are now `git ls-files --cached --others
+  --exclude-standard`, which is the tracked tree plus the untracked files
+  `.gitignore` does not exclude, so a build product still leaves the gate
+  alone.
+
 - The source citation gate fails again. `scripts/check-refs.sh` ended with an
   `echo` and the `exit 1` on the same line, so the exit was one more argument to
   the echo: every stale `src/path:line` citation in the tree was printed to
