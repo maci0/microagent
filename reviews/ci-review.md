@@ -39,8 +39,8 @@ provider, or if the tree has been reduced to a fragment with nothing to gate or 
    `uses:` in the workflows and in the actions under `.github/actions/` must name a
    40-character hex sha with the release it stands for in a trailing comment, because a
    mutable tag lets a new upstream release decide what this repository executes. Read
-   the whole set with `rg -n 'uses:'`, the actions included: a tag, a branch, or a bare
-   `actions/checkout` is a finding. The `github-actions` ecosystem in
+   the whole set with `rg -n 'uses:'`, the composite actions included: a tag, a branch,
+   or a bare `actions/checkout` is a finding. The `github-actions` ecosystem in
    `.github/dependabot.yml` is what moves these pins, so read the `directory:` it
    declares against the directories the `uses:` lines actually sit in: a pin outside
    every declared directory is one nothing bumps.

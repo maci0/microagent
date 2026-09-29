@@ -14,7 +14,9 @@ rankings derived from it. It does not audit the network client, judge the reply-
 formatting, check the command-line contract (the options themselves belong to
 `reviews/cli-contract-review.md`), or replace the standard gate on code quality. A finding must
 be provable by reading the code the document points at, not by an opinion about what an
-attacker would try.
+attacker would try. The request code those rows name is
+`reviews/network-client-review.md`'s; a change to either leaves a finding in the
+other, so neither pass edits the other's ground.
 
 ## First decide if this review applies
 

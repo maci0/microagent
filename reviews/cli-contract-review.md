@@ -148,8 +148,8 @@ a fragment with no invocation surface to hold a contract.
 - Do not edit the network client, the API key handling, the download path, or anything in
   `bench/`, `integrations/`, or `.github/`. Item 7 reads the update argument loop, the
   token lookup and the paths that fetch an asset; reading them is not a licence to change
-  how the download works. The numbers those scripts publish belong to
-  `reviews/benchmark-accuracy-review.md`.
+  how the download works, which belongs to `reviews/network-client-review.md`. The numbers
+  those scripts publish belong to `reviews/benchmark-accuracy-review.md`.
 - Do not rewrite the CHANGELOG's history or its release entries. Add an entry under
   `## [Unreleased]` only when your edit changes what an existing invocation does.
 - Stop after the findings you can prove. A pass that reports a contradiction in four
@@ -179,7 +179,8 @@ count of fixes applied and the gate result.
 ## Important:
 
 - This review owns the invocation and output contract. The threat model's accuracy
-  belongs to `reviews/threat-model-review.md`, the published measurements to
+  belongs to `reviews/threat-model-review.md`, the requests themselves to
+  `reviews/network-client-review.md`, the published measurements to
   `reviews/benchmark-accuracy-review.md`, the prose claims that are not the contract (the
   commands a contributor runs, the paths and links they follow) to
   `reviews/doc-review.md`, prompt files, skills, agent rule files, PRDs, ADRs,
