@@ -16,6 +16,17 @@
 #
 # The dist directory arrives as an argument so the Makefile stays the one place
 # a release path is written down.
+#
+# The locale and timezone are pinned here rather than left to the caller, because
+# two `sort`s below decide the order the pins and the files are written in: under
+# a locale whose collation puts `_` before `a`, or a case-insensitive one that
+# orders ASCII by case, the same dist/ and the same manifests produce a document
+# whose bytes depend on the machine that generated it. The Makefile exports the
+# same pair for every other recipe, and this script is also run by hand, so the
+# guarantee cannot live only there.
+LC_ALL=C
+TZ=UTC
+export LC_ALL TZ
 set -eu
 
 : "${1:?usage: sbom.sh <dist directory>}"
@@ -41,8 +52,18 @@ assets=
 asset_count=0
 for path in "$dist"/microagent-v*; do
 	name="${path##*/}"
+	# A previous run's inventory, and the sidecar beside it, are output of this
+	# script rather than assets of the release. The glob is `microagent-v*`,
+	# which the document's own name matches, so a second `make sbom` over a
+	# dist/ that already holds one reads its own last output back as an asset:
+	# the document then names a file that was never published, hashes it into
+	# the package verification code, and every run after the first disagrees
+	# with the one before it. `make release-assets` empties dist/ so a tag never
+	# reaches that, but the target is run by hand over a build that is already
+	# there, and a document that changes each time it is regenerated describes
+	# nothing.
 	case "$name" in
-	*.sha256 | *.tmp) continue ;;
+	*.sha256 | *.tmp | *.spdx.json) continue ;;
 	esac
 	test -f "$path" || continue
 	# A name outside this set is a path a JSON string would have to escape, and
@@ -98,7 +119,34 @@ test -n "$license" || {
 	echo "LICENSE names '$license_named', which is no SPDX identifier this script writes" >&2
 	exit 1
 }
-created="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# The creation time is SOURCE_DATE_EPOCH when the environment names one, and the
+# clock otherwise. `check-reproducible` varies SOURCE_DATE_EPOCH between its two
+# builds of every target, and the reproducible-builds convention is that a
+# toolchain stamps that value into the artifacts it writes; a document carrying
+# the wall clock instead means regenerating the inventory over an unchanged
+# dist/ yields different bytes, so a checksum published beside it describes a
+# file nobody can produce again. The conversion is spelled for both date
+# implementations: GNU coreutils takes `-d @<epoch>` and BSD takes `-r <epoch>`,
+# and a host with neither of those fails the release rather than falling back to
+# a clock, because a silent fallback is the nondeterminism this removes.
+if [ -n "${SOURCE_DATE_EPOCH:-}" ]; then
+	case "$SOURCE_DATE_EPOCH" in
+		*[!0-9]* | '')
+			echo "SOURCE_DATE_EPOCH is '$SOURCE_DATE_EPOCH', which is not a Unix timestamp" >&2
+			exit 1
+			;;
+	esac
+	if created="$(date -u -d "@$SOURCE_DATE_EPOCH" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"; then
+		:
+	elif created="$(date -u -r "$SOURCE_DATE_EPOCH" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"; then
+		:
+	else
+		echo "no date on this host converts a Unix timestamp, so the inventory cannot honor SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" >&2
+		exit 1
+	fi
+else
+	created="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+fi
 
 # One line per pin, the manifest that declares it last, deduplicated on the pin
 # so a package both manifests name is described once, by the first of them.

@@ -1144,7 +1144,14 @@ checksums:
 	for asset in microagent-v*; do \
 		case "$$asset" in *.sha256|*.tmp) continue;; esac; \
 		test -e "$$asset" || continue; \
-		$$sum "$$asset" > "$$asset.sha256.tmp"; \
+		line=$$($$sum "$$asset"); \
+		digest=$$(printf '%s\n' "$$line" | cut -d' ' -f1); \
+		printf '%s  %s\n' "$$digest" "$$asset" > "$$asset.sha256.tmp"; \
+		grep -qE '^[0-9a-f]{64}  ' "$$asset.sha256.tmp" || { \
+		  echo "$$sum produced no sha256 for $$asset, so the sidecar would name nothing update can verify" >&2; \
+		  rm -f "$$asset.sha256.tmp"; \
+		  exit 1; \
+		}; \
 		mv "$$asset.sha256.tmp" "$$asset.sha256"; \
 		written=$$((written + 1)); \
 	done; \
@@ -1176,7 +1183,12 @@ sha256-of:
 	  echo "neither sha256sum nor shasum is on PATH, so no digest can be read" >&2; \
 	  exit 2; \
 	}; \
-	$$sum "$(FILE)" | cut -d' ' -f1
+	digest=$$($$sum "$(FILE)" | cut -d' ' -f1); \
+	test -n "$$digest" || { \
+	  printf 'no digest could be read from %s\n' "$(FILE)" >&2; \
+	  exit 1; \
+	}; \
+	printf '%s\n' "$$digest"
 
 # Two independent builds of the same source must be byte-identical, or a
 # released checksum describes one binary and a rebuild produces another. Every
@@ -1243,7 +1255,10 @@ check-reproducible: zig-version
 	  SOURCE_DATE_EPOCH="$$1" LC_ALL="$$2" TZ="$$3" ZIG_GLOBAL_CACHE_DIR="$(REPRO_GLOBAL)" $(ZIG) build \
 	    -Dtarget="$$4" -Doptimize=ReleaseSmall \
 	    --cache-dir "$(REPRO_DIR)/cache" -p "$(REPRO_DIR)/out"; \
-	  $$sum "$(REPRO_DIR)/out/bin/microagent" | cut -d' ' -f1; \
+	  test -f "$(REPRO_DIR)/out/bin/microagent"; \
+	  digest=$$($$sum "$(REPRO_DIR)/out/bin/microagent" | cut -d' ' -f1); \
+	  test -n "$$digest"; \
+	  printf '%s\n' "$$digest"; \
 	}; \
 	build_from_copy() { \
 	  srcdir="$$REPRO_SRC"; \
@@ -1264,7 +1279,10 @@ check-reproducible: zig-version
 	  (cd "$$srcdir" && SOURCE_DATE_EPOCH="$$1" LC_ALL="$$2" TZ="$$3" ZIG_GLOBAL_CACHE_DIR="$(REPRO_GLOBAL)" $(ZIG) build \
 	    -Dtarget="$$4" -Doptimize=ReleaseSmall \
 	    --cache-dir "$(REPRO_DIR)/cache" -p "$(REPRO_DIR)/out2"); \
-	  $$sum "$(REPRO_DIR)/out2/bin/microagent" | cut -d' ' -f1; \
+	  test -f "$(REPRO_DIR)/out2/bin/microagent"; \
+	  digest=$$($$sum "$(REPRO_DIR)/out2/bin/microagent" | cut -d' ' -f1); \
+	  test -n "$$digest"; \
+	  printf '%s\n' "$$digest"; \
 	}; \
 	for target in $(RELEASE_TARGETS); do \
 	  first=$$(build_once 1700000000 C UTC "$$target"); \

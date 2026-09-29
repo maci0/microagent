@@ -56,11 +56,22 @@ runs:
     # same toolchain and architecture, so a commit that changed a file still
     # reuses what an earlier one built for the rest of the tree rather than
     # recompiling it from nothing.
+    #
+    # The hashed set is every input the build reads, not only src/: build.zig
+    # embeds config.example.toml into the binary, so an edit to it changes the
+    # bytes of every artifact without touching a line under src/, and a key
+    # that left it out would restore the previous commit's cache entry for
+    # every push that changed nothing but that file. Zig's cache is
+    # content-addressed, so a stale restore costs a recompile rather than a
+    # wrong binary; the key is here so the restore is a hit instead.
     - name: restore the project build cache
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: .zig-cache
-        key: zig-local-${{ runner.os }}-${{ runner.arch }}-${{ steps.zig.outputs.version }}-${{ hashFiles('build.zig', 'build.zig.zon', 'src/**') }}
+        key: >-
+          zig-local-${{ runner.os }}-${{ runner.arch }}-${{ steps.zig.outputs.version }}-${{
+          hashFiles('build.zig', 'build.zig.zon', 'src/**',
+          'config.example.toml', 'integrations/harbor/microagent_agent.py') }}
         restore-keys: |
           zig-local-${{ runner.os }}-${{ runner.arch }}-${{ steps.zig.outputs.version }}-
 
