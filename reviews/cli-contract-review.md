@@ -93,7 +93,10 @@ a fragment with no invocation surface to hold a contract.
 9. **Tools the model is offered.** The "Tools" table in `docs/usage.md` counts the tool set
    and names each one; the help text names no tool at all, so the table is the only
    prose to check, and a tool the array offers that the table lacks is this item's finding
-   in the direction the caller reads it.
+   in the direction the caller reads it. The paragraph under that table already
+   carries the `skill` tool and the `mcp__<server>__<tool>` entries
+   `extraToolsJson` appends at run time, so their absence from the table is not a
+   finding.
    Read the schemas in `tools_json` in `src/main.zig`, the array the request body is
    built from, and name them one by one; a repo-wide count of the `"type":"function"`
    literal also matches a test fixture elsewhere in the file, and a count taken that way

@@ -15,7 +15,7 @@ caught by compiling anything, because nothing consumes the numbers. This review
 owns their accuracy: the scripts, the committed results files, and the adapter.
 It does not own the binary's speed, the invocation contract (the options belong
 to `reviews/cli-contract-review.md`), the threat model (`reviews/threat-model-review.md`), or
-the prose quality of any document. A finding here must be provable by reading a
+the prose quality of any document (`reviews/doc-review.md`). A finding here must be provable by reading a
 script against the document, or by running a script and reading what it produced,
 not by an opinion about whether a harness ought to be faster.
 
@@ -35,10 +35,13 @@ reduced to a fragment with nothing measured left to check.
    count the un-cacheable-bytes section names are all measured, and every one of
    them can be measured again: `wc -l src/*.zig`, `ls -l` on a fresh
    `zig build -Doptimize=ReleaseSmall`, and the length of `tools_json` in
-   `src/main.zig`, the array the request body is built from. That array holds one
-   entry per tool, and a repo-wide count of the `"type":"function"` literal also
-   matches a test fixture, so a count taken that way overcounts and reports a tool
-   that is never offered. A figure that disagrees with the run is a finding, and so
+   `src/main.zig`, the built-in array the request body's `tools` starts from. That
+   constant holds one entry per built-in tool; `extraToolsJson` appends the `skill`
+   tool and one `mcp__<server>__<tool>` per tool a server reported, so a body
+   measured on a run carrying either is longer than the constant and the figure to
+   check is the constant's. A repo-wide count of the `"type":"function"` literal
+   also matches a test fixture, so a count taken that way overcounts and reports a
+   tool that is never offered. A figure that disagrees with the run is a finding, and so
    is one no run in this tree can reproduce.
 
 2. **Harnesses the document reports that no script runs.** Each row of the
