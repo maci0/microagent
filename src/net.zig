@@ -601,10 +601,9 @@ pub fn transientTransportError(err: anyerror) bool {
 }
 
 /// The month names in the order `std.time.epoch.getDaysInMonth` counts them,
-/// and the form a `Retry-After` date spells them in. Exported so a header built
-/// for a test names its month the way the parser reads one, rather than a
-/// second spelling of the twelve that can drift from it.
-pub const calendar_months = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+/// and the form a `Retry-After` date spells them in. One table for the reader
+/// and the writer, so a month cannot be spelled two ways and drift.
+const calendar_months = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
 
 /// An IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`) as seconds since the Unix
 /// epoch, or null for anything else.
@@ -1380,10 +1379,14 @@ fn fuzzHttpDate(_: void, smith: *std.testing.Smith) !void {
 
 /// `seconds` as the IMF-fixdate a server would have sent it, into `buf`.
 ///
+/// A caller building a `Retry-After` date writes the header with this rather
+/// than spelling the calendar a second time, so the header it hands its own
+/// parser is one the two agree on by construction.
+///
 /// The weekday is named from the day count with 1970-01-01 (a Thursday) as the
 /// zero, and the parser is documented not to check that field, so it is the one
 /// part of the round trip left unverified.
-fn writeHttpDate(seconds: i64, buf: []u8) ![]const u8 {
+pub fn writeHttpDate(seconds: i64, buf: []u8) ![]const u8 {
     // A floor and not a truncation, so a leap second (23:59:60) lands on the
     // day it belongs to rather than on the one before it.
     const days: u47 = @intCast(@divFloor(seconds, std.time.s_per_day));

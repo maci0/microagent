@@ -5897,25 +5897,13 @@ test "a Retry-After that names no wait falls back to the backoff, not to zero" {
 }
 
 /// A 429 head whose `Retry-After` is an IMF-fixdate naming an instant
-/// `seconds` after `now`, written into `buf` by the caller. The calendar fields
-/// come from the epoch arithmetic in the standard library, so the header the
-/// test builds is one the parser has to agree with rather than one spelled the
-/// same way twice.
+/// `seconds` after `now`, written into `buf` by the caller. The date is the
+/// one `net` writes, so the header the test builds is one the parser has to
+/// agree with rather than one spelled the same way twice.
 fn retryAfterDateHead(buf: []u8, now: i64, seconds: i64) []const u8 {
-    const target = now + seconds;
-    const seconds_in = std.time.epoch.EpochSeconds{ .secs = @intCast(target) };
-    const day = seconds_in.getEpochDay().calculateYearDay();
-    const month_day = day.calculateMonthDay();
-    const rest: u32 = @intCast(@mod(target, std.time.epoch.secs_per_day));
-    const clock = std.time.epoch.DaySeconds{ .secs = @intCast(rest) };
-    return std.fmt.bufPrint(buf, "HTTP/1.1 429 Too Many Requests\r\nretry-after: Thu, {d:0>2} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} GMT\r\n\r\n", .{
-        @as(u32, month_day.day_index) + 1,
-        net.calendar_months[month_day.month.numeric() - 1],
-        day.year,
-        clock.getHoursIntoDay(),
-        clock.getMinutesIntoHour(),
-        clock.getSecondsIntoMinute(),
-    }) catch unreachable;
+    var date: [64]u8 = undefined;
+    const written = net.writeHttpDate(now + seconds, &date) catch unreachable;
+    return std.fmt.bufPrint(buf, "HTTP/1.1 429 Too Many Requests\r\nretry-after: {s}\r\n\r\n", .{written}) catch unreachable;
 }
 
 // The run's ceiling is a promise about wall time, and the clock it is measured
