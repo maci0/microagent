@@ -22,7 +22,11 @@ release, and `microagent update` moves you to it.
   response. The new `served_model` and `fingerprint` are the provider's own
   answer to that, read off the frames the run already parses; both are empty
   strings when the stream named neither, and neither is prompt or output text.
-
+- Two more `std.testing.fuzz` harnesses, over the two untrusted inputs whose
+  handling decides where a secret goes: the base url, which chooses whether the
+  api key travels over plaintext and is printed on every failure, and the git
+  command line, which is composed out of a model's subcommand, revision and
+  path and carries the credential exclusion pathspecs.
 - `make test-sanitize` runs the unit tests a second time with the
   undefined-behavior sanitizer, and `make check` and both workflows run it. The
   plain suite says the assertions hold, not that nothing inside them is out of

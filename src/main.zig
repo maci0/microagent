@@ -3397,6 +3397,133 @@ test "a base url that carries credentials does not print them" {
     );
 }
 
+// The base url is the one value that decides where the api key goes, and it
+// arrives from a flag, an environment variable or a config file rather than
+// from this program: every spelling of an endpoint is somebody else's text.
+// The two things it has to keep doing are hand-written above, so this harness
+// runs the fuzzer's bytes through both and holds them to the property rather
+// than to the examples: plaintext earns the key only for a host that is this
+// machine, and a url that carries credentials never prints them.
+// `std.testing.fuzz` runs this corpus on every `zig build test`, and through
+// the fuzzer's mutations when the test binary is built in fuzz mode. The corpus
+// is the shapes that decide the answer: each scheme, the loopback spellings and
+// the names that only look like them, a port, userinfo, an ipv6 host, and the
+// bytes a terminal would act on.
+const base_url_corpus = [_][]const u8{
+    "",
+    " ",
+    "not a url",
+    "https://openrouter.ai/api/v1",
+    "HTTPS://OpenRouter.AI/api/v1",
+    "http://openrouter.ai/api/v1",
+    "httpsx://openrouter.ai",
+    "ftp://openrouter.ai",
+    "//openrouter.ai",
+    "https:/openrouter.ai",
+    "https://",
+    "https://:8443/v1",
+    "https://user:sk-secret@openrouter.ai/api/v1",
+    "https://user@openrouter.ai",
+    "https://@openrouter.ai",
+    "https://a@b@openrouter.ai",
+    "http://localhost:1234/v1",
+    "http://LocalHost:1234/v1",
+    "http://localhost.",
+    "http://localhost.evil.com/v1",
+    "http://localhost:99999999/v1",
+    "http://x.localhost:1/v1",
+    "http://.localhost/v1",
+    "http://127.0.0.1:1234/v1",
+    "http://127.1.2.3/v1",
+    "http://127.256.0.1/v1",
+    "http://127.0.0.1.evil.com/v1",
+    "http://127./v1",
+    "http://127.0.0/v1",
+    "http://127.0.0.1./v1",
+    "http://[::1]:1234/v1",
+    "http://[::2]/v1",
+    "http://[::1",
+    "http://gateway.internal:8443/v1",
+    "http://127.0.0.1\t.evil.com/v1",
+    "http://127.0.0.1\u{1b}[31m/v1",
+    "https://u:p@openrouter.ai/caf\xe9\x1b",
+    "https://openrouter.ai/\xff",
+    "https://openrouter.ai/\u{0}\u{7f}",
+    "https://" ++ "a" ** 300 ++ ".com/v1",
+    "http://\u{65e5}\u{8a00}/v1",
+};
+
+test "a fuzzed base url carries the key only over tls or to this machine" {
+    try std.testing.fuzz({}, fuzzBaseUrl, .{ .corpus = &base_url_corpus });
+}
+
+fn fuzzBaseUrl(_: void, smith: *std.testing.Smith) !void {
+    const gpa = std.testing.allocator;
+    var scratch: [8 * 1024]u8 = undefined;
+    const url: []const u8 = if (smith.in) |seed| seed else scratch[0..smith.slice(&scratch)];
+
+    // The key rides in an `Authorization` header on every request, so the
+    // exemption is read from the parsed url rather than from its text: a
+    // scheme that parses is the one the request will use, and a host that
+    // parses out of it is the one the socket is opened to.
+    if (baseUrlCarriesKey(url)) {
+        const uri = std.Uri.parse(url) catch return error.TestUnexpectedResult;
+        if (std.ascii.eqlIgnoreCase(uri.scheme, "https")) return;
+        // Plaintext. The host has to be this machine, spelled the four ways a
+        // resolver sends to this machine and no other.
+        var host_buf: [Io.net.HostName.max_len]u8 = undefined;
+        const host = (uri.getHost(&host_buf) catch return error.TestUnexpectedResult).bytes;
+        try std.testing.expect(isLoopbackHost(host));
+        var lower: [256]u8 = undefined;
+        if (host.len > lower.len) return error.TestUnexpectedResult;
+        for (host, 0..) |c, i| lower[i] = std.ascii.toLower(c);
+        const h = lower[0..host.len];
+        if (std.mem.eql(u8, std.mem.trim(u8, h, "[]"), "::1")) return;
+        if (std.mem.eql(u8, h, "localhost") or std.mem.endsWith(u8, h, ".localhost")) return;
+        // A dotted quad, and `127` is the whole of the range: a name that only
+        // begins with it is a host somebody else can point anywhere.
+        var octets: usize = 0;
+        var it = std.mem.splitScalar(u8, h, '.');
+        var first: u16 = 0;
+        while (it.next()) |part| {
+            if (part.len == 0 or part.len > 3) return error.TestUnexpectedResult;
+            const n = std.fmt.parseInt(u16, part, 10) catch return error.TestUnexpectedResult;
+            if (n > 255) return error.TestUnexpectedResult;
+            if (octets == 0) first = n;
+            octets += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 4), octets);
+        try std.testing.expectEqual(@as(u16, 127), first);
+    }
+
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    // The shown url is what every failure of the run names, so it holds no
+    // byte a terminal acts on and no byte that is not text.
+    const shown = displayUrl(arena, url);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(shown));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, shown, "\n"));
+    for (shown) |c| try std.testing.expect(c >= 0x20 and c != 0x7f);
+    // Redaction is not a second pass over different bytes: a shown url carries
+    // no further userinfo to hide, so showing it again changes nothing.
+    try std.testing.expectEqualStrings(shown, displayUrl(arena, shown));
+
+    // What the redactor removes never comes back, whatever it was spelled
+    // with: a printable userinfo is absent from what a reader is shown.
+    const scheme_end = std.mem.indexOf(u8, url, "://") orelse return;
+    const rest = url[scheme_end + "://".len ..];
+    const authority_end = std.mem.indexOfAny(u8, rest, "/?#") orelse rest.len;
+    const at = std.mem.lastIndexOfScalar(u8, rest[0..authority_end], '@') orelse return;
+    const userinfo = rest[0..at];
+    if (userinfo.len == 0) return;
+    for (shown) |c| {
+        if (c < 0x20 or c >= 0x7f) return;
+    }
+    try std.testing.expect(std.mem.indexOf(u8, shown, userinfo) == null);
+}
+
 // The trace is a diagnostic like any other, and every value on it came from
 // the environment or the command line. One that carries a C0 byte is written
 // escaped, on the one line whose job is telling an operator which value the run

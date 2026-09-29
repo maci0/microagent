@@ -3633,6 +3633,154 @@ test "a git line limit past what git parses is cut, not handed over" {
     }
 }
 
+// The command line `git` runs is composed out of two model-supplied values and
+// nothing else, and the composition is where the tool's security property
+// lives: `toolGit` refuses a rev that reads as an option or names a file, but
+// the argv that refusal protects is built here, and a `--` that moved, or an
+// exclusion pathspec that a model's `path` displaced, would turn a read into a
+// file a committed credential comes back out of. `std.testing.fuzz` runs this
+// corpus on every `zig build test`, and through the fuzzer's mutations when the
+// test binary is built in fuzz mode. The corpus is the subcommands, a rev and a
+// path that are empty, that are options, that name credentials, and a line
+// count at and past the ceiling.
+const git_argv_corpus = [_][]const u8{
+    "status",
+    "diff",
+    "log",
+    "show",
+    "blame",
+    "status\nHEAD",
+    "diff\nHEAD\nsrc/main.zig",
+    "diff\nHEAD~3\n.",
+    "diff\n--output=pwned",
+    "diff\nHEAD:.env",
+    "log\nHEAD\n.env",
+    "log\n400",
+    "log\n0",
+    "log\n18446744073709551615",
+    "log\n4294967295",
+    "log\n-1",
+    "log\nall",
+    "show\nHEAD\n.deploy/server.pem",
+    "show\n\n",
+    "blame\nHEAD\nsrc/main.zig",
+    "blame\n.env",
+    "blame\nHEAD\n--",
+    "diff\nHEAD\n--",
+    "diff\nHEAD\n--upload-pack=/tmp/x",
+    "diff\nHEAD\na\nb",
+    "log\nHEAD\nsrc",
+    "status\nHEAD\nsrc/main.zig",
+    "show\nHEAD~1\n*.zig",
+    "commit",
+    "push",
+    "\nHEAD",
+    "diff\n\u{0}\u{1}\u{7f}\n\u{fffd}",
+};
+
+test "a fuzzed git call runs a fixed command line with the model's values in it" {
+    try std.testing.fuzz({}, fuzzGitArgv, .{ .corpus = &git_argv_corpus });
+}
+
+fn fuzzGitArgv(_: void, smith: *std.testing.Smith) !void {
+    const gpa = std.testing.allocator;
+    var scratch: [8 * 1024]u8 = undefined;
+    const text: []const u8 = if (smith.in) |seed| seed else scratch[0..smith.slice(&scratch)];
+
+    // One value per line, so the fuzzer's bytes reach the subcommand, the rev
+    // and the path rather than only the first of them.
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    const cmd = lines.next() orelse "";
+    const rev_text = lines.next();
+    const path_text = lines.next();
+    // A limit the model can only have sent as a number, and the floor
+    // `lineCount` puts under one, since a count of zero is a line count of one.
+    const limit = @max(1, std.fmt.parseInt(usize, rev_text orelse "", 10) catch 1);
+
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    const argv = gitArgv(arena, cmd, rev_text, path_text, limit) catch |err| {
+        // A command this tool does not run is the whole answer: nothing is
+        // composed, so nothing can be spawned.
+        try std.testing.expectEqual(error.UnknownCmd, err);
+        return;
+    };
+
+    // The two words that make the invocation this program's own come first, so
+    // no model value can stand where they are and no pager can interpose.
+    try std.testing.expectEqualStrings("git", argv[0]);
+    try std.testing.expectEqualStrings("--no-pager", argv[1]);
+
+    // The separator is where the fixed words end, and the tail after it is the
+    // exclusion set plus the model's own path, in that order and complete. A
+    // model `path` that is itself `--`, or an option, is a pathspec here and
+    // stays one: it is after the separator, so git reads it as a name.
+    // The first `--` is the separator. A second one is the model's own path
+    // spelled that way, and after the separator git reads it as a name, which
+    // is what a path is.
+    var sep: ?usize = null;
+    for (argv, 0..) |arg, i| {
+        if (std.mem.eql(u8, arg, "--") and sep == null) sep = i;
+    }
+    const at_sep = sep orelse return error.TestUnexpectedResult;
+    try std.testing.expect(at_sep >= 3);
+    var want_tail: std.ArrayList([]const u8) = .empty;
+    if (std.mem.eql(u8, cmd, "diff") or std.mem.eql(u8, cmd, "show")) {
+        try want_tail.appendSlice(arena, &credential_pathspecs);
+    }
+    if (path_text) |p| try want_tail.append(arena, p);
+    const got_tail = argv[at_sep + 1 ..];
+    try std.testing.expectEqual(want_tail.items.len, got_tail.len);
+    for (want_tail.items, got_tail) |want, got| try std.testing.expectEqualStrings(want, got);
+    // The exclusion set is the tool's security property, so the two commands
+    // that print a file's contents carry all of it whatever path was named.
+    if (std.mem.eql(u8, cmd, "diff") or std.mem.eql(u8, cmd, "show")) {
+        for (credential_pathspecs) |spec| {
+            var seen = false;
+            for (argv) |arg| {
+                if (std.mem.eql(u8, arg, spec)) seen = true;
+            }
+            try std.testing.expect(seen);
+        }
+    }
+
+    // The count git parses is a decimal between one and the ceiling, whatever
+    // number the model sent, and it is the only thing between `-n` and the
+    // separator that is not a fixed word.
+    if (std.mem.eql(u8, cmd, "log")) {
+        for (argv, 0..) |arg, i| {
+            if (!std.mem.eql(u8, arg, "-n")) continue;
+            try std.testing.expect(i + 1 < at_sep);
+            const n = std.fmt.parseInt(usize, argv[i + 1], 10) catch return error.TestUnexpectedResult;
+            try std.testing.expect(n >= 1);
+            try std.testing.expect(n <= git_log_line_ceiling);
+        }
+    }
+
+    // A rev reaches git as an argument of the subcommand, and only for the
+    // three commands that take one: `status` and `log` have no revision, and a
+    // rev a command does not take is a word that was composed for nothing.
+    if (std.mem.eql(u8, cmd, "diff") or std.mem.eql(u8, cmd, "blame") or std.mem.eql(u8, cmd, "show")) {
+        // `show` names a revision even when the model named none; the other
+        // two take the working tree instead, so an absent rev is no argument.
+        const want_rev: ?[]const u8 = if (std.mem.eql(u8, cmd, "show")) rev_text orelse "HEAD" else rev_text;
+        if (want_rev) |want| {
+            var at_rev: ?usize = null;
+            for (argv, 0..) |arg, i| {
+                if (at_rev == null and std.mem.eql(u8, arg, want)) at_rev = i;
+            }
+            try std.testing.expect(at_rev != null);
+            try std.testing.expect(at_rev.? < at_sep);
+        }
+    } else if (std.mem.eql(u8, cmd, "status")) {
+        // `status` takes no revision at all, and the only words in its argv
+        // are the ones below composed them.
+        if (rev_text) |r| for (argv) |arg| try std.testing.expect(!std.mem.eql(u8, arg, r));
+    }
+}
+
 // A missing argument that the model filled with a number is still missing: the
 // tools read their arguments through `str`, which refuses every non-string.
 test "a tool argument sent as a number is missing, not a value" {
