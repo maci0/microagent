@@ -1914,12 +1914,14 @@ fn configPathText(arena: std.mem.Allocator, source: ConfigSource) []const u8 {
 /// printed, and a base url is the redacted spelling so credentials in one do
 /// not reach a log either.
 ///
-/// Every value the environment supplied is escaped by `traceText`, the same
+/// Every value the environment supplied is escaped by `safeTextAll`, the same
 /// reason the notes below it are: a model id, a bundle path, a session
 /// directory and the config path are all operator-supplied bytes, and a
 /// `MICROAGENT_SESSION_DIR` carrying a C0 byte wrote it to the terminal
 /// unsanitized on the one line whose whole job is telling an operator what the
-/// run resolved.
+/// run resolved. Escaped whole rather than cut to `net.quoted_value_bytes`,
+/// because a truncated path names no directory and the trace exists to let a
+/// reader recognize the value the run resolved.
 fn traceConfig(
     io: Io,
     arena: std.mem.Allocator,
@@ -1940,17 +1942,17 @@ fn traceConfig(
         \\[mdebug] api key from {s}
         \\
     , .{
-        traceText(arena, opts.model),
+        chat_mod.safeTextAll(arena, opts.model),
         displayUrl(arena, opts.base_url),
         opts.max_turns,
         opts.max_tokens,
         if (opts.budget_s) |b| std.fmt.allocPrint(arena, "{d}", .{b}) catch "?" else "unset",
         if (opts.max_spend_tokens) |m| std.fmt.allocPrint(arena, "{d}", .{m}) catch "?" else "unset",
-        traceText(arena, opts.reasoning_effort orelse "unset"),
-        traceText(arena, if (opts.temperature) |t| std.fmt.allocPrint(arena, "{d:.6}", .{t}) catch "?" else "unset"),
-        traceText(arena, if (opts.ca_bundle.len == 0) "unset" else opts.ca_bundle),
-        traceText(arena, if (opts.session_dir.len == 0) "off" else opts.session_dir),
-        traceText(arena, loaded.source orelse "none"),
+        chat_mod.safeTextAll(arena, opts.reasoning_effort orelse "unset"),
+        chat_mod.safeTextAll(arena, if (opts.temperature) |t| std.fmt.allocPrint(arena, "{d:.6}", .{t}) catch "?" else "unset"),
+        chat_mod.safeTextAll(arena, if (opts.ca_bundle.len == 0) "unset" else opts.ca_bundle),
+        chat_mod.safeTextAll(arena, if (opts.session_dir.len == 0) "off" else opts.session_dir),
+        chat_mod.safeTextAll(arena, loaded.source orelse "none"),
         loaded.system_prompt_extra.len,
         opts.skills.items.len,
         skillRootsText(arena, skill_roots),
@@ -1980,17 +1982,9 @@ fn skillRootsText(arena: std.mem.Allocator, roots: []const skill_mod.Root) []con
     var buf: std.ArrayList(u8) = .empty;
     for (roots, 0..) |root, i| {
         if (i != 0) buf.appendSlice(arena, ", ") catch return "none";
-        buf.appendSlice(arena, traceText(arena, root.path)) catch return "none";
+        buf.appendSlice(arena, chat_mod.safeTextAll(arena, root.path)) catch return "none";
     }
     return buf.items;
-}
-
-/// A configuration value the way the trace should spell it: escaped, and in
-/// full rather than cut to `net.quoted_value_bytes`, because the trace exists to
-/// let a reader recognize the value the run resolved, and a truncated path
-/// names no directory. Same escaping, same reasoning, as `displayUrl` above.
-fn traceText(arena: std.mem.Allocator, value: []const u8) []const u8 {
-    return chat_mod.safeText(arena, value, value.len *| chat_mod.safe_text_widening);
 }
 
 /// Whether a config that could not be read is worth a line on stderr. A
@@ -2813,7 +2807,7 @@ fn authHeaders(arena: std.mem.Allocator, api_key: []const u8) !std.http.Client.R
 /// caller's to hear about: swallowing it would run the turn with the guard
 /// silently absent and nothing to tell that from a socket that took it.
 fn setStallTimeout(handle: std.posix.socket_t, seconds: u32) !void {
-    if (@import("builtin").os.tag == .windows or seconds == 0) return;
+    if (builtin.os.tag == .windows or seconds == 0) return;
     const tv = std.posix.timeval{ .sec = @intCast(seconds), .usec = 0 };
     return std.posix.setsockopt(handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv));
 }
@@ -2979,13 +2973,12 @@ fn streamChatOnce(
         if (debug_enabled) std.debug.print("[mdebug] request sent, body={d} bytes\n", .{prefix_now.len + msgs.len + body_close.len});
 
         var response = open.receiveHead(&redirect_buffer) catch |err| {
-            // `worthAnotherAttempt` is what says a head is not worth another
-            // one; this is the operator's half of that, so a run that lost a
+            // `worthAnotherAttempt` returns false for a head whatever the
+            // error, so this is the operator's half of that: a run that lost a
             // billable turn says so rather than reporting a connection fault.
-            if (!worthAnotherAttempt(.head, err))
-                net.note(io, arena, "microagent: the request to {s} was sent in full and its response never arrived ({s}); it is not sent again, because a second POST of one turn is a second billable completion\n", .{
-                    shown_url, @errorName(err),
-                });
+            net.note(io, arena, "microagent: the request to {s} was sent in full and its response never arrived ({s}); it is not sent again, because a second POST of one turn is a second billable completion\n", .{
+                shown_url, @errorName(err),
+            });
             return err;
         };
         if (debug_enabled) std.debug.print("[mdebug] head status={d} enc={s}\n", .{ @intFromEnum(response.head.status), @tagName(response.head.content_encoding) });
@@ -3953,8 +3946,8 @@ test "every value on the config trace is escaped and left readable" {
 
     // Nothing to escape comes back as it went in, which is the common case and
     // the one a reader is scanning for.
-    try std.testing.expectEqualStrings("some/model", traceText(arena, "some/model"));
-    try std.testing.expectEqualStrings("unset", traceText(arena, "unset"));
+    try std.testing.expectEqualStrings("some/model", chat_mod.safeTextAll(arena, "some/model"));
+    try std.testing.expectEqualStrings("unset", chat_mod.safeTextAll(arena, "unset"));
 
     // The roots are the one value on the line that is a list, so the joining is
     // what the test is about: one root, several, and none. A run that found no
@@ -3984,15 +3977,15 @@ test "every value on the config trace is escaped and left readable" {
 
     // A C0 byte is spelled, so a session directory or a model id carrying one
     // cannot move the cursor, clear the screen or rewrite the line under it.
-    try std.testing.expectEqualStrings("a\\x1bb", traceText(arena, "a\x1bb"));
-    try std.testing.expectEqualStrings("\\x00", traceText(arena, "\x00"));
+    try std.testing.expectEqualStrings("a\\x1bb", chat_mod.safeTextAll(arena, "a\x1bb"));
+    try std.testing.expectEqualStrings("\\x00", chat_mod.safeTextAll(arena, "\x00"));
     // A byte that is not text is replaced rather than passed through as
     // mojibake, the same way every other diagnostic quotes a value.
-    try std.testing.expectEqualStrings("\u{fffd}", traceText(arena, "\xff"));
+    try std.testing.expectEqualStrings("\u{fffd}", chat_mod.safeTextAll(arena, "\xff"));
 
     // Well past the quote budget every other diagnostic cuts at.
     const long_path = "/home/" ++ "d" ** 400 ++ "/sessions";
-    const shown = traceText(arena, long_path);
+    const shown = chat_mod.safeTextAll(arena, long_path);
     try std.testing.expectEqualStrings(long_path, shown);
     try std.testing.expect(shown.len >= long_path.len);
 }

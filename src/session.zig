@@ -243,13 +243,19 @@ fn recordStampMs(now_ns: i96) i64 {
 /// per review forever; a monitor reads the recent runs, not the whole history.
 const max_session_logs = 200;
 
-/// How long a log is kept whatever the count says, in nanoseconds. The count
-/// alone is not a retention period: it bounds the store on a machine that runs
-/// often and bounds nothing at all on one that runs a few times a week, where
-/// two hundred logs is four years of the working directory each record names.
-/// Thirty days is well past the gap a monitor polling a running session has,
-/// and a log older than it describes a run no reader is following.
-const max_session_log_age_ns: u128 = 30 * 24 * 60 * 60 * std.time.ns_per_s;
+/// How long a log is kept whatever the count says, in days. The count alone is
+/// not a retention period: it bounds the store on a machine that runs often and
+/// bounds nothing at all on one that runs a few times a week, where two hundred
+/// logs is four years of the working directory each record names. Thirty days
+/// is well past the gap a monitor polling a running session has, and a log
+/// older than it describes a run no reader is following.
+///
+/// Stated in days rather than in nanoseconds because the window is a policy
+/// read back to the operator in days, and a day count derived by dividing the
+/// nanosecond constant is one edit away from naming a window nobody chose.
+const max_session_log_age_days: u64 = 30;
+const ns_per_day: u128 = 24 * 60 * 60 * std.time.ns_per_s;
+const max_session_log_age_ns: u128 = max_session_log_age_days * ns_per_day;
 
 /// Whether a log's name is further in the past than the age window allows,
 /// against the clock reading the run that is pruning.
@@ -451,7 +457,7 @@ fn pruneSessionsTo(io: Io, arena: std.mem.Allocator, session_dir: []const u8, ke
         };
     }
     if (failed != 0) net.note(io, arena, "microagent: {d} of {d} session logs under {s} could not be deleted ({s}); the store stays over its {d}-log limit and holds logs past the {d}-day age window until they can be\n", .{
-        failed, deleting, shown, @errorName(first_err.?), keep, max_session_log_age_ns / (24 * 60 * 60 * std.time.ns_per_s),
+        failed, deleting, shown, @errorName(first_err.?), keep, max_session_log_age_days,
     });
 }
 
@@ -963,7 +969,7 @@ test "the session store drops a log the age window has passed" {
 
     // Three logs a fortnight apart, so the oldest is past the window, the
     // middle is not, and the newest is this run.
-    const day_ns: u128 = 24 * 60 * 60 * std.time.ns_per_s;
+    const day_ns = ns_per_day;
     const now_ns: i128 = @intCast(40 * day_ns);
     const ages = [_]u128{ 39, 20, 1 };
     for (ages) |age| {
@@ -985,7 +991,7 @@ test "the session store drops a log the age window has passed" {
 // wrong clocks are the ones a machine reaches it with. Both leave the store
 // as they found it.
 test "a wrong clock expires nothing and the age window is thirty days wide" {
-    const day_ns: u128 = 24 * 60 * 60 * std.time.ns_per_s;
+    const day_ns = ns_per_day;
     try std.testing.expectEqual(@as(u128, 30 * day_ns), max_session_log_age_ns);
     // Just inside the window, and just outside it.
     try std.testing.expect(!stampExpired(30 * day_ns, @intCast(60 * day_ns)));

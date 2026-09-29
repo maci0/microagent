@@ -23,6 +23,13 @@ const sandbox = @import("sandbox.zig");
 /// is marked the same way every other tool's is.
 pub const max_tool_output = 24 * 1024;
 
+/// The multiple of `max_tool_output` each of a child's two streams is captured
+/// at, so a cut falls on the combined result rather than on one stream of it.
+/// Spelled once because it is a policy about what is worth keeping, not a
+/// per-tool decision: a tool that captured at a different multiple would hold
+/// a different amount of the same output for the same reason.
+pub const capture_limit_factor = 4;
+
 /// Ceiling on a file `read` returns whole. A source file is kilobytes, so the
 /// cap is what keeps one `read` of a multi-gigabyte artifact out of the
 /// conversation.
@@ -41,9 +48,9 @@ const bash_exit_note = "\n(exit: )";
 
 /// How long a read-only tool subprocess may run: `search`, `ast` and `git`.
 /// `bash` has its own default and ceiling below, because it is the one tool
-/// that runs what the model wrote. `max_tool_output * 4` is how much of each of
-/// a child's streams is kept before `clamp` trims the result to
-/// `max_tool_output` for the model.
+/// that runs what the model wrote. `max_tool_output * capture_limit_factor` is
+/// how much of each of a child's streams is kept before `clamp` trims the
+/// result to `max_tool_output` for the model.
 pub const tool_timeout_ms: u64 = 60_000;
 /// Ceiling on the `timeout_ms` a model may ask `bash` for. The value is model
 /// output, so it arrives with the same trust as a path or a command string: an
@@ -205,7 +212,7 @@ fn runSearchTool(
     // the drain, so it leaves the out-param untouched, and the failure below
     // reads it to say what the child printed before it did.
     var got: Partial = .{ .stdout = &.{}, .stderr = &.{}, .dropped = .{ false, false } };
-    const res = runCapped(io, arena, argv, max_tool_output * 4, net.durationMs(boundedMs(tool_timeout_ms, ceiling_ms)), environ_map, &got) catch |err|
+    const res = runCapped(io, arena, argv, max_tool_output * capture_limit_factor, net.durationMs(boundedMs(tool_timeout_ms, ceiling_ms)), environ_map, &got) catch |err|
         return failedOutput(arena, got, try missingProgram(arena, what, install, err));
     // Both streams and the exit status, for the reason `captureResult` gives:
     // returning stdout alone reported a search that had failed as one that had
@@ -478,7 +485,7 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
     // `error: git diff failed: StreamTooLong` with no lines at all.
     // Empty rather than undefined, for the reason `runSearchTool` gives.
     var got: Partial = .{ .stdout = &.{}, .stderr = &.{}, .dropped = .{ false, false } };
-    const res = runCapped(io, arena, argv, max_tool_output * 4, net.durationMs(boundedMs(tool_timeout_ms, ceiling_ms)), environ_map, &got) catch |err|
+    const res = runCapped(io, arena, argv, max_tool_output * capture_limit_factor, net.durationMs(boundedMs(tool_timeout_ms, ceiling_ms)), environ_map, &got) catch |err|
         return failedOutput(arena, got, try missingProgram(arena, try std.fmt.allocPrint(arena, "git {s}", .{cmd}), git_install, err));
     const text = if (res.stdout.len > 0) res.stdout else res.stderr;
     if (text.len == 0) return gitRanNothing(arena, cmd, res, limit);
@@ -979,7 +986,7 @@ fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_
         return std.fmt.allocPrint(arena, "refused: command contains '{s}', which is denied by configuration", .{denied});
     }
     const timeout_ms: u64 = bashTimeoutMs(requestedTimeoutMs(args.get("timeout_ms")), ceiling_ms);
-    const capture_limit = max_tool_output * 4;
+    const capture_limit = max_tool_output * capture_limit_factor;
     // A command that runs to its own timeout has usually already said what is
     // wrong: a build that printed every error before it hung is the case this
     // is for. Its output comes back with the reason, and a command that printed
@@ -5207,7 +5214,7 @@ test "a bash result over the cap still says how the command ended" {
     const chatty = try std.fmt.allocPrint(
         arena,
         "{{\"command\":\"head -c {} /dev/zero | tr '\\\\0' 'x'; exit 3\"}}",
-        .{max_tool_output * 4},
+        .{max_tool_output * capture_limit_factor},
     );
     const failed = try dispatch(arena, "bash", chatty);
     try std.testing.expect(failed.len <= max_tool_output);
@@ -5223,7 +5230,7 @@ test "a bash result over the cap still says how the command ended" {
     const hung = try std.fmt.allocPrint(
         arena,
         "{{\"command\":\"head -c {} /dev/zero | tr '\\\\0' 'x'; sleep 5\",\"timeout_ms\":600}}",
-        .{max_tool_output * 4},
+        .{max_tool_output * capture_limit_factor},
     );
     const timed_out = try dispatch(arena, "bash", hung);
     try std.testing.expect(timed_out.len <= max_tool_output);

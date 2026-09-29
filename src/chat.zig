@@ -216,36 +216,11 @@ pub const ChatResult = struct {
     /// counted, so the last index is the whole of what has to be remembered.
     over_cap_index: ?usize = null,
 
-    /// Releases `finish_reason` only when it has bytes, because a non-empty
-    /// field is the one `ownString` copied for this run: the shared empty slice
-    /// is not this run's to free, and a copied one is a leak if it is kept.
-    pub fn deinitFinish(self: *ChatResult, gpa: std.mem.Allocator) void {
-        if (!std.mem.eql(u8, self.finish_reason, &.{})) gpa.free(self.finish_reason);
-        self.finish_reason = &.{};
-    }
-
-    /// Releases `served_model` and `fingerprint` on the rule
-    /// `deinitFinish` follows: a field with no bytes is the shared empty slice,
-    /// which is not this run's to free.
-    fn deinitServed(self: *ChatResult, gpa: std.mem.Allocator) void {
-        if (self.served_model.len != 0) gpa.free(self.served_model);
-        if (self.fingerprint.len != 0) gpa.free(self.fingerprint);
-        self.served_model = &.{};
-        self.fingerprint = &.{};
-    }
-
-    /// Releases `stream_error` on the same rule, and the note it carries is
-    /// this run's own copy for the same reason: the frame it was read from is
-    /// gone by the time the caller prints it.
-    fn deinitStreamError(self: *ChatResult, gpa: std.mem.Allocator) void {
-        if (self.stream_error.len != 0) gpa.free(self.stream_error);
-        self.stream_error = &.{};
-    }
-
     /// The response outlives the turn's arena, so what a turn keeps is
     /// allocated here and released with the turn rather than at process exit.
     /// The name and the id of a call are as much of the response as its
-    /// arguments are, so they go with them.
+    /// arguments are, so they go with them. Every field it releases is one
+    /// `ownString` copied for this run, on `release`'s rule.
     pub fn deinit(self: *ChatResult, gpa: std.mem.Allocator) void {
         deinitCalls(gpa, &self.calls);
         self.content.deinit(gpa);

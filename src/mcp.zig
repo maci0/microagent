@@ -83,6 +83,11 @@ const max_name_bytes: usize = 64;
 /// The longest server description kept. A description is what the model picks
 /// a tool by, and every later turn pays for it.
 const max_description_bytes: usize = 1024;
+/// The bytes an untrusted name is escaped to before it reaches a gutter line
+/// the operator reads or a note on stderr. Long enough for a name to be
+/// recognized, short enough that a name chosen to be long cannot fill the
+/// terminal.
+const max_shown_name_bytes: usize = 120;
 /// The most bytes one tool's `inputSchema` contributes to the request. A
 /// description is bounded because it is a sentence; a schema is whatever the
 /// server chose to serialize, and a server that embeds a large `description`,
@@ -249,7 +254,7 @@ pub const Server = struct {
                 return line;
             }
             if (stdio.pending.items.len > max_frame_bytes) return error.FrameTooLong;
-            var chunk: [8 * 1024]u8 = undefined;
+            var chunk: [http_read_chunk_bytes]u8 = undefined;
             var vec: [1][]u8 = .{&chunk};
             var storage: [1]Io.Operation.Storage = undefined;
             var batch: Io.Batch = .init(&storage);
@@ -714,7 +719,7 @@ pub const Servers = struct {
         try pb.writer().writeAll(if (args.len == 0) "{}" else args);
         try pb.writer().writeAll("}");
 
-        net.writeErr(io, try std.fmt.allocPrint(arena, "\u{23fa} {s}\n", .{chat.safeText(arena, tool_call.tool.exposed, 120)}));
+        net.writeErr(io, try std.fmt.allocPrint(arena, "\u{23fa} {s}\n", .{chat.safeText(arena, tool_call.tool.exposed, max_shown_name_bytes)}));
         // The answer is parsed in a scratch arena and only the text built from
         // it is kept, for the reason the handshake gives.
         var scratch_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -782,7 +787,7 @@ fn resultText(arena: std.mem.Allocator, server_name: []const u8, result: std.jso
     // nobody keeps. The note below is the caller's own wording, written here
     // because this is the side that knows the size the whole text would have.
     const cap = tool_mod.max_tool_output;
-    const note_room = 128;
+    const note_room = truncation_note_room;
     var total: usize = 0;
     var started = false;
     for (items) |item| {
@@ -818,10 +823,8 @@ fn resultText(arena: std.mem.Allocator, server_name: []const u8, result: std.jso
     };
     if (total == 0) return "(the MCP server returned no text)";
     if (total > cap) {
-        // `note_room` bytes short of the cap, so the note survives the caller's
-        // own clamp with the cap and the true size it names.
         const kept = chat.clamp(buf.items, cap - note_room);
-        return std.fmt.allocPrint(arena, "{s}\n... [tool output truncated at {d} of {d} bytes]", .{ kept, cap, total });
+        return truncationNote(arena, kept, cap, total);
     }
     return buf.items;
 }
@@ -840,13 +843,25 @@ fn resultText(arena: std.mem.Allocator, server_name: []const u8, result: std.jso
 /// stringify that fails on the cap's own memory is an allocation failure, which
 /// is this machine's and not the server's.
 fn cappedJson(arena: std.mem.Allocator, value: std.json.Value, cap: usize) ![]const u8 {
-    const note_room = 128;
     var jb = chat.JsonBuf.init(arena);
     try std.json.Stringify.value(value, .{}, jb.writer());
     const text = jb.items();
     if (text.len <= cap) return text;
-    const kept = chat.clamp(text, cap - note_room);
-    return std.fmt.allocPrint(arena, "{s}\n... [tool output truncated at {d} of {d} bytes]", .{ kept, cap, text.len });
+    const kept = chat.clamp(text, cap - truncation_note_room);
+    return truncationNote(arena, kept, cap, text.len);
+}
+
+/// The room a truncation note is written into, held back from the cap before
+/// the cut rather than measured after it, so the note survives the caller's own
+/// clamp with the cap and the true size it names. Two paths cut a server's
+/// answer, so this is the one number both of them holds back.
+const truncation_note_room: usize = 128;
+
+/// The note both cut paths append, spelled once because a parser reads it: a
+/// tool result that was cut says how much of it is here, and a test parses
+/// that sentence to learn the sizes rather than the bytes.
+fn truncationNote(arena: std.mem.Allocator, kept: []const u8, cap: usize, total: usize) ![]const u8 {
+    return std.fmt.allocPrint(arena, "{s}\n... [tool output truncated at {d} of {d} bytes]", .{ kept, cap, total });
 }
 
 /// A JSON-RPC error value as a line: its message, with the code when there is
@@ -1202,6 +1217,17 @@ pub fn validName(name: []const u8) bool {
     return true;
 }
 
+/// Whether a tool table already holds `name`, which is what makes a second
+/// `tools/list` entry under a name already on the table the same tool. The
+/// scan is linear because a server's table is the length of its answer, and
+/// the table is built once per connection.
+fn indexOfToolName(table: []const Tool, name: []const u8) ?usize {
+    for (table, 0..) |tool, i| {
+        if (std.mem.eql(u8, tool.name, name)) return i;
+    }
+    return null;
+}
+
 /// Connects to every server the config declared, in the order the tables
 /// appeared. An entry that cannot run, or that fails its handshake, is said on
 /// stderr and skipped, because a server the operator wrote down and this run
@@ -1498,11 +1524,18 @@ fn buildTools(io: Io, arena: std.mem.Allocator, scratch: std.mem.Allocator, serv
         // The name is the one slice of the answer the tool table keeps, so it
         // is copied out of the arena the answer is parsed in.
         const name = chat.str(entry.get("name")) orelse continue;
-        const kept_name = arena.dupe(u8, name) catch return null;
         if (!validName(name)) {
-            net.note(io, arena, "microagent: MCP server {s} offers a tool named {s}, which cannot be spelled in a tool name; it is skipped\n", .{ chat.safeTextAll(arena, server.name), chat.safeText(arena, name, 120) });
+            net.note(io, arena, "microagent: MCP server {s} offers a tool named {s}, which cannot be spelled in a tool name; it is skipped\n", .{ chat.safeTextAll(arena, server.name), chat.safeText(arena, name, max_shown_name_bytes) });
             continue;
         }
+        // The exposed name is the server's name behind the prefix, so two
+        // entries the server listed under one name are one tool offered twice:
+        // the request would carry two `function.name` values the model cannot
+        // tell apart, and `resolve` would answer only the first for the whole
+        // run. The first listing wins, as it does for a name the server
+        // spells twice under different schemas.
+        if (indexOfToolName(found.items, name) != null) continue;
+        const kept_name = arena.dupe(u8, name) catch return null;
         const exposed = std.fmt.allocPrint(arena, "{s}{s}__{s}", .{ tool_prefix, server.name, kept_name }) catch return null;
         if (terseForServer(server, name)) |terse| {
             found.append(arena, .{ .name = kept_name, .exposed = exposed, .description = terse.description, .schema = terse.schema }) catch return null;
@@ -1597,8 +1630,11 @@ fn fuzzTools(_: void, smith: *std.testing.Smith) !void {
     };
 
     // Count what the answer offered, so the table can be held to it: a build
-    // that drops an entry it should keep loses a tool the server has.
+    // that drops an entry it should keep loses a tool the server has. A name
+    // the answer listed twice is one tool, so it is counted once, as
+    // `buildTools` keeps it once.
     var offered: usize = 0;
+    var offered_names: std.ArrayList([]const u8) = .empty;
     if (parsed == .object) {
         if (parsed.object.get("tools")) |value| {
             if (value == .array) {
@@ -1609,11 +1645,20 @@ fn fuzzTools(_: void, smith: *std.testing.Smith) !void {
                     };
                     const name = chat.str(entry.get("name")) orelse continue;
                     if (!validName(name)) continue;
-                    offered += 1;
+                    var already = false;
+                    for (offered_names.items) |seen| {
+                        if (std.mem.eql(u8, seen, name)) {
+                            already = true;
+                            break;
+                        }
+                    }
+                    if (already) continue;
+                    try offered_names.append(arena, name);
                 }
             }
         }
     }
+    offered = offered_names.items.len;
     try std.testing.expectEqual(offered, built.len);
 
     for (built, 0..) |tool, i| {
