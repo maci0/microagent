@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Summarize a harbor jobs directory: per-task reward, wall time, tokens.
 
-    summarize.py /tmp/harbor-jobs/2026-09-28__22-26-23
+    summarize.py ~/harbor-jobs/2026-09-28__22-26-23
 
 Reads only files harbor already wrote; no network, no Docker.
 """

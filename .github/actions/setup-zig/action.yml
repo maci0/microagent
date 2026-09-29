@@ -42,7 +42,7 @@ runs:
     # on every push.
     #
     # Every key carries `runner.arch` as well as `runner.os`, because os alone
-    # is not a machine: `macos-13` is X64 and `macos-14` is ARM64, and both
+    # is not a machine: `macos-15-intel` is X64 and `macos-14` is ARM64, and both
     # answer `runner.os` as `macOS`. Sharing one key between them makes the two
     # jobs race to save the same entry, and the cache action keeps the first
     # and drops the second, so whichever runner is second never gets a cache of

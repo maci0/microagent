@@ -39,12 +39,16 @@ jobs:
             release_target: x86_64-linux-musl
           - os: macos-14
             release_target: aarch64-macos
-          # macos-13 is the last x86_64 image, and it is the only runner that
-          # starts `x86_64-macos`. macos-14 is Apple silicon, so without this
-          # row the second of the two macOS assets the release publishes is
+          # The x86_64 macOS image is the only runner that starts
+          # `x86_64-macos`. macos-14 is Apple silicon, so without this row the
+          # second of the two macOS assets the release publishes is
           # cross-compiled and never run, and a Mach-O that links but does not
           # start would ship and fail on a user's machine instead of here.
-          - os: macos-13
+          # The `macos-13` image this row used to name is retired: GitHub
+          # removes an image from the runner fleet, and a matrix row naming a
+          # label no runner answers to never starts, so the job is red on
+          # every push with a scheduling error rather than a test failure.
+          - os: macos-15-intel
             release_target: x86_64-macos
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15

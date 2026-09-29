@@ -9,18 +9,24 @@
 #
 # Environment:
 #   MICROAGENT_API_KEY / MICROAGENT_BASE_URL   provider (default OpenRouter)
+#   OPENAI_API_KEY / OPENROUTER_API_KEY / DEEPSEEK_API_KEY
+#                                              also read, in the adapter's order
 #   MICROAGENT_MAX_TOKENS                      raise only if the balance allows
 #   PROVIDER=nvidia                            use NVIDIA NIM + the opencode
 #                                              provider overlay it needs
 #   TASKS="a b c"                              override the task list
-#   JOBS_DIR=/tmp/harbor-jobs                  where results land
+#   JOBS_DIR=~/harbor-jobs                     where results land
 set -u
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 bench=${1:-tb2}
 shift 2>/dev/null || true
 harnesses=${*:-"microagent opencode"}
-jobs_dir=${JOBS_DIR:-/tmp/harbor-jobs}
+# A job directory holds every container log and agent transcript the run
+# produced, and the scores in BENCHMARK.md are read out of it, so it is not
+# scratch: it lands beside the home directory the adapter's venv goes in, on
+# disk rather than on the tmpfs a /tmp is on a machine that keeps one.
+jobs_dir=${JOBS_DIR:-$HOME/harbor-jobs}
 jobs=${HARBOR_JOBS:-4}
 harbor=${HARBOR:-harbor}
 python=${PYTHON:-python3}
@@ -52,18 +58,31 @@ for task in $tasks; do include="$include -i $task"; done
 
 # harbor refuses egress to a host it cannot infer from the model name, and a
 # custom base url is exactly that: a trial then hangs until its timeout.
-allow=""
+allow_host=""
 model_micro=deepseek/deepseek-v4-flash
 model_open=openrouter/deepseek/deepseek-v4-flash
-extra_open=""
+nvidia_config=""
+key=""
 if [ "${PROVIDER:-openrouter}" = "nvidia" ]; then
 	model_micro=deepseek-ai/deepseek-v4.1-flash
 	model_open=nvidia/deepseek-ai/deepseek-v4.1-flash
-	allow="--allow-agent-host integrate.api.nvidia.com"
-	# The overlay is JSON, so the quotes are part of the argument harbor is
-	# meant to receive and word splitting is how the arguments reach it.
-	# shellcheck disable=SC2089
-	extra_open="--ak opencode_config={\"provider\":{\"nvidia\":{\"npm\":\"@ai-sdk/openai-compatible\",\"name\":\"NVIDIA\",\"options\":{\"baseURL\":\"${MICROAGENT_BASE_URL:-https://integrate.api.nvidia.com/v1}\",\"apiKey\":\"{env:OPENAI_API_KEY}\"},\"models\":{\"deepseek-ai/deepseek-v4.1-flash\":{}}}}} --ae OPENAI_API_KEY=${MICROAGENT_API_KEY:-}"
+	allow_host=integrate.api.nvidia.com
+	# The four names the adapter reads, in the order it reads them, so
+	# PROVIDER=nvidia works with the key this host's own runs already export
+	# instead of only with MICROAGENT_API_KEY. An empty one is refused here:
+	# harbor passes it into the container either way, and the trial then runs
+	# to its timeout against a provider with no credentials, which reads as a
+	# slow task rather than as a missing key.
+	key=${MICROAGENT_API_KEY:-${OPENAI_API_KEY:-${OPENROUTER_API_KEY:-${DEEPSEEK_API_KEY:-}}}}
+	if [ -z "$key" ]; then
+		echo "PROVIDER=nvidia needs a key in MICROAGENT_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY or DEEPSEEK_API_KEY" >&2
+		exit 2
+	fi
+	# Assembled from single-quoted pieces around the one value that varies, so
+	# the quotes in the JSON are the quotes of an argument. Written with
+	# backslashes inside one string, they reach harbor as literal backslashes
+	# whenever the string is expanded unquoted.
+	nvidia_config='{"provider":{"nvidia":{"npm":"@ai-sdk/openai-compatible","name":"NVIDIA","options":{"baseURL":"'${MICROAGENT_BASE_URL:-https://integrate.api.nvidia.com/v1}'","apiKey":"{env:OPENAI_API_KEY}"},"models":{"deepseek-ai/deepseek-v4.1-flash":{}}}}}'
 fi
 
 # A job name no earlier run already holds, printed on stdout.
@@ -93,6 +112,14 @@ new_job() {
 for harness in $harnesses; do
 	job=$(new_job "$harness-$bench")
 	echo "=== $job: $bench, ${jobs} at a time"
+	# The flags both harnesses share, held as positional parameters rather
+	# than in a string the shell splits and dequotes on the way in. The
+	# harness list is already expanded by the loop, so nothing above reads $@
+	# after this point.
+	set --
+	if [ -n "$allow_host" ]; then
+		set -- "$@" --allow-agent-host "$allow_host"
+	fi
 	case "$harness" in
 	microagent)
 		# shellcheck disable=SC2086
@@ -100,15 +127,18 @@ for harness in $harnesses; do
 			MICROAGENT_AGENT_TIMEOUT_SEC=$agent_timeout \
 			MICROAGENT_BUDGET_SECONDS=$budget \
 			MICROAGENT_MAX_TURNS=150 \
-			$harbor run -d "$dataset" $include $allow \
+			$harbor run -d "$dataset" $include "$@" \
 			-a microagent_agent:Microagent -m "$model_micro" \
 			--jobs-dir "$jobs_dir" -n "$jobs" --job-name "$job" 2>&1 | tail -6
 		;;
 	opencode)
-		# shellcheck disable=SC2086,SC2089,SC2090
-		$harbor run -d "$dataset" $include $allow \
-			-a opencode -m "$model_open" $extra_open \
-			--jobs-dir "$jobs_dir" -n "$jobs" --job-name "$job" 2>&1 | tail -6
+		set -- "$@" -a opencode -m "$model_open"
+		if [ -n "$nvidia_config" ]; then
+			set -- "$@" --ak "opencode_config=$nvidia_config" --ae "OPENAI_API_KEY=$key"
+		fi
+		set -- "$@" --jobs-dir "$jobs_dir" -n "$jobs" --job-name "$job"
+		# shellcheck disable=SC2086
+		$harbor run -d "$dataset" $include "$@" 2>&1 | tail -6
 		;;
 	*)
 		echo "unknown harness '$harness'" >&2

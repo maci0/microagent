@@ -127,7 +127,11 @@ release, and `microagent update` moves you to it.
   `bash` for anything the others do not cover and said nothing about the
   semantic queries the tree is indexed for, so callers and callees were
   answered with `rg` or by a whole-file read.
-
+- The x86_64 macOS row of the push workflow runs on `macos-15-intel`. The
+  `macos-13` image it named is out of the runner fleet, and a matrix row naming
+  a label no runner answers to does not start, so the job failed to schedule on
+  every push. The row is still the only one that runs the `x86_64-macos` asset
+  the release publishes, which macos-14, being Apple silicon, cannot.
 - `make lint-shell` runs shellcheck with six of its optional checks on, the
   ones that report a masked `set -e` failure, an uppercase variable read on a
   path that never assigned it, a `which` the shell may not carry, a null test
@@ -200,6 +204,23 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- `bench/harbor.sh` hands the opencode provider overlay to harbor as a real
+  argument and reads the provider key the way the adapter reads it. The overlay
+  was one string of backslash-escaped JSON, expanded unquoted, which shellcheck
+  refuses (`SC2089` and `SC2090`), so `make lint` was red and so was every push
+  and every tag the gate runs. The key went to harbor as
+  `--ae OPENAI_API_KEY=<key>`, which holds a live provider credential in the
+  process table for as long as the run lasts, and `${MICROAGENT_API_KEY:-}` sent
+  an empty value whenever the host had exported one of the other three names the
+  adapter accepts, so the trial ran to its timeout against a provider with no
+  credentials. The four names are read in the adapter's order and an empty one
+  stops the run before it starts, naming them.
+- A Harbor run's job directory defaults to `~/harbor-jobs` rather than
+  `/tmp/harbor-jobs`, which is what the adapter's own README already passes to
+  `--jobs-dir`. A job directory holds every container log and agent transcript
+  the run produced and the scores in BENCHMARK.md are read out of it, so a
+  tmpfs that a reboot empties is the wrong place for it, and the default
+  disagreed with the documented command. `JOBS_DIR` still overrides it.
 - A pre-release tag carrying dots of its own no longer reads as no version at
   all. `v0.2.0-rc.1` was split on `.` and came out as four components, so it was
   refused as an unorderable tag and compared equal to whatever build was
