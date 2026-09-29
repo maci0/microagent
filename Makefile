@@ -15,7 +15,7 @@ BIN := zig-out/bin/microagent
 export LC_ALL := C
 export TZ := UTC
 
-.PHONY: default help preflight version build small musl test test-sanitize test-one watch fmt fmt-check fmt-python lint lint-versions lint-lock zig-version required-zig-version release-targets check-targets check-assets check-asset-run check-binary check-changelog check-changelog-sections check-unreleased check-readme check-release check-reproducible lint-shell lint-python lint-yaml check bench gauntlet instructions overhead install release-assets checksums clean
+.PHONY: default help preflight version build small musl test test-sanitize test-one watch fmt fmt-check fmt-python lint lint-versions lint-lock zig-version required-zig-version release-targets check-targets check-assets check-asset-run check-binary check-changelog check-changelog-sections check-changelog-links check-unreleased check-readme check-release check-reproducible lint-shell lint-python lint-yaml check bench gauntlet instructions overhead install release-assets checksums clean
 
 # The targets `microagent update` asks for, in the names release.yml publishes.
 # ci.yml rehearses the same list on every push and release.yml publishes it, so
@@ -138,6 +138,7 @@ help:
 	  'check-changelog-sections  the five Keep a Changelog headings, once each, in order' \
 	  'check-unreleased      the [Unreleased] entry has the five sections, once each, in order' \
 	  'check-changelog-sections SECTION=...  the same five-section shape under one named heading' \
+	  'check-changelog-links  every heading has the compare link its version implies' \
 	  'check-readme      the README installs and names the version build.zig.zon declares' \
 	  'check-release TAG=vX.Y.Z  the tag names build.zig.zon, nothing is stranded unreleased' \
 	  'check-reproducible    every published target rebuilds byte-identical' \
@@ -538,6 +539,7 @@ check-changelog-sections:
 # names, which by then is a version heading the author no longer sees.
 check-unreleased:
 	@$(MAKE) --no-print-directory check-changelog-sections SECTION=Unreleased
+	@$(MAKE) --no-print-directory check-changelog-links
 
 # The changelog rules release.yml enforces on the tag, and the 0.y policy
 # CONTRIBUTING.md states, runnable before the tag exists. They were shell inside
@@ -633,7 +635,61 @@ check-release:
 	  exit 1; \
 	}; \
 	$(MAKE) --no-print-directory check-changelog VERSION=$(patsubst v%,%,$(TAG))
+	$(MAKE) --no-print-directory check-changelog-links
 	$(MAKE) --no-print-directory check-readme
+
+# The link under every heading in CHANGELOG.md is written by hand, and a
+# release moves two of them: cutting vX.Y.Z renames the `[Unreleased]` heading
+# it was written under and adds the version's own. Nothing else in the file
+# carries the repository, so a forgotten line does not fail a build or a tag,
+# it publishes notes whose "what changed" link still points at the release
+# before the one a reader is reading. The first version has no predecessor to
+# compare against, so it is a link naming its own tag instead.
+check-changelog-links:
+	@awk ' \
+	  /^## \[/ { \
+	    name = $$0; sub(/^## \[/, "", name); sub(/\].*/, "", name); \
+	    order[++n] = name; \
+	    if (name ~ /^[0-9]+\.[0-9]+\.[0-9]+$$/ && newest == "") newest = name; \
+	    next; \
+	  } \
+	  /^\[[^]]+\]: / { \
+	    name = $$0; sub(/^\[/, "", name); sub(/\].*/, "", name); \
+	    link[name] = $$0; sub(/^\[[^]]*\]: /, "", link[name]); \
+	    if (base == "" && index(link[name], "/compare/")) { \
+	      base = link[name]; sub(/\/compare\/.*$$/, "/compare/", base); \
+	    } \
+	    next; \
+	  } \
+	  END { \
+	    if (newest == "" || base == "") { \
+	      print "CHANGELOG.md has no released version heading or no compare link, so the link references under it cannot be checked" > "/dev/stderr"; \
+	      bad = 1; \
+	    } \
+	    for (i = 1; i <= n; i++) { \
+	      name = order[i]; \
+	      if (!(name in link)) { \
+	        printf("CHANGELOG.md has a \"## [%s]\" heading and no \"[%s]:\" link under it, so the notes a reader opens there are a dead reference\n", name, name) > "/dev/stderr"; \
+	        bad = 1; \
+	        continue; \
+	      } \
+	      if (name == "Unreleased") want = base "v" newest "...HEAD"; \
+	      else if (order[i + 1] == "Unreleased" || order[i + 1] !~ /^[0-9]+\.[0-9]+\.[0-9]+$$/) { \
+	        if (link[name] !~ ("/" "v" name "$$")) { \
+	          printf("CHANGELOG.md compares [%s] with %s, which is not a released version, so it links the tag itself instead: [%s]: .../v%s\n", name, order[i + 1], name, name) > "/dev/stderr"; \
+	          bad = 1; \
+	        } \
+	        continue; \
+	      } \
+	      else want = base "v" order[i + 1] "...v" name; \
+	      if (link[name] != want) { \
+	        printf("CHANGELOG.md says [%s]: %s, and the next version under it is %s, so it is %s\n", name, link[name], order[i + 1], want) > "/dev/stderr"; \
+	        bad = 1; \
+	      } \
+	    } \
+	    exit bad; \
+	  } \
+	' CHANGELOG.md
 
 # The assets in dist/ are the ones the tag will publish, read back off the disk
 # rather than assumed from the build that wrote them. release.yml did this inline

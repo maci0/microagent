@@ -240,7 +240,12 @@ checks the entry's shape while it is under `[Unreleased]`: the five sections,
 each at most once, in that order. Whether a change is worth an entry is the
 writer's call. `make check-changelog` checks the same shape on the entry a tag
 names, after the heading has become a version and the author no longer sees
-it.
+it. Both run `make check-changelog-links`, which holds the `[Unreleased]:` and
+`[X.Y.Z]:` references at the bottom of the file to the versions the headings
+above them say: a release renames the `[Unreleased]` heading and adds the
+version's own, and the two links under them are written by hand, so a release
+that forgets them publishes notes whose diff still points at the release
+before.
 
 ### Releases
 
@@ -267,6 +272,12 @@ land it in the next release under a version nobody ran, and it refuses a README
 still naming the previous release, since the install snippet a reader copies
 would fetch the older binary under the new tag. Run it after the
 version bump, the entry and the README line are written, before the tag is cut.
+
+Cutting a release moves two of those three by hand, and the third moves with
+them: rename `## [Unreleased]` to `## [X.Y.Z]` with the release date, write the
+version's own compare reference, and point `[Unreleased]` at the new tag. The
+step the `X.Y.Z` naming gives away is the one that gets skipped, because
+nothing downstream of a green `make check` reads those links.
 
 The four published binaries and their asset names are spelled once, in the
 [Makefile](Makefile), so a release can be built and checksummed on a laptop

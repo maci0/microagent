@@ -30,6 +30,13 @@ release, and `microagent update` moves you to it.
   else, and the session log holds counters and the working directory at
   `0o600`. The session log section now says the same about the modes, about
   what `cwd` reveals, and about how to delete the store.
+- `make check-changelog-links` holds the `[Unreleased]:` and `[X.Y.Z]:`
+  references under the changelog to the versions the headings above them name,
+  and `make check-unreleased` and `make check-release` both run it. Cutting a
+  release renames the `[Unreleased]` heading and adds the version's own, and
+  those two lines are written by hand: a release that skipped them published
+  notes whose diff still pointed at the release before the one being read, and
+  nothing downstream of a green gate read the link to notice.
 
 ### Changed
 
@@ -46,6 +53,17 @@ release, and `microagent update` moves you to it.
   the same two strings a few hundred times on the path that cannot be re-sent
   cheaply. A value that did change still replaces the one it follows, and a
   provider that empties a field still clears it.
+- An MCP tool whose `inputSchema` is over 16 KB is advertised with an empty
+  object schema that names the omission, rather than with the server's bytes. A
+  schema is whatever the server chose to serialize, and it sits in the constant
+  prefix of every request the run makes, so a server that embeds a large
+  `description`, `examples` or `enum` in one wrote megabytes into every turn of
+  the run, for the whole run. Before: a run with such a server billed the schema
+  on every request and the model saw the arguments. After: the tool is still
+  callable, under a schema whose `description` tells the model the arguments are
+  not described here and to ask the operator. A schema under the ceiling is the
+  server's own bytes, in the order the server wrote them, so the cacheable
+  prefix a provider hashes is unchanged for every server already in bounds.
 
 ### Fixed
 
@@ -102,6 +120,34 @@ release, and `microagent update` moves you to it.
   answered with a 4 MB text block cost about 19 MB of peak memory; the same
   answer now costs about 13 MB, and the note naming the size it was cut from is
   written while the text is built, so it still reports the whole size.
+- The system prompt contradicted itself about a skill body. A skill arrives
+  through the `skill` tool, so it arrives as a tool result, and the prompt tells
+  the model that a tool result is data about the repository rather than something
+  to act on. The model resolved the contradiction itself, in whichever direction
+  the skill happened to argue for. The prompt now names the exception, says where
+  the trust comes from (skills come from the operator's own directories and never
+  from the repository under review), and keeps the credential rule standing over
+  a skill body: an installed procedure that asks for a key is one to report.
+- An MCP result that carries no `content` is the structured one, and it was
+  serialized whole before the caller clamped it, so a server answering with a
+  megabyte of `structuredContent` was copied and stringified in full and cut
+  afterwards. It is built up to the same 24 KB cap the text path takes, and
+  because the cap can land mid-object the note says the whole size, so a result
+  the model cannot parse does not read to it as the whole of one.
+- The MCP shutdown was skipped on a failed run. `runMain` left the process from
+  inside itself, so a `std.process.exit` between two of its defers ran neither,
+  and the defers that did not run on the error paths included the one that kills
+  the server process groups: a run that failed with servers connected left them
+  running. The exit is now taken by `main`, after every defers that frame owns.
+- A socket that refused `SO_RCVTIMEO` left the turn with no stall guard and no
+  word about it, and a read on it can block until the caller kills the run, which
+  is the whole failure the guard exists to prevent. A refusal now ends the
+  request, and the error names it rather than reading as a provider failure.
+- `microagent update` printed `failed` instead of the reason whenever the path it
+  was installing to was long enough to overrun a 512-byte buffer, which is the
+  one line that does not name what failed. The buffer is now as wide as a whole
+  install path beside a sentence, and every other message it prints is cut to
+  that same width, so none of them can reach it either.
 
 ## [0.4.0] - 2026-09-29
 

@@ -347,8 +347,15 @@ env     = { LOG = "debug" }
 
 `name` and `command` are required; a table missing either is named on stderr and skipped. Every
 server is started before the first request and asked for its tool list, and each tool is offered to
-the model as `mcp__<server>__<tool>` with the server's own `inputSchema`. A call is a `tools/call`,
-and the text the server returns is the tool result, on the same deadline as any other tool.
+the model as `mcp__<server>__<tool>` with the server's own `inputSchema`. A schema over 16 KB is
+replaced with an empty object schema that says so in its `description`, because a schema sits in the
+constant prefix of every request the run makes: a server that embeds a large `description`,
+`examples` or `enum` in one would write those megabytes into every turn of the run, for the whole
+run. A tool under the ceiling keeps the server's bytes exactly, in the order the server wrote them.
+A call is a `tools/call`, and the text the server returns is the tool result, on the same deadline
+as any other tool. A result with no `content` is the structured one: it is carried as the server
+serialized it, capped at the same 24 KB a built-in tool's output is, with the note naming the size
+it was cut from.
 
 A server that cannot start, exits during the handshake, or refuses a call is reported on stderr and
 skipped: one broken entry costs that entry, not the run. The server's stderr is inherited, since
@@ -565,7 +572,7 @@ changed in each. Under `0.y`, the minor takes features, any change to what a run
 and anything removed; the patch takes fixes, and upgrading a patch must not change an existing
 invocation. The release workflow refuses a patch tag whose changelog section has an `Added`,
 `Changed` or `Removed` entry, a section that is not the five Keep a Changelog headings once each in
-order, and any tag while `## [Unreleased]` still holds entries. A breaking change to the flags, the
-environment variables, or the stdout and session-log JSON gets a changelog entry naming the before
-and the after. Only the latest release is supported: a fix ships in the next release, with no
-backports.
+order, a compare link under a heading that does not match the versions around it, and any tag while
+`## [Unreleased]` still holds entries. A breaking change to the flags, the environment variables, or
+the stdout and session-log JSON gets a changelog entry naming the before and the after. Only the
+latest release is supported: a fix ships in the next release, with no backports.
