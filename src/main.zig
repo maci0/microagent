@@ -1458,6 +1458,12 @@ fn loadConfig(io: Io, init: std.process.Init, arena: std.mem.Allocator, config: 
     var parsed = config_mod.parse(arena, "");
     if (source.path) |p| {
         const text = std.Io.Dir.cwd().readFileAlloc(io, p, arena, .limited(max_config_bytes)) catch |err| blk: {
+            // The default path with nothing at it is a first run, and a first
+            // run gets the template: the commented file the repository ships,
+            // written where the next edit will find it. A path somebody named
+            // is never created for them, and a file that is there is never
+            // touched.
+            if (err == error.FileNotFound and !source.named) writeDefaultConfig(io, arena, source);
             if (configReadWorthReporting(source.named, err))
                 net.note(io, arena, "microagent: config {s}: {s}; using the built-in defaults\n", .{ configPathText(arena, source), @errorName(err) });
             break :blk null;
@@ -1591,6 +1597,50 @@ fn traceText(arena: std.mem.Allocator, value: []const u8) []const u8 {
 fn configReadWorthReporting(named: bool, err: anyerror) bool {
     return named or err != error.FileNotFound;
 }
+
+/// The commented template the release ships, embedded at build time.
+const config_template = build_options.config_template;
+
+/// Writes the config template to the default path, for the first run that found
+/// nothing there. Nothing is fatal: a config file is optional, so a home this
+/// process cannot write to costs the run the same defaults it would have had,
+/// and the line says so rather than leaving the run silently unchanged.
+///
+/// The file is created exclusively, so a second run racing this one finds the
+/// first run's file and keeps it. Mode 0600, because the file may later hold an
+/// api key and a reader who has not decided that yet is better served by a
+/// tighter file than a looser one.
+fn writeDefaultConfig(io: Io, arena: std.mem.Allocator, source: ConfigSource) void {
+    const path = source.path orelse return;
+    const shown = configPathText(arena, source);
+    if (std.fs.path.dirname(path)) |dir| {
+        _ = std.Io.Dir.cwd().createDirPathStatus(io, dir, default_config_dir_mode) catch |err| {
+            net.note(io, arena, "microagent: config {s}: {s} could not be created ({s}), so the template was not written\n", .{ shown, dir, @errorName(err) });
+            return;
+        };
+    }
+    const file = std.Io.Dir.createFileAbsolute(io, path, .{ .exclusive = true, .permissions = default_config_mode }) catch |err| switch (err) {
+        // Another run wrote it between the read and this call, which is the
+        // file the reader wanted and no reason for a line.
+        error.PathAlreadyExists => return,
+        else => |e| {
+            net.note(io, arena, "microagent: config {s}: the template could not be created ({s}); the built-in defaults are in force\n", .{ shown, @errorName(e) });
+            return;
+        },
+    };
+    defer file.close(io);
+    file.writeStreamingAll(io, config_template) catch |err| {
+        net.note(io, arena, "microagent: config {s}: the template could not be written ({s}); the built-in defaults are in force\n", .{ shown, @errorName(err) });
+        return;
+    };
+    net.note(io, arena, "microagent: config {s}: no file there, so the commented template was written; edit it to configure the run\n", .{shown});
+}
+
+/// The config file holds operator settings and may later hold a provider key, so
+/// the template is written as the same 0600 the rest of the home state uses,
+/// under a 0700 directory holding this and the session logs.
+const default_config_mode: Io.File.Permissions = @enumFromInt(@as(std.posix.mode_t, 0o600));
+const default_config_dir_mode: Io.File.Permissions = @enumFromInt(@as(std.posix.mode_t, 0o700));
 
 /// The file the config is read from, and whether anything named it. A
 /// flag or a variable naming a file that cannot be read is a caller's mistake
@@ -2363,10 +2413,66 @@ fn endpoint(arena: std.mem.Allocator, opts: Options) !Endpoint {
     };
 }
 
+/// One turn's completion, asked again while the provider reports a failure it
+/// says it did not generate.
+///
+/// A request the provider has is never sent twice, because the completion
+/// behind it may already have been generated and billed. An error frame that
+/// arrives before a byte of content is the provider saying that did not happen:
+/// nothing reached stdout, no tool call is half assembled, and the prompt it
+/// re-reads is the one its cache already holds. That is worth another ask
+/// rather than a lost review; anything with a byte in it is not, and the branch
+/// in `streamChatOnce` is where the two are told apart.
+fn streamChat(
+    client: *std.http.Client,
+    io: Io,
+    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    opts: Options,
+    ep: Endpoint,
+    prefix: []const u8,
+    budget: Budget,
+    msgs: []const u8,
+) !chat_mod.ChatResult {
+    var ask: u32 = 0;
+    while (true) {
+        ask += 1;
+        const result = streamChatOnce(client, io, gpa, arena, opts, ep, prefix, budget, msgs) catch |err| {
+            if (err != error.StreamRetryable) return err;
+            const wait = reaskWaitMs(io, budget, ask, arena, ep.shown_url) orelse return error.StreamError;
+            waitMs(io, wait) catch return error.StreamError;
+            continue;
+        };
+        return result;
+    }
+}
+
+/// How long to wait before asking for a turn the provider failed without
+/// producing anything, or null when this is the last ask. Null is also the
+/// answer when the wait would pass the run's budget: a run killed mid-sleep
+/// has nothing to show for the turn either way, and the note says which of the
+/// two it was.
+fn reaskWaitMs(io: Io, budget: Budget, ask: u32, arena: std.mem.Allocator, shown_url: []const u8) ?u64 {
+    if (ask >= max_attempts) {
+        net.note(io, arena, "microagent: the provider failed this turn before any content {d} time(s); it is not asked again\n", .{ask});
+        return null;
+    }
+    const wait = net.retryBackoffMs(ask, max_backoff_ms);
+    if (!budget.canAffordWait(io, wait)) {
+        net.note(io, arena, "microagent: the provider failed this turn before any content, and the {d}ms before another ask would pass the run's budget; this one is the last\n", .{wait});
+        return null;
+    }
+    net.note(io, arena, "microagent: the provider failed this turn before any content from {s}; asking again in {d}ms\n", .{ shown_url, wait });
+    return wait;
+}
+
 /// Streams one completion, printing visible text as it arrives and accumulating
 /// tool calls and token counters. Text on stderr is tool activity; stdout is
 /// the model's own output plus one JSON usage line per response.
-fn streamChat(
+///
+/// One ask, not the whole turn: `streamChat` above is what turns a provider's
+/// own reported failure into another one.
+fn streamChatOnce(
     client: *std.http.Client,
     io: Io,
     gpa: std.mem.Allocator,
@@ -2650,6 +2756,16 @@ fn streamChat(
     // up on is not one the loop asks about again: the request is not a
     // resumption, and a second one is a second billable completion.
     if (result.stream_error.len != 0) {
+        // A failure with nothing behind it is the one case the turn is asked
+        // for again: the provider is saying it did not generate anything, so
+        // there is no answer on stdout to duplicate and no half-assembled call
+        // to lose. `streamChat` is what takes that answer and asks.
+        if (result.content.items.len == 0 and calls.items.len == 0) {
+            net.note(io, arena, "microagent: the provider reported a failure before any content from {s}: {s}\n", .{
+                shown_url, tool_mod.terminalSafe(arena, result.stream_error),
+            });
+            return error.StreamRetryable;
+        }
         net.note(io, arena, "microagent: the provider reported a failure part way through the completion stream from {s} after {d} byte(s) of content and {d} tool call(s): {s}; what is on stdout is a prefix of what it meant to send, and the turn is not retried\n", .{
             shown_url, result.content.items.len, calls.items.len, tool_mod.terminalSafe(arena, result.stream_error),
         });
@@ -4758,6 +4874,27 @@ test "a turn is resent only while the provider cannot have read it" {
     try std.testing.expect(!worthAnotherAttempt(.sending, error.InvalidUrl));
 }
 
+// The one failure after the request is on the wire that is asked again is the
+// provider reporting a failure it produced nothing behind: there is no answer
+// on stdout to duplicate and no half-assembled tool call to lose. The schedule
+// is the pre-wire one, and the same three-attempt cap.
+test "a provider failure with nothing behind it is asked again, up to the cap" {
+    const io = std.testing.io;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const shown_url = "https://example.invalid/v1/chat/completions";
+
+    const first = reaskWaitMs(io, .{}, 1, arena, shown_url) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(net.retryBackoffMs(1, max_backoff_ms), first);
+    // The last ask under the cap is not another one.
+    try std.testing.expectEqual(@as(?u64, null), reaskWaitMs(io, .{}, max_attempts, arena, shown_url));
+    // A budget that cannot cover the wait ends the run rather than sleeping
+    // through it, and the note says which of the two it was.
+    const spent: Budget = .{ .deadline_ns = Io.Timestamp.now(io, budget_clock).nanoseconds - 1 };
+    try std.testing.expectEqual(@as(?u64, null), reaskWaitMs(io, spent, 1, arena, shown_url));
+}
+
 // A response that called no tool ends the loop, and a run that ends there is
 // only finished if the response was an answer. A refusal, a content filter and a
 // response cut at `max_tokens` all arrive the same way, and each of them would
@@ -5513,6 +5650,54 @@ test "a config path written with a leading tilde is read from the home directory
     try std.testing.expectEqualStrings("/home/one/.microagent/other.toml", configSource(&env, arena, "").path.?);
     try std.testing.expectEqualStrings("/home/one/from/flag.toml", configSource(&env, arena, "~/from/flag.toml").path.?);
 }
+
+// The first run that finds nothing at the default config path gets the
+// repository's commented template, and an installed binary has no checkout to
+// read it from: the bytes are embedded at build time, so these two assertions
+// are the only thing that would notice the shipped template drifting from the
+// file the config tests apply.
+test "the first run writes the tracked template where the config is looked for" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const tracked = try std.Io.Dir.cwd().readFileAlloc(io, config_template_path, gpa, .limited(max_config_bytes));
+    defer gpa.free(tracked);
+    try std.testing.expectEqualStrings(tracked, config_template);
+
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", arena);
+    const path = try std.fs.path.join(arena, &.{ dir, "home", ".microagent", "config.toml" });
+    const source: ConfigSource = .{ .path = path, .named = false };
+
+    writeDefaultConfig(io, arena, source);
+
+    // The directory did not exist and was made for it, 0700 like the rest of
+    // the home state, and the file is the template at 0600.
+    try std.testing.expectEqualStrings(config_template, try std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_config_bytes)));
+    const stat = try tmp.dir.statFile(io, "home/.microagent/config.toml", .{});
+    try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), stat.permissions.toMode() & tool_mod.permission_bits);
+
+    // A file that is there is the operator's. The second call leaves it as it
+    // stands rather than restoring the template over an edit.
+    const file = try std.Io.Dir.createFileAbsolute(io, path, .{ .truncate = true });
+    try file.writeStreamingAll(io, "model = \"mine\"\n");
+    file.close(io);
+    writeDefaultConfig(io, arena, source);
+    try std.testing.expectEqualStrings("model = \"mine\"\n", try std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_config_bytes)));
+
+    // A path this process cannot write to costs the run nothing: the template
+    // is a convenience, and the run is on the same defaults without it. A file
+    // where the directory would go is one way the create fails.
+    try tmp.dir.writeFile(io, .{ .sub_path = "blocked", .data = "" });
+    writeDefaultConfig(io, arena, .{ .path = try std.fs.path.join(arena, &.{ dir, "blocked", "config.toml" }), .named = false });
+}
+
+/// The template the release embeds and writes on a first run.
+const config_template_path = "config.example.toml";
 
 // The threaded io, the temporary directory and the arena the three atomic
 // write tests below share: what varies between them is the tree they put in

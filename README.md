@@ -33,8 +33,8 @@ a container that has nothing installed. microagent is the other shape:
   else goes to stderr. Exit codes separate "finished", "failed", "bad invocation" and "stopped at a
   ceiling".
 - **Bounded by default.** Turn, token, spend and wall-clock ceilings, a request that is never
-  re-sent once the provider has it, and a prompt prefix that stays byte-identical so the provider's
-  cache keeps hitting.
+  re-sent once the provider has produced anything, and a prompt prefix that stays byte-identical so
+  the provider's cache keeps hitting.
 - **Small on purpose.** No subagents, no plugins, no TUI. Skills and MCP servers are yours to add. Four public remote
   tools (web search, library docs, GitHub code search, repository wikis) are on by default, described by
   this binary rather than by a start-up handshake, so they cost nothing until one is called.
