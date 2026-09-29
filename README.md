@@ -72,7 +72,11 @@ It also spent about 1.9x the input tokens. Details, caveats and error bars are i
 
 Prebuilt binaries for `x86_64-linux-musl`, `aarch64-linux-musl`, `x86_64-macos` and `aarch64-macos`
 are on the [releases page](https://github.com/maci0/microagent/releases), each with a `.sha256`
-sidecar and the `LICENSE` they are distributed under. Pick the target your machine runs:
+sidecar, the `LICENSE` they are distributed under, and an SPDX inventory
+(`microagent-$v.spdx.json`) naming the assets with their digests. The inventory records that the
+binaries carry no third-party code and link no libc, and names every Python package the repository
+pins for its linters and its benchmark adapter, none of which is in a release. Pick the target your
+machine runs:
 
 ```sh
 v=v0.7.0 t=x86_64-linux-musl

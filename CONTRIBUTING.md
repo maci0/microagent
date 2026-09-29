@@ -97,7 +97,7 @@ make check-unreleased       # the [Unreleased] entry has the five sections, once
 
 `make check` runs, in order: `preflight`, `zig-version`,
 `check-unreleased`, `check-readme`, `fmt-check`, `lint` (`lint-versions`,
-`lint-lock`, shellcheck, `ruff check`, `ruff format --check`,
+`lint-lock`, `check-sbom`, shellcheck, `ruff check`, `ruff format --check`,
 yamllint), `zig build test`,
 `zig build test-sanitize`, and `check-binary` (a `ReleaseSmall` build whose
 binary it then starts). These are the checks
@@ -205,6 +205,20 @@ package no pin in the manifest needs. A lock left behind by an earlier pin
 therefore fails the gate instead of benchmarking a Harbor release the manifest
 no longer names, and a package nothing asks for never reaches the venv a score
 is measured in.
+
+A release publishes an SPDX inventory beside its binaries: `make sbom` writes
+`dist/microagent-<tag>.spdx.json` from the assets in `dist/`, and the release
+runs it before `make checksums` so the inventory gets a sidecar like every other
+asset. It names each asset with its digest, and every pin the two Python
+manifests declare with the manifest that declares it, and says in one annotation
+that no published asset carries a third-party component. Nothing in the tree
+reads the file a release writes, and nothing builds a tagged one before the tag,
+so `make check-sbom` runs the generator over two stand-in assets in a scratch
+directory and checks what a scanner reads: that the document parses, names those
+assets with their digests, and carries a package for every pin the manifests
+declare. A manifest a change adds a pin to is then a `check-sbom` failure until
+the inventory is regenerated, rather than a package a published document
+silently omits.
 
 The build outputs are `zig-out/` and `dist/`. `make clean` removes them, along
 with `.zig-cache/` and the Harbor musl binary. `make musl` copies the static

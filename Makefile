@@ -15,7 +15,7 @@ BIN := zig-out/bin/microagent
 export LC_ALL := C
 export TZ := UTC
 
-.PHONY: default help preflight version build musl test test-sanitize fmt fmt-check fmt-python lint lint-versions lint-lock zig-version required-zig-version release-targets check-assets check-asset-run check-binary check-changelog check-changelog-links check-changelog-sections check-unreleased check-readme check-man check-release check-reproducible lint-shell lint-python lint-yaml check bench gauntlet instructions overhead install release-assets checksums sha256-of clean
+.PHONY: default help preflight version build musl test test-sanitize fmt fmt-check fmt-python lint lint-versions lint-lock check-sbom zig-version required-zig-version release-targets check-assets check-asset-run check-binary check-changelog check-changelog-links check-changelog-sections check-unreleased check-readme check-man check-release check-reproducible lint-shell lint-python lint-yaml check bench gauntlet instructions overhead install release-assets checksums sbom sha256-of clean
 
 # The Harbor adapter's directory, the one place that path is written down.
 # lint-lock.sh and lint-versions.sh both take it as an argument rather than
@@ -125,12 +125,13 @@ help:
 	  'fmt-python            rewrite the tracked .py files, which zig fmt does not reach' \
 	  'fmt-check             what check runs over the same files, without rewriting' \
 	  'check                 preflight, zig-version, check-unreleased, check-readme, fmt-check, the linters, the tests, an optimized build' \
-	  'lint                  the version and lock checks, then shellcheck, ruff and yamllint' \
+	  'lint                  the version and lock checks, the release inventory, then shellcheck, ruff and yamllint' \
 	  'lint-shell            shellcheck over every tracked .sh file' \
 	  'lint-python           ruff check and ruff format --check over every tracked .py file' \
 	  'lint-yaml             yamllint over every tracked .yml and .yaml file' \
 	  'lint-versions         check ruff and yamllint against the versions the gate runs, and that lint-requirements.in names the same' \
 	  'lint-lock             check the Harbor lock carries the manifest pins, a hash each, and nothing else' \
+	  'check-sbom            run the release inventory over stand-in assets and check what a scanner reads' \
 	  'zig-version           check the local zig against the version the release is built with' \
 	  'bench AGENTS=...      three coding tasks through each harness' \
 	  'gauntlet AGENTS=...   the same gauntlet review on a fresh clone, per harness' \
@@ -153,6 +154,7 @@ help:
 	  'check-release TAG=vX.Y.Z  the tag names build.zig.zon, nothing is stranded unreleased' \
 	  'check-reproducible    every published target rebuilds byte-identical' \
 	  'checksums             sha256 sidecars for dist/ (after a tagged build)' \
+	  'sbom                  the SPDX inventory of dist/, naming the assets and every declared pin' \
 	  'sha256-of FILE=<path> the sha256 of one file, through the command checksums wrote with' \
 	  'required-zig-version  the zig version build.zig.zon declares' \
 	  'clean                 remove zig-out, .zig-cache, dist and the Harbor musl binary'
@@ -301,7 +303,7 @@ fmt-python:
 # repeating the targets, so a linter added here reaches a push and a tag.
 # .github/dependabot.yml is the other thing to keep in step, since it decides
 # what opens a bump for these.
-lint: lint-versions lint-lock lint-shell lint-python lint-yaml
+lint: lint-versions lint-lock check-sbom lint-shell lint-python lint-yaml
 
 # The gate's own checks live in scripts/, not in recipes here, so shellcheck
 # reads them: a recipe is shell nothing lints, and these are the code that
@@ -941,6 +943,24 @@ release-assets: zig-version
 		install -m644 LICENSE "dist/$(ASSET_PREFIX)LICENSE"; \
 	fi
 
+# What the release ships, as an SPDX inventory: the assets with the digest of
+# each, and every third-party pin this tree declares with the manifest that
+# declares it. Nothing publishes the binaries' contents today, so a consumer who
+# wants to know what is in one, and a scanner that wants to know what to match
+# a finding against, both have nothing to read but the size of the file. The
+# generator is a script rather than a recipe, so shellcheck reads it like the
+# rest of the gate, and it takes the manifests as arguments the way
+# lint-lock.sh takes the Harbor directory from HARBOR_DIR: the paths are written
+# down here and nowhere else.
+#
+# It runs before `checksums`, so the inventory gets a sidecar like every other
+# asset, and it names no version of its own: the version is read out of the
+# asset names, because the files in dist/ are what a release publishes. A
+# rehearsal emits no inventory, the way it emits no license.
+sbom:
+	@test -d dist || { echo "no dist/, run 'make release-assets TAG=v0.2.0' first" >&2; exit 2; }; \
+SHA256_CMD="$$($(SHA256_CMD))" sh scripts/sbom.sh dist lint-requirements.txt $(HARBOR_DIR)/requirements.lock
+
 # The sha256 sidecar `microagent update` verifies before it replaces anything.
 # Only a tagged build names its assets after a version, so a rehearsal in dist/
 # has nothing to checksum and says so. A host with neither hashing command is
@@ -1100,6 +1120,43 @@ check-reproducible:
 	  echo "$$target rebuilds to $$first"; \
 	done; \
 	rm -rf "$(REPRO_DIR)" "$$REPRO_SRC" "$(REPRO_GLOBAL)"
+
+# The release inventory, run over a directory of stand-in assets. Nothing in
+# the tree reads the file a release writes, and nothing builds a tagged one
+# before the tag, so without this the only thing that would catch a broken
+# generator is a consumer scanning a published release. What is asserted is
+# what a scanner reads: that the document parses as JSON, that it names the
+# assets that are there with the digest of each, and that it carries a package
+# for every pin the two manifests declare, so a manifest a release adds is an
+# inventory that has to be regenerated rather than one that quietly omits it.
+#
+# The assets are two files named as a tagged build names them, written into a
+# scratch directory the recipe removes, so the real dist/ and the toolchain a
+# release needs are not part of it. python3 parses the JSON and nothing else
+# needs it: the rest is grep, so the check runs where the linters run.
+check-sbom:
+	@set -eu; \
+	dir="$$(mktemp -d)"; \
+	trap 'rm -rf "$$dir"' EXIT; \
+	for name in microagent-v0.0.0-x86_64-linux-musl microagent-v0.0.0-LICENSE; do \
+	  printf 'a stand-in for %s\n' "$$name" > "$$dir/$$name"; \
+	done; \
+SHA256_CMD="$$($(SHA256_CMD))" sh scripts/sbom.sh "$$dir" lint-requirements.txt $(HARBOR_DIR)/requirements.lock >/dev/null; \
+	doc="$$dir/microagent-v0.0.0.spdx.json"; \
+	test -f "$$doc" || { echo "the generator wrote no $doc" >&2; exit 1; }; \
+	python3 -m json.tool "$$doc" >/dev/null || { echo "$doc is not JSON" >&2; exit 1; }; \
+	for name in microagent-v0.0.0-x86_64-linux-musl microagent-v0.0.0-LICENSE; do \
+	  grep -q "\"fileName\": \"$$name\"" "$$doc" || { echo "$$doc does not name $$name" >&2; exit 1; }; \
+	  want="$$($(MAKE) --no-print-directory sha256-of "FILE=$$dir/$$name")"; \
+	  grep -q "\"checksumValue\": \"$$want\"" "$$doc" || { echo "$$doc records no digest of $$name" >&2; exit 1; }; \
+	done; \
+	pins="$$(awk '/^[A-Za-z0-9_.-]+==/ { print $$1 }' lint-requirements.txt $(HARBOR_DIR)/requirements.lock | sort -u | wc -l)"; \
+	named="$$(grep -c '"referenceLocator": "pkg:pypi/' "$$doc")"; \
+	test "$$pins" -eq "$$named" || { \
+	  echo "the manifests pin $$pins packages and $$doc names $$named of them" >&2; \
+	  exit 1; \
+	}; \
+	echo "$$doc names both stand-in assets with their digests and all $$pins declared pins"
 
 clean:
 	rm -rf zig-out .zig-cache dist $(CROSS_PREFIX) $(HARBOR_DIR)/microagent-*-linux-musl $(HARBOR_DIR)/microagent-*-linux-musl.tmp

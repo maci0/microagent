@@ -72,13 +72,17 @@ jobs:
 
       # The target list and the asset names come from the Makefile, so a
       # rehearsal with `make release-assets TAG=v0.2.0` builds the same files
-      # this step publishes.
+      # this step publishes. The inventory is written before the checksums, so
+      # it gets a sidecar like every other asset: a consumer reading the release
+      # page gets what a release shipped, and a scanner gets the digests to
+      # match a finding against, without having to take the binaries apart.
       - name: build and checksum the release assets
         env:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           make release-assets
+          make sbom
           make checksums
           # The host asset is run and every published target is read back for
           # the object format its name promises, off disk rather than from the

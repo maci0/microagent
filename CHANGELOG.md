@@ -16,6 +16,13 @@ release, and `microagent update` moves you to it.
 
 ### Added
 
+- Every release publishes an SPDX inventory beside its binaries,
+  `microagent-<tag>.spdx.json`, naming each asset with its digest and every
+  package the repository pins for its linters and its Harbor benchmark adapter,
+  none of which is in a release. `make sbom` writes it, `make check-sbom` runs
+  the generator over stand-in assets so a pin a manifest adds without a
+  regenerated inventory fails the gate, and both run in `make lint`.
+
 - A first run with no config file writes the commented template to the default path,
   `~/.microagent/config.toml`, at mode 0600 and names the path on stderr. A path named by `--config`
   or `MICROAGENT_CONFIG` is never created, and an existing file is never touched.
