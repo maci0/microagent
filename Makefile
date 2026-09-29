@@ -137,13 +137,13 @@ help:
 	  'fmt                   rewrite every tracked .zig and .py file in format style' \
 	  'fmt-python            rewrite the tracked .py files, which zig fmt does not reach' \
 	  'fmt-check             what check runs over the same files, without rewriting' \
-	  'check                 preflight, zig-version, check-unreleased, check-readme, fmt-check, the linters, the tests, an optimized build' \
+	  'check                 preflight, zig-version, check-unreleased, check-readme, check-man, fmt-check, the linters, the tests, an optimized build' \
 	  'lint                  the version and lock checks, the release inventory, then shellcheck, ruff and yamllint' \
 	  'lint-shell            shellcheck over every tracked .sh file' \
 	  'lint-ci               shellcheck over the run: steps in the workflows and composite actions' \
 	  'lint-python           ruff check and ruff format --check over every tracked .py file' \
 	  'lint-yaml             yamllint over every tracked .yml and .yaml file' \
-	  'lint-md               the Markdown check over every tracked .md file' \
+	  'lint-md               the Markdown checks over every tracked .md file, which no other linter reads' \
 	  'lint-versions         check ruff and yamllint against the versions the gate runs, and that lint-requirements.in names the same' \
 	  'lint-lock             check the Harbor lock carries the manifest pins, a hash each, and nothing else' \
 	  'check-sbom            run the release inventory over stand-in assets and check what a scanner reads' \
