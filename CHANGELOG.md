@@ -69,6 +69,17 @@ release, and `microagent update` moves you to it.
   trailing whitespace outside a code fence, two blank lines in a row, an
   unclosed fence, and a file that does not end in a newline.
 
+- The `src/path:line` citations in the Markdown are checked against the source.
+  They name the function behind a claim, and the line is written by hand beside
+  a diff that moves the function: nothing asked where it ended up, so 0.2.0's
+  repair of them had drifted again by 0.7.0, a reader following a citation
+  reading a function hundreds of lines away from the one named, and nine
+  citations naming updater functions the 0.6.0 rewrite deleted. `make check-refs`
+  runs from `scripts/check-refs.sh` and is in `make lint`, so it gates a push
+  and a tag. It asks the source where each named symbol is defined, so a moved
+  function and a deleted one are both findings, and `-f` rewrites a stale
+  citation to the line its symbol is on.
+
 - Every release publishes an SPDX inventory beside its binaries,
   `microagent-<tag>.spdx.json`, naming each asset with its digest and every
   package the repository pins for its linters and its Harbor benchmark adapter,
@@ -172,6 +183,20 @@ release, and `microagent update` moves you to it.
   named refused as outside the sandbox, and the refusal named a path the operator
   never wrote. The value decides now, and a value a root already covers is not
   added twice.
+
+- Every `src/path:line` citation in `docs/threat-model.md` names the line its
+  symbol is defined on. 126 pointed somewhere else, `clip` at
+  `src/main.zig:1075` against a definition on line 1270 among them, and nine
+  named updater functions the 0.6.0 rewrite of `microagent update` deleted:
+  `fetchAsset`, `fetchBody`, `fetchInto`, `fetchesAsset`, `decide`,
+  `replaceVerified`, `replaceExecutable`, `validRepo`, `repoPartOk` and
+  `releaseApiUrl`. A control citing a function that no longer exists is a
+  control describing nothing, and the `owner/name` validation row described a
+  flag that was removed with the flag itself. The rows now name `fetch`,
+  `installIfVerified`, `replaceBinary`, `Capped` and `trustedGithubUrl`, and
+  the repository row says what holds now: the repository is a compile-time
+  constant, so no caller text reaches a URL.
+
 - A `[mcp]` table is named instead of passed over. The servers are declared as
   `[[mcp]]`, and a file that writes one bracket took the whole table as somebody
   else's, so its servers never started and their tools were simply absent from

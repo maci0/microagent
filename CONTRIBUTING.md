@@ -100,7 +100,7 @@ make check-unreleased       # the [Unreleased] entry has the five sections, once
 `check-unreleased`, `check-readme`, `check-man`, `fmt-check`, `lint`
 (`lint-versions`, `lint-lock`, `check-sbom`, shellcheck over the tracked scripts
 and over the `run:` steps in the workflows, `ruff check`, `ruff format --check`,
-yamllint, and the Markdown check), `zig build test`,
+yamllint, the Markdown check and `check-refs`), `zig build test`,
 `zig build test-sanitize`, and `check-binary` (a `ReleaseSmall` build whose
 binary it then starts). These are the checks
 [.github/workflows/ci.yml](.github/workflows/ci.yml) runs in its test and lint
@@ -137,6 +137,16 @@ a proxy for one. Each target takes its file list from git, so a shell, Python,
 YAML or Markdown file added anywhere is linted too. Both workflows call `make lint`
 rather than repeating its targets, so a linter added to the Makefile gates a
 push and a tag as well as a laptop.
+
+`check-refs`, in the same target, is the one gate about what a document claims
+rather than how it is written. Every `src/path:line` citation in a Markdown
+file names the function behind a claim, and a line number is written by hand
+beside a diff that moves the function. `scripts/check-refs.sh` asks the source
+where each named symbol is defined and fails a citation that points anywhere
+else, or a symbol the file no longer has, so a control citing a deleted
+function fails the gate rather than the reader. `check-refs -f` rewrites a
+stale citation to the line its symbol is on; a citation with no symbol beside
+it names a line inside a body, and only that line's existence is asked.
 
 `check` does not cover three things. One is the release cross-build: `make
 release-assets` runs it, and `make check-reproducible` rebuilds it byte for

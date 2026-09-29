@@ -15,7 +15,7 @@ BIN := zig-out/bin/microagent
 export LC_ALL := C
 export TZ := UTC
 
-.PHONY: default help preflight version build musl test watch test-sanitize fmt fmt-check fmt-python lint lint-versions lint-lock lint-ci check-sbom zig-version required-zig-version release-targets check-assets check-asset-run check-binary check-changelog check-changelog-links check-changelog-sections check-unreleased check-readme check-man check-release check-reproducible lint-shell lint-python lint-yaml lint-md check bench gauntlet instructions overhead install release-assets checksums sbom sha256-of clean
+.PHONY: default help preflight version build musl test watch test-sanitize fmt fmt-check fmt-python lint lint-versions lint-lock lint-ci check-sbom check-refs zig-version required-zig-version release-targets check-assets check-asset-run check-binary check-changelog check-changelog-links check-changelog-sections check-unreleased check-readme check-man check-release check-reproducible lint-shell lint-python lint-yaml lint-md check bench gauntlet instructions overhead install release-assets checksums sbom sha256-of clean
 
 # The Harbor adapter's directory, the one place that path is written down.
 # lint-lock.sh and lint-versions.sh both take it as an argument rather than
@@ -144,6 +144,7 @@ help:
 	  'lint-python           ruff check and ruff format --check over every tracked .py file' \
 	  'lint-yaml             yamllint over every tracked .yml and .yaml file' \
 	  'lint-md               the Markdown checks over every tracked .md file, which no other linter reads' \
+	  'check-refs            every src/path:line citation in a .md file names the line its symbol is on' \
 	  'lint-versions         check ruff and yamllint against the versions the gate runs, and that lint-requirements.in names the same' \
 	  'lint-lock             check the Harbor lock carries the manifest pins, a hash each, and nothing else' \
 	  'check-sbom            run the release inventory over stand-in assets and check what a scanner reads' \
@@ -339,7 +340,7 @@ fmt-python:
 # repeating the targets, so a linter added here reaches a push and a tag.
 # .github/dependabot.yml is the other thing to keep in step, since it decides
 # what opens a bump for these.
-lint: lint-versions lint-lock check-sbom lint-shell lint-ci lint-python lint-yaml lint-md
+lint: lint-versions lint-lock check-sbom lint-shell lint-ci lint-python lint-yaml lint-md check-refs
 
 # The gate's own checks live in scripts/, not in recipes here, so shellcheck
 # reads them: a recipe is shell nothing lints, and these are the code that
@@ -505,6 +506,18 @@ lint-yaml:
 lint-md:
 	@test -n "$(MD_SOURCES)" || { echo "no tracked .md file to lint" >&2; exit 1; }
 	sh scripts/lint-md.sh $(MD_SOURCES)
+
+# The `path:line` citations in the Markdown, which name the function behind a
+# claim and are the only thing in a prose file that can be wrong without looking
+# wrong. They are written by hand beside a diff that moves the function, and
+# nothing asked where it ended up: 0.2.0 corrected the ones that were stale then
+# and every one of them had drifted again by 0.7.0, a control citing a line
+# hundreds above its own body and nine citing updater functions the 0.6.0
+# rewrite deleted. A reader following a citation is reading the wrong function,
+# so the citation is asked rather than the prose. The gate lives in scripts/ for
+# the reason lint-versions names: a recipe is shell nothing lints.
+check-refs:
+	sh scripts/check-refs.sh $(MD_SOURCES)
 
 # The CI gate, so a formatting, lint or test failure shows up here rather than
 # after a push. Keep these in step with .github/workflows/ci.yml. The release
