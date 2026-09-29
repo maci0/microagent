@@ -5,7 +5,6 @@
 const std = @import("std");
 
 const chat_mod = @import("chat.zig");
-const net = @import("net.zig");
 
 /// Parallel tool calls accepted from one response; higher indices are dropped.
 pub const max_tool_calls = 64;

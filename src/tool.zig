@@ -347,13 +347,13 @@ fn captureResult(arena: std.mem.Allocator, parts: CaptureParts) ![]const u8 {
     // costs the newline that separates it as well as its own bytes. A call that
     // printed nothing says the status in place of the output rather than under
     // it, so a term beside no output costs the output no room.
-    const exit_cost = if (body != 0 and report_term) noteCost.of(exit_line.items) else 0;
-    const reason_cost = if (parts.reason) |r| noteCost.of(r) else 0;
+    const exit_cost = if (body != 0 and report_term) noteCost(exit_line.items) else 0;
+    const reason_cost = if (parts.reason) |r| noteCost(r) else 0;
     // The truncation note is written when the capture limit said so or when the
     // output does not fit beside the other notes, and it is a fixed length
     // either way, so its room is held back before the cut rather than measured
     // after it.
-    const cut_cost = noteCost.of(truncation_note[1..]);
+    const cut_cost = noteCost(truncation_note[1..]);
     const will_cut = parts.at_limit or body > max_tool_output -| exit_cost -| reason_cost -| cut_cost;
     const room = max_tool_output -| exit_cost -| reason_cost -| (if (will_cut) cut_cost else 0);
 
@@ -403,11 +403,9 @@ fn captureResult(arena: std.mem.Allocator, parts: CaptureParts) ![]const u8 {
 
 /// What one note costs the result it is written into: the line, and the newline
 /// that separates it from what is above it.
-const noteCost = struct {
-    fn of(text: []const u8) usize {
-        return if (text.len == 0) 0 else text.len + 1;
-    }
-};
+fn noteCost(text: []const u8) usize {
+    return if (text.len == 0) 0 else text.len + 1;
+}
 
 /// One line under whatever is already written, and nothing at all when there is
 /// nothing to put it under. A note under an empty result is a line of its own
