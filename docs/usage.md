@@ -277,14 +277,18 @@ to know what their data does does not have to infer it from the code.
 
 **The provider.** Every turn re-sends the whole conversation to the base url: the task as typed, the
 system prompt, the text of every skill the config named, and every tool result so far. A tool result
-is whatever the tree held, so file contents, build logs, `git log` and `git blame` output with its
-author names and email addresses, and whatever a `bash` command printed all go to whichever host the
-base url names, and they are re-sent on every later turn. The credential guards under
-[Tools](#tools) keep key material out of a tool result; nothing here keeps a person's name out of
-one. The request itself carries no identifier of this run: the body is the model name, the tool
-schemas, `max_tokens`, the optional `reasoning` block and the conversation, and the headers are
-`Authorization`, `content-type` and `accept`. No user id, no session id, no machine name, no account
-name, no timestamp, no run counter.
+is whatever the tree held, so file contents, build logs, and whatever a `bash` command printed all go
+to whichever host the base url names, and they are re-sent on every later turn. The `git` tool is
+the one that reads what other people wrote, and it is held to what a coding task reads a commit for:
+`log` is `--oneline`, so a subject and a hash and no author; `show` asks git for the hash, the date
+and the subject rather than the `Author:` and `Commit:` header lines, so no name and no email address
+reaches the provider; `blame` prints the name of whoever last touched a line, which is the one field
+left that identifies a person and is what the tool is for. The credential guards under
+[Tools](#tools) keep key material out of a tool result; apart from the blame name, nothing here keeps
+a person's name out of one. The request itself carries no identifier of this run: the body is the
+model name, the tool schemas, `max_tokens`, the optional `reasoning` block and the conversation, and
+the headers are `Authorization`, `content-type` and `accept`. No user id, no session id, no machine
+name, no account name, no timestamp, no run counter.
 
 **GitHub.** `microagent update` and `microagent update --check` ask
 `https://api.github.com/repos/<owner>/<repo>/releases/latest` and the release page for the asset, so
@@ -303,7 +307,12 @@ arguments, and the handshake sends the client name and version (`microagent`, th
 version); the operator of the endpoint sees this machine's IP address, the query the model built and
 the key the entry names, when it names one. Nothing else of the run is sent. The sandbox does not
 confine this traffic. The presets are on by default, and their tools come from a table in this
-binary, so a run with no config reaches no endpoint until the model calls one of those tools: the
+binary, so a run with no config reaches no endpoint until the model calls one of those tools, and
+every one of those tools is described to the model with the same sentence: put nothing in an argument
+that belongs to the repository under review, no code, no path, no file content, no repository name and
+nothing that names a person in it. The guidance is the whole of the control, since the arguments are
+the model's own words; a server the operator configured is a server they chose and describe
+themselves. The
 first call is what connects, initializes and asks for the server's own tool list, and a tool the
 server no longer offers is reported then. Set `enabled = false` in a `[tools.<name>]` table to make
 no request at all, and give a preset an `api_key_env` to have it connected at start instead, because
@@ -570,6 +579,14 @@ code and documentation, and a query naming an individual would put that name in 
 search log to answer a coding task. The categories still work, so a task that is a profile search
 gets one when the task text asks for it.
 
+Every one of the eight descriptions ends with the same sentence, and it is the whole of the control:
+the arguments are the model's own words, so the model is told that a call leaves the machine and that
+nothing belonging to the repository under review goes in one. That covers the three that take text
+rather than a name, where a snippet out of the tree would otherwise become a search term in somebody
+else's log, and `grep_app`, whose `query` is a literal pattern and `repo` is a repository name. A
+public repository the task itself names is a different thing from the tree under review and is what
+these tools are for.
+
 **Mistakes.** A table name that is not one of the twelve above, a value a key cannot take, and a
 config that disables every built-in stop the run before any request, with exit status 2 and a message
 naming the config path and the bad name or key; the message for a bad name lists the valid ones. A
@@ -625,7 +642,7 @@ them off ([tool set](#tool-set)).
 | `multi_edit` | a list of `{path, old_string, new_string, replace_all}` replacements, in one file or across files, applied in order on the text the earlier ones left. Every edit is judged as `edit` judges it, and no file is written unless all are accepted, so a refusal names the edit and changes nothing; up to 64 edits per call. A file written part way says how many files had already landed. |
 | `search` | `rg --line-number --no-heading`, optional glob; credentials files excluded. |
 | `ast` | `ast-grep run` for a structural match, or `--rewrite --update-all` to apply one; credentials files excluded. |
-| `git` | read-only `status`, `diff`, `log`, `show`, `blame`, capped at 400 lines; a credentials path is refused. |
+| `git` | read-only `status`, `diff`, `log`, `show`, `blame`, capped at 400 lines; a credentials path is refused, and `show` is asked for the hash, date and subject rather than the author and committer header lines. |
 | `todo` | keeps the steps of a long task: the whole list, each `pending`, `doing` or `done`, replaces the last one and is returned. |
 
 A config can add two more kinds: the `skill` tool when a skills root held something, and one

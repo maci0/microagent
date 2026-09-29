@@ -936,6 +936,28 @@ pub const Preset = enum {
 /// them.
 const Terse = struct { preset: Preset, tool: []const u8, description: []const u8, schema: []const u8 };
 
+/// Appended to every preset tool's description, so it reaches the model with
+/// the tool rather than as a note the description could leave out.
+///
+/// A call to one of these four is a copy leaving the machine into a third
+/// party's log, and its arguments are the model's own bytes, chosen from the
+/// files in the tree. The tree is what the run was asked about and its operator
+/// did not offer to publish it, so a snippet, a path, a file name or a name
+/// belonging to somebody in it does not go to a search index or a wiki to answer
+/// a coding task. The four presets are on by default, which is why the guidance
+/// is theirs to carry: a server an operator configured is a server they chose
+/// and can describe themselves.
+const off_host_note =
+    " A call here leaves the machine, so put nothing in an argument that belongs to the repository under review: no code, no path, no file content, no repository name, and nothing that names a person in it.";
+
+/// What the model is told one preset tool is, which is the table's own line
+/// and `off_host_note`. The note is added here rather than written into the
+/// eight lines so it cannot be left off one of them, and so the test that bounds
+/// the description bounds the bytes that are actually sent.
+fn presetDescription(arena: std.mem.Allocator, entry: Terse) ![]const u8 {
+    return std.fmt.allocPrint(arena, "{s}{s}", .{ entry.description, off_host_note });
+}
+
 const terse_tools = [_]Terse{
     // Exa's own description for this tool also carries `category:people` and
     // `category:company`, which turn a query into a search of a person's or a
@@ -1070,6 +1092,9 @@ test "the compact preset tools are valid schemas for exactly the tools they name
     }
     for (terse_tools) |t| {
         try std.testing.expect(t.description.len > 0 and t.description.len < 400);
+        const description = try presetDescription(arena, t);
+        try std.testing.expect(description.len < 700);
+        try std.testing.expect(std.mem.endsWith(u8, description, off_host_note));
         const schema = try std.json.parseFromSliceLeaky(std.json.Value, arena, t.schema, .{});
         const object = schema.object;
         try std.testing.expectEqualStrings("object", object.get("type").?.string);
@@ -1150,7 +1175,7 @@ fn fillPresetTools(arena: std.mem.Allocator, server: *Server, client_version: []
         tools.append(arena, .{
             .name = entry.tool,
             .exposed = try std.fmt.allocPrint(arena, "{s}{s}__{s}", .{ tool_prefix, server.name, entry.tool }),
-            .description = entry.description,
+            .description = try presetDescription(arena, entry),
             .schema = entry.schema,
         }) catch return false;
     }

@@ -557,7 +557,17 @@ fn gitArgv(
         try argv.appendSlice(arena, &.{ "log", "--oneline", "--no-color", "-n" });
         try argv.append(arena, try std.fmt.allocPrint(arena, "{d}", .{@min(limit, git_log_line_ceiling)}));
     } else if (std.mem.eql(u8, cmd, "show")) {
+        // The default header of a shown commit is `Author:` and `Commit:`,
+        // each a name and an email address, and a tool result is re-sent to the
+        // provider on every later turn: every commit the run looks at would
+        // put the identity of whoever wrote it into a third party's log, and
+        // the file under review is not the operator's to publish. The format
+        // below is what a commit header is for here, the short hash, the date
+        // and the subject, and it is asked for as a `tformat` so the subject
+        // ends its line rather than running into the stat under it. Nothing a
+        // coding task needs is in the two lines it drops.
         try argv.appendSlice(arena, &.{ "show", "--no-color", "--stat", "--patch" });
+        try argv.appendSlice(arena, &.{ "--pretty=tformat:%h %ad %s", "--date=iso-strict" });
         try argv.append(arena, rev orelse "HEAD");
     } else if (std.mem.eql(u8, cmd, "blame")) {
         try argv.append(arena, "blame");
@@ -4220,6 +4230,64 @@ test "a git path does not switch the credential exclusions off" {
                 std.debug.print("git {s} was given credential exclusions it does not need\n", .{cmd});
                 return error.TestUnexpectedResult;
             }
+        }
+    }
+}
+
+// A shown commit's default header carries the name and the email address of
+// everyone who wrote and committed it, and a tool result is re-sent to the
+// provider on every later turn, so a run that looks at a handful of commits
+// ships a handful of people's contact details to a third party to fix a bug in
+// the tree. The format `gitArgv` asks for keeps the hash, the date and the
+// subject and drops the two identity lines. The fixture commits as a named
+// person with an address rather than the `t@t` the neighbouring fixture uses,
+// so a header that came back whole would be found by name and by address, and
+// the patch and the subject are the control: a header that dropped everything
+// fails here rather than passing on an empty result.
+test "a shown commit does not carry who wrote it" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "src");
+    try tmp.dir.writeFile(io, .{ .sub_path = "src/main.zig", .data = "pub fn main() void {}\n" });
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+
+    // A real repository, so git's own header is what is under test. The
+    // identity is set on the repository rather than with `-c` because that is
+    // where git reads it from when it writes a commit header.
+    const script = try std.fmt.allocPrint(arena,
+        \\git -C '{s}' init -q && git -C '{s}' config commit.gpgsign false && git -C '{s}' config core.hooksPath '' && git -C '{s}' config user.name 'Rosa Fixture' && git -C '{s}' config user.email rosa@example.invalid && git -C '{s}' add -A && git -C '{s}' commit -qm 'a subject line'
+    , .{ root, root, root, root, root, root, root });
+    const setup = [_][]const u8{ "/bin/sh", "-c", script };
+    const made = try runCapped(io, arena, &setup, 1 << 20, net.durationMs(60_000), null, null);
+    if (made.term != .exited or made.term.exited != 0) {
+        std.debug.print("could not build the fixture repository: {s}\n", .{made.stderr});
+        return error.TestUnexpectedResult;
+    }
+
+    const res = try runCapped(io, arena, try gitIn(arena, root, "show", null, null), 1 << 20, net.durationMs(60_000), null, null);
+    const text = try arena.dupe(u8, res.stdout);
+    for ([_][]const u8{ "Author:", "Commit:", "Committer:", "Rosa Fixture", "rosa@example.invalid" }) |identity| {
+        if (std.mem.indexOf(u8, text, identity) != null) {
+            std.debug.print("git show carried '{s}'\n", .{identity});
+            return error.TestUnexpectedResult;
+        }
+    }
+    // The control: the subject, the file and the patch are what a coding task
+    // reads a commit for, and the date and hash are what the format keeps.
+    for ([_][]const u8{ "a subject line", "main.zig", "diff --git" }) |kept| {
+        if (std.mem.indexOf(u8, text, kept) == null) {
+            std.debug.print("git show lost '{s}'\n", .{kept});
+            return error.TestUnexpectedResult;
         }
     }
 }

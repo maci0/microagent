@@ -119,6 +119,23 @@ release, and `microagent update` moves you to it.
 
 ### Changed
 
+- `git show` is asked for the hash, the date and the subject rather than the
+  commit header it prints by default. `Author:` and `Commit:` are a name and an
+  email address each, and a tool result is re-sent to the provider on every
+  later turn, so looking at a handful of commits shipped the contact details of
+  everyone who wrote them to whoever runs the base url, for a patch. `log` is
+  `--oneline` and never printed them; `blame` still prints the name of whoever
+  last touched a line, which is what the tool is for.
+
+- Every one of the four remote tool presets is described to the model with the
+  same closing sentence: a call leaves the machine, and nothing belonging to
+  the repository under review goes in an argument, no code, no path, no file
+  content, no repository name and nothing that names a person in it. Three of
+  the eight tools already said it per argument; the other five took whatever
+  the model wrote, and `searchGitHub` takes a literal pattern to search a public
+  code index with. The sentence is appended where the description is built
+  rather than written into the eight lines, so one of them cannot lose it.
+
 - `make install` stages the license beside the binary and the man page, at
   `$PREFIX/share/licenses/microagent/LICENSE` with `LICENSEDIR` to move it. The
   recipe is the one a distro or homebrew-style packager runs, and every format
