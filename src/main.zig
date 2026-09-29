@@ -512,14 +512,7 @@ fn runMain(init: std.process.Init) !u8 {
     defer opts.mcp.shutdown(io);
     traceConfig(io, arena, opts, loaded, skill_roots, key.source);
     const skill_block = try opts.skills.prompt(arena);
-    const agents = readAgentsFile(io, arena, loaded.agents_file, loaded.agents_file_named);
-    const agents_block = if (agents) |text|
-        try std.fmt.allocPrint(arena, "\n\nThe repository's own instructions, from {s}, which this run follows within the task above:\n{s}", .{
-            chat_mod.safeTextAll(arena, loaded.agents_file),
-            text,
-        })
-    else
-        "";
+    const agents_block = try agentsBlock(io, arena, loaded.agents_files);
     const system_text = try systemText(arena, loaded.system_prompt_extra, agents_block, skill_block, opts.disabled_tools);
     try conversation_mod.openConversation(gpa, &msgs, system_text, opts.prompt);
 
@@ -548,9 +541,23 @@ fn runMain(init: std.process.Init) !u8 {
 /// block it becomes says where it came from; a file larger than the cap is
 /// followed up to the cap rather than not at all, and the note names the size
 /// it was cut from.
-fn readAgentsFile(io: Io, arena: std.mem.Allocator, path: []const u8, named: bool) ?[]const u8 {
+fn agentsBlock(io: Io, arena: std.mem.Allocator, files: ?[]const []const u8) ![]const u8 {
+    const paths = files orelse &config_mod.agents_files_default;
+    var out: std.ArrayList(u8) = .empty;
+    for (paths) |path| {
+        const text = readAgentsFile(io, arena, std.Io.Dir.cwd(), path, true) orelse continue;
+        if (text.len == 0) continue;
+        try out.appendSlice(arena, "\n\nThe repository's own instructions, from ");
+        try out.appendSlice(arena, chat_mod.safeTextAll(arena, path));
+        try out.appendSlice(arena, ", which this run follows within the task above:\n");
+        try out.appendSlice(arena, text);
+    }
+    return out.items;
+}
+
+fn readAgentsFile(io: Io, arena: std.mem.Allocator, dir: std.Io.Dir, path: []const u8, named: bool) ?[]const u8 {
     if (path.len == 0) return null;
-    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_agents_bytes + 1)) catch |err| {
+    var file = dir.openFile(io, path, .{}) catch |err| {
         // A named file that is not there is the operator's own spelling of a
         // setting that did nothing, and the run says so. The default name is
         // silent there, because most repositories have no such file; a file
@@ -563,8 +570,30 @@ fn readAgentsFile(io: Io, arena: std.mem.Allocator, path: []const u8, named: boo
         }
         return null;
     };
-    if (bytes.len <= max_agents_bytes) return bytes;
-    const whole = bytes[0..chat_mod.partialTailLen(bytes[0..max_agents_bytes])];
+    defer file.close(io);
+    // One byte past the cap is what says the file is longer than the run
+    // follows: the read stops there, so a repository cannot hand the prompt a
+    // megabyte by naming the file.
+    const buf = arena.alloc(u8, max_agents_bytes + 1) catch return null;
+    var got: usize = 0;
+    while (got < buf.len) {
+        const n = file.readStreaming(io, &.{buf[got..]}) catch |err| switch (err) {
+            // End of file is the end of the read, not a fault.
+            error.EndOfStream => break,
+            else => {
+                net.note(io, arena, "microagent: the repository instructions {s} could not be read ({s}); this run follows the system prompt alone\n", .{
+                    chat_mod.safeTextAll(arena, path),
+                    @errorName(err),
+                });
+                return null;
+            },
+        };
+        if (n == 0) break;
+        got += n;
+    }
+    if (got <= max_agents_bytes) return buf[0..got];
+    const held = chat_mod.partialTailLen(buf[0..max_agents_bytes]);
+    const whole = buf[0 .. max_agents_bytes - held];
     net.note(io, arena, "microagent: the repository instructions {s} are larger than {d} bytes; the first {d} are followed\n", .{
         chat_mod.safeTextAll(arena, path),
         max_agents_bytes,
@@ -6443,6 +6472,37 @@ test "environMap holds what createMap holds" {
 // constant, byte for byte, because the provider caches on that prefix; a run
 // that turns tools off sends the same entries less those, in the same order,
 // as JSON a provider parses.
+test "the repository instructions are read, capped, and only a named miss is news" {
+    const gpa = std.testing.allocator;
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const arena = state.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "AGENTS.md", .data = "run the tests before you commit" });
+    try std.testing.expectEqualStrings(
+        "run the tests before you commit",
+        readAgentsFile(io, arena, tmp.dir, "AGENTS.md", true) orelse return error.TestUnexpectedResult,
+    );
+
+    // Over the cap, the run follows what fits rather than nothing.
+    const big = try arena.alloc(u8, max_agents_bytes + 32);
+    @memset(big, 'x');
+    try tmp.dir.writeFile(io, .{ .sub_path = "BIG.md", .data = big });
+    try std.testing.expectEqual(
+        max_agents_bytes,
+        (readAgentsFile(io, arena, tmp.dir, "BIG.md", true) orelse return error.TestUnexpectedResult).len,
+    );
+
+    // The empty path is the config turning the read off, and a file that is
+    // not there is null whether or not the config named it.
+    try std.testing.expectEqual(@as(?[]const u8, null), readAgentsFile(io, arena, tmp.dir, "", true));
+    try std.testing.expectEqual(@as(?[]const u8, null), readAgentsFile(io, arena, tmp.dir, "not-there.md", false));
+    try std.testing.expectEqual(@as(?[]const u8, null), readAgentsFile(io, arena, tmp.dir, "not-there.md", true));
+}
+
 test "the built-in schema is the constant unless the config turned a tool off" {
     var state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer state.deinit();

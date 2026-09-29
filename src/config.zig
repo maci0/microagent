@@ -57,9 +57,9 @@ pub const max_system_prompt_extra_bytes: usize = 16 * 1024;
 /// The file the run reads repository instructions from when the config named
 /// none. Every other coding agent reads this name, so a repository that carries
 /// one carries it for this run too.
-pub const agents_file_default = "AGENTS.md";
+pub const agents_files_default = [_][]const u8{"AGENTS.md"};
 
-/// The longest path `agents_file` may be. A path past this is not a path.
+/// The longest path `agents_files` may name. A path past this is not a path.
 pub const max_agents_path_bytes: usize = 1024;
 
 const Lines = std.mem.SplitIterator(u8, .scalar);
@@ -88,15 +88,10 @@ pub const Config = struct {
     /// Text appended to the system prompt after a blank line, empty for none.
     system_prompt_extra: []const u8 = "",
     /// The repository's own instructions, read from the working directory when
-    /// the run starts. `AGENTS.md` is the name every other coding agent uses;
-    /// an empty value turns the read off, which is the operator's way of not
-    /// following a file the repository supplies.
-    agents_file: []const u8 = agents_file_default,
-    /// Whether `agents_file` above was written in the file or is the default. A
-    /// named path that is not there is said on stderr; the default is not,
-    /// because most repositories have no such file and a note per run about it
-    /// would be noise.
-    agents_file_named: bool = false,
+    /// the run starts. Null is the convention, `AGENTS.md`, and an empty list
+    /// is the operator turning the read off: a repository that ships
+    /// instructions should not reach a run whose operator said no.
+    agents_files: ?[]const []const u8 = null,
     /// The provider settings the file named, empty when it named none. Each is
     /// one of the sources a run draws from, and the weakest: a `--flag` beats
     /// the environment variable, which beats the file. `api_key` is a secret
@@ -344,7 +339,7 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8) Config {
 }
 
 /// A key at the top of the file, outside any table: `system_prompt_extra`,
-/// `agents_file`, `model`, `base_url`, `api_key`, `skills` and `deny_commands`.
+/// `agents_files`, `model`, `base_url`, `api_key`, `skills` and `deny_commands`.
 /// `lines` is what
 /// follows this one, for the value that runs over several.
 fn topKey(config: *Config, arena: std.mem.Allocator, lines: *Lines, key: []const u8, value_text: []const u8) void {
@@ -355,13 +350,14 @@ fn topKey(config: *Config, arena: std.mem.Allocator, lines: *Lines, key: []const
         config.system_prompt_extra = text;
         return;
     }
-    if (std.mem.eql(u8, key, "agents_file")) {
-        topString(config, key, value_text, &config.agents_file);
-        if (config.agents_file.len > max_agents_path_bytes)
+    if (std.mem.eql(u8, key, "agents_files")) {
+        const paths = stringArray(arena, value_text) orelse
             return config.note(.{ .key = key, .kind = .bad_value });
-        // Named, so a path that is not there is the operator's own spelling of
-        // a setting that did nothing, and the run says so.
-        config.agents_file_named = true;
+        for (paths) |path| {
+            if (path.len > max_agents_path_bytes)
+                return config.note(.{ .key = key, .kind = .bad_value });
+        }
+        config.agents_files = paths;
         return;
     }
     if (std.mem.eql(u8, key, "model")) return topString(config, key, value_text, &config.model);
@@ -802,6 +798,34 @@ fn splitQuoted(arena: std.mem.Allocator, inner: []const u8, sep: u8) ?[]const []
 // the first request. These tests drive the reader the way the shipped template
 // and the fuzz corpus do, so the syntax the README documents and the syntax
 // this file accepts cannot drift apart.
+
+test "agents_files names the repository instructions, and an empty list turns them off" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    // Nothing said: the convention, and the run reads it if it is there.
+    const bare = parse(arena, "");
+    try std.testing.expectEqual(@as(?[]const []const u8, null), bare.agents_files);
+
+    const named = parse(arena, "agents_files = [\"docs/HOUSE.md\", \"AGENTS.md\"]\n");
+    try std.testing.expect(named.problem == null);
+    try std.testing.expectEqual(@as(usize, 2), named.agents_files.?.len);
+    try std.testing.expectEqualStrings("docs/HOUSE.md", named.agents_files.?[0]);
+    try std.testing.expectEqualStrings("AGENTS.md", named.agents_files.?[1]);
+
+    // An empty list is the operator turning the read off, which is not the
+    // same statement as a file that never mentioned it.
+    const off = parse(arena, "agents_files = []\n");
+    try std.testing.expectEqual(@as(usize, 0), off.agents_files.?.len);
+
+    // A bare string where the list goes is the value that is wrong, and a path
+    // longer than any path is too.
+    const bare_string = parse(arena, "agents_files = \"AGENTS.md\"\n");
+    try std.testing.expectEqualStrings("agents_files", bare_string.problem.?.key);
+    const long = parse(arena, std.fmt.allocPrint(arena, "agents_files = [\"{s}\"]\n", .{"a" ** (max_agents_path_bytes + 1)}) catch unreachable);
+    try std.testing.expectEqualStrings("agents_files", long.problem.?.key);
+}
 
 test "the config sets system_prompt_extra and leaves absent or bad keys alone" {
     var state = std.heap.ArenaAllocator.init(std.testing.allocator);
