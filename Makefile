@@ -117,6 +117,7 @@ help:
 	  'check-assets TAG=...  the assets in dist/ are the ones the tag will publish' \
 	  'check-changelog [VERSION=...]  the changelog entry a tag would publish, its shape, and the 0.y policy on it' \
 	  'check-unreleased      the [Unreleased] entry has the five sections, once each, in order' \
+	  'check-changelog-sections SECTION=...  the same five-section shape under one named heading' \
 	  'check-release TAG=vX.Y.Z  the tag names build.zig.zon, nothing is stranded unreleased' \
 	  'check-reproducible    every published target rebuilds byte-identical' \
 	  'checksums             sha256 sidecars for dist/ (after a tagged build)' \

@@ -17,8 +17,13 @@ no runtime.
 ```sh
 zig build -Doptimize=ReleaseFast      # zig-out/bin/microagent
 zig build -Doptimize=ReleaseSmall     # smallest binary, ~840 KB
-zig build test                        # unit tests
+zig build test --summary all          # unit tests
 ```
+
+`--summary all` is what prints the pass count. Without it the build system
+prints only failures, so a green run says nothing at all under the transcript
+the suite writes to stderr, and `make test` and both workflows pass the flag
+for that reason.
 
 Every target is also a make target, and `make help` lists them:
 

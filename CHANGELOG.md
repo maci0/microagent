@@ -107,6 +107,16 @@ release, and `microagent update` moves you to it.
 
 ### Changed
 
+- The README's first test command is `zig build test --summary all`. Without the
+  flag the build system prints failures only, so a green run says nothing at all
+  under the transcript the suite writes to stderr, and a contributor reading the
+  front page could not tell a passing suite from a hung one. `make test` and both
+  workflows already passed the flag.
+- `make help` lists `check-changelog-sections`, the target it is what
+  CONTRIBUTING.md means by "every target". It was the one `.PHONY` entry missing
+  from the list, and it is the shape check over any named heading, so
+  `SECTION=0.2.0` asks of a version entry what `check-unreleased` asks of a
+  draft.
 - A bare `help` is a request for the usage text, the way `microagent update help`
   already was. `microagent help` used to be a coding run whose task was the word
   "help", billed to the caller, and printed no usage at all, while the one
