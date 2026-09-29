@@ -12,7 +12,7 @@
 # project's check (e.g. "zig build test") to record that too.
 # The external equivalents (SWE-bench Verified, Terminal-Bench 2) are not driven
 # from here; they go through the harbor adapter, see integrations/harbor/README.md
-# and BENCHMARK.md.
+# and docs/benchmark.md.
 set -u
 
 root=$(cd "$(dirname "$0")/.." && pwd)

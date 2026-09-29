@@ -296,7 +296,7 @@ lint-versions:
 # that no check compares. requirements.txt is one pin; requirements.lock is uv's
 # output from it. A lock left behind from an earlier pin still installs, still
 # hashes every artifact, and still runs the adapter, so the Harbor release a
-# score in BENCHMARK.md was measured against stops being the one the pin names
+# score in docs/benchmark.md was measured against stops being the one the pin names
 # and nothing fails until a number is quietly incomparable. The lock is
 # generated, so it is read here and never written: the three checks are that every
 # pin in the manifest is in the lock at the same version, that no lock entry

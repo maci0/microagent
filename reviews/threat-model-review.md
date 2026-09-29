@@ -1,5 +1,5 @@
 You are a senior security engineer reviewing the threat model of this Zig agent
-binary. Your task is to review `THREAT_MODEL.md` and fix the defects listed
+binary. Your task is to review `docs/threat-model.md` and fix the defects listed
 below. This prompt file is the instrument, not the subject.
 
 ## Your goal is to
@@ -10,13 +10,13 @@ no reference cannot be re-checked, and a reference to code that has moved is wor
 none, because it reads as evidence. This review owns the accuracy of that mapping and the
 rankings derived from it. It does not audit the network client, judge the reply-style
 formatting, check the command-line contract (the options themselves belong to
-`cli-contract-review.md`), or replace the standard gate on code quality. A finding must
+`reviews/cli-contract-review.md`), or replace the standard gate on code quality. A finding must
 be provable by reading the code the document points at, not by an opinion about what an
 attacker would try.
 
 ## First decide if this review applies
 
-Apply it when the tree still carries a `THREAT_MODEL.md` with a reference column and the
+Apply it when the tree still carries a `docs/threat-model.md` with a reference column and the
 sources it names exist: an argument parser and run loop in `src/main.zig`, the tool
 implementations in `src/tool.zig`, and an update path in `src/update.zig`. Skip the whole
 review and print the skip result if there is no threat model, if the document has no code
@@ -113,7 +113,7 @@ surface to model.
 
 ## For each finding include:
 
-- The file and line in `THREAT_MODEL.md` where the claim is wrong.
+- The file and line in `docs/threat-model.md` where the claim is wrong.
 - The function the claim points at, and what it actually does.
 - The evidence: the line read, the call traced, or the output the binary prints.
 - The smallest edit that makes the document true.
@@ -127,10 +127,10 @@ applied and the gate result.
 ## Important:
 
 - This review owns the threat model's accuracy, not the binary's security, and it edits
-  `THREAT_MODEL.md` alone: the invocation contract belongs to
-  `cli-contract-review.md`, the published measurements to
-  `benchmark-accuracy-review.md`, the prose claims outside the contract to
-  `doc-review.md`, and code quality to the standard gate. A model that
+  `docs/threat-model.md` alone: the invocation contract belongs to
+  `reviews/cli-contract-review.md`, the published measurements to
+  `reviews/benchmark-accuracy-review.md`, the prose claims outside the contract to
+  `reviews/doc-review.md`, and code quality to the standard gate. A model that
   records every weakness faithfully is a correct deliverable even when the weaknesses
   are severe; do not pad it, and do not remove a threat to make the document look better.
 - Judge each claim as the next reader meets it: the row has to name code that exists, or

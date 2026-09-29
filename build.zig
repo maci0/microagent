@@ -98,9 +98,9 @@ pub fn build(b: *std.Build) void {
     pin_test_env(run_sanitize);
 
     // Three tracked files are read by the suite at run time, from the build
-    // root, rather than through the module system: README.md, the config
+    // root, rather than through the module system: docs/usage.md, the config
     // template and the Harbor adapter. Nothing the build graph knows about
-    // changes when one of them does, so editing the README and rerunning the
+    // changes when one of them does, so editing a document and rerunning the
     // suite was a cache hit on a binary compiled from the same sources: the
     // tests that read those files never saw the edit, and the one that holds
     // the two documents to the variables the program reads passed on a
@@ -112,7 +112,7 @@ pub fn build(b: *std.Build) void {
     // Both run steps get them, through the one `WriteFile`, for the reason
     // `pin_test_env` is shared: the sanitized run is the same suite.
     const tracked_data = b.addWriteFiles();
-    for ([_][]const u8{ "README.md", "config.example.toml", "integrations/harbor/microagent_agent.py" }) |path| {
+    for ([_][]const u8{ "docs/usage.md", "config.example.toml", "integrations/harbor/microagent_agent.py" }) |path| {
         _ = tracked_data.addCopyFile(b.path(path), path);
     }
     run_tests.step.dependOn(&tracked_data.step);

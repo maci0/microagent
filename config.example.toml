@@ -1,11 +1,11 @@
 # microagent configuration: the reply style, the skills, and the MCP servers.
 # Copy to ~/.microagent/config.toml, or point MICROAGENT_CONFIG or --config at
-# it. Every key here is optional: an absent one, a bad value, and a file that is
-# not there at all all keep the built-in default, and the first line this file
-# gets wrong is named on stderr.
+# it. Every key is optional. A missing key, a bad value or a missing file keeps
+# the built-in default, and the first line this file gets wrong is named on
+# stderr.
 #
 # MICROAGENT_CAVEMAN, MICROAGENT_PONYTAIL and MICROAGENT_SKILLS set the same
-# values for one run and win over this file, since naming a value in the
+# values for one run and override this file, since a value named in the
 # environment is the more explicit statement.
 
 # How terse the agent's own prose is. off, lite, full, ultra, or one of the
@@ -20,10 +20,10 @@ ponytail = "full"
 # directory per skill, each with a SKILL.md in it. A relative path is resolved
 # against the working directory. Leaving the key out uses
 # $HOME/.microagent/skills; `skills = []` turns skills off. The working
-# directory is deliberately not a default root: a SKILL.md in a repository
-# under review was written by whoever wrote that repository, and a skill body
-# is instructions the model follows. Name one here, or in MICROAGENT_SKILLS,
-# to say those bytes are instructions.
+# directory is never a default root: a SKILL.md in a repository under review
+# was written by whoever wrote that repository, and a skill body is
+# instructions the model follows. Name a directory here, or in
+# MICROAGENT_SKILLS, to say its bytes are instructions.
 #
 # skills = ["./skills", "~/.microagent/skills"]
 

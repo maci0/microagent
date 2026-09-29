@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="title">
+  <title id="title">microagent</title>
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#262a3d"/>
+      <stop offset="1" stop-color="#14151f"/>
+    </linearGradient>
+    <linearGradient id="zig" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffc24b"/>
+      <stop offset="1" stop-color="#f7771d"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#tile)"/>
+  <rect x="8.75" y="8.75" width="238.5" height="238.5" rx="55.25" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="1.5"/>
+  <g transform="translate(2 -18)">
+    <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M44 100 L70 124 L44 148" stroke="#7aa2f7" stroke-width="13"/>
+      <path d="M100 86 V206 M100 136 Q100 170 131 170 Q162 170 162 136 V86 M162 136 V156 Q162 170 176 170" stroke="url(#zig)" stroke-width="18"/>
+    </g>
+    <rect x="190" y="152" width="26" height="18" rx="3" fill="#e0e6ff">
+      <animate attributeName="opacity" values="1;1;0;0" keyTimes="0;0.5;0.5;1" dur="1.1s" repeatCount="indefinite"/>
+    </rect>
+  </g>
+</svg>

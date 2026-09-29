@@ -9,7 +9,7 @@ release-notes.md
 __pycache__/
 .scratch/
 # The Harbor adapter's musl binary, one name per host architecture. It is a
-# build product of `make musl`, ~1.3 MB, and nothing in the repo reads it.
+# build product of `make musl`, ~1.6 MB, and nothing in the repo reads it.
 integrations/harbor/microagent-*-linux-musl
 integrations/harbor/microagent-*-linux-musl.tmp
 # A style config written here to try a level out. The template that is tracked
