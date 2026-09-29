@@ -23,6 +23,13 @@ release, and `microagent update` moves you to it.
   than as a command a contributor could run. The workflow calls these targets
   now, and `check-asset-run` refuses a `TARGET=` that is not the one the host
   publishes.
+- `docs/usage.md` has a "What leaves the machine" section naming every host a
+  run reaches and every file it writes: the conversation and every tool result
+  go to the configured provider, the update check tells GitHub the IP and the
+  version, an MCP server sees the tool name and its arguments and nothing
+  else, and the session log holds counters and the working directory at
+  `0o600`. The session log section now says the same about the modes, about
+  what `cwd` reveals, and about how to delete the store.
 
 ### Changed
 

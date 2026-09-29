@@ -229,6 +229,37 @@ The key goes to the base url in an `Authorization` header on every request. Two 
 `--ca-bundle` (or `MICROAGENT_CA_BUNDLE`, else `SSL_CERT_FILE`) names a PEM file to trust instead of
 the system store, for container images that ship no `ca-certificates`.
 
+## What leaves the machine
+
+One run reaches three places, and writes one thing down. This is the whole list; a reader who wants
+to know what their data does does not have to infer it from the code.
+
+**The provider.** Every turn re-sends the whole conversation to the base url: the task as typed, the
+system prompt, the text of every skill the config named, and every tool result so far. A tool result
+is whatever the tree held, so file contents, build logs, `git log` and `git blame` output with its
+author names and email addresses, and whatever a `bash` command printed all go to whichever host the
+base url names, and they are re-sent on every later turn. The credential guards under
+[Tools](#tools) keep key material out of a tool result; nothing here keeps a person's name out of
+one. The request itself carries no identifier of this run: the body is the model name, the tool
+schemas, `max_tokens`, the optional `reasoning` block and the conversation, and the headers are
+`Authorization`, `content-type` and `accept`. No user id, no session id, no machine name, no account
+name, no timestamp, no run counter.
+
+**GitHub.** `microagent update` and `microagent update --check` ask
+`https://api.github.com/repos/<owner>/<repo>/releases/latest` and the release page for the asset, so
+GitHub sees this machine's IP address and, in the `User-Agent`, the version. Nothing else in a run
+makes an outbound request: there is no telemetry, no analytics, no crash report, and no update check
+on a run that was not asked to update. See [Update](#update).
+
+**MCP servers.** A configured server is a child process on this machine. One call sends it the tool
+name and the model's arguments for that call, and nothing else: no conversation, no system prompt,
+no token counts, no credential. What it returns is the tool result, so that goes to the provider in
+turn. See [MCP servers](#mcp-servers).
+
+**On disk.** The [session log](#session-log) is the only file a run keeps of itself, apart from the
+files its tools were asked to write. It holds counters and the working directory, never prompt or
+output text.
+
 ## Config file
 
 One TOML file carries the reply style, the skill roots and the MCP servers. It is `--config`, else
@@ -322,7 +353,9 @@ and the text the server returns is the tool result, on the same deadline as any 
 A server that cannot start, exits during the handshake, or refuses a call is reported on stderr and
 skipped: one broken entry costs that entry, not the run. The server's stderr is inherited, since
 that is where MCP servers write diagnostics. Its environment is the scrubbed one tool subprocesses
-get plus the entry's `env`, so it never sees a provider key.
+get plus the entry's `env`, so it never sees a provider key. Nor does it see the conversation: a
+call carries the tool name and the model's arguments for it and nothing else. [What leaves the
+machine](#what-leaves-the-machine) has the whole list.
 
 Server and tool names may hold only letters, digits, dot, dash and underscore, and a name holding
 `__` is refused: the double underscore separates the three parts of an exposed name.
@@ -441,6 +474,15 @@ A directory that cannot be created, or a log that cannot be opened or written, i
 and the rest of the run goes unrecorded. Nothing in the log is prompt or output text.
 [toktop](https://github.com/maci0/toktop) reads this store by default, and the keys are the ordinary
 OpenAI ones plus `cwd`, so any reader of agent transcripts works.
+
+A log is created `0o600` and a store directory this run creates is `0o700`, so on a shared account
+the last 200 runs are readable by the account that made them alone. Neither mode is applied to a
+directory that already exists, so a store an operator pointed `MICROAGENT_SESSION_DIR` at keeps the
+mode they gave it. `cwd` is the one field that names a person indirectly, since a working directory
+under a home directory carries the account name in it; it is there because a monitor reports the run
+by where it was, and it is the reason the modes above matter. Deleting the store is
+`rm -r ~/.microagent/sessions`: nothing outside it holds anything from the run, and the binary never
+reads a log back.
 
 ## Failure handling
 
