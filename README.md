@@ -410,6 +410,10 @@ Seven tools, all of them thin wrappers over tools you already have:
 | `ast` | `ast-grep run` for structural match, or `--rewrite --update-all` to apply one; credentials files excluded |
 | `git` | read-only `status`, `diff`, `log`, `show`, `blame`, capped at 400 lines; a credentials path is refused |
 
+A run may add two more kinds of tool to that list, neither of them on unless a config named it: the
+`skill` tool, when a skills directory held something, and one `mcp__<server>__<tool>` entry per tool
+an MCP server reported. Both are described above.
+
 The system prompt tells the model to search with ripgrep and rewrite structurally with `ast-grep`
 rather than reimplementing either in the harness. `bash` is there for builds and tests; git state
 has its own tool, with the subcommands fixed here instead of assembled by the model. Those three
