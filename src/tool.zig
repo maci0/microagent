@@ -115,7 +115,7 @@ const ToolChild = struct {
 };
 
 /// A key file, and which of the three things happened to it.
-pub const SecretRead = union(enum) {
+const SecretRead = union(enum) {
     /// The file is not there, which is the ordinary case for a run that has
     /// its key somewhere else.
     absent,

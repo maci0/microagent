@@ -51,7 +51,7 @@ const max_name_bytes: usize = 64;
 const max_description_bytes: usize = 200;
 
 /// One skill on disk, as discovery found it.
-pub const Skill = struct {
+const Skill = struct {
     /// The name the model calls, from the frontmatter or the directory.
     name: []const u8,
     /// One line saying when the skill applies, from the frontmatter or the
@@ -110,7 +110,7 @@ pub const Skills = struct {
 /// the operator named is one they believe is there, so a directory that is
 /// missing, unreadable or not a directory is worth a line; the default root is
 /// absent on most machines and silence about it is correct.
-pub const Root = struct { path: []const u8, named: bool };
+const Root = struct { path: []const u8, named: bool };
 
 /// The roots this run reads skills from, in precedence order: the directories
 /// MICROAGENT_SKILLS names, else the `skills` list the config file declared,
@@ -307,7 +307,7 @@ fn field(raw_text: []const u8, key: []const u8) ?[]const u8 {
 /// `skill` call. The read is capped at `max_skill_bytes`, which discovery
 /// already applied to the same file, so a skill whose file grew past the cap
 /// between the two reads is reported rather than loaded.
-pub fn load(io: Io, arena: std.mem.Allocator, skill: *const Skill) ![]const u8 {
+fn load(io: Io, arena: std.mem.Allocator, skill: *const Skill) ![]const u8 {
     const text = std.Io.Dir.cwd().readFileAlloc(io, skill.path, arena, .limited(max_skill_bytes)) catch |err|
         return std.fmt.allocPrint(arena, "error: cannot read skill {s}: {s}", .{ skill.name, @errorName(err) });
     return splitFrontmatter(text).body;
