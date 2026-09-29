@@ -203,6 +203,12 @@ test-sanitize:
 # glob names the paths as they stand, so a Zig file added outside src/ is
 # formatted by nothing and the gate still passes.
 ZIG_SOURCES := $(shell git ls-files '*.zig')
+# `zig fmt` formats .zon as well as .zig, and build.zig.zon is where the
+# version every release is published from is written down, so it is read by a
+# hand edit that nothing checks the shape of. It is listed apart from
+# ZIG_SOURCES because that list is also what `test-one` greps for test names,
+# and a manifest has none.
+ZON_SOURCES := $(shell git ls-files '*.zon')
 
 # The Python and YAML the linters read, for the same reason.
 PY_SOURCES := $(shell git ls-files '*.py')
@@ -237,7 +243,8 @@ watch:
 
 fmt:
 	@test -n "$(ZIG_SOURCES)" || { echo "no tracked .zig file to format" >&2; exit 1; }
-	$(ZIG) fmt $(ZIG_SOURCES)
+	@test -n "$(ZON_SOURCES)" || { echo "no tracked .zon file to format" >&2; exit 1; }
+	$(ZIG) fmt $(ZIG_SOURCES) $(ZON_SOURCES)
 	$(MAKE) fmt-python
 
 # What `check` runs, and what the workflows run, so the file list the gate
@@ -246,7 +253,8 @@ fmt:
 # reading nothing and the step green.
 fmt-check:
 	@test -n "$(ZIG_SOURCES)" || { echo "no tracked .zig file to check" >&2; exit 1; }
-	$(ZIG) fmt --check $(ZIG_SOURCES)
+	@test -n "$(ZON_SOURCES)" || { echo "no tracked .zon file to check" >&2; exit 1; }
+	$(ZIG) fmt --check $(ZIG_SOURCES) $(ZON_SOURCES)
 
 fmt-python:
 	@test -n "$(PY_SOURCES)" || { echo "no tracked .py file to format" >&2; exit 1; }
@@ -261,87 +269,20 @@ fmt-python:
 # what opens a bump for these.
 lint: lint-versions lint-lock lint-shell lint-python lint-yaml
 
-# A version mismatch is reported by name rather than surfacing later as a
-# formatting diff no one can explain, so the message says what to install.
-lint-versions:
-	@set -eu; \
-	have_ruff="$$(ruff --version | awk '{print $$2}')"; \
-	have_yamllint="$$(yamllint --version | awk '{print $$NF}')"; \
-	bad=0; \
-	[ "$$have_ruff" = "$(RUFF_VERSION)" ] || { \
-	  echo "ruff $$have_ruff, the gate runs $(RUFF_VERSION): install it with 'uv tool install ruff@$(RUFF_VERSION)'" >&2; bad=1; }; \
-	[ "$$have_yamllint" = "$(YAMLLINT_VERSION)" ] || { \
-	  echo "yamllint $$have_yamllint, the gate runs $(YAMLLINT_VERSION): install it with 'uv tool install yamllint==$(YAMLLINT_VERSION)'" >&2; bad=1; }; \
-	ruff_pin="$$(sed -n 's/^ruff==\([^ ]*\).*/\1/p' lint-requirements.txt)"; \
-	yamllint_pin="$$(sed -n 's/^yamllint==\([^ ]*\).*/\1/p' lint-requirements.txt)"; \
-	{ [ "$$ruff_pin" = "$(RUFF_VERSION)" ] && [ "$$yamllint_pin" = "$(YAMLLINT_VERSION)" ]; } || { \
-	  echo "lint-requirements.txt pins ruff==$$ruff_pin and yamllint==$$yamllint_pin, not $(RUFF_VERSION) and $(YAMLLINT_VERSION): CI installs that file, so a bump here has to bump the Makefile too" >&2; bad=1; }; \
-	ruff_required="$$(sed -n 's/^required-version = "\(.*\)"/\1/p' ruff.toml)"; \
-	[ "$$ruff_required" = "$(RUFF_VERSION)" ] || { \
-	  echo "ruff.toml requires ruff $$ruff_required, not $(RUFF_VERSION): a contributor running 'ruff check --config ruff.toml' directly is told nothing by the gate, and 'required-version' is the one pin ruff reads there" >&2; \
-	  echo "a bump to RUFF_VERSION has to bump required-version, and lint-requirements.txt, in the same change" >&2; bad=1; }; \
-	ruff_target="$$(sed -n 's/^target-version = "\(py[0-9]*\)"/\1/p' ruff.toml)"; \
-	lock_target="$$(sed -n 's/.*uv pip compile.*--python-version \([0-9][0-9.]*\).*/\1/p' integrations/harbor/requirements.txt)"; \
-	{ [ -n "$$ruff_target" ] && [ -n "$$lock_target" ] && [ "$$ruff_target" = "py$$(printf '%s' "$$lock_target" | tr -d .)" ]; } || { \
-	  echo "ruff.toml checks against $$ruff_target and integrations/harbor/requirements.txt resolves its lock for $$lock_target: a py target raised here without the floor raised there lints against an interpreter the lock does not resolve for" >&2; \
-	  echo "a bump to either has to bump the other, and the 'uv pip compile' at the top of that manifest with it" >&2; bad=1; }; \
-	unhashed="$$(awk '/^[A-Za-z0-9_.-]+==/ { if (name != "" && hashes == 0) print name; name = $$1; sub(/==.*/, "", name); hashes = 0; next } /--hash=sha256:/ { hashes++ } END { if (name != "" && hashes == 0) print name }' lint-requirements.txt)"; \
-	if [ -n "$$unhashed" ]; then \
-	  echo "lint-requirements.txt pins $$unhashed with no --hash=sha256, and setup-linters installs it with --require-hashes:" >&2; \
-	  echo "the install fails on pip's own message rather than this one, naming neither the pin nor the linter that asked for it" >&2; \
-	  bad=1; \
-	fi; \
-	test "$$bad" -eq 0
-
-# The Harbor adapter is the one dependency set here with a manifest and a lock
-# that no check compares. requirements.txt is one pin; requirements.lock is uv's
-# output from it. A lock left behind from an earlier pin still installs, still
-# hashes every artifact, and still runs the adapter, so the Harbor release a
-# score in docs/benchmark.md was measured against stops being the one the pin names
-# and nothing fails until a number is quietly incomparable. The lock is
-# generated, so it is read here and never written: the three checks are that every
-# pin in the manifest is in the lock at the same version, that no lock entry
-# arrives without a hash, which is what an artifact installed unverified would
-# be, and that every lock entry is reachable from a manifest pin, so a lock
-# carrying a package no requirement asks for is refused rather than installed
-# into the venv a score is measured in. Regenerating is the `uv pip compile` at
-# the top of requirements.txt.
 HARBOR_DIR := integrations/harbor
+
+# The gate's own checks live in scripts/, not in recipes here, so shellcheck
+# reads them: a recipe is shell nothing lints, and these two are the code that
+# decides whether the linters are the versions the gate means. The versions and
+# the Harbor directory stay here, so this file is still the one place each is
+# written down; the scripts take them as arguments.
+lint-versions:
+	@RUFF_VERSION='$(RUFF_VERSION)' YAMLLINT_VERSION='$(YAMLLINT_VERSION)' sh scripts/lint-versions.sh
+
+# The Harbor lock is compared against its manifest; what the three checks are
+# is scripts/lint-lock.sh's to say.
 lint-lock:
-	@set -eu; \
-	manifest="$(HARBOR_DIR)/requirements.txt"; \
-	lock="$(HARBOR_DIR)/requirements.lock"; \
-	for file in "$$manifest" "$$lock"; do \
-	  test -f "$$file" || { echo "no $$file, so the Harbor adapter's dependency set is undeclared" >&2; exit 1; }; \
-	done; \
-	bad=0; \
-	pins="$$(sed -n 's/^\([A-Za-z0-9_.-]*==[^ ]*\).*/\1/p' "$$manifest" | tr '\n' ' ')"; \
-	test -n "$$pins" || { echo "$$manifest pins no package, so the adapter's dependency set is undeclared" >&2; exit 1; }; \
-	for pin in $$pins; do \
-	  grep -q "^$$pin " "$$lock" || { \
-	    echo "$$manifest pins $$pin, which $$lock does not: the lock is older than the pin, so a benchmark would run against a Harbor the manifest no longer names" >&2; \
-	    echo "regenerate it with the 'uv pip compile' at the top of $$manifest" >&2; \
-	    bad=1; \
-	  }; \
-	done; \
-	grep -q -- '-r integrations/harbor/requirements.txt' "$$lock" || { \
-	  echo "$$lock records no root from $$manifest, so it was not generated from it" >&2; \
-	  bad=1; \
-	}; \
-	unhashed="$$(awk '/^[A-Za-z0-9_.-]+==/ { if (name != "" && hashes == 0) print name; name = $$1; sub(/==.*/, "", name); hashes = 0; next } /--hash=sha256:/ { hashes++ } END { if (name != "" && hashes == 0) print name }' "$$lock")"; \
-	if [ -n "$$unhashed" ]; then \
-	  echo "$$lock has entries with no --hash=sha256, which uv installs without verifying them:" >&2; \
-	  echo "$$unhashed" >&2; \
-	  bad=1; \
-	fi; \
-	roots="$$(printf '%s\n' $$pins | sed 's/==.*//' | tr '\n' ' ')"; \
-	orphans="$$(awk -v roots="$$roots" 'function norm(s) { s = tolower(s); gsub(/[._]/, "-", s); return s } /^[A-Za-z0-9_.-]+==/ { name = $$0; sub(/[[:space:]].*/, "", name); sub(/==.*/, "", name); cur = norm(name); names[cur] = 1; seq[++n] = cur; multi = 0; next } /^[[:space:]]*# via[[:space:]]*$$/ { multi = 1; next } /^[[:space:]]*# via[[:space:]]+/ { multi = 0; for (i = 2; i <= NF; i++) if ($$i != "-r") parents[cur] = parents[cur] " " norm($$i); next } /^[[:space:]]*#   [^ ]/ { if (multi) for (i = 1; i <= NF; i++) parents[cur] = parents[cur] " " norm($$i); next } END { nr = split(roots, r, " "); for (i = 1; i <= nr; i++) if (r[i] in names) { seen[r[i]] = 1; queue[++m] = r[i] } for (i = 1; i <= n; i++) { c = seq[i]; k = split(parents[c], p, " "); for (j = 1; j <= k; j++) if (p[j] != "" && (p[j] in names)) rev[p[j]] = rev[p[j]] " " c } for (idx = 1; idx <= m; idx++) { c = queue[idx]; k = split(rev[c], ch, " "); for (j = 1; j <= k; j++) if (ch[j] != "" && !(ch[j] in seen)) { seen[ch[j]] = 1; queue[++m] = ch[j] } } for (i = 1; i <= n; i++) if (!(seq[i] in seen)) print seq[i] }' "$$lock")"; \
-	if [ -n "$$orphans" ]; then \
-	  echo "$$lock carries packages no pin in $$manifest needs, which uv installs into the venv anyway:" >&2; \
-	  echo "$$orphans" >&2; \
-	  bad=1; \
-	fi; \
-	test "$$bad" -eq 0
+	@sh scripts/lint-lock.sh $(HARBOR_DIR)/requirements.txt
 
 # A different zig is a different compiler, and a compiler decides the bytes:
 # codegen, inlining and linker layout all move between releases. setup-zig

@@ -10,6 +10,7 @@
 | `docs/` | reference and design docs: [usage](docs/usage.md), [benchmark](docs/benchmark.md), [performance](docs/performance.md), [threat model](docs/threat-model.md), and the logo |
 | `reviews/` | this project's own [gauntlet](https://github.com/maci0/gauntlet) review prompts; run them with `gauntlet --prompt-dir reviews`, which replaces gauntlet's embedded set |
 | `.github/` | the `ci` and `release` workflows, the shared `setup-zig` and `setup-linters` actions, and the Dependabot config |
+| `scripts/` | the gate's own checks as shell files, so shellcheck reads them: the linter version pins (`lint-versions.sh`) and the Harbor lock against its manifest (`lint-lock.sh`) |
 
 At the root: `build.zig` and `build.zig.zon` (the build and the version), the
 [Makefile](Makefile) (every command below), `README.md`, `CHANGELOG.md`, this
@@ -64,7 +65,7 @@ so the job never writes into the runner image's externally managed Python.
 `make lint-versions` fails when that file and the Makefile disagree on a
 version.
 
-`zig fmt` covers the Zig and needs nothing else.
+`zig fmt` covers the Zig and `build.zig.zon`, and needs nothing else.
 
 `ruff` targets the Python the adapter runs on, not ruff's default.
 [ruff.toml](ruff.toml) sets `target-version = "py312"`, the floor
