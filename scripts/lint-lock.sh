@@ -1,44 +1,52 @@
 #!/bin/sh
-# The Harbor adapter is the one dependency set here with a manifest and a lock
-# that no other check compares. requirements.txt is one pin; requirements.lock
-# is uv's output from it. A lock left behind from an earlier pin still installs,
-# still hashes every artifact, and still runs the adapter, so the Harbor release
-# a score in docs/benchmark.md was measured against stops being the one the pin
-# names and nothing fails until a number is quietly incomparable. The lock is
+# Both dependency sets here are a manifest and the lock uv compiles from it, and
+# both answer the same three questions. A lock left behind from an earlier pin
+# still installs, still hashes every artifact, and still runs, so the release a
+# benchmark or a gate was measured against stops being the one the manifest
+# names and nothing fails until a number is quietly incomparable. A lock is
 # generated, so it is read here and never written: the three checks are that
 # every pin in the manifest is in the lock at the same version, that no lock
 # entry arrives without a hash, which is what an artifact installed unverified
 # would be, and that every lock entry is reachable from a manifest pin, so a
 # lock carrying a package no requirement asks for is refused rather than
-# installed into the venv a score is measured in. Regenerating is the
-# `uv pip compile` at the top of requirements.txt.
+# installed into the venv a score or a gate is run in. Regenerating is the
+# `uv pip compile` at the top of each manifest.
 #
-# The manifest path arrives as an argument so the Makefile stays the one place
-# the Harbor directory is written down.
+# The Harbor set is a lock nothing else in the tree regenerates, and the linter
+# set is the one a contributor can hand-edit: it lives at the root rather than
+# in a directory, and a linter bump that needs a package `uv` would not choose
+# is a line typed into a file that looks generated. CI installs that file with
+# `--require-hashes`, which refuses an unhashed entry there and nowhere else, so
+# a laptop running `make check` is the run that catches a hand edit. Same
+# questions, same answers, one script.
+#
+# Both paths arrive as arguments so the Makefile stays the one place each
+# dependency set is written down, and so the Harbor directory is spelled once.
 set -eu
 
-: "${1:?usage: lint-lock.sh <path to requirements.txt>}"
+: "${1:?usage: lint-lock.sh <manifest> <lock>}"
+: "${2:?usage: lint-lock.sh <manifest> <lock>}"
 
 manifest="$1"
-lock="$(dirname "$manifest")/requirements.lock"
+lock="$2"
 for file in "$manifest" "$lock"; do
-  test -f "$file" || { echo "no $file, so the Harbor adapter's dependency set is undeclared" >&2; exit 1; }
+  test -f "$file" || { echo "no $file, so this dependency set is undeclared" >&2; exit 1; }
 done
 bad=0
 pins="$(sed -n 's/^\([A-Za-z0-9_.-]*==[^ ]*\).*/\1/p' "$manifest")"
-test -n "$pins" || { echo "$manifest pins no package, so the adapter's dependency set is undeclared" >&2; exit 1; }
+test -n "$pins" || { echo "$manifest pins no package, so this dependency set is undeclared" >&2; exit 1; }
 # A here-document rather than a pipe: a pipe would run the loop in a subshell
 # and throw away the bad=1 it sets.
 while read -r pin; do
   grep -q "^$pin " "$lock" || {
-    echo "$manifest pins $pin, which $lock does not: the lock is older than the pin, so a benchmark would run against a Harbor the manifest no longer names" >&2;
+    echo "$manifest pins $pin, which $lock does not: the lock is older than the pin, so a run installs a release the manifest no longer names" >&2;
     echo "regenerate it with the 'uv pip compile' at the top of $manifest" >&2;
     bad=1;
   }
 done <<EOF
 $pins
 EOF
-grep -q -- '-r integrations/harbor/requirements.txt' "$lock" || {
+grep -q -- "-r $manifest" "$lock" || {
   echo "$lock records no root from $manifest, so it was not generated from it" >&2;
   bad=1;
 };

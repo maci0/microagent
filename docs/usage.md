@@ -185,11 +185,13 @@ NO_COLOR, TERM=dumb     the tool gutter draws its name in bold on a
                          value is not read, only the name) or TERM=dumb
                          leaves the bold out even at a terminal
 
-TMPDIR, on macOS        added to the sandbox writable roots whenever
-                         [sandbox] enabled is true, because that is where
-                         the system keeps per-user scratch space. Read on
-                         no other platform, so a run elsewhere is
-                         unaffected by it.
+TMPDIR                   added to the sandbox writable roots whenever
+                         [sandbox] enabled is true and it names an
+                         absolute directory none of the roots above
+                         already covers. On macOS that is where the
+                         system keeps per-user scratch space; a Linux
+                         host exporting it elsewhere gets the same root,
+                         and one exporting it at /tmp gains nothing.
 
 A variable set to an empty string is not a value: MICROAGENT_MODEL,
 MICROAGENT_BASE_URL, MICROAGENT_REASONING_EFFORT, MICROAGENT_TEMPERATURE,

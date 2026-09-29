@@ -20,6 +20,9 @@ export TZ := UTC
 # The Harbor adapter's directory, the one place that path is written down.
 # lint-lock.sh and lint-versions.sh both take it as an argument rather than
 # spelling it out in a script, so a move is a change here and nowhere else.
+# lint-lock.sh also derives nothing from it: each lock is named beside the
+# manifest it was compiled from, so the linter set and this one are checked by
+# the same code and each path is still written down once.
 HARBOR_DIR := integrations/harbor
 
 # The targets `microagent update` asks for, in the names release.yml publishes.
@@ -167,7 +170,7 @@ help:
 	  'check-refs            every src/path:line citation in a .md file names the line its symbol is on' \
 	  'check-refs FIX=1      rewrite each stale citation to the line its symbol is on' \
 	  'lint-versions         check ruff and yamllint against the versions the gate runs, and that lint-requirements.in names the same' \
-	  'lint-lock             check the Harbor lock carries the manifest pins, a hash each, and nothing else' \
+	  'lint-lock             check each lock carries its manifest pins, a hash each, and nothing else' \
 	  'check-sbom            run the release inventory over stand-in assets and check what a scanner reads' \
 	  'zig-version           check the local zig against the version the release is built with' \
 	  'bench AGENTS=...      three coding tasks through each harness' \
@@ -403,10 +406,13 @@ lint: lint-versions lint-lock check-sbom lint-shell lint-ci lint-python lint-yam
 lint-versions:
 	@RUFF_VERSION='$(RUFF_VERSION)' YAMLLINT_VERSION='$(YAMLLINT_VERSION)' sh scripts/lint-versions.sh $(HARBOR_DIR)/requirements.txt
 
-# The Harbor lock is compared against its manifest; what the three checks are
-# is scripts/lint-lock.sh's to say.
+# Each dependency set's lock is compared against the manifest it was compiled
+# from; what the three checks are is scripts/lint-lock.sh's to say. Both are
+# named here rather than derived, so each path is written down once and a lock
+# is checked against the manifest it actually came from.
 lint-lock:
-	@sh scripts/lint-lock.sh $(HARBOR_DIR)/requirements.txt
+	@sh scripts/lint-lock.sh lint-requirements.in lint-requirements.txt
+	@sh scripts/lint-lock.sh $(HARBOR_DIR)/requirements.txt $(HARBOR_DIR)/requirements.lock
 
 # A different zig is a different compiler, and a compiler decides the bytes:
 # codegen, inlining and linker layout all move between releases. setup-zig

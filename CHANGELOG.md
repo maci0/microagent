@@ -127,6 +127,15 @@ release, and `microagent update` moves you to it.
 
 ### Changed
 
+- `make lint-lock` asks the linter lock the three questions it has been asking
+  the Harbor lock, so both dependency sets are checked the same way. It takes
+  the lock beside the manifest it was compiled from rather than deriving one
+  path from the other. `lint-requirements.txt` is the one lock a contributor
+  can hand-edit: it sits at the root, and its header reads like a generated
+  file even when a line has been typed into it, so an entry with no `sha256` or
+  a package nothing asks for is now refused on the laptop running `make check`
+  and not only by the `--require-hashes` install CI does.
+
 - A tool's description and its argument schema are named in the system prompt
   as text the model does not take orders from. The rule that covers tool
   results did not reach them, and they are the one place a remote server's bytes

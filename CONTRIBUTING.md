@@ -10,7 +10,7 @@
 | `docs/` | reference and design docs: [usage](docs/usage.md), [benchmark](docs/benchmark.md), [performance](docs/performance.md), [threat model](docs/threat-model.md), the [to-do list](docs/todo.md), and the logo |
 | `reviews/` | this project's own [gauntlet](https://github.com/maci0/gauntlet) review prompts; run them with `gauntlet --prompt-dir reviews`, which replaces gauntlet's embedded set |
 | `.github/` | the `ci` and `release` workflows, the shared `setup-zig` and `setup-linters` actions, and the Dependabot config |
-| `scripts/` | the gate's own checks: the linter version pins (`lint-versions.sh`), the Harbor lock against its manifest (`lint-lock.sh`), the `run:` steps in the workflows (`lint-ci-shell.sh`), the Markdown checks (`lint-md.sh`), and the release inventory (`sbom.sh`). The linters' hashed install is compiled from `lint-requirements.in` |
+| `scripts/` | the gate's own checks: the linter version pins (`lint-versions.sh`), each dependency set's lock against the manifest it was compiled from (`lint-lock.sh`), the `run:` steps in the workflows (`lint-ci-shell.sh`), the Markdown checks (`lint-md.sh`), and the release inventory (`sbom.sh`). The linters' hashed install is compiled from `lint-requirements.in` |
 
 At the root: `build.zig` and `build.zig.zon` (the build and the version), the
 [Makefile](Makefile) (every command below), `README.md`, `CHANGELOG.md`, this
@@ -235,15 +235,23 @@ are what cover the session one.
 
 There is no generated code, and the Zig build regenerates no lockfile. The two
 lockfiles are inputs to the Python around the Zig, refreshed by hand:
-`lint-requirements.txt` pins the gate's linters, and
+`lint-requirements.txt` is uv's output for `lint-requirements.in`, and
 `integrations/harbor/requirements.lock` is uv's output for the Harbor adapter,
 with the command that produces it in the comment at the top of
-`integrations/harbor/requirements.txt`. `make lint-lock` refuses a lock that no
-longer carries the manifest's pin, has an entry with no `sha256`, or carries a
-package no pin in the manifest needs. A lock left behind by an earlier pin
-therefore fails the gate instead of benchmarking a Harbor release the manifest
-no longer names, and a package nothing asks for never reaches the venv a score
-is measured in.
+`integrations/harbor/requirements.txt`. `make lint-lock` asks each of the two
+the same three questions, and refuses a lock that no longer carries the
+manifest's pin, has an entry with no `sha256`, or carries a package no pin in
+the manifest needs. A lock left behind by an earlier pin therefore fails the
+gate instead of benchmarking a Harbor release the manifest no longer names, and
+a package nothing asks for never reaches the venv a score is measured in.
+
+The linter lock was the one of the two nothing asked the questions of, and it
+is the one a contributor can hand-edit: it sits at the root rather than in a
+directory, and its header reads like a generated file even when a line has been
+typed into it. CI installs it with `--require-hashes`, which refuses an
+unhashed entry there and nowhere else, so a laptop running `make check` is the
+run that catches a hand edit. Recompile it instead of editing it, with the
+`uv pip compile` in its own header.
 
 A release publishes an SPDX inventory beside its binaries: `make sbom` writes
 `dist/microagent-<tag>.spdx.json` from the assets in `dist/`, and the release
