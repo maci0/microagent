@@ -788,22 +788,40 @@ fn retryAfterValueMs(raw: []const u8, now_seconds: i64) ?u64 {
 /// against.
 ///
 /// The reading is checked against the range before it is narrowed, rather than
-/// narrowed straight out of it. A wall clock before 1970 is ordinary rather
-/// than exotic: a container with no RTC, a machine restored from a snapshot, and
-/// a host whose RTC battery is flat all boot into one, and the clock's own
-/// reading is a signed `i96` wide enough to hold such a date. `@intCast` out of
-/// it trapped a checked build on the first request of such a run. The `i96`
-/// also reaches past `i64` on its own, so a far-future clock is the same
-/// narrowing from the other side, and both ends saturate: this feeds a
-/// subtraction against a `Retry-After` date, and a wrong answer there is a
-/// wait of the wrong length, so a value at the end of the range is worth more
-/// than a crash.
+/// narrowed straight out of it, because a wall clock before 1970 is ordinary
+/// rather than exotic: a container with no RTC, a machine restored from a
+/// snapshot, and a host whose RTC battery is flat all boot into one, and the
+/// clock's own reading is a signed `i96` wide enough to hold such a date.
+/// `@intCast` out of it trapped a checked build on the first request of such a
+/// run. The `i96` also reaches past `i64` on its own, so a far-future clock is
+/// the same narrowing from the other side, and both ends saturate: this feeds a
+/// subtraction against a `Retry-After` date, and a wrong answer there is a wait
+/// of the wrong length, so a value at the end of the range is worth more than a
+/// crash.
+///
+/// The bottom of the range is the epoch, and that is the clamp `session.logStamp`
+/// and `session.recordStampMs` already apply: a negative epoch is not an
+/// instant a date can be measured against. The subtraction in
+/// `retryAfterValueMs` is `target - now_seconds`, so a negative reading made
+/// every `left` larger than it is and a date that had already passed was read as
+/// still in the future — the run then sat out up to `max_retry_after_ms` on a
+/// wait for a deadline that was behind it, which is the refusal the header
+/// exists to prevent. Zero is the reading that says nothing about the time,
+/// which is all a clock before the epoch says.
 pub fn nowSeconds(io: Io) i64 {
-    const ns = Io.Clock.real.now(io).nanoseconds;
-    const seconds = @divTrunc(ns, std.time.ns_per_s);
-    if (seconds < std.math.minInt(i64)) return std.math.minInt(i64);
-    if (seconds > std.math.maxInt(i64)) return std.math.maxInt(i64);
-    return @intCast(seconds);
+    return nowSecondsFromNs(Io.Clock.real.now(io).nanoseconds);
+}
+
+/// The same reading with the nanoseconds passed in, so both sides of the epoch
+/// and both ends of the range are reachable from a test without a machine whose
+/// clock is set to them. The division is saturating rather than an `@intCast`,
+/// so a clock set far enough ahead to push the seconds past what an `i64` holds
+/// is the ceiling instead of a trap that ends the run at the point it was about
+/// to wait out a rate limit.
+fn nowSecondsFromNs(now_ns: i128) i64 {
+    const seconds = @divTrunc(now_ns, std.time.ns_per_s);
+    if (seconds < 0) return 0;
+    return @intCast(@min(seconds, std.math.maxInt(i64)));
 }
 
 /// Whether a transport failure is worth another attempt. The set is the
@@ -1438,6 +1456,52 @@ test "a Retry-After date is read as the instant it names" {
     // A weekday that does not match the date is ignored rather than refused:
     // it is redundant, and a server a second off writes the wrong one.
     try std.testing.expectEqual(@as(?i64, 1_792_567_680), httpDateEpochSeconds("Mon, 21 Oct 2026 07:28:00 GMT"));
+}
+
+// The clock a `Retry-After` date is measured against comes from the machine, and
+// a machine whose clock is set before 1970 reads negative. `retryAfterValueMs`
+// subtracts that reading from the date, so a negative one made every wait larger
+// than it is: a date that had already passed was read as still in the future and
+// the run sat out up to `max_retry_after_ms` on a deadline that was behind it,
+// which is the refusal the header exists to prevent. `nowSeconds` clamps the way
+// `session.logStamp` and `session.recordStampMs` already do, and this pins the
+// two together.
+test "a clock before 1970 reads as the epoch, so a past Retry-After has passed" {
+    // The clamp itself, on both sides of the epoch it divides.
+    try std.testing.expectEqual(@as(i64, 0), nowSecondsFromNs(-1));
+    try std.testing.expectEqual(@as(i64, 0), nowSecondsFromNs(0));
+    try std.testing.expectEqual(@as(i64, 0), nowSecondsFromNs(-1_000_000_000));
+    try std.testing.expectEqual(@as(i64, 1), nowSecondsFromNs(1_000_000_000));
+    // A clock far enough ahead that the seconds would not fit an i64 is the
+    // ceiling rather than a trap: the run is about to wait out a rate limit, and
+    // an unchecked `@intCast` here ended it at the point it was meant to keep
+    // running. The second reading is the one that reaches the clamp at all,
+    // since dividing `maxInt(i128)` by a billion still fits.
+    try std.testing.expectEqual(
+        std.math.maxInt(i64),
+        nowSecondsFromNs(@as(i128, std.math.maxInt(i64)) * std.time.ns_per_s),
+    );
+    try std.testing.expectEqual(std.math.maxInt(i64), nowSecondsFromNs(std.math.maxInt(i128)));
+
+    // And the wait that depends on it: the same header read against a clamped
+    // clock and against the negative reading an unchecked cast produced, which
+    // is the comparison the caller actually makes.
+    const head = "HTTP/1.1 429 Too Many Requests\r\nRetry-After: Thu, 01 Jan 1970 00:00:00 GMT\r\n\r\n";
+    // The epoch is at or before the clamped clock, so the wait has already run
+    // out: zero, not the cap.
+    try std.testing.expectEqual(@as(?u64, 0), retryAfterMs(head, nowSecondsFromNs(-1_000_000_000)));
+    // Under a clock one second before the epoch the same header is a date in the
+    // future, and a wait of one second rather than the 120 second cap the
+    // negative reading gave a header with nothing left to wait for.
+    try std.testing.expectEqual(@as(?u64, 1_000), retryAfterMs(head, -1));
+    // A date further ahead of the clamped clock is still a real wait, and it is
+    // the difference rather than the cap: the clamp moved the bottom of the
+    // range, not the top of it. Ninety seconds is inside `max_retry_after_ms`,
+    // so what the wait is is the arithmetic's and not the ceiling's.
+    try std.testing.expectEqual(@as(?u64, 90_000), retryAfterMs(head, -90));
+    // Past the cap the ceiling stands, which is the bound a date a long way off
+    // gets rather than the two minutes it would otherwise be.
+    try std.testing.expectEqual(max_retry_after_ms, retryAfterMs(head, -1_000));
 }
 
 // The dates above name three months of the twelve, so a table reordered, a
