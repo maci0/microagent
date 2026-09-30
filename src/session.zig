@@ -182,7 +182,7 @@ fn createSessionLog(io: Io, arena: std.mem.Allocator, session_dir: []const u8, s
 /// store the caller turned off, and a store this run could not open. Only the
 /// second is said, so an operator whose watch shows nothing learns which of the
 /// two it is.
-pub fn open(io: Io, arena: std.mem.Allocator, session_dir: []const u8, model: []const u8) ?Session {
+pub fn open(io: Io, arena: std.mem.Allocator, env: *const std.process.Environ.Map, session_dir: []const u8, model: []const u8) ?Session {
     if (session_dir.len == 0) return null;
     // Every record names the directory it ran in. That is what attributes the
     // record to one review: the store is machine-wide, and a monitor skips a
@@ -194,10 +194,11 @@ pub fn open(io: Io, arena: std.mem.Allocator, session_dir: []const u8, model: []
     // gives: the directory is a variable or a path under `$HOME`, and a value
     // that is not text is written as the characters it is.
     const shown = chat.safeTextAll(arena, session_dir);
-    const cwd = std.Io.Dir.cwd().realPathFileAlloc(io, ".", arena) catch |err| {
+    const resolved = std.Io.Dir.cwd().realPathFileAlloc(io, ".", arena) catch |err| {
         net.note(io, arena, "microagent: the working directory could not be read ({s}), so no session log is kept under {s}\n", .{ @errorName(err), shown });
         return null;
     };
+    const cwd = recordCwd(arena, env, resolved);
     _ = std.Io.Dir.cwd().createDirPathStatus(io, session_dir, log_dir_mode) catch |err| {
         net.note(io, arena, "microagent: the session directory {s} could not be created ({s}); the rest of this run is not recorded\n", .{ shown, @errorName(err) });
         return null;
@@ -222,6 +223,84 @@ pub fn open(io: Io, arena: std.mem.Allocator, session_dir: []const u8, model: []
         return null;
     };
     return .{ .file = opened, .cwd = cwd, .model = model, .dir = session_dir };
+}
+
+/// The `cwd` a record carries, which is the resolved working directory with
+/// the account's own home cut off its front.
+///
+/// A working directory under a home directory carries the account name in it:
+/// `/home/alice/Desktop/Projects/microagent` says who was working, and the
+/// store keeps 200 of those records in the clear under that same home. So the
+/// name is dropped and the part under it kept, which is what a monitor reads
+/// the field for: two runs in `~/src/a` and `~/src/b` are still two
+/// directories, and a run from `~/src/a` and one from `~/work/a` are still told
+/// apart. The prefix a record gets is spelled rather than implicit, so a reader
+/// can tell a home-relative directory from an absolute one without asking the
+/// machine that wrote it.
+///
+/// A directory that is not under the home keeps its whole path, because the
+/// components under the home are the only part that identifies a tree there: a
+/// benchmark container runs in `/workspace/repo` and `/workspace` alone would
+/// not tell two of its trials apart. `$HOME` itself records as the one marker
+/// below, the directory under the home with nothing after it.
+///
+/// The home is cut only on a real boundary. A home spelled `/home/alice` does
+/// not make `/home/alice2/secret` a child of it, so the tail is only taken
+/// when the home is a whole path prefix of the directory, and a directory
+/// equal to the home is the marker rather than a `.` a reader would have to
+/// recognize.
+fn recordCwd(arena: std.mem.Allocator, env: *const std.process.Environ.Map, resolved: []const u8) []const u8 {
+    const home = net.homeDir(env) orelse return resolved;
+    const root = std.mem.trim(u8, home, net.env_surrounding);
+    if (root.len == 0 or !std.fs.path.isAbsolute(root)) return resolved;
+    if (std.mem.eql(u8, resolved, root)) return home_marker;
+    const tail = resolved[root.len..];
+    if (tail[0] != std.fs.path.sep) return resolved;
+    return std.fmt.allocPrint(arena, "{s}{s}{s}", .{ home_marker, std.fs.path.sep_str, tail[1..] }) catch resolved;
+}
+
+/// The marker a `cwd` carries in front of the part under the home, so a reader
+/// tells a home-relative directory from an absolute one. Not a path: no
+/// directory is named this, and a reader that resolved it would find nothing.
+const home_marker = "~";
+
+test "a record's cwd is the part of the working directory under the home" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    const sep = std.fs.path.sep_str;
+
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", "/home/alice");
+
+    // The case this is for: the account name is in the path and is not in the
+    // record, while the directory still reads as the one the run worked in.
+    try std.testing.expectEqualStrings(
+        "~" ++ sep ++ "Desktop" ++ sep ++ "Projects" ++ sep ++ "microagent",
+        recordCwd(arena, &env, "/home/alice/Desktop/Projects/microagent"),
+    );
+    try std.testing.expectEqualStrings("~", recordCwd(arena, &env, "/home/alice"));
+    try std.testing.expectEqualStrings("~" ++ sep ++ "a", recordCwd(arena, &env, "/home/alice/a"));
+
+    // A sibling whose name merely starts with the home's is not under it, and
+    // cutting it would write `/home/alice2/secret` as `~2/secret`.
+    try std.testing.expectEqualStrings("/home/alice2/secret", recordCwd(arena, &env, "/home/alice2/secret"));
+    // Outside the home the whole path is kept: a benchmark container runs in
+    // `/workspace/repo`, and dropping the prefix would leave one directory for
+    // every trial in it.
+    try std.testing.expectEqualStrings("/workspace/repo", recordCwd(arena, &env, "/workspace/repo"));
+
+    // No home to cut against leaves the path as it is, and so does a home that
+    // is not an absolute path: neither is a prefix of the directory, so
+    // nothing is cut that was not a boundary.
+    var bare: std.process.Environ.Map = .init(std.testing.allocator);
+    defer bare.deinit();
+    try std.testing.expectEqualStrings("/home/alice/x", recordCwd(arena, &bare, "/home/alice/x"));
+    try env.put("HOME", "relative");
+    try std.testing.expectEqualStrings("/home/alice/x", recordCwd(arena, &env, "/home/alice/x"));
+    try env.put("HOME", "  ");
+    try std.testing.expectEqualStrings("/home/alice/x", recordCwd(arena, &env, "/home/alice/x"));
 }
 
 /// The stamp a run's log is named from, from a clock reading in nanoseconds. A
@@ -863,8 +942,14 @@ test "a session directory that cannot be used is named, and keeps no log" {
     // spelling a run is given reaches it and the cleanup takes it with the rest.
     const store = try storeRelative(arena, io, f.tmp);
 
+    // No home in the environment, so `recordCwd` leaves the working
+    // directory whole and the test keeps asserting on the directory it
+    // opened the store in.
+    var no_env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer no_env.deinit();
+
     // Off is not a failure and says nothing: the caller asked for no log.
-    try std.testing.expect(open(io, arena, "", "test/model") == null);
+    try std.testing.expect(open(io, arena, &no_env, "", "test/model") == null);
 
     // A store no filesystem will hold: a name longer than a path component is
     // allowed to be, so the directory cannot be made and no log is kept. The
@@ -873,12 +958,12 @@ test "a session directory that cannot be used is named, and keeps no log" {
     const long_name = try arena.alloc(u8, 300);
     @memset(long_name, 'x');
     const blocked = try std.fs.path.join(arena, &.{ store, long_name });
-    try std.testing.expect(open(io, arena, blocked, "test/model") == null);
+    try std.testing.expect(open(io, arena, &no_env, blocked, "test/model") == null);
 
     // The same path a run can use, so the null above is the directory and not
     // the shape of the call.
     const usable = try std.fs.path.join(arena, &.{ store, "sessions" });
-    var session: ?Session = open(io, arena, usable, "test/model") orelse return error.TestUnexpectedResult;
+    var session: ?Session = open(io, arena, &no_env, usable, "test/model") orelse return error.TestUnexpectedResult;
     defer close(io, &session);
 
     // And the store that opened is one a monitor can read: the record is on
@@ -1086,7 +1171,12 @@ test "a run's own log is counted by the retention window, not left past it" {
         try store.tmp.dir.writeFile(io, .{ .sub_path = name, .data = "{}" });
     }
 
-    var session: ?Session = open(io, arena, dir_path, "test/model") orelse return error.TestUnexpectedResult;
+    // No home in the environment, so `recordCwd` leaves the working
+    // directory whole and the test keeps asserting on the directory it
+    // opened the store in.
+    var no_env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer no_env.deinit();
+    var session: ?Session = open(io, arena, &no_env, dir_path, "test/model") orelse return error.TestUnexpectedResult;
     defer close(io, &session);
 
     // The window, with the log this run opened among them: not the window plus
@@ -1185,7 +1275,12 @@ test "a session log is readable by its owner alone" {
     const arena = store.arena();
     const relative = try std.fs.path.join(arena, &.{ try storeRelative(arena, io, store.tmp), "modes" });
 
-    var session = open(io, arena, relative, "test/model") orelse return error.TestUnexpectedResult;
+    // No home in the environment, so `recordCwd` leaves the working
+    // directory whole and the test keeps asserting on the directory it
+    // opened the store in.
+    var no_env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer no_env.deinit();
+    var session = open(io, arena, &no_env, relative, "test/model") orelse return error.TestUnexpectedResult;
     session.file.close(io);
     defer std.Io.Dir.cwd().deleteTree(io, relative) catch {};
 
@@ -1244,7 +1339,12 @@ test "a store whose name is not plain text is created where it was named" {
     const arena = store.arena();
 
     const hostile = try std.fs.path.join(arena, &.{ try store.path(), "s\x1b[2J\xffstore" });
-    var live: ?Session = open(io, arena, hostile, "test/model") orelse return error.TestUnexpectedResult;
+    // No home in the environment, so `recordCwd` leaves the working
+    // directory whole and the test keeps asserting on the directory it
+    // opened the store in.
+    var no_env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer no_env.deinit();
+    var live: ?Session = open(io, arena, &no_env, hostile, "test/model") orelse return error.TestUnexpectedResult;
     defer close(io, &live);
 
     // The log is under the real name, with the escape sequence and the byte
@@ -1507,7 +1607,12 @@ test "a store that cannot be created gives the run no log rather than a silent o
     try store.tmp.dir.writeFile(io, .{ .sub_path = "blocked", .data = "not a directory" });
     const blocked = try std.fmt.allocPrint(arena, "{s}{c}blocked{c}sessions", .{ try store.path(), std.fs.path.sep, std.fs.path.sep });
 
-    try std.testing.expectEqual(@as(?Session, null), open(io, arena, blocked, "test/model"));
+    // No home in the environment, so `recordCwd` leaves the working
+    // directory whole and the test keeps asserting on the directory it
+    // opened the store in.
+    var no_env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer no_env.deinit();
+    try std.testing.expectEqual(@as(?Session, null), open(io, arena, &no_env, blocked, "test/model"));
     // Still not a directory: the refusal left nothing behind for the next run
     // to walk into.
     const still_a_file = try store.tmp.dir.readFileAlloc(io, "blocked", arena, .limited(64));

@@ -616,7 +616,7 @@ fn runMain(init: std.process.Init) !u8 {
         }
         if (msgs.items.len == 0) {
             try conversation_mod.openConversation(gpa, &msgs, system_text, opts.prompt);
-            session = session_mod.open(io, arena, opts.session_dir, opts.model);
+            session = session_mod.open(io, arena, init.environ_map, opts.session_dir, opts.model);
         } else {
             try conversation_mod.appendMessage(gpa, &msgs, "user", opts.prompt);
         }

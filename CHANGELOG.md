@@ -16,6 +16,14 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+### Changed
+
+- A session log record's `cwd` carries the part of the working directory under the
+  home and a `~` in front of it, so the record no longer holds the account name the
+  absolute path spelled out. A directory outside the home is recorded whole, and so
+  is one under a run whose `HOME` is unset. A monitor still tells two runs apart by
+  directory, and the store holds no more about the operator than it did.
+
 ### Fixed
 
 - MCP tool names are checked against the provider's 64-character limit including their

@@ -803,17 +803,17 @@ it. The store keeps the 200 most recent runs and prunes older ones, and it drops
 days whatever the count says, so a machine that runs rarely does not keep every run it has ever done.
 
 ```json
-{"ts":1790608347342,"cwd":"/home/you/Desktop/Projects/microagent","model":"deepseek/deepseek-v4-flash","finish_reason":"stop","served_model":"deepseek/deepseek-v4-flash-0726","fingerprint":"fp_9c1e","elapsed_ms":1448,"usage":{"prompt_tokens":998,"cached_tokens":896,"completion_tokens":19,"reasoning_tokens":16,"total_tokens":1017}}
+{"ts":1790608347342,"cwd":"~/Desktop/Projects/microagent","model":"deepseek/deepseek-v4-flash","finish_reason":"stop","served_model":"deepseek/deepseek-v4-flash-0726","fingerprint":"fp_9c1e","elapsed_ms":1448,"usage":{"prompt_tokens":998,"cached_tokens":896,"completion_tokens":19,"reasoning_tokens":16,"total_tokens":1017}}
 ```
 
 ```json
-{"ts":1790608351204,"cwd":"/home/you/Desktop/Projects/microagent","model":"deepseek/deepseek-v4-flash","finish_reason":"","served_model":"","fingerprint":"","error":"ConnectionRefused","elapsed_ms":902,"usage":{"prompt_tokens":0,"cached_tokens":0,"completion_tokens":0,"reasoning_tokens":0,"total_tokens":0}}
+{"ts":1790608351204,"cwd":"~/Desktop/Projects/microagent","model":"deepseek/deepseek-v4-flash","finish_reason":"","served_model":"","fingerprint":"","error":"ConnectionRefused","elapsed_ms":902,"usage":{"prompt_tokens":0,"cached_tokens":0,"completion_tokens":0,"reasoning_tokens":0,"total_tokens":0}}
 ```
 
 | key | meaning |
 | --- | --- |
 | `usage` | this response's own counters, not the run's cumulative ones. Zero on a record carrying `error`, because no response was billed and none arrived. |
-| `cwd` | the directory the run works in |
+| `cwd` | the directory the run works in, behind a `~` and relative to the home when it is under it, so the record carries no account name; a directory outside the home is recorded whole |
 | `finish_reason` | why the provider stopped. `length` means the response was cut at `--max-tokens` and the run says so on stderr; the empty string is a stream that carried no reason, and every value on a record carrying `error`. |
 | `model` / `served_model` / `fingerprint` | what the run asked for, what the provider says answered, and the weights fingerprint it reported. A gateway routes a name to whichever snapshot it holds that week, so two runs are comparable only when these match. Empty when the stream named none. |
 | `error` | why the provider call never answered, on a record for a turn that failed rather than a turn that returned. Absent from a record for a turn that returned. |
@@ -827,9 +827,15 @@ OpenAI ones plus `cwd`, so any reader of agent transcripts works.
 A log is created `0o600` and a store directory this run creates is `0o700`, so on a shared account
 the last 200 runs are readable by the account that made them alone. Neither mode is applied to a
 directory that already exists, so a store an operator pointed `MICROAGENT_SESSION_DIR` at keeps the
-mode they gave it. `cwd` is the one field that names a person indirectly, since a working directory
-under a home directory carries the account name in it; it is there because a monitor reports the run
-by where it was, and it is the reason the modes above matter. Deleting the store is
+mode they gave it. `cwd` is the one field that can name a person: a working directory under a home
+directory carries the account name in it, so the record keeps the part under the home and writes it
+behind a `~` — a run in `/home/you/Desktop/Projects/microagent` records as
+`~/Desktop/Projects/microagent`, and a reader can tell that from a whole path without asking the
+machine that wrote it. A directory outside the home is recorded whole, because there the components
+are the only part that tells two runs apart, and so is one under a run whose `HOME` is unset. Two
+runs in `~/src/a` and `~/src/b` are still two directories, and a run from `~/src/a` is still told
+apart from one in `~/work/a`: the field is there because a monitor reports the run by where it was,
+and the modes above are what keep the rest of the record to the account that made it. Deleting the store is
 `rm -r ~/.microagent/sessions`: nothing outside it holds anything from the run, and the binary never
 reads a log back.
 
