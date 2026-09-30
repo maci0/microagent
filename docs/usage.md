@@ -6,6 +6,7 @@ Everything a run reads and everything it writes. The [README](../README.md) is t
 - [Flags and environment](#flags-and-environment)
 - [How values resolve](#how-values-resolve)
 - [Providers and keys](#providers-and-keys)
+- [Prompt cache](#prompt-cache)
 - [Config file](#config-file): [provider settings](#provider-settings), [system prompt addendum](#system-prompt-addendum), [repository instructions](#repository-instructions), [skills](#skills), [MCP servers](#mcp-servers), [tool set](#tool-set), [command filter](#command-filter)
 - [Tools](#tools)
 - [Output](#output): [stdout](#stdout), [exit status](#exit-status), [session log](#session-log)
@@ -335,6 +336,35 @@ named on stderr and its tools are left out of that call.
 files its tools were asked to write. It holds counters and the working directory, never prompt or
 output text.
 
+## Prompt cache
+
+Providers cache the leading bytes of a request and charge the cached part at a fraction of the
+input price, so the order of the request is chosen for that: the constant fields come first
+(`model`, the whole tool schema, `stream`, `stream_options`, `max_tokens`, `reasoning`,
+`temperature`) and `messages` ends the body. Every turn is therefore the previous turn's body plus
+the messages it added, and a turn that only appends is a prefix hit.
+
+The same holds between invocations, which is the case a loop of short runs lives on: the tool schema
+and the built-in system prompt are the same bytes on the next run in the same directory, so a second
+invocation's first request reuses them rather than re-reading them. That prefix is the tool schema
+(about 4.5 KB with the presets off, 11 KB with them on) plus a system prompt of about 4 KB, a few
+thousand tokens, past the 1024-token floor the large providers apply before caching at all (a few
+models want 2048 or 4096). Nothing provider-specific is sent: there is no `prompt_cache_key` and no
+`cache_control`, so this is the provider's own automatic prefix cache and not a hint from this
+client.
+
+What changes the prefix between invocations, and so forces a miss through the changed bytes:
+
+- the working directory, which the system prompt names (one line, behind the built-in prompt);
+- `system_prompt_extra`, the skills and the `agents_files` contents;
+- the tool set: `[tools.<name>]` tables, `[[mcp]]` entries and an MCP server's own tool list;
+- the model id.
+
+`cached_tokens` in the [usage line](#stdout) and in the [session log](#session-log) is what the
+provider answered with, so a cold cache is visible as a small number on the first turn of a run and
+as most of the prompt on the turns after it. Two invocations in the same directory with the same
+config send byte-identical prefixes.
+
 ## Config file
 
 One TOML file carries the provider settings, the system prompt addendum, the skill roots, the MCP servers, the tool set, denied shell commands, and workspace sandbox settings. It is `--config`, else
@@ -424,7 +454,9 @@ can reach.
 `system_prompt_extra` is text appended to the system prompt after a blank line, for a house rule such
 as the reply length or the language. It is the only prompt-level setting: the tools and the request
 shape are untouched, and the conversation stays the plain OpenAI message array. With the key absent
-or empty the system prompt is the built-in one, byte for byte.
+or empty the system prompt is the built-in one plus one generated line naming the absolute working
+directory the run starts in, ahead of the addendum; a model given no path answers with one it
+invented, and then treats that invented path as the tree it is working in.
 
 ```toml
 system_prompt_extra = "Answer in at most three sentences."

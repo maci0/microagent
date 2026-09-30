@@ -16,6 +16,20 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+### Changed
+
+- The system prompt includes the absolute starting working directory.
+
+### Fixed
+
+- Sandbox writable roots retain `/` and correctly cover its absolute descendants.
+- The first-run config test accepts the filesystem errors returned on both Linux and macOS.
+
+- The system prompt names the absolute working directory the run starts in. It said "the current
+  directory" and no path, so a model asked to work on a repository it could not name answered with a
+  plausible one it invented (`/workspace/processors` on a run started in `~/.microagent`) and then
+  reasoned about that path.
+
 ## [0.8.0] - 2026-09-30
 
 ### Added

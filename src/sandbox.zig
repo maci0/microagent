@@ -22,7 +22,7 @@ const path_sep: []const u8 = &[_]u8{std.fs.path.sep};
 /// `/private`, and a Seatbelt `subpath` compares resolved paths, so a root is recorded resolved.
 fn canonical(io: Io, arena: std.mem.Allocator, path: []const u8) []const u8 {
     const real = std.Io.Dir.cwd().realPathFileAlloc(io, path, arena) catch return path;
-    return std.mem.trimEnd(u8, real, path_sep);
+    return trimTrailingSep(real);
 }
 
 /// Records the directory at `resolved` (an absolute path with no `.` or `..` in it) under both of
@@ -127,6 +127,7 @@ pub fn resolveWritableRoots(
 /// level up, so a root trimmed down to nothing refused nothing here.
 fn isUnderRoot(path: []const u8, root: []const u8) bool {
     if (root.len == 0) return false;
+    if (std.mem.eql(u8, root, path_sep)) return std.fs.path.isAbsolute(path);
     if (!std.mem.startsWith(u8, path, root)) return false;
     return path.len == root.len or path[root.len] == std.fs.path.sep;
 }
@@ -907,4 +908,18 @@ test "a refused confinement names what the kernel refused" {
     try std.testing.expect(std.mem.indexOf(u8, seatbelt, "deny file-write*") != null);
     for (seatbelt) |c| try std.testing.expect(c != 0x1b);
     try std.testing.expectEqualStrings("\n", seatbelt[seatbelt.len - 1 ..]);
+}
+
+test "the filesystem root stays canonical and covers absolute descendants" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    const io = std.testing.io;
+    try std.testing.expectEqualStrings("/", canonical(io, arena, "/"));
+    const roots = try resolveWritableRoots(io, arena, null, &.{"/"}, null);
+    try std.testing.expect(withinAnyRoot("/etc/passwd", roots));
+    try std.testing.expect(isPathWritable(io, arena, "/", roots));
+    try std.testing.expect(isPathWritable(io, arena, "/etc/passwd", roots));
+    try std.testing.expect(!isUnderRoot("relative", "/"));
+    try std.testing.expect(!isUnderRoot("/etc", ""));
 }

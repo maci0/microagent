@@ -585,7 +585,12 @@ fn runMain(init: std.process.Init) !u8 {
     traceConfig(io, arena, opts, loaded, skill_roots, key.source);
     const skill_block = try opts.skills.prompt(arena);
     const agents_block = try agentsBlock(io, arena, std.Io.Dir.cwd(), loaded.agents_files);
-    const system_text = try systemText(arena, loaded.system_prompt_extra, agents_block, skill_block, opts.disabled_tools);
+    // Named in the prompt rather than left to be guessed: a model told only
+    // "the current directory" answers with a plausible one it invented, and
+    // that invented path is what it then reasons about and runs commands
+    // against.
+    const cwd = std.Io.Dir.cwd().realPathFileAlloc(io, ".", arena) catch ".";
+    const system_text = try systemText(arena, cwd, loaded.system_prompt_extra, agents_block, skill_block, opts.disabled_tools);
     try conversation_mod.openConversation(gpa, &msgs, system_text, opts.prompt);
 
     const ended = run(&client, io, gpa, init.arena.allocator(), opts, &msgs, tool_env, &opts.mcp) catch |err| {
@@ -811,15 +816,22 @@ test "the repository instructions are followed to the cap, not dropped past it" 
     try std.testing.expectEqual(@as(?[]const u8, null), readAgentsFile(io, arena, tmp.dir, "none.md", true));
 }
 
-/// The system prompt: one string, so a run with no addendum, no repository
-/// instructions, no skills and every tool on sends exactly the prompt it sent
-/// before any of them existed. A run
-/// that turned built-in tools off ends it with one line naming them, so the
-/// model does not learn of them from a refusal.
-fn systemText(arena: std.mem.Allocator, extra: []const u8, agents_block: []const u8, skill_block: []const u8, disabled: std.EnumSet(chat_mod.Tool)) ![]const u8 {
-    if (extra.len == 0 and agents_block.len == 0 and skill_block.len == 0 and disabled.count() == 0) return conversation_mod.system_prompt;
+/// The system prompt: one string built from the built-in prompt, the working
+/// directory the run starts in, the operator's addendum, the repository
+/// instructions, the skills and the disabled tools, in that order. A run that
+/// turned built-in tools off ends it with one line naming them, so the model
+/// does not learn of them from a refusal.
+///
+/// The directory is spelled out because the built-in prompt only says "the
+/// current directory": a model asked to work on a repository it cannot name
+/// answers with a plausible path of its own, and then treats that path as the
+/// tree it is working in.
+fn systemText(arena: std.mem.Allocator, cwd: []const u8, extra: []const u8, agents_block: []const u8, skill_block: []const u8, disabled: std.EnumSet(chat_mod.Tool)) ![]const u8 {
     var text: std.ArrayList(u8) = .empty;
     try text.appendSlice(arena, conversation_mod.system_prompt);
+    try text.appendSlice(arena, "\n\nThe working directory is ");
+    try text.appendSlice(arena, cwd);
+    try text.appendSlice(arena, ", and every `bash` call starts there.");
     if (extra.len != 0) {
         try text.appendSlice(arena, "\n\n");
         try text.appendSlice(arena, extra);
@@ -5282,6 +5294,40 @@ test "the tool schema sits inside the cacheable prefix, not behind the conversat
     try std.testing.expectEqualStrings(tools_json, body[tools_at + 8 ..][0..tools_json.len]);
 }
 
+// A provider reuses a cached prefix between invocations, not only between the
+// turns of one: the bytes ahead of the conversation have to be the same bytes
+// the next run sends. They are, as long as nothing that varies per invocation
+// is written into them. This pins the two halves of that: the constant header
+// rebuilt twice is byte-identical, and the one per-run value in the system
+// prompt, the directory, sits behind the built-in prompt rather than in front
+// of it.
+test "a later invocation sends the same cacheable prefix" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const gpa = arena_state.allocator();
+
+    // No counter, clock, address or hash order reaches the header: two builds
+    // of it from the same options are the same bytes, which is what the
+    // provider's prefix match sees on a second invocation.
+    const msgs = "[{\"role\":\"user\",\"content\":\"hi\"}]";
+    const one = try buildBody(gpa, .{ .model = "m" }, msgs);
+    const two = try buildBody(gpa, .{ .model = "m" }, msgs);
+    try std.testing.expectEqualStrings(one, two);
+
+    // Two directories, one run each. The shared prefix is the built-in prompt
+    // and the lead-in of the directory line, so a run that starts somewhere
+    // else still matches the prompt and, because the schema is written ahead of
+    // `messages`, the whole tool schema with it.
+    const here = try systemText(gpa, "/one/tree", "", "", "", .initEmpty());
+    const there = try systemText(gpa, "/two/tree", "", "", "", .initEmpty());
+    try std.testing.expect(std.mem.startsWith(u8, here, conversation_mod.system_prompt));
+    var shared: usize = 0;
+    while (shared < here.len and shared < there.len and here[shared] == there[shared]) : (shared += 1) {}
+    // One byte past the lead-in: both paths are absolute, so they part at the
+    // first character of the directory name.
+    try std.testing.expectEqual(conversation_mod.system_prompt.len + "\n\nThe working directory is ".len + 1, shared);
+}
+
 // A line of the stream that never ends is the one shape the response ceiling
 // cannot see, because nothing is consumed and nothing is folded into a frame.
 test "a stream line that never ends is bounded" {
@@ -6872,7 +6918,11 @@ test "the first run writes the tracked template where the config is looked for" 
     // that was in its way is left as the operator left it, empty.
     try tmp.dir.writeFile(io, .{ .sub_path = "blocked", .data = "" });
     writeDefaultConfig(io, arena, .{ .path = try std.fs.path.join(arena, &.{ dir, "blocked", "config.toml" }), .named = false });
-    try std.testing.expectError(error.NotDir, std.Io.Dir.cwd().statFile(io, try std.fs.path.join(arena, &.{ dir, "blocked", "config.toml" }), .{}));
+    if (std.Io.Dir.cwd().statFile(io, try std.fs.path.join(arena, &.{ dir, "blocked", "config.toml" }), .{})) |_| {
+        return error.TestUnexpectedResult;
+    } else |err| {
+        try std.testing.expect(err == error.NotDir or err == error.FileNotFound);
+    }
     // The file that was in the way is the one the run leaves as it stands, and
     // the config written above it is the one it does not touch.
     try std.testing.expectEqualStrings("", try tmp.dir.readFileAlloc(io, "blocked", arena, .limited(max_config_bytes)));
@@ -6896,8 +6946,12 @@ test "the repository instructions ride between the addendum and the skills" {
 
     const paths = [_][]const u8{"AGENTS.md"};
     const block = try agentsBlock(io, arena, tmp.dir, &paths);
-    const text = try systemText(arena, "be brief", block, "\n\nSkills: x", .initEmpty());
-    try std.testing.expect(std.mem.startsWith(u8, text, conversation_mod.system_prompt ++ "\n\nbe brief"));
+    const text = try systemText(arena, "/work/tree", "be brief", block, "\n\nSkills: x", .initEmpty());
+    // The directory the run starts in is the first thing after the built-in
+    // prompt, ahead of the addendum: a model that reads a path it invented
+    // keeps it for the rest of the run.
+    try std.testing.expect(std.mem.startsWith(u8, text, conversation_mod.system_prompt ++ "\n\nThe working directory is /work/tree"));
+    try std.testing.expect(std.mem.indexOf(u8, text, "/work/tree").? < std.mem.indexOf(u8, text, "be brief").?);
     try std.testing.expect(std.mem.indexOf(u8, text, "be brief").? < std.mem.indexOf(u8, text, "run the tests").?);
     try std.testing.expect(std.mem.indexOf(u8, text, "run the tests").? < std.mem.indexOf(u8, text, "Skills: x").?);
 }
@@ -7784,21 +7838,26 @@ test "the system prompt names the tools that are off, and only then" {
     defer state.deinit();
     const arena = state.allocator();
 
-    // Nothing to add: the compile-time prompt itself, not a copy of it.
-    const stock = try systemText(arena, "", "", "", .initEmpty());
-    try std.testing.expectEqual(conversation_mod.system_prompt.ptr, stock.ptr);
+    // A run with nothing else to add still names the directory it starts in,
+    // ahead of everything a config can add.
+    const stock = try systemText(arena, "/work/tree", "", "", "", .initEmpty());
+    try std.testing.expectEqualStrings(
+        conversation_mod.system_prompt ++ "\n\nThe working directory is /work/tree, and every `bash` call starts there.",
+        stock,
+    );
 
     var off: std.EnumSet(chat_mod.Tool) = .initEmpty();
     off.insert(.git);
     off.insert(.ast);
-    const text = try systemText(arena, "", "", "", off);
+    const text = try systemText(arena, "/work/tree", "", "", "", off);
     try std.testing.expect(std.mem.startsWith(u8, text, conversation_mod.system_prompt));
-    try std.testing.expectEqualStrings("\n\nDisabled tools: ast, git.", text[conversation_mod.system_prompt.len..]);
+    try std.testing.expectEqualStrings("\n\nDisabled tools: ast, git.", text[text.len - "\n\nDisabled tools: ast, git.".len ..]);
 
-    // The addendum follows the stock prompt after a blank line, and it and the
-    // skills keep their place ahead of the line.
-    const extended = try systemText(arena, "be brief", "", "\n\nSkills: x", off);
-    try std.testing.expect(std.mem.startsWith(u8, extended, conversation_mod.system_prompt ++ "\n\nbe brief"));
+    // The addendum follows the directory line after a blank line, and it and
+    // the skills keep their place ahead of the disabled-tools line.
+    const extended = try systemText(arena, "/work/tree", "be brief", "", "\n\nSkills: x", off);
+    try std.testing.expect(std.mem.startsWith(u8, extended, conversation_mod.system_prompt ++ "\n\nThe working directory is /work/tree"));
+    try std.testing.expect(std.mem.indexOf(u8, extended, "/work/tree").? < std.mem.indexOf(u8, extended, "be brief").?);
     try std.testing.expect(std.mem.indexOf(u8, extended, "be brief").? < std.mem.indexOf(u8, extended, "Skills: x").?);
     try std.testing.expect(std.mem.endsWith(u8, extended, "\n\nDisabled tools: ast, git."));
 }
