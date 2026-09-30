@@ -35,7 +35,8 @@ root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$root"
 
 tmp="$(mktemp)"
-trap 'rm -f "$tmp"' EXIT
+trap 'rm -f "$tmp" "$tmp.refs" "$tmp.rewritten"' EXIT
+unfixed=0
 
 # Where each function and constant is defined, per file: the line whose last
 # word is the name, and which is a declaration rather than a call. A Zig
@@ -51,10 +52,11 @@ defs() {
       if (match(rest, /[A-Za-z_][A-Za-z0-9_]*[ \t]*$/)) {
         name = substr(rest, RSTART, RLENGTH)
         sub(/[ \t]+$/, "", name)
-        print name, FNR
+        if (!(name in seen)) print name, FNR
+        seen[name] = 1
       }
     }
-  ' "$1" | sort -u -k1,1
+  ' "$1"
 }
 
 for file in "$@"; do
@@ -62,8 +64,10 @@ for file in "$@"; do
   # backticks immediately before it when there is one. The symbol is captured
   # from the same backtick run, so `foo`, `src/a.zig:1` yields the pair and
   # "checked at `src/a.zig:1`" yields the path alone.
-  rg -o '`[A-Za-z_][A-Za-z0-9_]*`, `(src/[a-z_]+\.zig):[0-9]+(-[0-9]+)?`|at `(src/[a-z_]+\.zig):([0-9]+)`' \
-    "$file" > "$tmp.refs" 2>/dev/null || true
+  status=0
+  rg -o '`[A-Za-z_][A-Za-z0-9_]*`, `src/[a-z_]+\.zig:[0-9]+(-[0-9]+)?`|`src/[a-z_]+\.zig:[0-9]+(-[0-9]+)?`' \
+    "$file" > "$tmp.refs" || status=$?
+  [ "$status" -le 1 ] || exit 1
   while read -r ref; do
     [ -n "$ref" ] || continue
     # because: the single quotes are the point, they carry the literal backtick
@@ -82,41 +86,39 @@ for file in "$@"; do
 
     if [ ! -f "$path" ]; then
       printf '%s: cites %s, which is not in the tree\n' "$file" "$path" >> "$tmp"
+      unfixed=1
       continue
     fi
-    [ -n "$sym" ] || continue
 
-    # The symbol is asked first: a citation whose line is past the end of a file
-    # that shrank is the same drift as one that is ten lines off, and naming the
-    # line the symbol is on is the finding a fix needs.
-    got="$(defs "$path" | awk -v s="$sym" '$1 == s { print $2; exit }')"
-    if [ -z "$got" ]; then
-      printf '%s: cites %s, which %s does not define\n' "$file" "$sym" "$path" >> "$tmp"
-      continue
-    fi
-    if [ "$got" != "$want" ]; then
-      if [ "$fix" = 1 ]; then
-        # Not `sed -i`: it edits in place on GNU sed and wants a suffix
-        # argument on BSD, where it fails outright rather than writing the
-        # file, and a stock macOS ships BSD sed. The rewrite then is the only
-        # repair the gate offers, so it has to work on the platform the
-        # release publishes for.
-        sed "s|\`$sym\`, \`$path:$span\`|\`$sym\`, \`$path:$got\`|" "$file" > "$tmp.rewritten"
-        mv "$tmp.rewritten" "$file"
-        printf '%s: moved %s from %s:%s to %s:%s\n' "$file" "$sym" "$path" "$want" "$path" "$got" >> "$tmp"
-      else
-        printf '%s: cites %s at %s:%s, where it is defined on line %s\n' \
-          "$file" "$sym" "$path" "$want" "$got" >> "$tmp"
+    if [ -n "$sym" ]; then
+      # Read the whole definitions stream so no producer is cut off by SIGPIPE.
+      got="$(defs "$path" | awk -v s="$sym" '$1 == s { print $2 }')"
+      if [ -z "$got" ]; then
+        printf '%s: cites %s, which %s does not define\n' "$file" "$sym" "$path" >> "$tmp"
+        unfixed=1
+        continue
       fi
-      continue
+      if [ "$got" != "$want" ]; then
+        if [ "$fix" = 1 ]; then
+          # Write and rename: portable to GNU and BSD sed.
+          sed "s|\`$sym\`, \`$path:$span\`|\`$sym\`, \`$path:$got\`|" "$file" > "$tmp.rewritten"
+          mv "$tmp.rewritten" "$file"
+          printf '%s: moved %s from %s:%s to %s:%s\n' "$file" "$sym" "$path" "$want" "$path" "$got" >> "$tmp"
+        else
+          printf '%s: cites %s at %s:%s, where it is defined on line %s\n' \
+            "$file" "$sym" "$path" "$want" "$got" >> "$tmp"
+          unfixed=1
+        fi
+        continue
+      fi
     fi
 
-    # A citation with no symbol beside it names a line inside a body, which
-    # nothing in the document names, so the line is only asked to exist.
-    lines="$(wc -l < "$path" | tr -d ' ')"
-    if [ "$want" -gt "$lines" ]; then
-      printf '%s: cites %s:%s and the file has %s lines\n' "$file" "$path" "$want" "$lines" >> "$tmp"
-      continue
+    lines="$(awk 'END { print NR }' "$path")"
+    # Numeric coercion also rejects enormous references without shell integer overflow.
+    if ! awk -v first="$want" -v last="${span##*-}" -v lines="$lines" \
+      'BEGIN { exit !((first + 0) >= 1 && (last + 0) >= (first + 0) && (last + 0) <= (lines + 0)) }'; then
+      printf '%s: cites %s:%s and the file has %s lines\n' "$file" "$path" "$span" "$lines" >> "$tmp"
+      unfixed=1
     fi
   done < "$tmp.refs"
   rm -f "$tmp.refs"
@@ -124,7 +126,7 @@ done
 
 if [ -s "$tmp" ]; then
   sort -u "$tmp" >&2
-  if [ "$fix" = 1 ]; then
+  if [ "$fix" = 1 ] && [ "$unfixed" = 0 ]; then
     echo "citations rewritten; run the check again to see what is left" >&2
     exit 0
   fi

@@ -1,12 +1,16 @@
 .\" Man page for microagent. The option and environment lists below are checked
 .\" against `microagent --help` by `make check-man`, so the two cannot drift.
-.TH MICROAGENT 1 "2026-09-30" "microagent 0.9.0" "User Commands"
+.TH MICROAGENT 1 "2026-10-01" "microagent 0.10.0" "User Commands"
 .SH NAME
 microagent \- tiny OpenAI-compatible coding agent
 .SH SYNOPSIS
 .B microagent
 .RI [ options ]
 .RI "\(dqprompt\(dq"
+.br
+.B microagent \-\-repl
+.RI [ options ]
+.RI [ "\(dqprompt\(dq" ]
 .br
 .B microagent update
 .RB [ \-c | \-\-check ]
@@ -63,6 +67,14 @@ Tools can be removed and MCP servers added in the config file; see
 and the full reference in
 .IR docs/usage.md .
 .SH OPTIONS
+.TP
+.B \-\-repl
+Read one prompt per line and keep conversation history. An optional argument
+is the first prompt. Blank lines are skipped; /quit or EOF exits. Each line,
+including its newline, must fit in 64 KiB. Turn, time and token spending
+ceilings reset for each prompt. Usage counters stay cumulative and responses
+share one session log. A failed or incomplete prompt ends the REPL with the
+usual exit status.
 Every long option that takes a value also takes it as
 .BI \-\-flag= value \fR;
 an option that takes none, like
@@ -101,10 +113,10 @@ any user of the machine can read it; a variable or a file mode 600 is not.
 .BI \-\-max\-turns " n"
 Ceiling on tool-loop turns, at least 1. Environment
 .BR MICROAGENT_MAX_TURNS ,
-default 100.
+default 1000.
 .TP
 .BI \-\-stall\-timeout " s"
-Seconds the response socket may stay silent before the read fails. Environment
+Seconds connection setup or a request write/read may block before cancellation. Environment
 .BR MICROAGENT_STALL_TIMEOUT ,
 default 120.
 .TP

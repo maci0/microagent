@@ -27,6 +27,12 @@ microagent -p "fix the failing test and run it"
 
 The prompt may also be the last bare argument, so `microagent "fix the failing test"` is the same run.
 
+`microagent --repl` reads one prompt per line, keeping conversation history. An optional argument
+runs as the first prompt. Blank lines are skipped; `/quit` or EOF exits. Each input line, including
+its newline, must fit in 64 KiB. Turn, time and token spending ceilings reset for each prompt;
+stdout usage counters stay cumulative, and all responses share one session log. A failed or
+incomplete prompt ends the REPL with the usual exit status.
+
 ## Flags and environment
 
 `microagent --help`, verbatim:
@@ -35,9 +41,12 @@ The prompt may also be the last bare argument, so `microagent "fix the failing t
 microagent - tiny OpenAI-compatible coding agent
 
 usage: microagent [options] "<prompt>"
+       microagent --repl [options] ["<prompt>"]
        microagent update [-c | --check]
        microagent help [update]
 
+      --repl             read one prompt per line; /quit or EOF exits
+                         history is kept; ceilings reset per prompt
   -p, --print <prompt>   task to run (also accepted as a bare argument)
   -m, --model <model>    model id (env MICROAGENT_MODEL, config key
                          model, default deepseek/deepseek-v4-flash)
@@ -55,9 +64,9 @@ usage: microagent [options] "<prompt>"
                          user of this machine can read it; a variable or
                          a file mode 600 is not
       --max-turns <n>    tool-loop turn ceiling, at least 1
-                         (env MICROAGENT_MAX_TURNS, default 100)
-      --stall-timeout <s>  seconds the response socket may stay silent
-                         before the read fails
+                         (env MICROAGENT_MAX_TURNS, default 1000)
+      --stall-timeout <s>  seconds connection setup or a request
+                         write/read may block before cancellation
                          (env MICROAGENT_STALL_TIMEOUT, default 120)
       --max-tokens <n>   max_tokens sent to the provider: the ceiling on
                          one response's generated tokens, at least 1
@@ -97,7 +106,7 @@ usage: microagent [options] "<prompt>"
   -h, --help             this text ("help" as the only argument too)
   -V, --version          version
 
-every long flag also takes --flag=value. A flag wins over the environment
+every long flag taking a value also takes --flag=value. A flag wins over the environment
 variable for the same option, and wins over one the run could not use:
 MICROAGENT_MAX_TURNS=0 with --max-turns 5 is a run with five turns, and the
 variable is named on stderr rather than stopping it. A bare -- ends the
@@ -163,7 +172,8 @@ examples:
 exit status: 0 the run finished, 1 the run failed, 2 the command line was
 wrong, 3 the run stopped without an answer (--max-turns, --max-spend-tokens,
 or a budget that ran out, or a last response that carried no text, was cut
-at --max-tokens, or the provider stopped generating it) so the answer on
+at --max-tokens or the response byte ceiling, or the provider stopped
+generating it) so the answer on
 stdout is a prefix of the work rather than an answer, 130 interrupted
 (Ctrl+C or kill), which takes the tool subprocess with it.
 
@@ -429,7 +439,7 @@ not there is silent, because most repositories carry none; a path a list names t
 named on stderr, because a setting that did nothing is the operator's own spelling. A file that is
 there and cannot be read is named either way.
 
-The text is at most 16 KB. A larger file is followed up to the cap, cut at a character boundary, and
+The text is at most 128 KB. A larger file is followed up to the cap, cut at a character boundary, and
 the note on stderr names the size it was cut from. Unlike a skill, whose roots the operator names,
 this file is repository content the run treats as instructions. It is read once, before the first
 request, so a file changed during the run reaches the next run and not this one, and it never becomes
@@ -527,8 +537,8 @@ it was cut from.
 
 A server that cannot start, exits during the handshake, or refuses a call is reported on stderr and
 skipped: one broken entry costs that entry, not the run. An `env` key is a variable name, letters,
-digits and underscores, quoted or not; a key or a value carrying a `=`, a NUL or a control character
-is one the child's environment block cannot hold, so that server is skipped and the line named rather
+digits and underscores, quoted or not. A key outside that form, or a value containing a NUL,
+is rejected, so that server is skipped and the line named rather
 than spawned. The server's stderr is inherited, since
 that is where MCP servers write diagnostics. Its environment is the scrubbed one tool subprocesses
 get plus the entry's `env`, so it never sees a provider key. Nor does it see the conversation: a
@@ -773,7 +783,7 @@ Two bounds keep a long run from re-sending without limit:
 | 0 | the run finished |
 | 1 | the run failed |
 | 2 | wrong command line, or a config the run cannot start with: a bad value, a `[tools.<name>]` that names no tool, every built-in disabled |
-| 3 | stopped without an answer: `--max-turns`, `--max-spend-tokens` or `--budget` reached, or the last response carried no text, was cut at `--max-tokens`, or the provider stopped generating it. stdout is a prefix of the work, not an answer. |
+| 3 | stopped without an answer: `--max-turns`, `--max-spend-tokens` or `--budget` reached, or the last response carried no text, was cut at `--max-tokens` or the response byte ceiling, or the provider stopped generating it. stdout is a prefix of the work, not an answer. |
 | 130 | interrupted (Ctrl+C or kill), taking the tool subprocess with it |
 
 A wrong flag prints the reason and the full help on stderr, so a script reading stdout gets nothing
@@ -839,6 +849,8 @@ reads a log back.
   so `--max-spend-tokens` is the ceiling on what a run spends.
 - **`--budget`** stops starting turns after the given seconds, then takes one last turn to land an
   edit, which may run up to 5 minutes past it. A turn cut off there is discarded, not half-applied.
+  The deadline also cancels blocked DNS, TLS, request writes, response headers and stream reads.
+  `--stall-timeout` bounds connection setup, request writes and silent response reads even with no budget.
 - **No session resume.** gauntlet's `--retries` covers a whole review, and a missing feature is
   cheaper than a half-working one.
 

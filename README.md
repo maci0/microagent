@@ -21,8 +21,8 @@ Agent CLIs are built for a person at a terminal: a TUI, a node or python runtime
 plugins, session state. None of that helps when a script calls the agent in a loop or drops it into
 a container that has nothing installed. microagent is the other shape:
 
-- **A memory footprint you can ignore.** About 0.6 MB resident at start, 0.8 MB up to the first
-  request, 1.3 MB after 50,000 streamed frames. At `--version`, `grok` holds 25 MB,
+- **A memory footprint you can ignore.** About 0.6 MB resident at start, 0.9 MB for the first
+  response, 1.6 MB after 50,000 streamed frames. At `--version`, `grok` holds 25 MB,
   `codex` 28 MB, `claude` 37 MB, `opencode` 198 MB and `kimi` 326 MB. A hundred idle copies are
   60 MB of microagent and 2.5 GB of `grok`.
 - **Nothing to install.** One Zig binary of about 0.9 MB with no runtime. On Linux it links no C
@@ -81,7 +81,7 @@ pins for its linters and its benchmark adapter, none of which is in a release. P
 machine runs:
 
 ```sh
-v=v0.9.0 t=x86_64-linux-musl
+v=v0.10.0 t=x86_64-linux-musl
 curl -fLO https://github.com/maci0/microagent/releases/download/$v/microagent-$v-$t
 curl -fLO https://github.com/maci0/microagent/releases/download/$v/microagent-$v-$t.sha256
 # GNU coreutils spells it sha256sum, macOS ships shasum; both read the same
@@ -122,6 +122,10 @@ microagent "fix the failing test and run it"
 All three may also be written in the config file (`model`, `base_url`, `api_key`); a flag beats the
 variable, which beats the file. There is no default provider and no key file.
 
+For an interactive session, run `microagent --repl`. Enter one prompt per line;
+conversation history carries over. Exit with `/quit` or Ctrl-D. The usual flags apply,
+and turn, time and token spending ceilings reset for each prompt.
+
 `microagent --help` lists every flag. [docs/usage.md](docs/usage.md) is the full reference: flags and
 environment variables, the config file (provider settings, system prompt addendum, skills, MCP servers), the tools and their
 credential guards, the stdout and session-log formats, exit codes, retries, gauntlet setup, and
@@ -129,7 +133,7 @@ self-update.
 
 ## Status
 
-Version 0.9.0. What works: the tool loop against OpenRouter, DeepSeek, OpenAI and any other
+Version 0.10.0. What works: the tool loop against OpenRouter, DeepSeek, OpenAI and any other
 OpenAI-compatible endpoint; repository instructions read from `AGENTS.md`; skills; MCP servers over
 stdio; the session log; verified self-update;
 reproducible release builds for Linux and macOS.

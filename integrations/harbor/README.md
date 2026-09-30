@@ -71,7 +71,7 @@ command that regenerates the lock is in the comment at the top of
 | `MICROAGENT_BASE_URL` | OpenAI-compatible endpoint (default OpenRouter); https, or http on loopback, because the key goes to it in the clear, and a url the binary refuses stops the run here |
 | `MICROAGENT_CONFIG` | set by the adapter, not read from the host: the container gets a config that turns the four remote tool presets off, so a scored run has no web access beyond the provider |
 | `MICROAGENT_BUDGET_SECONDS` | elapsed-time budget inside the container, read from the monotonic clock (default 600), capped at `MICROAGENT_AGENT_TIMEOUT_SEC` less 360 s |
-| `MICROAGENT_MAX_TURNS` | `--max-turns` passed to the binary (default 150, above the binary's own 100) |
+| `MICROAGENT_MAX_TURNS` | `--max-turns` passed to the binary (default 1200, above the binary's own 1000) |
 | `MICROAGENT_REASONING_EFFORT` | `minimal`, `low`, `medium`, `high` or `none`; reasoning models otherwise spend the whole budget thinking. A level the binary does not have stops the run here |
 | `MICROAGENT_MAX_TOKENS` | generation ceiling passed to the binary (its own default when unset); a low account balance is answered with `402 ... you can only afford N`, and asking for less is the only lever |
 | `MICROAGENT_STALL_TIMEOUT` | seconds the response socket may stay silent before the read fails, passed to the binary (its own 120 s default when unset). Raise it for a provider slow to a first token on a large prompt: NVIDIA NIM took over two minutes on one, and the run died of the default rather than of its own answer |

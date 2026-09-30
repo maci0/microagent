@@ -125,7 +125,9 @@ says nothing inside them goes out of bounds or overflows, which is silent in
 the `ReleaseSmall` binary the release assets are made of.
 
 `make test FILTER=...` checks the filter against the declared test names first, because a filter that
-matches nothing reports success while running no test. `make watch` is that same check around
+matches nothing reports success while running no test. An unfiltered `make test` also runs
+`make test-cli`, a Python standard-library check of the built CLI against a loopback provider.
+`make watch` is that same filter check around
 `zig build test --watch`, the build system's own edit loop, and is not what `check` runs: a green
 watch is not a push.
 
@@ -154,8 +156,9 @@ where each named symbol is defined and fails a citation that points anywhere
 else, or a symbol the file no longer has, so a control citing a deleted
 function fails the gate rather than the reader. `make check-refs FIX=1` rewrites a
 stale citation to the line its symbol is on, which is the repair a diff that moved
-a function needs; a citation with no symbol beside
-it names a line inside a body, and only that line's existence is asked.
+a function needs. Citations without symbols must name an existing line; ranges
+must be ordered and both endpoints must exist. Repair mode still fails when a
+reference cannot be repaired, and missing input files fail the check.
 
 `check` does not cover three things. One is the release cross-build: `make
 release-assets` runs it, and `make check-reproducible` rebuilds it byte for

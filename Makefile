@@ -15,6 +15,8 @@ BIN := zig-out/bin/microagent
 export LC_ALL := C
 export TZ := UTC
 
+.PHONY: test-cli
+
 .PHONY: default help preflight version build musl test watch test-sanitize fmt fmt-check fmt-python lint lint-versions lint-lock lint-ci check-sbom check-refs zig-version required-zig-version release-targets check-assets check-asset-run check-binary check-changelog check-changelog-links check-changelog-sections check-unreleased check-changelog-history check-readme check-help check-man check-release check-reproducible lint-shell lint-python lint-yaml lint-md check bench gauntlet instructions overhead install release-assets checksums check-checksums sbom sha256-of clean
 
 # The Harbor adapter's directory, the one place that path is written down.
@@ -154,6 +156,7 @@ help:
 	  'musl                  static musl binary for integrations/harbor, for this host ($(MUSL_ARCH))' \
 	  'version               the version build.zig.zon declares' \
 	  'test [FILTER=...]     the whole unit test suite, or only the tests FILTER names' \
+	  'test-cli              built CLI against a loopback provider (also in unfiltered test)' \
 	  'watch [FILTER=...]    the same tests again on every source change, until Ctrl-C' \
 	  'test-sanitize         the same suite under the undefined-behavior sanitizer' \
 	  'preflight             name every tool check and lint need that is not on PATH, and every one whose absence skips tests' \
@@ -286,7 +289,7 @@ musl: zig-version
 # against the test names first. Spelled once, because `test` and `watch` take the same filter and a
 # filter one of them refuses has to be refused by the other.
 REFUSE_UNKNOWN_FILTER = if [ -n "$(FILTER)" ]; then \
-	  grep -h -o -E '^test "[^"]+"' $(ZIG_SOURCES) | grep -F -q -- "$(FILTER)" || { \
+	  grep -h -o -E '^test "[^"]+"' $(ZIG_SOURCES) | grep -F -- "$(FILTER)" >/dev/null || { \
 	    printf 'no declared test is named like "%s"\n' "$(FILTER)" >&2; \
 	    printf "  list the names with: grep -h -o -E '^test \"[^\"]+\"' $(ZIG_SOURCES)\n" >&2; \
 	    exit 2; }; \
@@ -297,8 +300,12 @@ test:
 	if [ -n "$(FILTER)" ]; then \
 	  $(ZIG) build test -Dtest-filter="$(FILTER)" --summary all; \
 	else \
-	  $(ZIG) build test --summary all; \
+	  $(ZIG) build test --summary all && $(MAKE) test-cli; \
 	fi
+
+# Exercise the actual CLI over loopback, without a provider account.
+test-cli: build
+	python3 scripts/test_cli.py $(BIN)
 
 # The suite again on every source change, until Ctrl-C: the build system's own edit loop, and the
 # command a contributor runs all day. It is not what `check` runs, so a green watch is not a push.

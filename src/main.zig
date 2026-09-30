@@ -87,7 +87,7 @@ const tool_result_message_scaffolding_bytes = 512;
 /// runs at the top of a turn, so nothing bounds the turn that filled it. The
 /// calls still run and still get a tool message, so the pairing the next
 /// request needs is intact and no call is silently unanswered; what stops is
-/// the output being carried forward, past the first result that does not fit.
+/// each result that does not fit in the remaining room being carried forward.
 const max_turn_tool_output: usize = 256 * 1024;
 /// The marker that replaces a tool result past the ceiling above. It is the
 /// run's own doing, not the tool's, and says so: a tool that printed nothing
@@ -95,7 +95,7 @@ const max_turn_tool_output: usize = 256 * 1024;
 /// the model is the one deciding what to do next. The system prompt names it,
 /// the way it names the marker compaction writes.
 const turn_output_capped_marker = "[tool output not carried: this turn's tool results reached their ceiling]";
-const max_turns_default = 100;
+const max_turns_default = 1000;
 /// The exit status for a run that stopped at a ceiling rather than finishing:
 /// `--max-turns`, or a budget that ended the last turn. Distinct from 0 (the
 /// model answered) and from 1 (the run failed), because neither of those
@@ -111,10 +111,8 @@ const exit_incomplete: u8 = 3;
 /// response in it came near this), and low enough that one runaway turn cannot
 /// run up a real bill.
 const default_max_tokens: u32 = 65_536;
-/// How long the response socket may stay silent before its read fails rather
-/// than blocking forever. The budget is checked between reads, and a read that
-/// never returns never reaches that check: a host that accepted the connection
-/// and then said nothing hung a benchmark trial for twenty-five minutes.
+/// How long connection setup or a request write/read may block before being
+/// cancelled. A provider that goes silent must not hold the run indefinitely.
 const default_stall_timeout_s: u32 = 120;
 /// The ends of the range a `temperature` may sit in: 0 is the greedy decode,
 /// which is the one setting two runs of the same conversation and model answer
@@ -131,7 +129,7 @@ const stream_read_chunk: usize = 8 * 1024;
 /// The most of a repository's instructions this run follows. They ride on every
 /// request of the run, so a file past this is read up to the cap and the note
 /// names the size it was cut from.
-const max_agents_bytes: usize = 16 * 1024;
+const max_agents_bytes: usize = 128 * 1024;
 
 /// The opening and closing fences of a repository-instructions block, as the
 /// builder writes them. One spelling each, shared with `agentsBlock` and with
@@ -209,6 +207,7 @@ fn writeAction(io: Io, action: Action) void {
 
 const Options = struct {
     prompt: []const u8 = "",
+    repl: bool = false,
     model: []const u8 = default_model,
     /// The OpenAI-compatible endpoint. Empty until the config file, the
     /// environment or the command line names one, and a run with none is
@@ -218,7 +217,7 @@ const Options = struct {
     max_turns: usize = max_turns_default,
     /// Sent as `max_tokens`, the ceiling on one response's generated tokens.
     max_tokens: u32 = default_max_tokens,
-    /// Seconds the response socket may stay silent before a read fails.
+    /// Seconds connection setup or a request write/read may block.
     stall_timeout_s: u32 = default_stall_timeout_s,
     /// Passed to the provider as `reasoning.effort`. Unset by default: on a
     /// reasoning model the thinking is usually most of the output tokens, and
@@ -396,30 +395,32 @@ fn environMap(arena: std.mem.Allocator, environ: std.process.Environ) !std.proce
 }
 
 pub fn main(minimal: std.process.Init.Minimal) !void {
-    defer if (builtin.mode == .Debug) {
-        _ = gpa_state.deinit();
+    const status = status: {
+        defer if (builtin.mode == .Debug) {
+            _ = gpa_state.deinit();
+        };
+        const gpa = gpa_state.allocator();
+        var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+        defer arena.deinit();
+        var threaded: std.Io.Threaded = .init(gpa, ioOptions(minimal));
+        defer threaded.deinit();
+        // In the run arena: the map lives as long as the process, so its ~100 strings are bumps that
+        // one `arena.deinit` releases, not an allocation and a free apiece.
+        var environ_map = try environMap(arena.allocator(), minimal.environ);
+        // `runMain` reports the exit status rather than leaving the process from
+        // inside itself: a `std.process.exit` between two of its defers skips
+        // them, and the one it skips on a failed run is the MCP shutdown, which is
+        // what kills the server process groups. The exit is here instead, after
+        // every defers this frame owns has run.
+        break :status try runMain(.{
+            .minimal = minimal,
+            .arena = &arena,
+            .gpa = gpa,
+            .io = threaded.io(),
+            .environ_map = &environ_map,
+            .preopens = .empty,
+        });
     };
-    const gpa = gpa_state.allocator();
-    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
-    defer arena.deinit();
-    var threaded: std.Io.Threaded = .init(gpa, ioOptions(minimal));
-    defer threaded.deinit();
-    // In the run arena: the map lives as long as the process, so its ~100 strings are bumps that
-    // one `arena.deinit` releases, not an allocation and a free apiece.
-    var environ_map = try environMap(arena.allocator(), minimal.environ);
-    // `runMain` reports the exit status rather than leaving the process from
-    // inside itself: a `std.process.exit` between two of its defers skips
-    // them, and the one it skips on a failed run is the MCP shutdown, which is
-    // what kills the server process groups. The exit is here instead, after
-    // every defers this frame owns has run.
-    const status = try runMain(.{
-        .minimal = minimal,
-        .arena = &arena,
-        .gpa = gpa,
-        .io = threaded.io(),
-        .environ_map = &environ_map,
-        .preopens = .empty,
-    });
     if (status != 0) std.process.exit(status);
 }
 
@@ -503,7 +504,7 @@ fn runMain(init: std.process.Init) !u8 {
     if (opts.action != .run) return 0;
     if (env_problem) |problem| reportEnvProblem(io, init.arena.allocator(), problem, opts.from_flag, &err_buf);
 
-    if (opts.prompt.len == 0) return usageError(io, "no prompt: pass it as an argument or with --print", .{});
+    if (opts.prompt.len == 0 and !opts.repl) return usageError(io, "no prompt: pass it as an argument or with --print", .{});
     tool_mod.forwardInterruptsToToolGroup();
     // Read before the key and the endpoint are resolved, because the file is
     // one of the sources they are resolved from.
@@ -591,25 +592,80 @@ fn runMain(init: std.process.Init) !u8 {
     // against.
     const cwd = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", arena);
     const system_text = try systemText(arena, cwd, loaded.system_prompt_extra, agents_block, skill_block, opts.disabled_tools);
-    try conversation_mod.openConversation(gpa, &msgs, system_text, opts.prompt);
+    var input_buf: [max_repl_prompt_bytes]u8 = undefined;
+    var input = std.Io.File.stdin().readerStreaming(io, &input_buf);
+    const prefix = try bodyPrefix(arena, opts);
+    const ep = try endpoint(arena, opts);
+    var session: ?session_mod.Session = null;
+    defer session_mod.close(io, &session);
+    var usage: chat_mod.Usage = .{};
+    // Prompt-local allocations must be released even when the REPL stays open.
+    var prompt_state = std.heap.ArenaAllocator.init(gpa);
+    defer prompt_state.deinit();
 
-    const ended = run(&client, io, gpa, init.arena.allocator(), opts, &msgs, tool_env, &opts.mcp) catch |err| {
-        // The endpoint is the one thing every failure below shares, and it is
-        // not in the error: a DNS failure, a refused connection and a truncated
-        // stream all arrive here as a bare name.
-        const msg = try std.fmt.allocPrint(arena, "microagent: the run against {s} failed: {s}\n", .{
-            displayUrl(arena, opts.base_url),
-            @errorName(err),
-        });
-        net.writeErr(io, msg);
-        return 1;
-    };
-    // A run that stopped at a ceiling still has the model's words on stdout,
-    // and they are a prefix of the work rather than an answer to it. Reporting
-    // 0 would tell a script reading them that the task finished, which is the
-    // one claim a ceiling-truncated answer cannot support.
-    if (ended != .answered) return exit_incomplete;
-    return 0;
+    while (true) {
+        if (opts.prompt.len == 0) {
+            opts.prompt = (replPrompt(io, &input.interface) catch |err| {
+                if (err == error.StreamTooLong) {
+                    net.note(io, arena, "microagent: REPL prompt exceeds the {d} byte input buffer\n", .{max_repl_prompt_bytes});
+                    return 2;
+                }
+                net.note(io, arena, "microagent: reading REPL input failed: {s}\n", .{@errorName(err)});
+                return 1;
+            }) orelse return 0;
+        }
+        if (msgs.items.len == 0) {
+            try conversation_mod.openConversation(gpa, &msgs, system_text, opts.prompt);
+            session = session_mod.open(io, arena, opts.session_dir, opts.model);
+        } else {
+            try conversation_mod.appendMessage(gpa, &msgs, "user", opts.prompt);
+        }
+        _ = prompt_state.reset(.{ .retain_with_limit = turn_arena_retain_bytes });
+        const ended = run(&client, io, gpa, prompt_state.allocator(), opts, &msgs, tool_env, &opts.mcp, prefix, ep, &session, &usage) catch |err| {
+            // The endpoint is the one thing every failure below shares, and it is
+            // not in the error: a DNS failure, a refused connection and a truncated
+            // stream all arrive here as a bare name.
+            const msg = try std.fmt.allocPrint(arena, "microagent: the run against {s} failed: {s}\n", .{
+                displayUrl(arena, opts.base_url),
+                @errorName(err),
+            });
+            net.writeErr(io, msg);
+            return 1;
+        };
+        // A run that stopped at a ceiling still has the model's words on stdout,
+        // and they are a prefix of the work rather than an answer to it. Reporting
+        // 0 would tell a script reading them that the task finished, which is the
+        // one claim a ceiling-truncated answer cannot support.
+        if (ended != .answered) return exit_incomplete;
+        if (!opts.repl) return 0;
+        opts.prompt = "";
+    }
+}
+
+const max_repl_prompt_bytes = 64 * 1024;
+
+fn replPrompt(io: Io, reader: *std.Io.Reader) !?[]const u8 {
+    while (true) {
+        net.writeErr(io, "> ");
+        const line = (try reader.takeDelimiter('\n')) orelse return null;
+        const prompt = std.mem.trim(u8, line, " \t\r");
+        if (std.mem.eql(u8, prompt, "/quit")) return null;
+        if (prompt.len != 0) return prompt;
+    }
+}
+
+test "repl skips blank lines and exits on quit or EOF" {
+    var reader = std.Io.Reader.fixed(" \r\nfirst\r\nsecond\n/quit\nignored\n");
+    try std.testing.expectEqualStrings("first", (try replPrompt(std.testing.io, &reader)).?);
+    try std.testing.expectEqualStrings("second", (try replPrompt(std.testing.io, &reader)).?);
+    try std.testing.expectEqual(@as(?[]const u8, null), try replPrompt(std.testing.io, &reader));
+    var eof = std.Io.Reader.fixed("last");
+    try std.testing.expectEqualStrings("last", (try replPrompt(std.testing.io, &eof)).?);
+    try std.testing.expectEqual(@as(?[]const u8, null), try replPrompt(std.testing.io, &eof));
+    var opts: Options = .{};
+    var buf: [512]u8 = undefined;
+    try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &.{"--repl"}, &opts));
+    try std.testing.expect(opts.repl);
 }
 
 /// The repository's own instructions, read from `dir` when the run starts, or
@@ -903,9 +959,12 @@ const help_text =
     \\microagent - tiny OpenAI-compatible coding agent
     \\
     \\usage: microagent [options] "<prompt>"
+    \\       microagent --repl [options] ["<prompt>"]
     \\       microagent update [-c | --check]
     \\       microagent help [update]
     \\
+    \\      --repl             read one prompt per line; /quit or EOF exits
+    \\                         history is kept; ceilings reset per prompt
     \\  -p, --print <prompt>   task to run (also accepted as a bare argument)
     \\  -m, --model <model>    model id (env MICROAGENT_MODEL, config key
     \\                         model, default
@@ -925,8 +984,8 @@ const help_text =
     \\                         a file mode 600 is not
     \\      --max-turns <n>    tool-loop turn ceiling, at least 1
 ++ (std.fmt.comptimePrint("\n                         (env MICROAGENT_MAX_TURNS, default {d})\n", .{max_turns_default})) ++
-    \\      --stall-timeout <s>  seconds the response socket may stay silent
-    \\                         before the read fails
+    \\      --stall-timeout <s>  seconds connection setup or a request
+    \\                         write/read may block before cancellation
 ++ (std.fmt.comptimePrint("\n                         (env MICROAGENT_STALL_TIMEOUT, default {d})\n", .{default_stall_timeout_s})) ++
     \\      --max-tokens <n>   max_tokens sent to the provider: the ceiling on
     \\                         one response's generated tokens, at least 1
@@ -966,7 +1025,7 @@ const help_text =
     \\  -h, --help             this text ("help" as the only argument too)
     \\  -V, --version          version
     \\
-    \\every long flag also takes --flag=value. A flag wins over the environment
+    \\every long flag taking a value also takes --flag=value. A flag wins over the environment
     \\variable for the same option, and wins over one the run could not use:
     \\MICROAGENT_MAX_TURNS=0 with --max-turns 5 is a run with five turns, and the
     \\variable is named on stderr rather than stopping it. A bare -- ends the
@@ -1032,7 +1091,8 @@ const help_text =
     \\exit status: 0 the run finished, 1 the run failed, 2 the command line was
     \\wrong, 3 the run stopped without an answer (--max-turns, --max-spend-tokens,
     \\or a budget that ran out, or a last response that carried no text, was cut
-    \\at --max-tokens, or the provider stopped generating it) so the answer on
+    \\at --max-tokens or the response byte ceiling, or the provider stopped
+    \\generating it) so the answer on
     \\stdout is a prefix of the work rather than an answer, 130 interrupted
     \\(Ctrl+C or kill), which takes the tool subprocess with it.
     \\
@@ -1702,6 +1762,8 @@ fn parseArgs(buf: []u8, argv: []const []const u8, opts: *Options) ?[]const u8 {
         } else if (isFlag(name, "-h", "--help")) {
             opts.action = .help;
             return null;
+        } else if (std.mem.eql(u8, arg, "--repl")) {
+            opts.repl = true;
         } else if (valuedFlag(name)) |flag| {
             // A flag that ends the command line and one handed an empty value
             // are the same mistake, so both say the same thing.
@@ -1778,6 +1840,7 @@ fn unknownArgument(buf: []u8, arg: []const u8) []const u8 {
 /// the test below is what holds the two together, and it fails on a flag added
 /// to the parser and not here.
 const known_words = [_][]const u8{
+    "--repl",
     "--print",
     "--model",
     "--base-url",
@@ -2087,7 +2150,7 @@ fn loadConfig(io: Io, init: std.process.Init, arena: std.mem.Allocator, config: 
     // is true of a path a directory name was spelled with. The two untrusted
     // byte paths this program already has normalize what they print, and a
     // diagnostic is the third.
-    // No file is the same as an empty one, so the presets that are on by default are on.
+    // No file is the same as an empty one: built-ins on, remote presets off.
     var parsed = config_mod.parse(arena, "");
     if (source.path) |p| {
         // `readFileAlloc` refuses the moment the limit is reached, so a file of
@@ -2565,24 +2628,13 @@ fn run(
     msgs: *std.ArrayList(u8),
     tool_env: *const std.process.Environ.Map,
     mcp: *mcp_mod.Servers,
+    prefix: []const u8,
+    ep: Endpoint,
+    session: *?session_mod.Session,
+    usage: *chat_mod.Usage,
 ) !TurnEnd {
     const started = Io.Timestamp.now(io, budget_clock).nanoseconds;
     const budget = Budget.of(started, opts.budget_s);
-    var session: ?session_mod.Session = session_mod.open(io, arena, opts.session_dir, opts.model);
-    defer session_mod.close(io, &session);
-    // The constant half of every request, built once from the run arena. It is
-    // a pure function of `opts`, and nothing in the loop below changes any of
-    // what goes into it: the model, the token ceiling, the reasoning field, the
-    // built-in tool schema, the run's skills and the servers' tools are all
-    // settled before the first turn. Rebuilding it per turn walked that whole
-    // schema again and copied every remote tool's `inputSchema` into a fresh
-    // buffer on the turn arena, once per turn, for bytes the previous turn had
-    // already produced identically. On a run with three servers carrying
-    // megabytes of schemas that is the largest allocation the loop makes after
-    // the conversation itself, and it is the one that grows with the server
-    // count rather than with the work.
-    const prefix = try bodyPrefix(arena, opts);
-    const ep = try endpoint(arena, opts);
     // What one turn allocates from the wire down -- the request body (a full
     // copy of the conversation), the streamed content, the tool results --
     // is dead once that turn's messages are appended. The run arena is never
@@ -2593,7 +2645,7 @@ fn run(
     defer turn_state.deinit();
     const turn_arena = turn_state.allocator();
     var turn: usize = 0;
-    var usage: chat_mod.Usage = .{};
+    var spent: u64 = 0;
     var compaction_floor: usize = 0;
     var verify_asked = false;
     var spend_alarmed = false;
@@ -2605,8 +2657,8 @@ fn run(
         // rather than in seconds. Announced once, on the turn that crosses the
         // alarm, and spent for the rest of the run: a warning repeated on every
         // turn after it is noise the first one has already made.
-        if (spendNotice(arena, usage.total, opts.max_spend_tokens, turn)) |notice| {
-            if (spendCeilingReached(usage.total, opts.max_spend_tokens)) {
+        if (spendNotice(arena, spent, opts.max_spend_tokens, turn)) |notice| {
+            if (spendCeilingReached(spent, opts.max_spend_tokens)) {
                 net.writeErr(io, notice);
                 return .cut_off;
             }
@@ -2626,7 +2678,7 @@ fn run(
             // way any other does. A model that answers it finished, and one
             // that asks for more tools was cut off mid-work, which is a
             // different exit status from a finished run.
-            return try runTurn(client, io, turn_arena, gpa, prefix, opts, ep, msgs, &session, &usage, budget.withGraceNs(final_push_grace_s), tool_env, &progress, mcp);
+            return try runTurn(client, io, turn_arena, gpa, prefix, opts, ep, msgs, session, usage, &spent, budget.withGraceNs(final_push_grace_s), tool_env, &progress, mcp);
         }
         // The ceiling is announced on the turn it applies to, before it is
         // spent, so a truncated answer is never the last thing on stdout with no
@@ -2636,7 +2688,7 @@ fn run(
         try conversation_mod.compactMessages(io, gpa, msgs, turn_arena, &compaction_floor);
         // `.wants_tools` keeps the loop going, and `.cut_off` is the budget
         // ending the run mid-turn, so neither is a finished run.
-        switch (try runTurn(client, io, turn_arena, gpa, prefix, opts, ep, msgs, &session, &usage, budget, tool_env, &progress, mcp)) {
+        switch (try runTurn(client, io, turn_arena, gpa, prefix, opts, ep, msgs, session, usage, &spent, budget, tool_env, &progress, mcp)) {
             // The tool results are already appended, so the next request
             // carries them and the loop asks again. Returning here ended the
             // run on the first turn that asked for a tool, which is every turn
@@ -2830,6 +2882,7 @@ fn runTurn(
     msgs: *std.ArrayList(u8),
     session: *?session_mod.Session,
     usage: *chat_mod.Usage,
+    spent: *u64,
     budget: Budget,
     tool_env: *const std.process.Environ.Map,
     progress: *Progress,
@@ -2867,7 +2920,12 @@ fn runTurn(
     // above, so the record itself is the same either way; only the moment it
     // lands is not.
     session_mod.writeRecord(io, arena, session, model_ms, &result);
+    spent.* +|= result.total_tokens;
     try finishTurn(io, arena, gpa, msgs, &result, usage, budget, tool_env, progress, opts.skills, mcp, opts.disabled_tools, opts.deny_commands, opts.writable_roots);
+    if (result.unusable_calls != 0 or result.over_cap != 0) {
+        try conversation_mod.appendMessage(gpa, msgs, "user", "Some requested tool calls were not dispatched because their id/name or JSON arguments were invalid, or the parallel-call limit was exceeded. Reissue only the missing work as valid tool calls.");
+        return .wants_tools;
+    }
     if (result.calls.items.len != 0) return .wants_tools;
     // No tool call ends the loop, but only an answer ends the run. A refusal, a
     // provider that stopped generating, a response cut at `max_tokens` and a
@@ -2906,6 +2964,7 @@ const content_filter_notice = "the provider stopped generating this response (fi
 fn incompleteAnswer(arena: std.mem.Allocator, result: *const chat_mod.ChatResult, max_tokens: u32) ?[]const u8 {
     const reason = result.finish_reason;
     if (std.mem.eql(u8, reason, "content_filter")) return content_filter_notice;
+    if (result.dropped) return "the answer was cut at the response byte ceiling, so what is on stdout is a prefix of it";
     if (result.content.items.len == 0) {
         // The reason is the provider's own bytes, and this notice is the last
         // line the run prints, so it goes out through the escaping every other
@@ -3072,22 +3131,24 @@ fn authHeaders(arena: std.mem.Allocator, api_key: []const u8) !std.http.Client.R
     };
 }
 
-/// Makes a silent response socket fail instead of blocking forever.
-///
-/// A read on a connection that is open but never speaks does not return, so
-/// nothing checked between reads — the budget, a stop flag — ever runs. A
-/// receive timeout turns that hang into a read error the loop already handles.
-/// Applied per request because the client pools connections and `std.http` has
-/// no per-request read timeout.
-///
-/// A socket that refused the option leaves a read that can block forever, and
-/// that is the whole failure this exists to prevent, so the refusal is the
-/// caller's to hear about: swallowing it would run the turn with the guard
-/// silently absent and nothing to tell that from a socket that took it.
-fn setStallTimeout(handle: std.posix.socket_t, seconds: u32) !void {
-    if (builtin.os.tag == .windows or seconds == 0) return;
-    const tv = std.posix.timeval{ .sec = @intCast(seconds), .usec = 0 };
-    return std.posix.setsockopt(handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv));
+/// Bound a blocking request write, header read or body read. Socket timeout
+/// options yield EAGAIN, which Zig's blocking I/O treats as a programmer bug.
+/// These operations return borrowed views or arena allocations; their owner
+/// survives cancellation, and both tasks are joined before the buffers move.
+fn withStallTimeout(io: Io, seconds: u32, comptime operation: anytype, args: anytype) !@typeInfo(@typeInfo(@TypeOf(operation)).@"fn".return_type.?).error_union.payload {
+    const Outcome = union(enum) {
+        answered: @typeInfo(@TypeOf(operation)).@"fn".return_type.?,
+        expired: Io.Cancelable!void,
+    };
+    var slots: [2]Outcome = undefined;
+    var select: Io.Select(Outcome) = .init(io, &slots);
+    defer select.cancelDiscard();
+    try select.concurrent(.answered, operation, args);
+    try select.concurrent(.expired, Io.Timeout.sleep, .{ net.durationMs(@as(u64, seconds) * std.time.ms_per_s), io });
+    return switch (try select.await()) {
+        .answered => |answer| answer,
+        .expired => error.Timeout,
+    };
 }
 
 /// Where a request goes and what authorizes it, both settled by `opts` before
@@ -3141,7 +3202,9 @@ fn streamChat(
     var ask: u32 = 0;
     while (true) {
         ask += 1;
-        const result = streamChatOnce(client, io, gpa, arena, opts, ep, prefix, budget, msgs) catch |err| {
+        const result = streamChatWithinBudget(client, io, gpa, arena, opts, ep, prefix, budget, msgs) catch |err| {
+            if (err == error.BudgetExhausted)
+                net.note(io, arena, "microagent: the time budget ran out while contacting {s}; the turn is discarded\n", .{ep.shown_url});
             if (err != error.StreamRetryable) return err;
             const wait = reaskWaitMs(io, budget, ask, arena, ep.shown_url) orelse return error.StreamError;
             waitMs(io, wait) catch return error.StreamError;
@@ -3149,6 +3212,69 @@ fn streamChat(
         };
         return result;
     }
+}
+
+/// Race the whole exchange against the budget, including DNS, TLS, headers and
+/// blocked reads. Cancellation joins the exchange before its arena is reused.
+fn streamChatWithinBudget(
+    client: *std.http.Client,
+    io: Io,
+    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    opts: Options,
+    ep: Endpoint,
+    prefix: []const u8,
+    budget: Budget,
+    msgs: []const u8,
+) !chat_mod.ChatResult {
+    const deadline = budget.deadline_ns orelse return streamChatOnce(client, io, gpa, arena, opts, ep, prefix, budget, msgs);
+    if (budget.expired(io)) return error.BudgetExhausted;
+    const Outcome = union(enum) {
+        answered: anyerror!chat_mod.ChatResult,
+        expired: Io.Cancelable!void,
+    };
+    var slots: [2]Outcome = undefined;
+    var select: Io.Select(Outcome) = .init(io, &slots);
+    // A response can finish at the same instant as the clock; reclaim any
+    // completed answer the race did not return, rather than discard ownership.
+    defer while (select.cancel()) |outcome| switch (outcome) {
+        .answered => |answer| if (answer) |value| {
+            var result = value;
+            result.deinit(gpa);
+        } else |_| {},
+        .expired => {},
+    };
+    try select.concurrent(.answered, streamChatOnce, .{ client, io, gpa, arena, opts, ep, prefix, budget, msgs });
+    const timeout: Io.Timeout = .{ .deadline = .{ .raw = .{ .nanoseconds = deadline }, .clock = budget_clock } };
+    try select.concurrent(.expired, Io.Timeout.sleep, .{ timeout, io });
+    return switch (try select.await()) {
+        .answered => |answer| answer,
+        .expired => error.BudgetExhausted,
+    };
+}
+
+/// Connection setup returns an owned request, so reclaim a completed request
+/// if the timer wins at the same instant as setup finishes.
+fn openChatRequest(client: *std.http.Client, uri: std.Uri, options: std.http.Client.RequestOptions, seconds: u32) !std.http.Client.Request {
+    const Outcome = union(enum) {
+        opened: std.http.Client.RequestError!std.http.Client.Request,
+        expired: Io.Cancelable!void,
+    };
+    var slots: [2]Outcome = undefined;
+    var select: Io.Select(Outcome) = .init(client.io, &slots);
+    defer while (select.cancel()) |outcome| switch (outcome) {
+        .opened => |answer| if (answer) |value| {
+            var request = value;
+            request.deinit();
+        } else |_| {},
+        .expired => {},
+    };
+    try select.concurrent(.opened, std.http.Client.request, .{ client, .POST, uri, options });
+    try select.concurrent(.expired, Io.Timeout.sleep, .{ net.durationMs(@as(u64, seconds) * std.time.ms_per_s), client.io });
+    return switch (try select.await()) {
+        .opened => |answer| answer,
+        .expired => error.Timeout,
+    };
 }
 
 /// How long to wait before asking for a turn the provider failed without
@@ -3253,31 +3379,27 @@ fn streamChatOnce(
             r.deinit();
             req_slot = null;
         }
-        const req = client.request(.POST, uri, .{
+        const req = openChatRequest(client, uri, .{
             .redirect_behavior = .unhandled,
             .headers = auth_headers,
             .extra_headers = &.{
                 .{ .name = "content-type", .value = "application/json" },
                 .{ .name = "accept", .value = "text/event-stream" },
             },
-        }) catch |err| {
+        }, opts.stall_timeout_s) catch |err| {
             if (worthAnotherAttempt(.opened, err) and waitBeforeRetry(io, arena, shown_url, attempt, "opening the request to", err, budget)) continue;
             return err;
         };
         req_slot = req;
         net.releaseDeadStack();
-        // A turn with no stall guard can hang until the caller kills it, so the
-        // failure to install one ends the request rather than reading on.
-        if (req_slot.?.connection) |connection|
-            try setStallTimeout(connection.stream_reader.stream.socket.handle, opts.stall_timeout_s);
-        var open = &req_slot.?;
-        sendRequest(open, &body_chunk, prefix_now, msgs) catch |err| {
+        const open = &req_slot.?;
+        withStallTimeout(io, opts.stall_timeout_s, sendRequest, .{ open, &body_chunk, prefix_now, msgs }) catch |err| {
             if (worthAnotherAttempt(.sending, err) and waitBeforeRetry(io, arena, shown_url, attempt, "sending the request body to", err, budget)) continue;
             return err;
         };
         if (debug_enabled) std.debug.print("[mdebug] request sent, body={d} bytes\n", .{prefix_now.len + msgs.len + body_close.len});
 
-        var response = open.receiveHead(&redirect_buffer) catch |err| {
+        var response = withStallTimeout(io, opts.stall_timeout_s, std.http.Client.Request.receiveHead, .{ open, &redirect_buffer }) catch |err| {
             // `worthAnotherAttempt` returns false for a head whatever the
             // error, so this is the operator's half of that: a run that lost a
             // billable turn says so rather than reporting a connection fault.
@@ -3353,7 +3475,7 @@ fn streamChatOnce(
             // with an empty body: `http 500:` on its own reads as a provider
             // that said nothing, which is a different thing from a body this
             // run could not read.
-            const err_body = err_reader.allocRemaining(arena, .limited(max_error_body_bytes)) catch |err|
+            const err_body = withStallTimeout(io, opts.stall_timeout_s, Io.Reader.allocRemaining, .{ err_reader, arena, Io.Limit.limited(max_error_body_bytes) }) catch |err|
                 try std.fmt.allocPrint(arena, "(the error body could not be read: {s})", .{@errorName(err)});
             const msg = try std.fmt.allocPrint(arena, "http {d}: {s}\n", .{
                 @intFromEnum(response.head.status),
@@ -3391,9 +3513,8 @@ fn streamChatOnce(
     var done = false;
     var unparsable: usize = 0;
     while (!done) {
-        // Between reads, because a read is the one thing here that cannot be
-        // interrupted: a provider that is slow rather than gone has to cost the
-        // run its budget and stop there, not a caller's whole review timeout.
+        // Check between reads too, so a busy stream stops without waiting for
+        // the budget task to cancel its next blocking operation.
         if (budget.expired(io)) {
             net.note(io, arena, "microagent: the time budget ran out after {d} byte(s) of content and {d} tool call(s) from {s}; the turn is discarded\n", .{
                 result.content.items.len, calls.items.len, shown_url,
@@ -3404,7 +3525,7 @@ fn streamChatOnce(
         // is appended after it: every byte of every completion passed through
         // that copy, and the line split below works on `pending` itself.
         try pending.ensureUnusedCapacity(gpa, stream_read_chunk);
-        const n = reader.readSliceShort(pending.unusedCapacitySlice()) catch |err| {
+        const n = withStallTimeout(io, opts.stall_timeout_s, Io.Reader.readSliceShort, .{ reader, pending.unusedCapacitySlice() }) catch |err| {
             net.note(io, arena, "microagent: reading the completion stream from {s} failed after {d} byte(s) of content and {d} tool call(s): {s}\n", .{ shown_url, result.content.items.len, calls.items.len, @errorName(err) });
             return err;
         };
@@ -3414,8 +3535,8 @@ fn streamChatOnce(
             // dropped with the rest of the tail: a response that arrived whole
             // is not a truncated one, and reading it as one costs the run the
             // turn and a retry of everything up to it.
-            if (scanned < pending.items.len and
-                try applyStreamLine(&frame_arena_state, gpa, pending.items[scanned..], &result, &calls, &out_buf, &unparsable)) done = true;
+            if (pending.items.len != 0 and
+                try applyStreamLine(&frame_arena_state, gpa, pending.items, &result, &calls, &out_buf, &unparsable)) done = true;
             break;
         }
         pending.items.len += n;
@@ -3489,11 +3610,9 @@ fn streamChatOnce(
     // up on is not one the loop asks about again: the request is not a
     // resumption, and a second one is a second billable completion.
     if (result.stream_error.len != 0) {
-        // A failure with nothing behind it is the one case the turn is asked
-        // for again: the provider is saying it did not generate anything, so
-        // there is no answer on stdout to duplicate and no half-assembled call
-        // to lose. `streamChat` is what takes that answer and asks.
-        if (result.content.items.len == 0 and calls.items.len == 0) {
+        // Only an empty failure without reported usage can be retried. Usage
+        // can report billable generation even when no visible text arrived.
+        if (result.content.items.len == 0 and calls.items.len == 0 and result.total_tokens == 0 and result.reasoning_tokens == 0 and unparsable == 0) {
             net.note(io, arena, "microagent: the provider reported a failure before any content from {s}: {s}\n", .{
                 shown_url, tool_mod.terminalSafe(arena, result.stream_error),
             });
@@ -3547,6 +3666,7 @@ fn streamChatOnce(
     // direction, where a call the model asked for is not dispatched and the
     // assistant message that goes back names fewer calls than the stream did.
     const dropped = stream_mod.keepRunnableCalls(gpa, &result.calls);
+    result.unusable_calls = dropped.unusable;
     if (stream_mod.droppedCallNotice(arena, shown_url, dropped, result.over_cap)) |notice| net.note(io, arena, "{s}\n", .{notice});
     if (dropped.duplicate > 0) net.note(io, arena, "microagent: the completion stream from {s} carried {d} tool call(s) whose id this response had already delivered; they are not dispatched a second time\n", .{ shown_url, dropped.duplicate });
     return result;
@@ -3811,7 +3931,7 @@ fn finishTurn(
         const result_bytes = carriedToolResult(try tool_mod.toolResult(arena, output), &carried, &capped);
         if (capped and !capped_said) {
             capped_said = true;
-            net.note(io, arena, "microagent: this turn's tool results reached the {d} byte ceiling ({d} carried so far); every later result in the same turn is a marker, the calls themselves still ran, and the model is told which\n", .{ max_turn_tool_output, carried });
+            net.note(io, arena, "microagent: this turn's tool results reached the {d} byte ceiling ({d} carried so far); results that do not fit the remaining room are markers, the calls themselves still ran, and the model is told which\n", .{ max_turn_tool_output, carried });
         }
         var tool_msg = chat_mod.JsonBuf.initCapacity(arena, @min(tool_result_message_bytes, result_bytes.len + tool_result_message_scaffolding_bytes));
         try tool_msg.writer().writeAll(",{\"role\":\"tool\",\"tool_call_id\":");
@@ -3825,7 +3945,7 @@ fn finishTurn(
 }
 
 /// What one call's result is carried into the conversation as: the result
-/// itself while the turn has room for it, and `turn_output_capped_marker` once
+/// itself when the turn has room for it, and `turn_output_capped_marker` when
 /// it does not. A result that does not fit whole is not carried partly: half a
 /// file read is not evidence of anything, and the marker says the output is
 /// gone where a truncated one would read as the whole of it.
@@ -6018,6 +6138,9 @@ test "a toolless response that is not an answer does not finish the run" {
     try answered.content.appendSlice(std.testing.allocator, "done");
     defer answered.deinit(std.testing.allocator);
     try std.testing.expect(incompleteAnswer(arena, &answered, default_max_tokens) == null);
+    answered.dropped = true;
+    try std.testing.expect(std.mem.indexOf(u8, incompleteAnswer(arena, &answered, default_max_tokens).?, "byte ceiling") != null);
+    answered.dropped = false;
 
     // The provider stopped generating: no answer whatever it left behind.
     var blocked: chat_mod.ChatResult = .{ .finish_reason = try arena.dupe(u8, "content_filter") };

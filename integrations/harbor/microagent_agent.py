@@ -71,7 +71,7 @@ DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 # The turn ceiling, above the binary's own 100. Spelled once because setup
 # checks it and run passes it, and a default one of the two no longer knows
 # about is a run that is checked for one ceiling and given another.
-DEFAULT_MAX_TURNS = "150"
+DEFAULT_MAX_TURNS = "1200"
 # Keep the agent's own budget under harbor's per-task agent timeout, so
 # microagent stops deliberately instead of being killed mid-turn.
 DEFAULT_BUDGET_SECONDS = "600"
