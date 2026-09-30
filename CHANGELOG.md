@@ -16,6 +16,8 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-30
+
 ### Added
 
 - A fuzz harness for the request body a turn assembles. Every member of the
@@ -2426,7 +2428,8 @@ First release.
   `aarch64-macos` with a checksum sidecar each, and refuses a tag that does not name the version in
   `build.zig.zon`.
 
-[Unreleased]: https://github.com/maci0/microagent/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/maci0/microagent/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/maci0/microagent/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/maci0/microagent/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/maci0/microagent/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/maci0/microagent/compare/v0.4.0...v0.5.0
