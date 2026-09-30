@@ -78,7 +78,7 @@ const http_transfer_bytes: usize = 4 * 1024;
 /// JWT; past this it is not a value this run sends on every request.
 const max_session_id_bytes: usize = 512;
 /// The longest server or tool name this run spells into a tool name. The
-/// provider sees the whole of it, and the model types it back.
+/// complete prefixed name must also fit this limit at the provider.
 const max_name_bytes: usize = 64;
 /// The longest server description kept. A description is what the model picks
 /// a tool by, and every later turn pays for it.
@@ -1344,6 +1344,48 @@ fn indexOfToolName(table: []const Tool, name: []const u8) ?usize {
     return null;
 }
 
+// Parallel handshakes share the caller's run allocator, which may be an
+// ArenaAllocator. Lock its operations, not the network round trips. This
+// adapter lives until every handshake joins; retained servers then use the
+// original allocator on the serial tool-call path.
+const HandshakeAllocator = struct {
+    io: Io,
+    inner: std.mem.Allocator,
+    mutex: Io.Mutex = .init,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.inner.rawAlloc(len, alignment, ret_addr);
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, len: usize, ret_addr: usize) bool {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.inner.rawResize(memory, alignment, len, ret_addr);
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.inner.rawRemap(memory, alignment, len, ret_addr);
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        self.inner.rawFree(memory, alignment, ret_addr);
+    }
+};
+
 /// Connects to every server the config declared, in the order the tables
 /// appeared. An entry that cannot run, or that fails its handshake, is said on
 /// stderr and skipped, because a server the operator wrote down and this run
@@ -1351,12 +1393,14 @@ fn indexOfToolName(table: []const Tool, name: []const u8) ?usize {
 /// through `client`, the run's own, which already trusts the CA bundle.
 pub fn connect(
     io: Io,
-    arena: std.mem.Allocator,
+    run_arena: std.mem.Allocator,
     environ_map: *const std.process.Environ.Map,
     client: *std.http.Client,
     entries: []const Entry,
     client_version: []const u8,
 ) Servers {
+    var locked: HandshakeAllocator = .{ .io = io, .inner = run_arena };
+    const arena = locked.allocator();
     // Every local server is started before any of them is asked to initialize.
     // What a handshake mostly waits for is the server's own boot -- `npx`
     // resolving a package, a node or python interpreter coming up -- and that
@@ -1405,10 +1449,13 @@ pub fn connect(
     }
     // A cancelation here ends the tasks, and a task that did not finish left
     // its slot false, so its server is skipped below.
-    remote.await(io) catch {};
+    remote.await(io) catch remote.cancel(io);
 
     var connected: std.ArrayList(Server) = .empty;
     for (spawned.items, ready) |*server, ok| {
+        // The temporary adapter cannot outlive connect(). All remote tasks
+        // are joined now, and later calls dispatch serially.
+        server.run_arena = run_arena;
         if (!ok) {
             // A handshake that gave up before it could record why leaves the
             // field empty, and a line reading "server X: ; it is skipped"
@@ -1434,6 +1481,83 @@ pub fn connect(
 /// `handshake`, with the answer stored where a task can leave it.
 fn handshakeInto(io: Io, arena: std.mem.Allocator, server: *Server, client_version: []const u8, ok: *bool) void {
     ok.* = handshake(io, arena, server, client_version);
+}
+
+test "concurrent handshakes allocate distinct buffers from a shared run arena" {
+    const io = std.testing.io;
+    // Pause backing allocations to expose simultaneous arena growth even on
+    // a host where each worker could otherwise finish in one scheduler slice.
+    const Backing = struct {
+        io: Io,
+        active: std.atomic.Value(u32) = .init(0),
+        overlapped: std.atomic.Value(bool) = .init(false),
+        fn allocator(self: *@This()) std.mem.Allocator {
+            return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = std.mem.Allocator.noResize, .remap = std.mem.Allocator.noRemap, .free = free } };
+        }
+        fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (self.active.fetchAdd(1, .acq_rel) != 0) self.overlapped.store(true, .release);
+            defer _ = self.active.fetchSub(1, .acq_rel);
+            net.durationMs(1).sleep(self.io) catch {};
+            return std.testing.allocator.rawAlloc(len, alignment, ret_addr);
+        }
+        fn free(_: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+            std.testing.allocator.rawFree(memory, alignment, ret_addr);
+        }
+    };
+    var backing: Backing = .{ .io = io };
+    var state = std.heap.ArenaAllocator.init(backing.allocator());
+    defer state.deinit();
+    var locked: HandshakeAllocator = .{ .io = io, .inner = state.allocator() };
+    var buffers: [4][128][]u8 = undefined;
+    var gate: Io.Event = .unset;
+    const Worker = struct {
+        fn fill(io_: Io, gate_: *Io.Event, allocator: std.mem.Allocator, output: *[128][]u8, marker: u8) void {
+            gate_.wait(io_) catch return;
+            for (output) |*slot| {
+                slot.* = allocator.alloc(u8, 8192) catch @panic("test allocation failed");
+                @memset(slot.*, marker);
+            }
+        }
+    };
+    var tasks: Io.Group = .init;
+    defer tasks.cancel(io);
+    for (&buffers, 0..) |*output, index|
+        try tasks.concurrent(io, Worker.fill, .{ io, &gate, locked.allocator(), output, @as(u8, @intCast(index + 1)) });
+    gate.set(io);
+    try tasks.await(io);
+    try std.testing.expect(!backing.overlapped.load(.acquire));
+    for (buffers, 0..) |output, index| {
+        for (output) |bytes|
+            try std.testing.expect(std.mem.allEqual(u8, bytes, @intCast(index + 1)));
+    }
+}
+
+test "MCP commands and arguments refuse embedded NUL before spawning" {
+    const io = std.testing.io;
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = buf[0..try tmp.dir.realPath(io, &buf)];
+    var env: std.process.Environ.Map = .init(arena);
+    var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    defer client.deinit();
+    for ([_]bool{ true, false }) |bad_command| {
+        const name = if (bad_command) "command" else "argument";
+        const marker = try std.fs.path.join(arena, &.{ root, name });
+        const arg = if (bad_command) marker else try std.mem.concat(arena, u8, &.{ marker, "\x00ignored" });
+        var servers = connect(io, arena, &env, &client, &.{.{
+            .name = name,
+            .command = if (bad_command) "/usr/bin/touch\x00ignored" else "/usr/bin/touch",
+            .args = &.{arg},
+        }}, "test");
+        defer servers.shutdown(io);
+        try std.testing.expectEqual(@as(usize, 0), servers.items.len);
+        try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, name, .{}));
+    }
 }
 
 /// Records a remote server. Nothing is sent yet: the handshake runs later,
@@ -1504,7 +1628,7 @@ fn openRemote(
     // not ordinary, so it is named rather than read as the same thing.
     if (entry.api_key.len == 0) {
         _ = fillPresetTools(arena, &server, client_version) catch |err| blk: {
-            net.note(io, arena, "microagent: MCP server {s}: its tools could not be prepared ({s}); it is connected, and the handshake is made before its first use\n", .{
+            net.note(io, arena, "microagent: MCP server {s}: its tools could not be prepared ({s}); it will use a server handshake instead\n", .{
                 shown, @errorName(err),
             });
             break :blk false;
@@ -1526,6 +1650,12 @@ fn spawnOne(
     out: *std.ArrayList(Server),
 ) void {
     const shown = chat.safeTextAll(arena, entry.name);
+    if (std.mem.indexOfScalar(u8, entry.command, 0) != null)
+        return skipped(io, arena, shown, "its command contains a NUL byte", error.InvalidArguments);
+    for (entry.args) |arg| {
+        if (std.mem.indexOfScalar(u8, arg, 0) != null)
+            return skipped(io, arena, shown, "an argument contains a NUL byte", error.InvalidArguments);
+    }
     var argv: std.ArrayList([]const u8) = .empty;
     argv.append(arena, entry.command) catch |err| return skipped(io, arena, shown, "its command line could not be built", err);
     argv.appendSlice(arena, entry.args) catch |err| return skipped(io, arena, shown, "its command line could not be built", err);

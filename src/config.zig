@@ -887,7 +887,7 @@ fn completedValue(arena: std.mem.Allocator, lines: *Lines, first: []const u8) ?[
     joined.appendSlice(arena, first) catch return null;
     while (true) {
         const next = std.mem.trim(u8, lines.peek() orelse return null, " \t\r");
-        if (next.len == 0 or next[0] == '[') return null;
+        if (next.len != 0 and next[0] == '[') return null;
         _ = lines.next();
         joined.append(arena, '\n') catch return null;
         joined.appendSlice(arena, next) catch return null;
@@ -1476,6 +1476,7 @@ test "a list or a table that runs over several lines is read whole" {
     const denied = parse(arena,
         \\deny_commands = [
         \\  "sudo",
+        \\
         \\  "su",   # and the rest of the list
         \\  "shutdown",
         \\]
@@ -1850,11 +1851,11 @@ test "the shipped config template applies" {
         return error.TestUnexpectedResult;
     }
 
-    // Every example in the template is a comment, so a user who copies the
-    // file gets the stock prompt and nothing that spawns a process, reads a
-    // directory they did not write, denies a command they did not name, or
-    // offers a query to a third party's search index.
-    try std.testing.expectEqualStrings("", config.system_prompt_extra);
+    // Apart from the reply-style addendum, every example in the template is a
+    // comment, so a user who copies the file gets nothing that spawns a
+    // process, reads a directory they did not write, denies a command they did
+    // not name, or offers a query to a third party's search index.
+    try std.testing.expect(std.mem.startsWith(u8, config.system_prompt_extra, "Maximum compression."));
     try std.testing.expect(config.agents_files == null);
     try std.testing.expect(config.skills == null);
     try std.testing.expectEqual(@as(usize, 0), config.deny_commands.len);

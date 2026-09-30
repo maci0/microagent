@@ -16,6 +16,42 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-01
+
+### Added
+
+- `--repl` reads one prompt per line with conversation history, per-prompt ceilings,
+  cumulative usage and one session log. `/quit` or EOF exits.
+
+### Changed
+
+- `--max-turns` now defaults to 1000 (was 100); the Harbor adapter default rises to 1200. Pass
+  `--max-turns 100` to keep the old ceiling.
+- Repository instructions (`AGENTS.md`) are followed up to 128 KB (was 16 KB).
+- The config template (written to `~/.microagent/config.toml` on first run) sets `system_prompt_extra` to
+  the old `caveman = "ultra"` and `ponytail = "full"` texts. `system_prompt_extra = ""` restores the stock prompt.
+
+### Fixed
+
+- Concurrent MCP handshakes synchronize the shared run allocator and join cancelled tasks
+  before consuming server state, preventing allocator corruption and reads during shutdown.
+- MCP commands and arguments containing NUL bytes are rejected before spawning, preventing
+  the OS from silently executing truncated values.
+- Blank lines inside multiline config arrays preserve the configured list, including denied commands.
+- Chat budgets cancel blocked connection setup, TLS, request writes, response headers and reads.
+  Cancellable I/O deadlines enforce `--stall-timeout` without socket timeout options that
+  caused Zig 0.16 Debug builds to panic. Stream failures reporting usage are not retried.
+- Citation validation checks references without symbols, both range endpoints and missing
+  input; repair mode fails when references remain unrepairable and no longer emits broken-pipe errors.
+- A text response truncated by the response byte ceiling exits incomplete; tool-output
+  diagnostics correctly describe which results fit the remaining per-turn allowance.
+- A completion ending with `[DONE]` without a newline is accepted instead of reported truncated.
+- Responses containing only rejected tool calls request valid replacement calls within the
+  run's ceilings, instead of reporting success with the requested work missing.
+- Interactive prompts release their temporary allocations and diagnose oversized input.
+- The usage reference and man page document interactive invocation; CLI checks exercise
+  history, ceilings, counters, logging, input handling and exit statuses against a local provider.
+
 ## [0.9.0] - 2026-09-30
 
 ### Changed
@@ -2459,7 +2495,8 @@ First release.
   `aarch64-macos` with a checksum sidecar each, and refuses a tag that does not name the version in
   `build.zig.zon`.
 
-[Unreleased]: https://github.com/maci0/microagent/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/maci0/microagent/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/maci0/microagent/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/maci0/microagent/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/maci0/microagent/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/maci0/microagent/compare/v0.6.0...v0.7.0

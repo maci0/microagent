@@ -209,6 +209,9 @@ pub const ChatResult = struct {
     /// ran fewer calls than the model asked for with nothing said about it is a
     /// turn whose work is smaller than the work it asked for.
     over_cap: usize = 0,
+    /// Calls removed for missing ids/names or malformed arguments. The loop
+    /// must recover the missing work even when no runnable call remains.
+    unusable_calls: usize = 0,
     /// The index `over_cap` last counted, so a call streamed as one frame per
     /// argument fragment is counted once rather than once per fragment. The
     /// fragments of a call arrive together, and a provider that interleaved two

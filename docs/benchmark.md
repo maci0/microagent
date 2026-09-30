@@ -54,7 +54,7 @@ moves timings and barely moves resident memory: the five runs behind each `--ver
 
 | harness | peak resident |
 | --- | --- |
-| **microagent, this tree (ReleaseSmall)** | **0.6 MB** |
+| **microagent, measured 2026-09-29 (ReleaseSmall)** | **0.6 MB** |
 | grok 1.0.41 | 24.7 MB |
 | codex-cli 0.158.0 | 27.7 MB |
 | claude 2.1.284 | 36.7 MB |
@@ -86,6 +86,12 @@ in it. The harness is under 1% of a turn either way, so
 [docs/performance.md](performance.md) measures its CPU on `ReleaseFast` and this file measures its
 memory on what ships. The last column is dominated by the model's own text, which a run holds once
 as the response and once as the output buffer.
+
+After the cancellable provider deadlines were added, a 2026-10-01 check of `ReleaseSmall`
+measured medians of 612 kB at `--version`, 892 kB for one frame, 916 kB for 5,000 frames and
+1,604 kB for 50,000 frames. Each is three runs through the same ptrace reader and loopback stub;
+the long-stream samples ranged from 1,348 to 2,116 kB. The older build-mode comparison above
+remains the 2026-09-29 measurement; the README uses the updated `ReleaseSmall` medians.
 
 ### Binary size and source
 

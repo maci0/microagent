@@ -211,7 +211,7 @@ for harness in $harnesses; do
 		PYTHONPATH="$root/integrations/harbor" \
 			MICROAGENT_AGENT_TIMEOUT_SEC=$agent_timeout \
 			MICROAGENT_BUDGET_SECONDS=$budget \
-			MICROAGENT_MAX_TURNS=150 \
+			MICROAGENT_MAX_TURNS=1200 \
 			$harbor run -d "$dataset" $include "$@" \
 			-a microagent_agent:Microagent -m "$model_micro" \
 			--jobs-dir "$jobs_dir" -n "$jobs" --job-name "$job" 2>&1 | tail -6

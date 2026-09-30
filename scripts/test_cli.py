@@ -1,0 +1,244 @@
+"""Check the built CLI against a loopback provider: python3 scripts/test_cli.py BINARY."""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from socketserver import BaseRequestHandler, ThreadingTCPServer
+from threading import Thread
+from typing import Any, ClassVar
+
+
+class Provider(BaseHTTPRequestHandler):
+    seen: ClassVar[list[dict[str, Any]]] = []
+    empty = False
+    trailing_newline = True
+    bad_call = False
+    hang = False
+    hang_body = False
+    billed_error = False
+    invalid_usage = False
+
+    def do_POST(self) -> None:
+        Provider.seen.append(json.loads(self.rfile.read(int(self.headers["content-length"]))))
+        if Provider.hang:
+            if Provider.hang_body:
+                self.send_response(200)
+                self.send_header("content-type", "text/event-stream")
+                self.send_header("content-length", "100")
+                self.end_headers()
+            self.rfile.read(1)  # Wait for the client to enforce its deadline and close.
+            return
+        frame = {
+            "choices": [{"delta": {"content": "" if Provider.empty else "answer"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 1, "total_tokens": 11},
+        }
+        if Provider.bad_call:
+            Provider.bad_call = False
+            frame["choices"] = [
+                {
+                    "delta": {
+                        "content": "working",
+                        "tool_calls": [
+                            {"index": 0, "id": "bad", "function": {"name": "read", "arguments": '{"path":'}}
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ]
+        ending = "\n\n" if Provider.trailing_newline else ""
+        body = ("data: " + json.dumps(frame) + "\n\ndata: [DONE]" + ending).encode()
+        if Provider.billed_error:
+            usage = (
+                '{"total_tokens":"unknown"}'
+                if Provider.invalid_usage
+                else '{"prompt_tokens":10,"completion_tokens":1,"total_tokens":11}'
+            )
+            body = (
+                'data: {"usage":' + usage + '}\n\ndata: {"error":{"message":"generation failed"}}\n\ndata: [DONE]\n\n'
+            ).encode()
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    # because: BaseHTTPRequestHandler declares this parameter name
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+        """Keep the check's output free of access logs."""
+
+
+def expect(condition: object, detail: object) -> None:
+    if not condition:
+        raise AssertionError(detail)
+
+
+def invoke(binary: Path, root: Path, url: str, args: list[str], prompts: str) -> subprocess.CompletedProcess[str]:
+    Provider.seen.clear()
+    # A wholly synthetic environment keeps user credentials and settings out.
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "MICROAGENT_API_KEY": "test",
+        "MICROAGENT_BASE_URL": url,
+        "MICROAGENT_CONFIG": "",
+        "MICROAGENT_SKILLS": "",
+        "MICROAGENT_SESSION_DIR": str(root / "sessions"),
+    }
+    # because: the explicitly supplied local binary is the program under test
+    result = subprocess.run(  # noqa: S603
+        [str(binary), *args],
+        input=prompts,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=env,
+        cwd=root,
+        timeout=10,
+        check=False,
+    )
+    expect("error(gpa)" not in result.stderr, result.stderr)
+    return result
+
+
+def check_refs(root: Path) -> None:
+    fixture = root / "refs"
+    (fixture / "scripts").mkdir(parents=True)
+    (fixture / "src").mkdir()
+    script = fixture / "scripts" / "check-refs.sh"
+    shutil.copyfile(Path(__file__).with_name("check-refs.sh"), script)
+    (fixture / "src" / "example.zig").write_text("pub fn first() void {}\npub fn second() void {}\n", encoding="utf-8")
+    doc = fixture / "references.md"
+    for text, status in (
+        ("`first`, `src/example.zig:1`", 0),
+        ("at `src/example.zig:2`", 0),
+        ("`src/example.zig:1-2`", 0),
+        ("at `src/example.zig:99`", 1),
+        ("`src/example.zig:1-99`", 1),
+        ("`src/example.zig:2-1`", 1),
+        ("`src/example.zig:0`", 1),
+        ("`src/example.zig:" + "9" * 50 + "`", 1),
+        ("`first`, `src/example.zig:1-99`", 1),
+        ("`second`, `src/example.zig:1`", 1),
+    ):
+        doc.write_text(text + "\n", encoding="utf-8")
+        # because: the repository's own validation script, copied into an isolated fixture
+        result = subprocess.run(["/bin/sh", str(script), str(doc)], capture_output=True, text=True, check=False)  # noqa: S603
+        expect(result.returncode == status, (text, result.stderr))
+    # A fix must report references it cannot repair, and missing input cannot pass.
+    for text, status in (("`second`, `src/example.zig:1`", 0), ("at `src/example.zig:99`", 1)):
+        doc.write_text(text + "\n", encoding="utf-8")
+        # because: the same local script with its documented repair switch
+        result = subprocess.run(["/bin/sh", str(script), "-f", str(doc)], capture_output=True, text=True, check=False)  # noqa: S603
+        expect(result.returncode == status, result.stderr)
+        if status == 0:
+            expect(doc.read_text(encoding="utf-8") == "`second`, `src/example.zig:2`\n", result.stderr)
+    doc.unlink()
+    # because: a missing file is deliberately passed to the validator
+    result = subprocess.run(["/bin/sh", str(script), str(doc)], capture_output=True, text=True, check=False)  # noqa: S603
+    expect(result.returncode != 0, result.stderr)
+
+
+def check(binary: Path, root: Path, url: str) -> None:
+    result = invoke(
+        binary,
+        root,
+        url,
+        ["--repl", "--max-turns", "1", "--max-spend-tokens", "1"],
+        " \r\nfirst\r\nsecond\n/quit\nignored\n",
+    )
+    expect(result.returncode == 0, result.stderr)
+    expect(len(Provider.seen) == 2, Provider.seen)
+    messages = Provider.seen[-1]["messages"]
+    expect([m["role"] for m in messages] == ["system", "user", "assistant", "user"], messages)
+    expect([m["content"] for m in messages[1:]] == ["first", "answer", "second"], messages)
+    usage = [
+        json.loads(line)["usage"]["total_tokens"]
+        for line in result.stdout.splitlines()
+        if line.startswith('{"type":"usage"')
+    ]
+    expect(usage == [11, 22], result.stdout)
+    logs = list((root / "sessions").glob("*.jsonl"))
+    expect(len(logs) == 1 and len(logs[0].read_text(encoding="utf-8").splitlines()) == 2, logs)
+
+    result = invoke(binary, root, url, ["--repl", "initial"], "last")
+    expect(result.returncode == 0 and len(Provider.seen) == 2, result.stderr)
+    expect(Provider.seen[-1]["messages"][-1]["content"] == "last", Provider.seen)
+
+    result = invoke(binary, root, url, ["--repl"], "/quit\n")
+    expect(result.returncode == 0 and not Provider.seen and not result.stdout, result.stderr)
+    result = invoke(binary, root, url, ["--repl"], "x" * (64 * 1024) + "\n")
+    expect(result.returncode == 2 and "REPL prompt" in result.stderr and not Provider.seen, result.stderr)
+
+    result = invoke(binary, root, url, ["one task"], "ignored\n")
+    expect(result.returncode == 0 and len(Provider.seen) == 1 and "> " not in result.stderr, result.stderr)
+    Provider.trailing_newline = False
+    result = invoke(binary, root, url, ["unterminated DONE"], "")
+    expect(result.returncode == 0, result.stderr)
+    Provider.trailing_newline = True
+    Provider.bad_call = True
+    result = invoke(binary, root, url, ["recover invalid tool call"], "")
+    expect(result.returncode == 0 and len(Provider.seen) == 2, result.stderr)
+    expect(Provider.seen[-1]["messages"][-1]["role"] == "user", Provider.seen)
+    Provider.empty = True
+    result = invoke(binary, root, url, ["--repl"], "first\nsecond\n")
+    expect(result.returncode == 3 and len(Provider.seen) == 1, result.stderr)
+    Provider.billed_error = True
+    for invalid in (False, True):
+        Provider.invalid_usage = invalid
+        result = invoke(binary, root, url, ["billed stream failure"], "")
+        expect(result.returncode == 1 and len(Provider.seen) == 1 and "not retried" in result.stderr, result.stderr)
+    Provider.billed_error = False
+    Provider.invalid_usage = False
+
+
+class SilentTLS(BaseRequestHandler):
+    def handle(self) -> None:
+        # Consume ClientHello but never answer it. Exit when cancellation closes the socket.
+        while self.request.recv(4096):
+            pass
+
+
+def check_timeouts(binary: Path, root: Path, url: str) -> None:
+    Provider.hang = True
+    result = invoke(binary, root, url, ["--budget", "1", "--stall-timeout", "120", "silent response"], "")
+    expect(result.returncode == 3 and len(Provider.seen) == 1 and "budget" in result.stderr, result.stderr)
+    result = invoke(binary, root, url, ["--stall-timeout", "1", "silent response without budget"], "")
+    expect(result.returncode == 1 and len(Provider.seen) == 1, result.stderr)
+    Provider.hang_body = True
+    result = invoke(binary, root, url, ["--stall-timeout", "1", "silent stream"], "")
+    expect(result.returncode == 1 and len(Provider.seen) == 1 and "Timeout" in result.stderr, result.stderr)
+    Provider.hang_body = False
+    Provider.hang = False
+    with ThreadingTCPServer(("127.0.0.1", 0), SilentTLS) as server:
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            tls_url = f"https://127.0.0.1:{server.server_address[1]}/v1"
+            result = invoke(binary, root, tls_url, ["--budget", "1", "TLS deadline"], "")
+            expect(result.returncode == 3 and "budget" in result.stderr, result.stderr)
+            result = invoke(binary, root, tls_url, ["--stall-timeout", "1", "TLS stall"], "")
+            expect(result.returncode == 1 and "Timeout" in result.stderr, result.stderr)
+        finally:
+            server.shutdown()
+            thread.join()
+
+
+if __name__ == "__main__":
+    binary = Path(sys.argv[1]).resolve(strict=True)
+    with tempfile.TemporaryDirectory() as temp, ThreadingHTTPServer(("127.0.0.1", 0), Provider) as server:
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            check_refs(Path(temp))
+            check(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
+            check_timeouts(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
+        finally:
+            server.shutdown()
+            thread.join()
+    print("CLI checks passed: REPL, ceilings, usage, sessions, input, deadlines, exit statuses and citations")
