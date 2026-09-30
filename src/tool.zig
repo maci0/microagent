@@ -315,7 +315,7 @@ pub fn retireChildGroup(pgid: std.posix.pid_t) void {
 }
 
 /// How many children are published, which is zero once every one is reaped.
-fn liveChildGroups() usize {
+pub fn liveChildGroups() usize {
     var n: usize = 0;
     for (&child_groups) |*slot| {
         if (slot.load(.monotonic) != 0) n += 1;

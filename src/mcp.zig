@@ -171,6 +171,11 @@ pub const Server = struct {
         /// frames between one read and the next, and dropping the second would
         /// desynchronize every request after it.
         pending: std.ArrayList(u8) = .empty,
+        /// Set once `reap` has stopped the child and handed back the buffer
+        /// above. A server is reaped by whichever comes first, the request that
+        /// found it gone or the run's shutdown, and both can name the same
+        /// server.
+        reaped: bool = false,
     };
 
     /// A streamable-HTTP endpoint: one POST per frame, the answer in the
@@ -195,17 +200,38 @@ pub const Server = struct {
         negotiated_version: ?[]const u8 = null,
     };
 
+    /// Stops the child this server leads and hands back what it held, once.
+    ///
+    /// Idempotent, and it has to be. `shutdown` reaps every server the run
+    /// connected, and a server that stopped answering is reaped the moment it
+    /// stopped: a long run holds a dead server's process group, its slot in the
+    /// interrupt table and a pipe nobody reads for every remaining turn, and
+    /// the child itself keeps running until the run ends. A second reap would
+    /// free `pending` twice, which a debug build traps on, and signal a pid the
+    /// operating system has already handed to something else. So the flag is
+    /// set first and the rest of the function reads what is left to do.
     fn reap(self: *Server, io: Io) void {
         const stdio = switch (self.transport) {
             .stdio => |*s| s,
             .http => return,
         };
+        if (stdio.reaped) return;
+        stdio.reaped = true;
         tool_mod.retireChildGroup(stdio.pgid);
         std.posix.kill(-stdio.pgid, .KILL) catch {};
         stdio.child.kill(io);
         // The buffer is this allocator's, not the arena's, so it is handed
         // back here rather than with the run.
         stdio.pending.deinit(pending_allocator);
+    }
+
+    /// A server that is not answering any more stops holding its child
+    /// process, its process-group slot and its read buffer. Called where a
+    /// server is marked `dead`, so a run of many turns is not what pays for
+    /// the process a dead server left behind.
+    fn retireIfDead(self: *Server, io: Io) void {
+        if (!self.dead) return;
+        self.reap(io);
     }
 
     /// One JSON-RPC frame without its terminator: a request when `id` is set,
@@ -330,6 +356,11 @@ pub const Server = struct {
             const line = readLine(&self.transport.stdio, io, scratch, deadline) catch |err| {
                 self.last_error = @errorName(err);
                 self.dead = true;
+                // A server that stopped answering is not asked again, and its
+                // child process is not left running for the turns that are.
+                // Only the stdio transport holds one: a remote server has no
+                // child to stop, and the flag it set is all that it has.
+                self.retireIfDead(io);
                 return err;
             };
             // Notifications and unrelated replies consume the same response
@@ -430,8 +461,12 @@ pub const Server = struct {
                 else => self.last_error = @errorName(err),
             }
             // A server that did not answer in time is not asked again, as a
-            // stdio one that went quiet is not.
-            if (err == error.Timeout) self.dead = true;
+            // stdio one that went quiet is not. Neither keeps its process
+            // group for the rest of the run once it is known to be gone.
+            if (err == error.Timeout) {
+                self.dead = true;
+                self.retireIfDead(io);
+            }
             return err;
         };
     }
@@ -3700,4 +3735,68 @@ fn fuzzBody(_: void, smith: *std.testing.Smith) !void {
         const answer = server.readAnswer(arena, &reader, is_sse, 1, &stopped_early) catch continue;
         if (answer == .object) _ = try resultText(arena, "fuzz", answer);
     }
+}
+
+// A stdio server that exits leaves a child process, a process-group slot in
+// the interrupt table and a read buffer behind it. Marking it dead stops the
+// next call from asking again, but the run can be long: a REPL, or a review
+// that spends three hundred turns. So the child is stopped where the server is
+// found gone, rather than at the end of a run that may be far off, and the
+// run's own shutdown is then a second reap of a server that is already stopped.
+// Both halves are here, because either one alone passes: without the release
+// the group is still published after the call, and without the second reap the
+// shutdown would free a buffer this call already freed.
+test "a stdio server that stopped answering gives its child back, and shutting down again is safe" {
+    const gpa = std.testing.allocator;
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const arena = state.allocator();
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // A server that answers the handshake and exits before the first call, so
+    // what the call finds is a pipe whose other end is gone rather than a
+    // server that is merely slow.
+    try tmp.dir.writeFile(io, .{ .sub_path = "quitter.sh", .data =
+        \\while IFS= read -r line; do
+        \\  case "$line" in
+        \\    *'"method":"initialize"'*)
+        \\      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"quitter","version":"1"}}}' ;;
+        \\    *'"method":"tools/list"'*)
+        \\      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"Echo text back","inputSchema":{"type":"object"}}]}}' ;;
+        \\  esac
+        \\done
+        \\exit 0
+    });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+    const script = try std.fs.path.join(arena, &.{ base, "quitter.sh" });
+
+    var env: std.process.Environ.Map = .init(arena);
+    const entries = [_]Entry{.{ .name = "quitter", .command = "/bin/sh", .args = &.{script} }};
+    var client: std.http.Client = .{ .allocator = gpa, .io = io };
+    defer client.deinit();
+    var servers = connect(io, arena, &env, &client, &entries, "test");
+    defer servers.shutdown(io);
+
+    try std.testing.expectEqual(@as(usize, 1), servers.items.len);
+    // The connected server holds one published process group: the one the
+    // interrupt handler has to be able to reach.
+    try std.testing.expectEqual(@as(usize, 1), tool_mod.liveChildGroups());
+
+    const resolved = servers.resolve("mcp__quitter__echo").?;
+    // The server is gone by the time the call asks, so the call says so and the
+    // answer is a sentence rather than a hang.
+    const said = try Servers.call(io, arena, resolved, "{\"text\":\"hi\"}", net.durationMs(10_000));
+    try std.testing.expect(std.mem.indexOf(u8, said, "did not answer") != null);
+    try std.testing.expect(servers.items[0].dead);
+
+    // The group is handed back by the call that found the server gone, not by
+    // the shutdown above: this is the whole point, and it is read before any
+    // later call could have released it.
+    try std.testing.expectEqual(@as(usize, 0), tool_mod.liveChildGroups());
+    // And the server is not asked again.
+    const again = try Servers.call(io, arena, resolved, "{\"text\":\"hi\"}", net.durationMs(10_000));
+    try std.testing.expect(std.mem.indexOf(u8, again, "no longer running") != null);
 }
