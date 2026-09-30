@@ -80,6 +80,9 @@ const max_session_id_bytes: usize = 512;
 /// The longest server or tool name this run spells into a tool name. The
 /// complete prefixed name must also fit this limit at the provider.
 const max_name_bytes: usize = 64;
+/// The separator between the server half and the tool half of an exposed name,
+/// so the bytes a name spends on the prefix and on the split.
+const exposed_name_separator_bytes: usize = 2;
 /// The longest server description kept. A description is what the model picks
 /// a tool by, and every later turn pays for it.
 const max_mcp_description_bytes: usize = 1024;
@@ -1221,17 +1224,27 @@ test "a preset with no key is offered without a handshake, and one with a key is
     try std.testing.expectEqual(@as(usize, 0), keyed.items[0].tools.len);
 }
 
-/// Fills a preset's tool table from the table above, so its tools can be
-/// offered without the run talking to it. True when the host is one the table
-/// knows, which is the four presets and nothing a config wrote: a `[[mcp]]` url
-/// is a server whose tools only its own `tools/list` can name.
+/// Whether the name a tool is offered under fits the provider's limit once
+/// `tool_prefix` and the separator are counted. The half-names are held to
+/// `max_name_bytes` on their own, and a name that fits that limit is not
+/// therefore one whose exposed form does: the prefix and the split are spent
+/// out of the same budget, and a server whose name is long enough leaves a tool
+/// the model cannot be shown.
 ///
-/// A preset with a key is not filled here. A key unlocks tools this binary has
-/// never seen -- exa's company and people search, deepwiki's private mode -- and
-/// a table that named only the public ones would hide them from the model until
-/// one of them was called, which it cannot do if it cannot see one.
+/// Spelled once so the check the builder below makes and the oracle the fuzz
+/// test checks against cannot disagree about where the boundary is: the two ask
+/// the same question, and a second copy of the arithmetic is a second answer to
+/// it the moment the prefix or the limit is edited.
+fn exposedNameFits(server_name: []const u8, tool_name: []const u8) bool {
+    return tool_prefix.len + server_name.len + exposed_name_separator_bytes + tool_name.len <= max_name_bytes;
+}
+
+/// The name a tool is offered to the model under: the prefix, the server, the
+/// split and the tool. An exposed name past the provider's limit is refused
+/// rather than sent, and the refusal names the tool so an operator can see
+/// which of a server's tools went unshown.
 fn exposedToolName(io: Io, arena: std.mem.Allocator, server_name: []const u8, tool_name: []const u8) ![]u8 {
-    if (tool_prefix.len + server_name.len + 2 + tool_name.len > max_name_bytes) {
+    if (!exposedNameFits(server_name, tool_name)) {
         net.note(io, arena, "microagent: MCP server {s}: tool {s} exceeds the {d}-byte provider name limit after prefixing; it is skipped\n", .{
             chat.safeTextAll(arena, server_name), chat.safeTextAll(arena, tool_name), max_name_bytes,
         });
@@ -1250,6 +1263,13 @@ test "MCP tool names include the server prefix in the provider name limit" {
     const tools = buildTools(io, arena, arena, &server, answer).?;
     try std.testing.expectEqual(@as(usize, 1), tools.len);
     try std.testing.expectEqual(@as(usize, 64), tools[0].exposed.len);
+    // The predicate and the format string are two halves of one answer: the
+    // limit is what the predicate measures and the name is what is sent, so a
+    // name the predicate accepted is held to being the length that was
+    // measured. 54 is the last tool that fits behind a three-byte server name.
+    try std.testing.expect(exposedNameFits("srv", "x" ** 54));
+    try std.testing.expect(!exposedNameFits("srv", "x" ** 55));
+    try std.testing.expectEqual(tools[0].exposed.len, tool_prefix.len + "srv".len + exposed_name_separator_bytes + 54);
     var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     defer client.deinit();
     var preset: Server = .{ .name = "s" ** 56, .run_arena = arena, .tools = &.{}, .transport = .{ .http = .{
@@ -1261,6 +1281,15 @@ test "MCP tool names include the server prefix in the provider name limit" {
     try std.testing.expectEqual(@as(usize, 0), preset.tools.len);
 }
 
+/// Fills a preset's tool table from the table above, so its tools can be
+/// offered without the run talking to it. True when the host is one the table
+/// knows, which is the four presets and nothing a config wrote: a `[[mcp]]` url
+/// is a server whose tools only its own `tools/list` can name.
+///
+/// A preset with a key is not filled here. A key unlocks tools this binary has
+/// never seen -- exa's company and people search, deepwiki's private mode -- and
+/// a table that named only the public ones would hide them from the model until
+/// one of them was called, which it cannot do if it cannot see one.
 fn fillPresetTools(io: Io, arena: std.mem.Allocator, server: *Server, client_version: []const u8) !bool {
     const http = switch (server.transport) {
         .http => |h| h,
@@ -1955,7 +1984,7 @@ fn fuzzTools(_: void, smith: *std.testing.Smith) !void {
                     };
                     const name = chat.str(entry.get("name")) orelse continue;
                     if (!validName(name)) continue;
-                    if (tool_prefix.len + server.name.len + 2 + name.len > max_name_bytes) continue;
+                    if (!exposedNameFits(server.name, name)) continue;
                     try offered_names.put(name, {});
                 }
             }
