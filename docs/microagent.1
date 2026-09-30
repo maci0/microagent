@@ -70,7 +70,8 @@ and the full reference in
 .TP
 .B \-\-repl
 Read one prompt per line and keep conversation history. An optional argument
-is the first prompt. Blank lines are skipped; /quit or EOF exits. Each line,
+is the first prompt. Blank lines are skipped; /quit, /exit or EOF exits, and
+/help repeats the session's commands. Each line,
 including its newline, must fit in 64 KiB. Turn, time and token spending
 ceilings reset for each prompt. Usage counters stay cumulative and responses
 share one session log. A failed or incomplete prompt ends the REPL with the

@@ -24,6 +24,8 @@ release, and `microagent update` moves you to it.
   made in that tree. Both assert on what survives the pass rather than on that
   it does not crash, so a name left in a blame line or a fence left able to
   close the block the builder wrote is a failed check on every `zig build test`.
+- `--repl` names its own commands on stderr before the first prompt: `/help` repeats them, and
+  `/exit` ends the session beside `/quit` and EOF.
 
 ### Changed
 

@@ -644,12 +644,33 @@ fn runMain(init: std.process.Init) !u8 {
 
 const max_repl_prompt_bytes = 64 * 1024;
 
+/// The one screen of REPL controls a user is given before the first prompt, and
+/// the same text `/help` repeats later.
+///
+/// `/quit` was the only command the session had and it was named nowhere a
+/// user could reach from inside the session: `--help` is a screen away, and a
+/// mistyped `/exit` or `/help` was sent to the provider as a task, so it cost a
+/// billed turn and, for `/help`, ran `bash` in the operator's repository before
+/// answering. Naming the commands at the prompt is the whole fix; the aliases
+/// are there so the two words a user actually types both stop the session.
+const repl_help =
+    "one prompt per line; /help lists these, /quit or /exit or EOF ends the session\n";
+
 fn replPrompt(io: Io, reader: *std.Io.Reader) !?[]const u8 {
+    var said = false;
     while (true) {
+        if (!said) {
+            said = true;
+            net.writeErr(io, repl_help);
+        }
         net.writeErr(io, "> ");
         const line = (try reader.takeDelimiter('\n')) orelse return null;
         const prompt = std.mem.trim(u8, line, " \t\r");
-        if (std.mem.eql(u8, prompt, "/quit")) return null;
+        if (std.mem.eql(u8, prompt, "/quit") or std.mem.eql(u8, prompt, "/exit")) return null;
+        if (std.mem.eql(u8, prompt, "/help")) {
+            net.writeErr(io, repl_help);
+            continue;
+        }
         if (prompt.len != 0) return prompt;
     }
 }
@@ -666,6 +687,18 @@ test "repl skips blank lines and exits on quit or EOF" {
     var buf: [512]u8 = undefined;
     try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &.{"--repl"}, &opts));
     try std.testing.expect(opts.repl);
+}
+
+test "repl answers /help and stops on /exit without spending a turn" {
+    // Both words a user types when they mean "end the session" stop it, and
+    // `/help` repeats the controls rather than going to the provider: a
+    // mistyped command that became a task billed a turn and, for `/help`,
+    // ran `bash` in the operator's repository first.
+    var quit_alias = std.Io.Reader.fixed("/exit\n");
+    try std.testing.expectEqual(@as(?[]const u8, null), try replPrompt(std.testing.io, &quit_alias));
+
+    var reader = std.Io.Reader.fixed("/help\nafter\n");
+    try std.testing.expectEqualStrings("after", (try replPrompt(std.testing.io, &reader)).?);
 }
 
 /// The repository's own instructions, read from `dir` when the run starts, or
@@ -963,8 +996,9 @@ const help_text =
     \\       microagent update [-c | --check]
     \\       microagent help [update]
     \\
-    \\      --repl             read one prompt per line; /quit or EOF exits
-    \\                         history is kept; ceilings reset per prompt
+    \\      --repl             read one prompt per line; /quit or /exit or EOF
+    \\                         exits, /help lists the session's commands.
+    \\                         History is kept; ceilings reset per prompt
     \\  -p, --print <prompt>   task to run (also accepted as a bare argument)
     \\  -m, --model <model>    model id (env MICROAGENT_MODEL, config key
     \\                         model, default
