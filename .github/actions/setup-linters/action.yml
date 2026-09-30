@@ -14,35 +14,30 @@ runs:
     # yamllint themselves, plus the two packages yamllint imports, so nothing
     # in the resolution is chosen at install time.
     #
-    # The install goes into a venv. The runner's python3 is marked externally
-    # managed (PEP 668), so pip refuses to install into it without
-    # --break-system-packages, which is the flag the runner image exists to not
-    # need. Its bin directory goes on PATH for the rest of the job, so the
-    # Makefile's bare `ruff` and `yamllint` are these.
+    # The install goes into a venv, since the runner's python3 is marked
+    # externally managed (PEP 668). Its bin directory goes on PATH for the rest
+    # of the job, so the Makefile's bare `ruff` and `yamllint` are these.
     #
-    # The wheels are cached, keyed on the file that names them, so a push that
-    # changes no lint pin installs nothing. The venv itself is not cached: it
-    # is built in a few seconds and caching it would put a second copy of the
-    # pinned wheels in the tree beside the ones this step already verified.
-    #
-    # `runner.arch` is in the key for the reason setup-zig's caches give: os
-    # alone is not a machine, and ruff and yamllint are installed from
-    # platform-specific wheels. A second architecture answering to the same
-    # runner.os would race the first to save the same entry, and the loser would
-    # either restore wheels it cannot install or re-download every one of them.
-    - name: restore the pip cache
-      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+    # uv's cache holds the wheels, keyed on the file that names them, so a
+    # push that changes no lint pin downloads nothing. The venv itself is not
+    # cached: it is built in a second and caching it would put a second copy of
+    # the pinned wheels in the tree beside the ones this step already verified.
+    # setup-uv's cache key already carries the runner's os and arch, which
+    # matters because ruff and yamllint are installed from platform-specific
+    # wheels.
+    - name: install uv
+      uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
       with:
-        path: ~/.cache/pip
-        key: pip-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lint-requirements.txt') }}
-        restore-keys: |
-          pip-${{ runner.os }}-${{ runner.arch }}-
+        enable-cache: true
+        cache-dependency-glob: lint-requirements.txt
+        # The default prune drops downloaded wheels, which are the whole point.
+        prune-cache: false
 
     - name: install the linters
       shell: bash
       run: |
         set -euo pipefail
-        python3 -m venv "$RUNNER_TEMP/lintenv"
+        uv venv --python 3.12 "$RUNNER_TEMP/lintenv"
         echo "$RUNNER_TEMP/lintenv/bin" >> "$GITHUB_PATH"
-        "$RUNNER_TEMP/lintenv/bin/pip" install --disable-pip-version-check \
+        uv pip install --python "$RUNNER_TEMP/lintenv/bin/python" \
           --require-hashes -r lint-requirements.txt

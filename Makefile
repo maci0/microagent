@@ -129,7 +129,7 @@ preflight:
 	    git) \
 	      echo "$$tool is not on PATH: every linter's file list is read from it with 'git ls-files', so a clone without it lints nothing" >&2 ;; \
 	    python3) \
-	      echo "$$tool is not on PATH: setup-linters builds the CI venv with it" >&2 ;; \
+	      echo "$$tool is not on PATH: check-sbom parses the SBOM with 'python3 -m json.tool'" >&2 ;; \
 	    *) \
 	      echo "$$tool is not on PATH" >&2 ;; \
 	  esac; \

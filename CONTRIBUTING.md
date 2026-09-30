@@ -38,7 +38,7 @@ make OPT=ReleaseFast     # the build the CPU counters are read on
 
 `make check` also needs `shellcheck`, `ruff`, `yamllint`, `git` and `python3` on
 `PATH` (git because every linter reads its file list with `git ls-files`;
-python3 because CI builds the linters' venv with it).
+python3 because `check-sbom` parses the SBOM with it).
 `make preflight` names each missing tool with the command that installs it, and
 `make check` runs it first, so a clean clone missing a linter says which one
 instead of stopping at `make: ruff: No such file or directory`. It also names
