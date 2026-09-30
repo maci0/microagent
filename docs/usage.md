@@ -525,7 +525,10 @@ env     = { LOG = "debug" }
 skipped and named on stderr by the server it declared, so a file with several tables says which one
 was dropped. Every local server is started before the first request and asked for its tool list, the remote ones are asked at the same time
 rather than one after another, and each tool is offered to
-the model as `mcp__<server>__<tool>` with the server's own `inputSchema`. A schema over 16 KB is
+the model as `mcp__<server>__<tool>` with the server's own `inputSchema`. The complete exposed
+name must fit the [Chat Completions API's 64-character limit](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create);
+oversized names are reported and skipped. Commands and arguments containing NUL bytes are
+rejected before spawning. A schema over 16 KB is
 replaced with an empty object schema that says so in its `description`, because a schema sits in the
 constant prefix of every request the run makes: a server that embeds a large `description`,
 `examples` or `enum` in one would write those megabytes into every turn of the run, for the whole

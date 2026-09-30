@@ -1230,7 +1230,38 @@ test "a preset with no key is offered without a handshake, and one with a key is
 /// never seen -- exa's company and people search, deepwiki's private mode -- and
 /// a table that named only the public ones would hide them from the model until
 /// one of them was called, which it cannot do if it cannot see one.
-fn fillPresetTools(arena: std.mem.Allocator, server: *Server, client_version: []const u8) !bool {
+fn exposedToolName(io: Io, arena: std.mem.Allocator, server_name: []const u8, tool_name: []const u8) ![]u8 {
+    if (tool_prefix.len + server_name.len + 2 + tool_name.len > max_name_bytes) {
+        net.note(io, arena, "microagent: MCP server {s}: tool {s} exceeds the {d}-byte provider name limit after prefixing; it is skipped\n", .{
+            chat.safeTextAll(arena, server_name), chat.safeTextAll(arena, tool_name), max_name_bytes,
+        });
+        return error.NameTooLong;
+    }
+    return std.fmt.allocPrint(arena, "{s}{s}__{s}", .{ tool_prefix, server_name, tool_name });
+}
+
+test "MCP tool names include the server prefix in the provider name limit" {
+    const io = std.testing.io;
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    const answer = try std.json.parseFromSliceLeaky(std.json.Value, arena, "{\"tools\":[{\"name\":\"" ++ "x" ** 54 ++ "\"},{\"name\":\"" ++ "x" ** 55 ++ "\"}]}", .{});
+    const server: Server = .{ .name = "srv", .run_arena = arena, .transport = .{ .stdio = undefined }, .tools = &.{} };
+    const tools = buildTools(io, arena, arena, &server, answer).?;
+    try std.testing.expectEqual(@as(usize, 1), tools.len);
+    try std.testing.expectEqual(@as(usize, 64), tools[0].exposed.len);
+    var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    defer client.deinit();
+    var preset: Server = .{ .name = "s" ** 56, .run_arena = arena, .tools = &.{}, .transport = .{ .http = .{
+        .client = &client,
+        .uri = try std.Uri.parse(Preset.context7.url()),
+        .timeout_ms = 1000,
+    } } };
+    try std.testing.expect(try fillPresetTools(io, arena, &preset, "test"));
+    try std.testing.expectEqual(@as(usize, 0), preset.tools.len);
+}
+
+fn fillPresetTools(io: Io, arena: std.mem.Allocator, server: *Server, client_version: []const u8) !bool {
     const http = switch (server.transport) {
         .http => |h| h,
         .stdio => return false,
@@ -1242,12 +1273,16 @@ fn fillPresetTools(arena: std.mem.Allocator, server: *Server, client_version: []
     var tools: std.ArrayList(Tool) = .empty;
     for (terse_tools) |entry| {
         if (entry.preset != preset) continue;
-        tools.append(arena, .{
+        const exposed = exposedToolName(io, arena, server.name, entry.tool) catch |err| switch (err) {
+            error.NameTooLong => continue,
+            else => return err,
+        };
+        try tools.append(arena, .{
             .name = entry.tool,
-            .exposed = try std.fmt.allocPrint(arena, "{s}{s}__{s}", .{ tool_prefix, server.name, entry.tool }),
+            .exposed = exposed,
             .description = try presetDescription(arena, entry),
             .schema = entry.schema,
-        }) catch return false;
+        });
     }
     server.tools = tools.items;
     server.lazy = true;
@@ -1627,7 +1662,7 @@ fn openRemote(
     // such a server is handshaken before its first use instead; an error is
     // not ordinary, so it is named rather than read as the same thing.
     if (entry.api_key.len == 0) {
-        _ = fillPresetTools(arena, &server, client_version) catch |err| blk: {
+        _ = fillPresetTools(io, arena, &server, client_version) catch |err| blk: {
             net.note(io, arena, "microagent: MCP server {s}: its tools could not be prepared ({s}); it will use a server handshake instead\n", .{
                 shown, @errorName(err),
             });
@@ -1808,7 +1843,10 @@ fn buildTools(io: Io, arena: std.mem.Allocator, scratch: std.mem.Allocator, serv
         // spells twice under different schemas.
         if (indexOfToolName(found.items, name) != null) continue;
         const kept_name = arena.dupe(u8, name) catch return null;
-        const exposed = std.fmt.allocPrint(arena, "{s}{s}__{s}", .{ tool_prefix, server.name, kept_name }) catch return null;
+        const exposed = exposedToolName(io, arena, server.name, kept_name) catch |err| switch (err) {
+            error.NameTooLong => continue,
+            else => return null,
+        };
         if (terseForServer(server, name)) |terse| {
             const terse_description = presetDescription(arena, terse) catch return null;
             found.append(arena, .{ .name = kept_name, .exposed = exposed, .description = terse_description, .schema = terse.schema }) catch return null;
@@ -1917,6 +1955,7 @@ fn fuzzTools(_: void, smith: *std.testing.Smith) !void {
                     };
                     const name = chat.str(entry.get("name")) orelse continue;
                     if (!validName(name)) continue;
+                    if (tool_prefix.len + server.name.len + 2 + name.len > max_name_bytes) continue;
                     try offered_names.put(name, {});
                 }
             }
@@ -1929,6 +1968,7 @@ fn fuzzTools(_: void, smith: *std.testing.Smith) !void {
         // built from it reaches the tool the server listed.
         try std.testing.expect(validName(tool.name));
         try std.testing.expect(tool.name.len <= max_name_bytes);
+        try std.testing.expect(tool.exposed.len <= max_name_bytes);
         var want: [512]u8 = undefined;
         const exposed = try std.fmt.bufPrint(&want, tool_prefix ++ "{s}__{s}", .{ server.name, tool.name });
         try std.testing.expectEqualStrings(exposed, tool.exposed);

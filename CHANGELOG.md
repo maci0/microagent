@@ -16,6 +16,11 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+### Fixed
+
+- MCP tool names are checked against the provider's 64-character limit including their
+  server prefix; oversized names are reported and omitted from remote and preset schemas.
+
 ## [0.10.1] - 2026-10-01
 
 ### Fixed
