@@ -338,32 +338,19 @@ output text.
 
 ## Prompt cache
 
-Providers cache the leading bytes of a request and charge the cached part at a fraction of the
-input price, so the order of the request is chosen for that: the constant fields come first
-(`model`, the whole tool schema, `stream`, `stream_options`, `max_tokens`, `reasoning`,
-`temperature`) and `messages` ends the body. Every turn is therefore the previous turn's body plus
-the messages it added, and a turn that only appends is a prefix hit.
+The client sends constant request fields and the tool schema before `messages`, and keeps
+conversation messages in their existing order when appending a turn. The built-in system prompt
+also stays ahead of the working-directory line and configuration additions. This keeps unchanged
+prompt content stable between turns and invocations with the same directory and configuration.
 
-The same holds between invocations, which is the case a loop of short runs lives on: the tool schema
-and the built-in system prompt are the same bytes on the next run in the same directory, so a second
-invocation's first request reuses them rather than re-reading them. That prefix is the tool schema
-(about 4.5 KB with the presets off, 11 KB with them on) plus a system prompt of about 4 KB, a few
-thousand tokens, past the 1024-token floor the large providers apply before caching at all (a few
-models want 2048 or 4096). Nothing provider-specific is sent: there is no `prompt_cache_key` and no
-`cache_control`, so this is the provider's own automatic prefix cache and not a hint from this
-client.
+Caching depends on the provider and model. JSON member order alone does not guarantee a cache hit:
+the provider decides how to turn the request into model tokens, whether to cache them, and how long
+to retain them. The client sends neither `prompt_cache_key` nor `cache_control`.
 
-What changes the prefix between invocations, and so forces a miss through the changed bytes:
-
-- the working directory, which the system prompt names (one line, behind the built-in prompt);
-- `system_prompt_extra`, the skills and the `agents_files` contents;
-- the tool set: `[tools.<name>]` tables, `[[mcp]]` entries and an MCP server's own tool list;
-- the model id.
-
-`cached_tokens` in the [usage line](#stdout) and in the [session log](#session-log) is what the
-provider answered with, so a cold cache is visible as a small number on the first turn of a run and
-as most of the prompt on the turns after it. Two invocations in the same directory with the same
-config send byte-identical prefixes.
+Changing the model, tool set, working directory, system prompt addendum, repository instructions,
+or skills can change the reusable prefix. Conversation compaction also changes earlier messages.
+`cached_tokens` in the [usage line](#stdout) and [session log](#session-log) reports the provider's
+cache usage when it supplies that field; a missing field is reported as zero.
 
 ## Config file
 

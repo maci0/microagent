@@ -368,9 +368,9 @@ pub fn resolveSymlinkTarget(
 /// How many links a path may hold before the answer is a cycle rather than a
 /// file. Two links naming each other, or a link into a directory of links, would
 /// otherwise spin here. The bound is this module's own and the pruning and the
-/// tests are written against it; the kernel refuses a chain at its own, longer,
-/// limit, so a path that reaches either is not one any of these platforms opens.
-const max_symlink_depth = 32;
+/// tests are written against it. Forty matches Linux's maximum; macOS may
+/// refuse a shorter chain. Credential checks also refuse resolution errors.
+const max_symlink_depth = 40;
 
 /// The file `path` names once every symlink on it is followed, including a link
 /// in a directory component rather than only one on the last name. This is the
@@ -427,7 +427,12 @@ pub fn resolveEveryComponent(
         if (std.mem.eql(u8, part, "..")) {
             // A `..` drops the component under it, and a link still ahead of the
             // path is resolved against what is left.
-            prefix = popComponent(prefix);
+            if (prefix.len == 0 or std.mem.eql(u8, std.fs.path.basename(prefix), "..")) {
+                const parents = if (prefix.len == 0) part else try joinOnto(under_test, prefix, part);
+                prefix = try copyInto(cur_buf, parents);
+            } else {
+                prefix = popComponent(prefix);
+            }
             rest = after;
             continue;
         }
@@ -465,8 +470,7 @@ pub fn resolveEveryComponent(
             prefix = try copyInto(cur_buf, target[0..1]);
             rest = try linkRest(link_store, &.{}, target[1..], after);
         } else {
-            rest = try linkRest(link_store, prefix, target, after);
-            prefix = &.{};
+            rest = try linkRest(link_store, &.{}, target, after);
         }
     }
 }
@@ -2186,15 +2190,16 @@ fn fuzzResolvePath(_: void, smith: *std.testing.Smith) !void {
         (start >= @intFromPtr(&next_buf) and start + answer.len <= @intFromPtr(&next_buf) + next_buf.len);
     try std.testing.expect(owned);
 
-    // What the walk is for: no component of the answer is a `.` or a `..`, so
-    // the name the caller goes on to check is the one the kernel opens. An
-    // answer that kept a `..` is a path the credential check read and the write
-    // did not.
+    // Only leading parents of a relative path remain: they cannot be
+    // consumed without changing the directory the kernel starts from.
     const rest = if (std.mem.startsWith(u8, answer, &.{path_sep})) answer[1..] else answer;
     var words = std.mem.splitScalar(u8, rest, path_sep);
+    var parents_allowed = !std.fs.path.isAbsolute(answer);
     while (words.next()) |word| {
         try std.testing.expect(!std.mem.eql(u8, word, "."));
-        try std.testing.expect(!std.mem.eql(u8, word, ".."));
+        if (std.mem.eql(u8, word, "..")) {
+            try std.testing.expect(parents_allowed);
+        } else if (word.len != 0) parents_allowed = false;
     }
 
     // The same text over the same links answers the same bytes: a walk that
@@ -2207,4 +2212,20 @@ fn fuzzResolvePath(_: void, smith: *std.testing.Smith) !void {
         else => |e| return e,
     };
     try std.testing.expectEqualStrings(answer, again);
+}
+
+test "relative parent components reach links in the parent directory" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "child");
+    try tmp.dir.createDirPath(io, ".secrets");
+    try tmp.dir.symLink(io, ".secrets", "alias", .{});
+    var child = try tmp.dir.openDir(io, "child", .{});
+    defer child.close(io);
+    var name_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var cur_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
+    var next_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings("../.secrets/token", try resolveEveryComponent(io, child, "../alias/token", &name_buf, &cur_buf, &next_buf));
+    try std.testing.expectEqualStrings("../../leaf", try resolveEveryComponent(io, child, "../../leaf", &name_buf, &cur_buf, &next_buf));
 }

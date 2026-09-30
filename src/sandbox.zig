@@ -149,27 +149,21 @@ fn trimTrailingSep(path: []const u8) []const u8 {
 /// taken relative to `writable_roots[0]`, which must be the working directory.
 pub fn isPathWritable(io: Io, arena: std.mem.Allocator, path: []const u8, writable_roots: []const []const u8) bool {
     if (writable_roots.len == 0) return true;
-    const trimmed = std.mem.trim(u8, path, " \t\r\n");
-    if (trimmed.len == 0) return false;
+    if (std.mem.trim(u8, path, " \t\r\n").len == 0) return false;
+    const absolute = if (std.fs.path.isAbsolute(path)) path else std.fmt.allocPrint(arena, "{s}/{s}", .{ writable_roots[0], path }) catch return false;
+    const abs_path = std.fs.path.resolve(arena, &.{absolute}) catch return false;
+    var name_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var cur_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
+    var next_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
+    // Follow links before consuming `..`, as the kernel does. Missing leaves
+    // remain in the result, including a dangling link's destination.
+    const real = net.resolveEveryComponent(io, std.Io.Dir.cwd(), absolute, &name_buf, &cur_buf, &next_buf) catch return false;
 
-    const abs_path = if (std.fs.path.isAbsolute(trimmed))
-        std.fs.path.resolve(arena, &.{trimmed}) catch return false
-    else
-        // `writable_roots[0]` is the canonical cwd `resolveWritableRoots` took at startup, and
-        // nothing changes directory, so it saves a realpath per call.
-        std.fs.path.resolve(arena, &.{ writable_roots[0], trimmed }) catch return false;
-
-    // If the file exists on disk (or is a symlink), also check the real path target. A file that is
-    // not there yet resolves only as far as the deepest ancestor of it that is, and that ancestor
-    // is what the check reads: a tree carrying `link -> /etc` and a call for `link/passwd` is a
-    // path that begins inside a root and leaves it, which the lexical check cannot see because it
-    // never looks at what a link points at. Both halves have to hold: the resolved path names
-    // where the bytes land, and the lexical one is the path the call named. A root reached
-    // through a link answers to both spellings, because `appendRoot` records both, so naming a
-    // granted directory the way the caller spells it is inside the root rather than a path that
-    // begins outside every one of them.
-    const real = resolvedPrefix(io, arena, abs_path) orelse return false;
+    // Require both the named location and the actual destination to be inside
+    // the roots, including destinations that do not exist yet.
     if (!withinAnyRoot(real, writable_roots)) return false;
+    const existing = resolvedPrefix(io, arena, real) orelse return false;
+    if (!withinAnyRoot(existing, writable_roots)) return false;
     return withinAnyRoot(abs_path, writable_roots);
 }
 
@@ -183,21 +177,19 @@ fn withinAnyRoot(path: []const u8, writable_roots: []const []const u8) bool {
     return false;
 }
 
-/// The resolved path of `abs_path` where it stops being one: the deepest ancestor that exists,
-/// with every symlink on the way to it followed. A path whose own name resolves is itself, and a
-/// path with no existing ancestor (every one of its components missing) is null, which the caller
-/// reads as unwritable rather than as permitted.
-///
-/// `abs_path` is the lexically resolved form, so the components walked back over carry no `.` or
-/// `..` and the tail that is dropped is exactly the part that does not exist yet. That tail cannot
-/// change which root the path is under, so answering for the prefix answers for the path.
-fn resolvedPrefix(io: Io, arena: std.mem.Allocator, abs_path: []const u8) ?[]const u8 {
-    var probe = abs_path;
-    while (std.Io.Dir.cwd().realPathFileAlloc(io, probe, arena)) |real| return real else |_| {}
-    const parent = std.fs.path.dirname(probe) orelse return null;
-    if (parent.len == 0 or std.mem.eql(u8, parent, probe)) return null;
-    probe = parent;
-    return resolvedPrefix(io, arena, probe);
+/// The deepest existing ancestor must itself be granted: a missing configured
+/// root does not grant its parent, where creating that root would write.
+fn resolvedPrefix(io: Io, arena: std.mem.Allocator, path: []const u8) ?[]const u8 {
+    var probe = path;
+    while (true) {
+        if (std.Io.Dir.cwd().realPathFileAlloc(io, probe, arena)) |real| return real else |err| switch (err) {
+            error.FileNotFound, error.NotDir => {},
+            else => return null,
+        }
+        const parent = std.fs.path.dirname(probe) orelse return null;
+        if (parent.len == 0 or std.mem.eql(u8, parent, probe)) return null;
+        probe = parent;
+    }
 }
 
 const linux = std.os.linux;
@@ -922,4 +914,27 @@ test "the filesystem root stays canonical and covers absolute descendants" {
     try std.testing.expect(isPathWritable(io, arena, "/etc/passwd", roots));
     try std.testing.expect(!isUnderRoot("relative", "/"));
     try std.testing.expect(!isUnderRoot("/etc", ""));
+}
+
+test "sandbox checks follow links before parent components and missing leaves" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", arena);
+    try tmp.dir.createDirPath(io, "allowed");
+    try tmp.dir.createDirPath(io, "outside/sub");
+    const allowed = try std.fs.path.join(arena, &.{ root, "allowed" });
+    const outside = try std.fs.path.join(arena, &.{ root, "outside" });
+    try tmp.dir.symLink(io, "../outside/sub", "allowed/link", .{});
+    try tmp.dir.symLink(io, "../outside/missing", "allowed/dangling", .{});
+    try tmp.dir.symLink(io, "../outside", "allowed/spaced ", .{});
+    const roots = &[_][]const u8{allowed};
+    try std.testing.expect(!isPathWritable(io, arena, try std.fs.path.join(arena, &.{ allowed, "link", "..", "new.txt" }), roots));
+    try std.testing.expect(!isPathWritable(io, arena, try std.fs.path.join(arena, &.{ allowed, "dangling", "new.txt" }), roots));
+    try std.testing.expect(!isPathWritable(io, arena, try std.fs.path.join(arena, &.{ allowed, "spaced " }), roots));
+    try std.testing.expect(!isPathWritable(io, arena, outside, roots));
+    try std.testing.expect(isPathWritable(io, arena, try std.fs.path.join(arena, &.{ allowed, "new", "file.txt" }), roots));
 }

@@ -269,6 +269,10 @@ fn appendRootSkills(io: Io, arena: std.mem.Allocator, dir: Io.Dir, root_path: []
                 net.note(io, arena, "microagent: skill {s}: {s}; it is skipped\n", .{ chat.safeTextAll(arena, entry.name), @errorName(err) });
             continue;
         };
+        if (stat.kind != .file) {
+            net.note(io, arena, "microagent: skill {s} is skipped: SKILL.md is not a regular file\n", .{chat.safeTextAll(arena, entry.name)});
+            continue;
+        }
         if (stat.size > max_skill_bytes) {
             net.note(io, arena, "microagent: skill {s} is skipped: it is larger than the {d} bytes a skill may hold\n", .{ chat.safeTextAll(arena, entry.name), max_skill_bytes });
             continue;
@@ -459,6 +463,9 @@ fn field(raw_text: []const u8, key: []const u8) ?[]const u8 {
 /// already applied to the same file, so a skill whose file grew past the cap
 /// between the two reads is reported rather than loaded.
 fn load(io: Io, arena: std.mem.Allocator, skill: *const Skill) ![]const u8 {
+    const stat = std.Io.Dir.cwd().statFile(io, skill.path, .{}) catch |err|
+        return std.fmt.allocPrint(arena, "error: cannot read skill {s}: {s}", .{ skill.name, @errorName(err) });
+    if (stat.kind != .file) return std.fmt.allocPrint(arena, "error: cannot read skill {s}: NotFile", .{skill.name});
     const text = std.Io.Dir.cwd().readFileAlloc(io, skill.path, arena, .limited(max_skill_bytes)) catch |err|
         return std.fmt.allocPrint(arena, "error: cannot read skill {s}: {s}", .{ skill.name, @errorName(err) });
     return splitFrontmatter(text).body;

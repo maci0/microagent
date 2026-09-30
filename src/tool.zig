@@ -1764,8 +1764,7 @@ fn isCredentialPath(path: []const u8) bool {
 /// The walk costs one readlink per component and nothing more: a path that is
 /// not a link is returned as it went in, so the read is the whole of it. A link
 /// the walk cannot settle (a chain longer than the kernel allows, a name it
-/// cannot hold) answers null, and the tool does what it would have done: a write
-/// then fails on its own `SymlinkLoop` rather than on a guess made here.
+/// cannot hold) is refused rather than leaving the file unchecked.
 ///
 /// Every component is followed, not only the last one, because that is the order
 /// the kernel opens a path in. A committed `docs/keys -> ~/.secrets` is a link
@@ -1814,8 +1813,12 @@ fn credentialPath(io: Io, arena: std.mem.Allocator, path: []const u8) ?[]const u
     var name_buf: [std.fs.max_path_bytes]u8 = undefined;
     var cur_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
     var next_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
-    const target = net.resolveEveryComponent(io, std.Io.Dir.cwd(), path, &name_buf, &cur_buf, &next_buf) catch return null;
-    if (!isCredentialPath(target)) return null;
+    const absolute = if (std.fs.path.isAbsolute(path)) path else blk: {
+        const cwd = std.Io.Dir.cwd().realPathFileAlloc(io, ".", arena) catch return path;
+        break :blk std.fmt.allocPrint(arena, "{s}/{s}", .{ cwd, path }) catch return path;
+    };
+    const target = net.resolveEveryComponent(io, std.Io.Dir.cwd(), absolute, &name_buf, &cur_buf, &next_buf) catch return path;
+    if (!isCredentialPath(target) and !isProcfsCredential(target)) return null;
     // The name to report is the file that was actually refused, which is the
     // target's own path rather than the link the model named. The slices above
     // belong to this frame, so a target that differs from the path is copied
@@ -7307,4 +7310,43 @@ test "a path a read would block on is refused by name, by all three tools" {
     // so nothing here narrows what a path may be.
     const dir_result = try dispatch(arena, "read", try std.json.Stringify.valueAlloc(arena, .{ .path = dir_path }, .{}));
     try std.testing.expect(std.mem.indexOf(u8, dir_result, "IsDir") != null);
+}
+
+test "credential checks reject links to process credentials" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const io = std.testing.io;
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", arena);
+    const relative = try std.fs.path.relative(arena, "/", null, try std.Io.Dir.cwd().realPathFileAlloc(io, ".", arena), "/proc/self/environ");
+    try std.testing.expect(credentialPath(io, arena, relative) != null);
+    for ([_][]const u8{ "environ", "cmdline" }) |leaf| {
+        try tmp.dir.symLink(io, try std.fmt.allocPrint(arena, "/proc/self/{s}", .{leaf}), leaf, .{});
+        const path = try std.fs.path.join(arena, &.{ root, leaf });
+        try std.testing.expect(credentialPath(io, arena, path) != null);
+    }
+}
+
+test "credential checks follow chains within the kernel symlink limit" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const io = std.testing.io;
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = ".env", .data = "SECRET=keep" });
+    var target: []const u8 = ".env";
+    for (0..33) |i| {
+        const name = try std.fmt.allocPrint(arena, "link{d}", .{i});
+        try tmp.dir.symLink(io, target, name, .{});
+        target = name;
+    }
+    const root = try tmp.dir.realPathFileAlloc(io, ".", arena);
+    const path = try std.fs.path.join(arena, &.{ root, target });
+    try std.testing.expectEqualStrings("SECRET=keep", try tmp.dir.readFileAlloc(io, target, arena, .limited(64)));
+    try std.testing.expect(credentialPath(io, arena, path) != null);
 }

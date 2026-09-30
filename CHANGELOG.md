@@ -16,19 +16,34 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-30
+
 ### Changed
 
 - The system prompt includes the absolute starting working directory.
+- CI installs the hash-pinned linters with uv.
 
 ### Fixed
 
+- Prompt-cache documentation describes provider-dependent behavior, and the threat model
+  correctly states that a successfully loaded CA bundle replaces the system store.
 - Sandbox writable roots retain `/` and correctly cover its absolute descendants.
+- Filtered test runs collect all modules, so selecting a tool or network regression actually
+  runs it even when no selected main test imports that module.
 - The first-run config test accepts the filesystem errors returned on both Linux and macOS.
 
-- The system prompt names the absolute working directory the run starts in. It said "the current
-  directory" and no path, so a model asked to work on a repository it could not name answered with a
-  plausible one it invented (`/workspace/processors` on a run started in `~/.microagent`) and then
-  reasoned about that path.
+### Security
+
+- Credential checks preserve leading relative parent components and absolute prefixes when
+  resolving links, and reject relative paths and symlinks to `/proc` environment and command-line
+  files.
+  Resolution errors fail closed, including link chains longer than the guard can follow.
+- Repository instruction files and skills must be regular files; a named pipe can no longer
+  block startup or a skill call indefinitely.
+- Sandbox write checks follow symlinks before `..` and reject dangling links that resolve
+  outside writable roots. They check the exact path bytes used by the tools.
+- The starting working directory is quoted in the system prompt, preventing control characters
+  and quotes in directory names from adding unquoted prompt lines.
 
 ## [0.8.0] - 2026-09-30
 
@@ -2442,7 +2457,8 @@ First release.
   `aarch64-macos` with a checksum sidecar each, and refuses a tag that does not name the version in
   `build.zig.zon`.
 
-[Unreleased]: https://github.com/maci0/microagent/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/maci0/microagent/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/maci0/microagent/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/maci0/microagent/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/maci0/microagent/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/maci0/microagent/compare/v0.5.0...v0.6.0
