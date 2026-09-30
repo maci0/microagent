@@ -65,7 +65,9 @@ for file in "$@"; do
   # from the same backtick run, so `foo`, `src/a.zig:1` yields the pair and
   # "checked at `src/a.zig:1`" yields the path alone.
   status=0
-  rg -o '`[A-Za-z_][A-Za-z0-9_]*`, `src/[a-z_]+\.zig:[0-9]+(-[0-9]+)?`|`src/[a-z_]+\.zig:[0-9]+(-[0-9]+)?`' \
+  # because: the backticks are literal Markdown code spans, not command substitution
+  # shellcheck disable=SC2016
+  grep -oE '`[A-Za-z_][A-Za-z0-9_]*`, `src/[a-z_]+\.zig:[0-9]+(-[0-9]+)?`|`src/[a-z_]+\.zig:[0-9]+(-[0-9]+)?`' \
     "$file" > "$tmp.refs" || status=$?
   [ "$status" -le 1 ] || exit 1
   while read -r ref; do
