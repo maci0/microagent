@@ -630,11 +630,7 @@ pub const Server = struct {
                     return result;
                 }
             }
-            if (start > 0) {
-                std.mem.copyForwards(u8, pending.items[0..], pending.items[start..]);
-                pending.items.len -= start;
-                scanned -|= start;
-            }
+            net.dropPending(&pending, &scanned, start);
         }
         if (!is_sse) {
             const value = self.parseFrame(scratch, pending.items) catch |err| {
@@ -907,7 +903,6 @@ fn resultText(arena: std.mem.Allocator, server_name: []const u8, result: std.jso
     // the copy, the clamp and the bytes in between were all work over text
     // nobody keeps. The note below is the caller's own wording, written here
     // because this is the side that knows the size the whole text would have.
-    const note_room = truncation_note_room;
     var total: usize = buf.items.len;
     var started = false;
     for (items) |item| {
@@ -934,7 +929,7 @@ fn resultText(arena: std.mem.Allocator, server_name: []const u8, result: std.jso
     }
     if (total == 0) return "(the MCP server returned no text)";
     if (total > cap) {
-        const kept = chat.clamp(buf.items, cap - note_room);
+        const kept = chat.clamp(buf.items, cap - truncation_note_room);
         return truncationNote(arena, kept, cap, total);
     }
     return buf.items;

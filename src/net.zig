@@ -366,9 +366,7 @@ pub fn resolveSymlinkTarget(
             try joinOnto(into, dir_end, link)
         else
             try copyInto(into, link);
-        const written = spare;
-        spare = into;
-        into = written;
+        std.mem.swap([]u8, &spare, &into);
         cur = next;
     }
     return error.SymlinkLoop;
@@ -577,6 +575,20 @@ pub fn nextLineEnd(pending: []const u8, scanned: *usize) ?usize {
     return at;
 }
 
+/// Drops the `consumed` leading bytes of a pending buffer a caller has finished
+/// with, and lowers `scanned` past them so the next `nextLineEnd` resumes where
+/// the last one stopped. `scanned` is null for a caller that keeps no such
+/// cursor. A zero count is a no-op: the shift would be a move of the whole
+/// buffer onto itself, which on a record of long lines is the second half of
+/// the copy the cap exists to avoid.
+pub fn dropPending(pending: *std.ArrayList(u8), scanned: ?*usize, consumed: usize) void {
+    if (consumed == 0) return;
+    const kept = pending.items.len - consumed;
+    std.mem.copyForwards(u8, pending.items[0..kept], pending.items[consumed..]);
+    pending.shrinkRetainingCapacity(kept);
+    if (scanned) |cursor| cursor.* -|= consumed;
+}
+
 // The splitter three call sites share, so the `scanned` bookkeeping is pinned
 // here rather than only through them. An off-by-one either leaves a caller's
 // `pending` growing without bound (a `scanned` that is not lowered past the
@@ -626,14 +638,28 @@ test "the line splitter resumes where the last call stopped, and does not skip a
     try pending.appendSlice(std.testing.allocator, "st\ndata: second\n");
     const at = nextLineEnd(pending.items, &scanned).?;
     try std.testing.expectEqualStrings("data: first", pending.items[0..at]);
-    const consumed = at + 1;
-    std.mem.copyForwards(u8, pending.items, pending.items[consumed..]);
-    pending.items.len -= consumed;
-    scanned -= consumed;
+    dropPending(&pending, &scanned, at + 1);
     try std.testing.expectEqualStrings("data: second\n", pending.items);
     try std.testing.expectEqual(@as(usize, 0), scanned);
     try std.testing.expectEqual(@as(?usize, 12), nextLineEnd(pending.items, &scanned));
     try std.testing.expectEqual(@as(?usize, null), nextLineEnd(pending.items, &scanned));
+}
+
+test "dropping nothing moves nothing, and a caller with no cursor needs no one" {
+    var pending: std.ArrayList(u8) = .empty;
+    defer pending.deinit(std.testing.allocator);
+    try pending.appendSlice(std.testing.allocator, "one line, unterminated");
+
+    // The zero case: a read that completed no line leaves `start` at zero, and
+    // the shift would be a copy of the whole buffer onto itself.
+    var scanned: usize = 3;
+    dropPending(&pending, &scanned, 0);
+    try std.testing.expectEqualStrings("one line, unterminated", pending.items);
+    try std.testing.expectEqual(@as(usize, 3), scanned);
+
+    dropPending(&pending, null, 4);
+    try std.testing.expectEqualStrings("line, unterminated", pending.items);
+    try std.testing.expectEqual(@as(usize, 3), scanned);
 }
 
 /// Whether a credential may be sent to this url. The API key rides in an
@@ -1688,8 +1714,7 @@ fn fuzzHttpDate(_: void, smith: *std.testing.Smith) !void {
     // instant one second past the last the four-digit year field can carry.
     // Nothing downstream cares (a caller only ever subtracts it from a clock),
     // so it is held to the range above and the round trip starts after it.
-    const last_second_of_the_last_day = last;
-    if (got < 0 or got >= last_second_of_the_last_day) return;
+    if (got < 0 or got >= last) return;
     var header: [64]u8 = undefined;
     const written = writeHttpDate(got, &header) catch |err| {
         std.debug.print("\nhttp_date: {d} does not fit an IMF-fixdate: {t}\n", .{ got, err });
@@ -1853,12 +1878,7 @@ fn fuzzLineSplit(_: void, smith: *std.testing.Smith) !void {
             try seen.append(gpa, try lines.dupe(u8, pending.items[start..at]));
             start = at + 1;
         }
-        if (start > 0) {
-            const rest = pending.items.len - start;
-            std.mem.copyForwards(u8, pending.items[0..rest], pending.items[start..]);
-            pending.items.len = rest;
-            scanned -= start;
-        }
+        dropPending(&pending, &scanned, start);
         if (carried.len == 0) break;
     }
 

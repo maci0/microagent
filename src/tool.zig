@@ -1270,9 +1270,7 @@ fn globsIntersect(pattern: []const u8, glob: []const u8) bool {
                 std.ascii.toLower(pc) == std.ascii.toLower(glob[j]) and next[j + 1];
             if (j == 0) break;
         }
-        const swap = next;
-        next = cur;
-        cur = swap;
+        std.mem.swap(*[cap]bool, &next, &cur);
     }
     return next[0];
 }
@@ -2023,17 +2021,11 @@ fn readLines(io: Io, arena: std.mem.Allocator, path: []const u8, offset: usize, 
             // of, and truncate it.
             start = pos + 1;
         }
-        // Nothing was consumed on a read that completed no line, and the
-        // move below is a memmove of the whole pending line onto itself when
-        // `start` is zero, which on a file of long lines is the other half of
-        // that gigabyte.
-        if (start > 0) {
-            const left = rest.items.len - start;
-            std.mem.copyForwards(u8, rest.items[0..left], rest.items[start..]);
-            rest.shrinkRetainingCapacity(left);
-            scanned -= start;
-            start = 0;
-        }
+        // Nothing was consumed on a read that completed no line, which `dropPending`
+        // leaves alone rather than shifting the whole pending line onto itself:
+        // on a file of long lines that is the other half of that gigabyte.
+        net.dropPending(&rest, &scanned, start);
+        start = 0;
     }
     // Out of cap rather than out of file, which is what a whole-file read of
     // the same file reports, so one file over the cap reads the same whichever

@@ -3624,10 +3624,7 @@ fn streamChatOnce(
             if (result.dropped) break;
         }
         // Drop what was consumed, so a long stream does not keep every frame.
-        if (start > 0) {
-            dropWritten(&pending, start);
-            scanned -|= start;
-        }
+        net.dropPending(&pending, &scanned, start);
         // What is left above is the one line that has not ended, and a line
         // that has not ended by now is not one this turn can carry, so the run
         // says so and ends the turn rather than growing with the rest of the
@@ -3788,7 +3785,7 @@ test "a character split across two reads is written once it is whole" {
         taken += take;
         const held = chat_mod.partialTailLen(buf.items);
         try written.appendSlice(std.testing.allocator, buf.items[0 .. buf.items.len - held]);
-        dropWritten(&buf, buf.items.len - held);
+        net.dropPending(&buf, null, buf.items.len - held);
     }
     try written.appendSlice(std.testing.allocator, buf.items);
 
@@ -3875,17 +3872,7 @@ fn writeOutPrefix(
         net.note(io, arena, "microagent: the text streamed from {s} could not be written to stdout ({s}); the rest of this run's output is not on it either, and the run fails rather than finishing with a partial answer\n", .{ shown_url, @errorName(err) });
         return err;
     };
-    dropWritten(out_buf, len);
-}
-
-/// Drops the `len` bytes just consumed, whether they were written out or parsed
-/// as a line, and moves what is left to the front, so the bytes the next chunk
-/// has to complete are the ones the next call starts from. The buffer only ever
-/// holds one read's worth, so the move is over a few bytes.
-fn dropWritten(out_buf: *std.ArrayList(u8), len: usize) void {
-    const kept = out_buf.items.len - len;
-    std.mem.copyForwards(u8, out_buf.items[0..kept], out_buf.items[len..]);
-    out_buf.shrinkRetainingCapacity(kept);
+    net.dropPending(out_buf, null, len);
 }
 
 /// One tool call, to whichever half of the tool surface answers for its name:
@@ -5717,10 +5704,7 @@ test "a frame split across reads yields the same lines, and is searched once" {
             try seen.append(gpa, gpa.dupe(u8, pending.items[start..pos]) catch return error.OutOfMemory);
             start = pos + 1;
         }
-        if (start > 0) {
-            dropWritten(&pending, start);
-            scanned -|= start;
-        }
+        net.dropPending(&pending, &scanned, start);
     }
     try std.testing.expectEqual(lines.len, seen.items.len);
     for (lines, seen.items) |want, got| try std.testing.expectEqualStrings(want, got);
