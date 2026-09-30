@@ -464,7 +464,7 @@ const usage_text =
     \\GitHub release and replaces this binary only when the digest matches.
     \\
     \\  -c, --check    report the latest release, install nothing
-    \\  -h, --help     this text
+    \\  -h, --help     this text ("microagent help update" too)
     \\  -V, --version  version
     \\
     \\environment:
