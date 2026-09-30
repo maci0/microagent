@@ -16,6 +16,14 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-10-01
+
+### Fixed
+
+- `make check-refs` reads citations with grep, so the release gate runs on hosts without ripgrep
+  instead of failing. It checked nothing on CI before, and v0.10.0 was tagged but never published
+  because of it.
+
 ## [0.10.0] - 2026-10-01
 
 ### Added
@@ -2495,7 +2503,8 @@ First release.
   `aarch64-macos` with a checksum sidecar each, and refuses a tag that does not name the version in
   `build.zig.zon`.
 
-[Unreleased]: https://github.com/maci0/microagent/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/maci0/microagent/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/maci0/microagent/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/maci0/microagent/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/maci0/microagent/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/maci0/microagent/compare/v0.7.0...v0.8.0
