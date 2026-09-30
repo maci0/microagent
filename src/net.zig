@@ -767,16 +767,43 @@ fn retryAfterValueMs(raw: []const u8, now_seconds: i64) ?u64 {
         return @min(seconds *| std.time.ms_per_s, max_retry_after_ms);
     } else |_| {}
     const target = httpDateEpochSeconds(raw) orelse return null;
-    const left = target - now_seconds;
-    if (left <= 0) return 0;
-    return @min(@as(u64, @intCast(left)) *| std.time.ms_per_s, max_retry_after_ms);
+    // A date already past is a wait of none, and a date so far ahead that the
+    // gap is not representable is a wait past the cap, which is what comes
+    // back. Both ends of that subtraction are off a wire or off the wall clock
+    // and neither is bounded: the date is capped by the four-digit year the
+    // grammar spells, so `target` is at most the year 9999, but a clock is
+    // bounded by nothing at all, and a machine whose wall clock is set before
+    // 1970 -- a container with no RTC, a host restored from a snapshot, a
+    // machine with a flat RTC battery -- reads below 1970 as an ordinary
+    // negative number. `maxInt(i64)` of those two is past what an `i64`
+    // subtraction holds, and the subtraction was the last unchecked one on
+    // this path: it trapped a checked build on the first 429 of such a run,
+    // where the header had carried everything it needed to answer.
+    if (target <= now_seconds) return 0;
+    const left = @as(u64, @intCast(target -| now_seconds));
+    return @min(left *| std.time.ms_per_s, max_retry_after_ms);
 }
 
 /// The caller's own clock in seconds, the form `retryAfterMs` reads a date
 /// against.
+///
+/// The reading is checked against the range before it is narrowed, rather than
+/// narrowed straight out of it. A wall clock before 1970 is ordinary rather
+/// than exotic: a container with no RTC, a machine restored from a snapshot, and
+/// a host whose RTC battery is flat all boot into one, and the clock's own
+/// reading is a signed `i96` wide enough to hold such a date. `@intCast` out of
+/// it trapped a checked build on the first request of such a run. The `i96`
+/// also reaches past `i64` on its own, so a far-future clock is the same
+/// narrowing from the other side, and both ends saturate: this feeds a
+/// subtraction against a `Retry-After` date, and a wrong answer there is a
+/// wait of the wrong length, so a value at the end of the range is worth more
+/// than a crash.
 pub fn nowSeconds(io: Io) i64 {
     const ns = Io.Clock.real.now(io).nanoseconds;
-    return @intCast(@divTrunc(ns, std.time.ns_per_s));
+    const seconds = @divTrunc(ns, std.time.ns_per_s);
+    if (seconds < std.math.minInt(i64)) return std.math.minInt(i64);
+    if (seconds > std.math.maxInt(i64)) return std.math.maxInt(i64);
+    return @intCast(seconds);
 }
 
 /// Whether a transport failure is worth another attempt. The set is the
@@ -1614,9 +1641,32 @@ fn fuzzHttpDate(_: void, smith: *std.testing.Smith) !void {
 /// The weekday is named from the day count with 1970-01-01 (a Thursday) as the
 /// zero, and the parser is documented not to check that field, so it is the one
 /// part of the round trip left unverified.
+///
+/// `error.OutOfRange` for a `seconds` the calendar below cannot name, rather
+/// than a date produced by a narrowing nobody checked. Two ends are refused,
+/// and each of them used to be something worse than a refusal.
+///
+/// The low end is 1970-01-01T00:00:00Z. Below it the day count is negative,
+/// and `@intCast` into the standard library's unsigned `EpochDay` trapped a
+/// checked build and wrapped a release one into a date at the far end of the
+/// calendar. The library's calendar counts days from the epoch and cannot name
+/// a day before it, so a pre-epoch `seconds` has no spelling here at all.
+///
+/// The high end is 9999-12-31T23:59:59Z, the last year a four-digit IMF-fixdate
+/// field can spell and the last one `httpDateYear` reads. Past it the year
+/// `calculateYearDay` walks out to is past its own `u16`, and it reaches that
+/// year one year at a time from 1970, so a value at the top of an `i64` was a
+/// walk of billions of iterations before the arithmetic wrapped or trapped.
+///
+/// The range is a return rather than a clamp: a `Retry-After` a provider sent
+/// before 1970 is not a wait this run can honour, and the caller falls back to
+/// the backoff schedule, which is where every unreadable header goes.
 pub fn writeHttpDate(seconds: i64, buf: []u8) ![]const u8 {
+    if (seconds < first_http_date_seconds or seconds > last_http_date_seconds) return error.OutOfRange;
     // A floor and not a truncation, so a leap second (23:59:60) lands on the
-    // day it belongs to rather than on the one before it.
+    // day it belongs to rather than on the one before it. Both casts are exact
+    // inside the range above, which is what makes them casts rather than a
+    // narrowing nobody checked.
     const days: u47 = @intCast(@divFloor(seconds, std.time.s_per_day));
     const into_day: u17 = @intCast(@mod(seconds, std.time.s_per_day));
     const date: std.time.epoch.EpochDay = .{ .day = days };
@@ -1644,6 +1694,16 @@ const weekdays = [_][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" 
 /// How far the epoch's own day sits into `weekdays`: 1970-01-01 was a Thursday,
 /// which is `weekdays[4]`: the fifth name, at index 4.
 const weekday_epoch_offset: u47 = 4;
+
+// The first and last second `writeHttpDate` will name: the epoch itself, and
+// the last second of the last year a four-digit IMF-fixdate field can spell.
+// The low end is the epoch rather than the grammar's own 0001-01-01 because
+// the calendar below counts days from the epoch and has no day before it to
+// name; the high end is the grammar's, worked out with the same civil-date
+// arithmetic `httpDateEpochSeconds` uses, so both halves of a round trip are
+// bounded by one rule rather than each naming its own.
+const first_http_date_seconds: i64 = 0;
+const last_http_date_seconds: i64 = daysFromCivil(10000, 1, 1) * std.time.s_per_day - 1;
 
 // The body a streamed response arrives as, and the shapes that break a reader
 // splitting it a line at a time. `std.testing.fuzz` runs this corpus through
@@ -1807,6 +1867,12 @@ const retry_after_corpus = [_][]const u8{
     "HTTP/1.1 429 Too Many Requests\r\nretry-after: 30\x00\r\n\r\n",
     "HTTP/1.1 429 Too Many Requests\r\nretry-after: 30\r\n\n\r\n",
     "HTTP/1.1 429 Too Many Requests\r\nretry-after: Wed, 21 Oct 2026 07:28:00 GMT\r\nretry-after: 5\r\n\r\n",
+    // The ends of the year range the four-digit year field spells, which are
+    // the widest gaps a date can ask to be measured against a clock. The clock
+    // the fuzz harness builds out of its own bytes reaches either side of the
+    // epoch, so these are the pairs whose difference was never representable.
+    "HTTP/1.1 429 Too Many Requests\r\nretry-after: Mon, 01 Jan 0001 00:00:00 GMT\r\n\r\n",
+    "HTTP/1.1 429 Too Many Requests\r\nretry-after: Fri, 31 Dec 9999 23:59:59 GMT\r\n\r\n",
 };
 
 test "a fuzzed Retry-After head waits for the header it names, and never past the cap" {
@@ -2228,4 +2294,65 @@ test "relative parent components reach links in the parent directory" {
     var next_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
     try std.testing.expectEqualStrings("../.secrets/token", try resolveEveryComponent(io, child, "../alias/token", &name_buf, &cur_buf, &next_buf));
     try std.testing.expectEqualStrings("../../leaf", try resolveEveryComponent(io, child, "../../leaf", &name_buf, &cur_buf, &next_buf));
+}
+
+// The instant a `Retry-After` date is written from has to be one the same
+// parser can read back, and both ends of the `i64` it is spelled with are past
+// the calendar's own range. Neither end was refused: a negative day count was
+// narrowed into the library's unsigned `EpochDay`, which trapped a checked
+// build and wrapped a release one into a date at the far end of the calendar,
+// and a year past the four-digit field was reached by a walk of one year at a
+// time out of 1970, which for the top of an `i64` is billions of iterations
+// before it wraps. The round trip above covers what is inside; this holds the
+// refusal, because a refusal is the only answer that is right at both ends.
+test "a date past the calendar's own range is refused rather than narrowed into it" {
+    var header: [64]u8 = undefined;
+    // Below the epoch: the day count is negative, and the calendar counts days
+    // from 1970 and has no day before it to name.
+    try std.testing.expectError(error.OutOfRange, writeHttpDate(-1, &header));
+    try std.testing.expectError(error.OutOfRange, writeHttpDate(std.math.minInt(i64), &header));
+    // Above the last year a four-digit year field can spell, which is the last
+    // year `httpDateYear` reads.
+    try std.testing.expectError(error.OutOfRange, writeHttpDate(last_http_date_seconds + 1, &header));
+    try std.testing.expectError(error.OutOfRange, writeHttpDate(std.math.maxInt(i64), &header));
+
+    // The ends themselves are inside the range, and both are read back as
+    // themselves: the range check is on the value, not on the calendar's edge.
+    const first = try writeHttpDate(first_http_date_seconds, &header);
+    try std.testing.expectEqualStrings("Thu, 01 Jan 1970 00:00:00 GMT", first);
+    try std.testing.expectEqual(@as(?i64, first_http_date_seconds), httpDateEpochSeconds(first));
+    const last = try writeHttpDate(last_http_date_seconds, &header);
+    try std.testing.expectEqualStrings("Fri, 31 Dec 9999 23:59:59 GMT", last);
+    try std.testing.expectEqual(@as(?i64, last_http_date_seconds), httpDateEpochSeconds(last));
+}
+
+// The clock a `Retry-After` date is read against, and the narrowing it used to
+// do. The clock is a signed `i96` and this is an `i64`, so a machine whose
+// wall clock is set before 1970 -- a container with no RTC, a host restored
+// from a snapshot, a machine with a flat RTC battery -- reached the narrowing
+// from below and the run ended on the first request that asked for the time.
+// The same reading reaches past an `i64` on its own at the far end. Both ends
+// saturate here, because what this feeds is a subtraction against a date a
+// server sent, and a wrong answer to that is a wait of the wrong length.
+test "the clock read for a Retry-After date is an i64 at both ends" {
+    // The reading on this machine is inside the range, which is the ordinary
+    // case and the one every other reading is measured against.
+    const now = nowSeconds(std.testing.io);
+    try std.testing.expect(now > 0);
+    // A clock at either end of the range, against a date at either end of the
+    // one the grammar spells. Neither pair of ends is a wait the run can take,
+    // so both are answered rather than one of them overflowing the subtraction
+    // that measures them: the widest gap is the cap, and a date already past
+    // is zero. Before the subtraction was saturating the first of these four
+    // trapped a checked build, on a machine whose clock reads what this spells.
+    const past = "HTTP/1.1 429\r\nretry-after: Thu, 01 Jan 1970 00:00:00 GMT\r\n\r\n";
+    const future = "HTTP/1.1 429\r\nretry-after: Fri, 31 Dec 9999 23:59:59 GMT\r\n\r\n";
+    try std.testing.expectEqual(@as(?u64, max_retry_after_ms), retryAfterMs(past, std.math.minInt(i64)));
+    try std.testing.expectEqual(@as(?u64, 0), retryAfterMs(past, std.math.maxInt(i64)));
+    try std.testing.expectEqual(@as(?u64, max_retry_after_ms), retryAfterMs(future, std.math.minInt(i64)));
+    try std.testing.expectEqual(@as(?u64, 0), retryAfterMs(future, std.math.maxInt(i64)));
+    // And the same date against a clock in the ordinary range, which is the
+    // case every other reading here is measured against.
+    try std.testing.expectEqual(@as(?u64, 0), retryAfterMs(past, now));
+    try std.testing.expectEqual(@as(?u64, max_retry_after_ms), retryAfterMs(future, now));
 }

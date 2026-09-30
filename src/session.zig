@@ -241,8 +241,18 @@ fn logStamp(now_ns: i128) u128 {
 /// order against the positive ones the rest of the store holds. Zero is the
 /// reading that says nothing about the time, which is all a clock before the
 /// epoch says.
+///
+/// The far end is held too, and for the reason the near end is. The clock is
+/// a signed `i96`, and divided into milliseconds it still reaches past what
+/// an `i64` holds, so a machine whose wall clock is set far ahead reaches the
+/// same narrowing the other way: `@intCast` traps a checked build. Both ends
+/// saturate rather than wrap, because a record that carries a stamp no reader
+/// can order is worth less than one carrying the largest stamp there is.
 fn recordStampMs(now_ns: i96) i64 {
-    return if (now_ns < 0) 0 else @intCast(@divTrunc(now_ns, std.time.ns_per_ms));
+    if (now_ns < 0) return 0;
+    const ms = @divTrunc(now_ns, std.time.ns_per_ms);
+    if (ms > std.math.maxInt(i64)) return std.math.maxInt(i64);
+    return @intCast(ms);
 }
 
 /// Session logs kept on disk. The store is a per-run directory that nothing
@@ -1319,6 +1329,12 @@ test "a record stamped from a clock before 1970 carries the epoch, not a negativ
     // The zero the clamp gives is the value a reader of the store can still
     // compare, which is the whole reason it is zero rather than the negative.
     try std.testing.expect(recordStampMs(before_epoch_ns) >= 0);
+    // A clock set far ahead is the same narrowing from the other end. The
+    // reading is an `i96`, and in milliseconds it still reaches past what an
+    // `i64` holds, so a host whose clock is set past what the machine has
+    // reached is a machine this record cannot be written for. The last stamp
+    // there is, which a monitor can still order.
+    try std.testing.expectEqual(std.math.maxInt(i64), recordStampMs(std.math.maxInt(i96)));
 }
 
 test "a log named from a clock before 1970 is still one the pruner counts" {

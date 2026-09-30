@@ -302,7 +302,15 @@ const fetch_timeout_bytes_per_s: u64 = 2 * 1024 * 1024;
 
 /// The deadline one download of at most `limit` bytes is given.
 fn fetchTimeoutMs(limit: usize) u64 {
-    const for_the_body = (@as(u64, @intCast(limit)) * std.time.ms_per_s) / fetch_timeout_bytes_per_s;
+    // Saturating, because a `limit` the caller sets is a size and the product
+    // below is in milliseconds of it: a `usize` near its own top times 1000
+    // does not fit a `u64`, and the wrap lands the other side of the floor
+    // below and gives a 512 MB body a thirty-second deadline. Every `limit` in
+    // this file today is a constant no larger than `max_asset_bytes`, so the
+    // saturating add is a promise rather than a behavior, and the promise is
+    // what keeps it one when the next caller passes a size it read off the
+    // wire.
+    const for_the_body = (@as(u64, @intCast(limit)) *| std.time.ms_per_s) / fetch_timeout_bytes_per_s;
     return @max(fetch_timeout_floor_ms, for_the_body);
 }
 
