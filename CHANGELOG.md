@@ -25,6 +25,8 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- The Harbor adapter separates task text from CLI flags, so tasks beginning with `-` or
+  named `help` are run as prompts.
 - Prompt-cache documentation describes provider-dependent behavior, and the threat model
   correctly states that a successfully loaded CA bundle replaces the system store.
 - Sandbox writable roots retain `/` and correctly cover its absolute descendants.

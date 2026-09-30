@@ -489,6 +489,7 @@ class Microagent(BaseAgent):
                 budget,
                 "--max-turns",
                 str(int_env("MICROAGENT_MAX_TURNS", DEFAULT_MAX_TURNS)),
+                "--",
                 instruction,
             )
         )
