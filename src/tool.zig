@@ -256,7 +256,12 @@ fn signalGroup(pgid: std.posix.pid_t) void {
 /// lives for the whole run rather than for one call. Atomics rather than a lock,
 /// because the reader is a signal handler that must not take one: a handler that
 /// blocks on a mutex the interrupted thread already holds is a hang where the
-/// exit code was going to be.
+/// exit code was going to be. Claiming a slot is a compare-and-swap rather than
+/// a load followed by a store: the writers are every `bash` command and every
+/// MCP server this run starts, on whichever worker the io hands them, and two
+/// of them reaching the same free slot between its load and its store left one
+/// group outside the table -- the exact child Ctrl+C then leaves running. `0` is
+/// the free marker, never a pid, so it can stay the initial value.
 const max_child_groups: usize = 64;
 var child_groups: [max_child_groups]std.atomic.Value(std.posix.pid_t) =
     [_]std.atomic.Value(std.posix.pid_t){.init(0)} ** max_child_groups;
@@ -265,23 +270,22 @@ var child_groups: [max_child_groups]std.atomic.Value(std.posix.pid_t) =
 /// table is full, and the caller stops the child rather than start one the
 /// handler cannot reach: an untracked group is a group Ctrl+C leaves behind.
 pub fn publishChildGroup(pgid: std.posix.pid_t) bool {
+    std.debug.assert(pgid > 0);
     for (&child_groups) |*slot| {
-        if (slot.load(.monotonic) == 0) {
-            slot.store(pgid, .monotonic);
-            return true;
-        }
+        if (slot.cmpxchgStrong(0, pgid, .monotonic, .monotonic) == null) return true;
     }
     return false;
 }
 
 /// Retires a group whose child has been reaped, so a later signal does not hit
-/// a pid the operating system may have handed to something else.
+/// a pid the operating system may have handed to something else. The swap is
+/// what makes the check and the clearing one step: a caller retiring the group
+/// it just published always finds it, and never clears a slot another child has
+/// since taken.
 pub fn retireChildGroup(pgid: std.posix.pid_t) void {
+    if (pgid == 0) return;
     for (&child_groups) |*slot| {
-        if (slot.load(.monotonic) == pgid) {
-            slot.store(0, .monotonic);
-            return;
-        }
+        if (slot.cmpxchgStrong(pgid, 0, .monotonic, .monotonic) == null) return;
     }
 }
 
@@ -6302,6 +6306,85 @@ test "the interrupt handler's group table holds every child at once and empties"
     // The freed slot is the one a server started later takes.
     try std.testing.expect(publishChildGroup(1));
     try std.testing.expectEqual(@as(usize, max_child_groups), liveChildGroups());
+}
+
+test "children claimed on several threads each hold a slot of the interrupt table" {
+    // The writers are every `bash` command and every MCP server this run starts,
+    // on whichever worker the io handed the call, so claiming a slot has to be
+    // one step. Claiming it with a load followed by a store let two threads that
+    // read the same free slot both take it: the second `publish` overwrote the
+    // first group, and one child ended up outside the table, which is exactly
+    // the child Ctrl+C leaves running.
+    const threads = 8;
+    const each = 4;
+    const rounds = 64;
+    // The pids here are not real and nothing signals them: the table holds
+    // numbers, and the handler is the only reader. Every thread owns its own
+    // range, so a thread reading the table back finds only its own groups in it
+    // and no other thread can be holding the pid it is asking about.
+    const first_pid: std.posix.pid_t = 10_000;
+    var joined: usize = 0;
+    var workers: [threads]?std.Thread = .{null} ** threads;
+    defer while (joined < threads) : (joined += 1) {
+        if (workers[joined]) |t| t.join();
+    };
+
+    const held = struct {
+        fn is(pgid: std.posix.pid_t) bool {
+            for (&child_groups) |*slot| {
+                if (slot.load(.monotonic) == pgid) return true;
+            }
+            return false;
+        }
+    };
+    // Every thread is looking at the one free slot at the same moment, which is
+    // the window the load-then-store claim opens, and each round starts by
+    // filling its own slots from an empty prefix of the table. A test that only
+    // counts the table after the fact passes against the code it is meant to
+    // fail, so the count is taken while the claims are still in flight.
+    const Claim = struct {
+        fn run(base: std.posix.pid_t, gate: *std.atomic.Value(u32), lost: *std.atomic.Value(u32)) void {
+            _ = gate.fetchAdd(1, .acq_rel);
+            while (gate.load(.acquire) < threads) std.atomic.spinLoopHint();
+            for (0..rounds) |round| {
+                for (0..each) |i| {
+                    const pgid = base + @as(std.posix.pid_t, @intCast(round * each + i));
+                    _ = publishChildGroup(pgid);
+                }
+                for (0..each) |i| {
+                    const pgid = base + @as(std.posix.pid_t, @intCast(round * each + i));
+                    if (!held.is(pgid)) {
+                        _ = lost.fetchAdd(1, .acq_rel);
+                        continue;
+                    }
+                    retireChildGroup(pgid);
+                    if (held.is(pgid)) _ = lost.fetchAdd(1, .acq_rel);
+                }
+            }
+        }
+    };
+    var gate: std.atomic.Value(u32) = .init(0);
+    var lost: std.atomic.Value(u32) = .init(0);
+    for (&workers, 0..) |*slot, index| {
+        slot.* = try std.Thread.spawn(.{}, Claim.run, .{
+            first_pid + @as(std.posix.pid_t, @intCast(index * each * rounds)),
+            &gate,
+            &lost,
+        });
+    }
+    for (&workers) |*slot| {
+        const t = slot.* orelse continue;
+        t.join();
+        slot.* = null;
+        joined += 1;
+    }
+    // No group any thread claimed was lost on the way in or on the way out, and
+    // none was left behind for the next one to publish over.
+    try std.testing.expectEqual(@as(u32, 0), lost.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), liveChildGroups());
+    // The table is back to the empty state the test found it in, or the
+    // assertions above are asserting against whatever a failing run left here.
+    for (&child_groups) |*slot| try std.testing.expectEqual(@as(std.posix.pid_t, 0), slot.load(.monotonic));
 }
 
 test "a tool call reports the exit status of the command it ran" {
