@@ -37,6 +37,14 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- Workflow shell checks decode YAML quotes, folded scalars and block indicators,
+  keep `run:` text inside shell heredocs in the original step, and handle braces
+  in quoted expressions. SBOM checks count direct pins from the manifests rather
+  than depend on inline lock annotations.
+
+- Dependency lock checks compare literal version pins and reject malformed
+  SHA-256 digests, including bad digests beside otherwise valid ones.
+
 - Benchmark rows escape run IDs and agent specifications as JSON. Missing Git
   statistics are reported as unavailable instead of zero changes. Simultaneous runs
   use separate work directories and retain their own logs. An instruction gate with

@@ -7,3 +7,5 @@
 # The versions are also named in the Makefile, and `make lint-versions` fails when they disagree.
 ruff==0.16.4
 yamllint==1.38.0
+# lint-ci-shell.sh parses workflow scalars with the same parser yamllint uses.
+pyyaml==6.0.3

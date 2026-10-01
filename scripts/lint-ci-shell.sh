@@ -4,7 +4,7 @@
 # and what writes its assets, and a typo in one is a red or a green run nobody
 # reads. None of it is a tracked .sh file, so `make lint-shell` never sees it.
 #
-# This reads the `run:` bodies out of the workflows and the composite actions
+# This parses the `run:` bodies out of the workflows and the composite actions
 # and runs shellcheck over them with the same options `make lint-shell` runs
 # over the scripts, so the two gates cannot drift into checking different
 # things. Both body forms are covered, because both are shell: the block
@@ -74,77 +74,60 @@ trap 'rm -rf "$tmp"' EXIT
 
 # A body is named for the file it came from and its position in that file, so
 # two workflows cannot overwrite each other's bodies and a manifest row is keyed
-# by something that cannot collide or be misparsed. The name carries both halves
-# rather than one number counted across files: awk is a fresh process per file,
-# so its own block counter starts at one every time, and numbering from the
-# file's position in the argument list let the second workflow's first body
-# overwrite the first workflow's. Every body after that was linted or not
-# depending on how many bodies the file before it happened to have, which is
-# why the manifest ended up describing one workflow and the checker was handed
-# the last one's bodies under the names of all of them.
-: > "$tmp/manifest"
-index=0
-for yaml in "$@"; do
-  test -f "$yaml" || { echo "no $yaml" >&2; exit 1; }
-  index="$((index + 1))"
-  awk -v dir="$tmp" -v src="$yaml" -v first="$index" -v prelude="$prelude" -v head="$((prelude_lines + 2))" '
-    function open_out() {
-      n = sprintf("%06d.%06d", first, ++blocks);
-      out = sprintf("%s/%s.sh", dir, n);
-      printf "# shellcheck shell=bash\n%s\n", prelude > out;
-    }
-    # The line a body line has to be shifted by to name the workflow line it
-    # came from: the workflow line its first body line is on, less the lines
-    # the file spends above that. `base` is that first line, which is the key
-    # line itself for a one-line body and a line inside the block for a block
-    # scalar, so it is recorded when it is known rather than guessed at the key.
-    function manifest(base) {
-      printf "%s\t%s\t%d\n", n, src, base - head >> (dir "/manifest");
-    }
-    # A one-line body: the value after `run: ` with no block indicator.
-    /^[[:space:]]*(- )?run: [^|>[:space:]]/ {
-      body = $0;
-      sub(/^[[:space:]]*(- )?run: /, "", body);
-      open_out();
-      manifest(FNR);
-      gsub(/\$\{\{[^}]*\}\}/, "github_expr", body);
-      print body > out;
-      close(out);
-      next;
-    }
-    # A block scalar. Its body is every following line indented past the key,
-    # which is what a YAML block is, and stops at the first line that is not.
-    /^[[:space:]]*(- )?run: [|>][[:space:]]*(-?[0-9]*|[-+]?[[:space:]]*#.*)?[[:space:]]*$/ {
-      prefix = match($0, /[^ ]/) - 1;
-      open_out();
-      inblock = 1;
-      started = 0;
-      next;
-    }
-    inblock {
-      line = $0;
-      indent = match(line, /[^ ]/) - 1;
-      if (line !~ /^[[:space:]]*$/ && indent <= prefix) {
-        # A block whose every line is blank wrote a file and no body. It still
-        # owes a manifest row, or the row count and the file count disagree and
-        # the report has no shift for a file shellcheck did open.
-        if (!started) manifest(FNR);
-        inblock = 0;
-        next;
-      }
-      if (!started) {
-        if (line ~ /^[[:space:]]*$/) next;
-        strip = indent;
-        started = 1;
-        manifest(FNR);
-      }
-      if (line ~ /^[[:space:]]*$/) { print "" > out; next; }
-      print substr(line, strip + 1) > out;
-      next;
-    }
-    { inblock = 0 }
-  ' "$yaml"
-done
+# by something that cannot collide or be misparsed.
+# PyYAML is already in the hashed linter install. Parsing the scalar gives
+# the checker exactly what Actions runs, including YAML quotes, folded lines,
+# chomping indicators, aliases and text resembling keys inside a heredoc.
+python3 - "$tmp" "$prelude" "$((prelude_lines + 2))" "$@" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+try:
+    import yaml
+except ImportError:
+    sys.exit("lint-ci-shell.sh: Python needs PyYAML; install lint-requirements.txt into a venv on PATH")
+
+
+def fields(node):
+    return {key.value: value for key, value in node.value} if isinstance(node, yaml.MappingNode) else {}
+
+
+directory = Path(sys.argv[1])
+prelude = sys.argv[2]
+head = int(sys.argv[3])
+with (directory / "manifest").open("w", encoding="utf-8") as manifest:
+    for index, filename in enumerate(sys.argv[4:], 1):
+        try:
+            root = fields(yaml.compose(Path(filename).read_text(encoding="utf-8"), Loader=yaml.BaseLoader))
+        except (OSError, UnicodeError, yaml.YAMLError) as error:
+            sys.exit(f"{filename}: {error}")
+        owners = [*fields(root.get("jobs")).values(), root.get("runs")]
+        count = 0
+        for owner in owners:
+            steps = fields(owner).get("steps")
+            if not isinstance(steps, yaml.SequenceNode):
+                continue
+            for step in steps.value:
+                body = fields(step).get("run")
+                if body is None:
+                    continue
+                if not isinstance(body, yaml.ScalarNode):
+                    sys.exit(f"{filename}:{body.start_mark.line + 1}: run must be a YAML scalar")
+                count += 1
+                name = f"{index:06d}.{count:06d}"
+                value = re.sub(
+                    r"\$\{\{(?:'[^']*'|[^'}])*\}\}",
+                    lambda match: "github_expr" + "\\\n" * match.group().count("\n"),
+                    body.value,
+                )
+                (directory / f"{name}.sh").write_text(f"# shellcheck shell=bash\n{prelude}\n{value}\n", encoding="utf-8")
+                base = body.start_mark.line + (2 if body.style in ("|", ">") else 1)
+                # ponytail: folded/quoted scalars map to their start line;
+                # per-character source maps only if precise multiline locations are needed.
+                anchor = 0 if body.style == "|" else base
+                manifest.write(f"{name}\t{filename}\t{base - head}\t{anchor}\n")
+PY
 
 # A workflow with no `run:` step is not an error: dependabot.yml is a schedule.
 # A tree with no shell at all is, because then the extraction is broken and the
@@ -193,9 +176,10 @@ shellcheck $SHELLCHECK_OPTS -s bash "$tmp"/*.sh > "$tmp/report" || status=$?
 
 # The report, named back to the workflow it came from: shellcheck opens each
 # finding with `In <file> line <n>:`, and both halves are a temporary path and
-# a line counted from a header this script wrote.
+# a line counted from a header this script wrote. Literal blocks map line by
+# line; quoted and folded scalars name the beginning of the scalar.
 awk -v base="$tmp/" '
-  FNR == NR { shift_of[$1] = $3; where[$1] = $2; next }
+  FNR == NR { shift_of[$1] = $3; where[$1] = $2; anchor[$1] = $4; next }
   /^In / {
     name = $0;
     sub("^In " base, "", name);
@@ -205,7 +189,7 @@ awk -v base="$tmp/" '
     sub("^.* line ", "", line);
     sub(":$", "", line);
     if (name in shift_of) {
-      printf "In %s line %d:\n", where[name], line + shift_of[name];
+      printf "In %s line %d:\n", where[name], anchor[name] ? anchor[name] : line + shift_of[name];
       next;
     }
     print $0;

@@ -1,4 +1,4 @@
-"""Check benchmark and SBOM failure reporting with local command stand-ins."""
+"""Check benchmark and release gate failures with local command stand-ins."""
 
 from __future__ import annotations
 
@@ -44,6 +44,9 @@ def check() -> None:
         commands = directory / "bin"
         commands.mkdir()
         env = dict(os.environ, PATH=f"{commands}{os.pathsep}{os.environ['PATH']}", BENCH_WORK=str(directory / "work"))
+        if sys.argv[1:] == ["--workflows"]:
+            check_workflows(directory, env)
+            return
 
         executable(commands / "broken-bench-agent", "import sys\nsys.exit(0 if sys.argv[1] == '--version' else 7)\n")
         executable(
@@ -113,6 +116,100 @@ def check() -> None:
 
         check_sbom(directory, env)
         check_rows(directory, env)
+        check_locks(directory, env)
+
+
+def check_locks(directory: Path, env: dict[str, str]) -> None:
+    manifest = directory / "manifest.txt"
+    lock = directory / "lock.txt"
+    manifest.write_text("ruff==0.16.4\n", encoding="utf-8")
+    for version, hashes, passed in (
+        ("0.16.4", ["a" * 64], True),
+        ("0.16.4", ["A" * 64, "b" * 64], True),
+        ("0.16+4", ["a" * 64], False),
+        ("0.16.40", ["a" * 64], False),
+        ("0.16.4", [], False),
+        ("0.16.4", [""], False),
+        ("0.16.4", ["a" * 63], False),
+        ("0.16.4", ["a" * 65], False),
+        ("0.16.4", ["z" * 64], False),
+        ("0.16.4", ["a" * 64, "garbage"], False),
+    ):
+        lock.write_text(
+            f"ruff=={version} \\\n"
+            + "".join(f"    --hash=sha256:{digest} \\\n" for digest in hashes)
+            + f"    # via -r {manifest}\n",
+            encoding="utf-8",
+        )
+        result = run(ROOT / "scripts/lint-lock.sh", str(manifest), str(lock), env=env)
+        expect((result.returncode == 0) == passed, result)
+    for pin, entry in (("Ruff==0.16.4", "ruff==0.16.4"), ("Foo__Bar==1.0", "foo-bar==1.0")):
+        manifest.write_text(pin + "\n", encoding="utf-8")
+        for suffix in ("", ".old"):
+            lock.write_text(
+                f"{entry} \\\n    --hash=sha256:{'a' * 64}\n    # via -r {manifest}{suffix}\n", encoding="utf-8"
+            )
+            result = run(ROOT / "scripts/lint-lock.sh", str(manifest), str(lock), env=env)
+            expect((result.returncode == 0) == (not suffix), result)
+
+
+def check_workflows(directory: Path, env: dict[str, str]) -> None:
+    workflow = directory / "workflow.yml"
+    composite = directory / "action.yml"
+    record = directory / "shell-bodies.json"
+    checker = directory / "bin/shellcheck"
+    executable(
+        checker,
+        "import json,os,pathlib,sys\n"
+        "bodies = [pathlib.Path(arg).read_text() for arg in sys.argv[1:] if arg.endswith('.sh')]\n"
+        "pathlib.Path(os.environ['SHELL_BODIES']).write_text(json.dumps(bodies))\n",
+    )
+    values = (
+        ("'printf \"%s\\n\" ok'", 'printf "%s\\n" ok'),
+        ('"printf \\"%s\\\\n\\" ok"', 'printf "%s\\n" ok'),
+        ("|+\n          echo ok\n", "echo ok\n\n"),
+        ("|2-\n          echo ok", "echo ok"),
+        (">-\n          printf '%s\\n'\n          ok", "printf '%s\\n' ok"),
+        ("|\n          cat <<EOF\n          run: hello\n          EOF", "cat <<EOF\nrun: hello\nEOF\n"),
+        ("|\n\n          echo ok", "\necho ok\n"),
+        ("echo \"${{ format('{0}', 'ok') }}\"", 'echo "github_expr"'),
+        ("echo \"${{ 'it''s }} quoted' }}\"", 'echo "github_expr"'),
+        (
+            "|-\n          echo \"${{\n            format('{0}', 'ok')\n          }}\"\n          echo ok",
+            'echo "github_expr\\\n\\\n"\necho ok',
+        ),
+    )
+    workflow.write_text(
+        "jobs:\n  lint:\n    steps:\n" + "".join(f"      - run: {scalar}\n" for scalar, _ in values), encoding="utf-8"
+    )
+    composite.write_text("runs:\n  using: composite\n  steps:\n    - run: echo action\n", encoding="utf-8")
+    try:
+        result = run(
+            ROOT / "scripts/lint-ci-shell.sh", str(workflow), str(composite), env=env, SHELL_BODIES=str(record)
+        )
+        expect(result.returncode == 0, result)
+        bodies = json.loads(record.read_text(encoding="utf-8"))
+        expect(len(bodies) == len(values) + 1, bodies)
+        for body, expected in zip(bodies, [*(value for _, value in values), "echo action"], strict=True):
+            expect(body.endswith(expected + "\n"), body)
+    finally:
+        checker.unlink()
+    # Use the actual checker for diagnostics and original source locations.
+    for scalar, line in (
+        ("'echo \"$missing\"'", 4),
+        ('|+\n          echo "$missing"', 5),
+        (
+            "|-\n          echo \"${{\n            format('{0}', 'ok')\n          }}\"\n          echo \"$missing\"",
+            8,
+        ),
+    ):
+        workflow.write_text(f"jobs:\n  lint:\n    steps:\n      - run: {scalar}\n", encoding="utf-8")
+        result = run(ROOT / "scripts/lint-ci-shell.sh", str(workflow), env=env)
+        expect(result.returncode != 0 and "SC2154" in result.stdout, result)
+        expect(f"In {workflow} line {line}:" in result.stdout, result)
+    workflow.write_text("jobs: [\n", encoding="utf-8")
+    result = run(ROOT / "scripts/lint-ci-shell.sh", str(workflow), env=env)
+    expect(result.returncode != 0 and str(workflow) in result.stderr, result)
 
 
 def check_instructions(directory: Path, env: dict[str, str]) -> None:
@@ -316,5 +413,7 @@ def check_parallel(fixture: Path, env: dict[str, str]) -> None:
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] not in ([], ["--workflows"]):
+        sys.exit("usage: test_scripts.py [--workflows]")
     check()
-    print("Benchmark and SBOM command failure checks passed")
+    print("Workflow shell checks passed" if sys.argv[1:] else "Benchmark and release gate failure checks passed")

@@ -136,6 +136,10 @@ preflight:
 	      echo "$$tool is not on PATH" >&2 ;; \
 	  esac; \
 	done; \
+	if command -v python3 >/dev/null 2>&1 && ! python3 -c 'import yaml' >/dev/null 2>&1; then \
+	  echo "python3 cannot import PyYAML: install lint-requirements.txt into a venv on PATH (see CONTRIBUTING.md)" >&2; \
+	  bad=1; \
+	fi; \
 	for tool in $(PREFLIGHT_SKIPPED_TOOLS); do \
 	  command -v "$$tool" >/dev/null 2>&1 && continue; \
 	  case "$$tool" in \
@@ -568,6 +572,7 @@ lint-shell:
 lint-ci:
 	@test -n "$(CI_SOURCES)" || { echo "no tracked workflow to read the run: steps from" >&2; exit 1; }
 	SHELLCHECK_OPTS='$(SHELLCHECK_OPTS)' sh scripts/lint-ci-shell.sh $(CI_SOURCES)
+	python3 bench/test_scripts.py --workflows
 
 lint-python:
 	@test -n "$(PY_SOURCES)" || { echo "no tracked .py file to lint" >&2; exit 1; }
@@ -1510,7 +1515,7 @@ check-sbom:
 	  exit 1; \
 	}; \
 	declared_pins="$$(grep -c '"comment": "Declared in ' "$$doc")"; \
-	roots="$$(grep -h -c '^[[:space:]]*# via -r ' lint-requirements.txt $(HARBOR_DIR)/requirements.lock | awk '{ n += $$1 } END { print n + 0 }')"; \
+	roots="$$(awk '/^[A-Za-z0-9_.-]+==/ { print $$1 }' lint-requirements.in $(HARBOR_DIR)/requirements.txt | sort -u | wc -l)"; \
 	test "$$declared_pins" -eq "$$roots" || { \
 	  echo "$$doc records $$declared_pins pins as declared where the manifests record $$roots as their roots: the role each pin carries is read out of the manifests, so a pin described as a direct dependency is one the manifest does not name" >&2; \
 	  exit 1; \

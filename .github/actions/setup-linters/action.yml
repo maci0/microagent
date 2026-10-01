@@ -11,7 +11,8 @@ runs:
     # The file is installed with --require-hashes, so an artifact whose
     # sha256 is not the one written down there fails the job instead of
     # becoming the linter that decides the gate passes. The pins are ruff and
-    # yamllint themselves, plus the two packages yamllint imports, so nothing
+    # yamllint themselves, plus the parser the workflow checker shares with
+    # yamllint and the package matcher yamllint imports, so nothing
     # in the resolution is chosen at install time.
     #
     # The install goes into a venv, since the runner's python3 is marked

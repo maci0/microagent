@@ -6,7 +6,7 @@
 # names and nothing fails until a number is quietly incomparable. A lock is
 # generated, so it is read here and never written: the three checks are that
 # every pin in the manifest is in the lock at the same version, that no lock
-# entry arrives without a hash, which is what an artifact installed unverified
+# entry arrives without a valid SHA-256 hash, which is what an artifact installed unverified
 # would be, and that every lock entry is reachable from a manifest pin, so a
 # lock carrying a package no requirement asks for is refused rather than
 # installed into the venv a score or a gate is run in. Regenerating is the
@@ -38,7 +38,12 @@ test -n "$pins" || { echo "$manifest pins no package, so this dependency set is 
 # A here-document rather than a pipe: a pipe would run the loop in a subshell
 # and throw away the bad=1 it sets.
 while read -r pin; do
-  grep -q "^$pin " "$lock" || {
+  awk -v pin="$pin" '
+    function norm(s) { s = tolower(s); gsub(/[-._]+/, "-", s); return s }
+    BEGIN { split(pin, wanted, "==") }
+    split($1, actual, "==") == 2 && norm(actual[1]) == norm(wanted[1]) && actual[2] == wanted[2] { found = 1 }
+    END { exit !found }
+  ' "$lock" || {
     echo "$manifest pins $pin, which $lock does not: the lock is older than the pin, so a run installs a release the manifest no longer names" >&2;
     echo "regenerate it with the 'uv pip compile' at the top of $manifest" >&2;
     bad=1;
@@ -46,18 +51,35 @@ while read -r pin; do
 done <<EOF
 $pins
 EOF
-grep -q -- "-r $manifest" "$lock" || {
+awk -v manifest="$manifest" '
+  /^[[:space:]]*#/ {
+    line = $0; sub(/^[[:space:]]*#[[:space:]]*/, "", line); sub(/^via[[:space:]]+/, "", line);
+    if (line == "-r " manifest) found = 1;
+  }
+  END { exit !found }
+' "$lock" || {
   echo "$lock records no root from $manifest, so it was not generated from it" >&2;
   bad=1;
 };
-unhashed="$(awk '/^[A-Za-z0-9_.-]+==/ { if (name != "" && hashes == 0) print name; name = $1; sub(/==.*/, "", name); hashes = 0; next } /--hash=sha256:/ { hashes++ } END { if (name != "" && hashes == 0) print name }' "$lock")"
-if [ -n "$unhashed" ]; then
-  echo "$lock has entries with no --hash=sha256, which uv installs without verifying them:" >&2;
-  echo "$unhashed" >&2;
+unverified="$(awk '
+  function finish() { if (name != "" && (hashes == 0 || malformed)) print name }
+  /^[A-Za-z0-9_.-]+==/ { finish(); name = $1; sub(/==.*/, "", name); hashes = 0; malformed = 0 }
+  /--hash=/ {
+    for (i = 1; i <= NF; i++) if ($i ~ /^--hash=/) {
+      digest = $i; sub(/^--hash=sha256:/, "", digest);
+      if ($i !~ /^--hash=sha256:/ || length(digest) != 64 || digest ~ /[^0-9a-fA-F]/) malformed = 1;
+      else hashes++;
+    }
+  }
+  END { finish() }
+' "$lock")"
+if [ -n "$unverified" ]; then
+  echo "$lock has entries with missing or malformed --hash=sha256 digests:" >&2;
+  echo "$unverified" >&2;
   bad=1;
 fi
 roots="$(printf '%s\n' "$pins" | sed 's/==.*//' | tr '\n' ' ')"
-orphans="$(awk -v roots="$roots" 'function norm(s) { s = tolower(s); gsub(/[._]/, "-", s); return s } /^[A-Za-z0-9_.-]+==/ { name = $0; sub(/[[:space:]].*/, "", name); sub(/==.*/, "", name); cur = norm(name); names[cur] = 1; seq[++n] = cur; multi = 0; next } /^[[:space:]]*# via[[:space:]]*$/ { multi = 1; next } /^[[:space:]]*# via[[:space:]]+/ { multi = 0; for (i = 2; i <= NF; i++) if ($i != "-r") parents[cur] = parents[cur] " " norm($i); next } /^[[:space:]]*#   [^ ]/ { if (multi) for (i = 1; i <= NF; i++) parents[cur] = parents[cur] " " norm($i); next } END { nr = split(roots, r, " "); for (i = 1; i <= nr; i++) if (r[i] in names) { seen[r[i]] = 1; queue[++m] = r[i] } for (i = 1; i <= n; i++) { c = seq[i]; k = split(parents[c], p, " "); for (j = 1; j <= k; j++) if (p[j] != "" && (p[j] in names)) rev[p[j]] = rev[p[j]] " " c } for (idx = 1; idx <= m; idx++) { c = queue[idx]; k = split(rev[c], ch, " "); for (j = 1; j <= k; j++) if (ch[j] != "" && !(ch[j] in seen)) { seen[ch[j]] = 1; queue[++m] = ch[j] } } for (i = 1; i <= n; i++) if (!(seq[i] in seen)) print seq[i] }' "$lock")"
+orphans="$(awk -v roots="$roots" 'function norm(s) { s = tolower(s); gsub(/[-._]+/, "-", s); return s } /^[A-Za-z0-9_.-]+==/ { name = $0; sub(/[[:space:]].*/, "", name); sub(/==.*/, "", name); cur = norm(name); names[cur] = 1; seq[++n] = cur; multi = 0; next } /^[[:space:]]*# via[[:space:]]*$/ { multi = 1; next } /^[[:space:]]*# via[[:space:]]+/ { multi = 0; for (i = 2; i <= NF; i++) if ($i != "-r") parents[cur] = parents[cur] " " norm($i); next } /^[[:space:]]*#   [^ ]/ { if (multi) for (i = 1; i <= NF; i++) parents[cur] = parents[cur] " " norm($i); next } END { nr = split(roots, r, " "); for (i = 1; i <= nr; i++) { r[i] = norm(r[i]); if (r[i] in names) { seen[r[i]] = 1; queue[++m] = r[i] } } for (i = 1; i <= n; i++) { c = seq[i]; k = split(parents[c], p, " "); for (j = 1; j <= k; j++) if (p[j] != "" && (p[j] in names)) rev[p[j]] = rev[p[j]] " " c } for (idx = 1; idx <= m; idx++) { c = queue[idx]; k = split(rev[c], ch, " "); for (j = 1; j <= k; j++) if (ch[j] != "" && !(ch[j] in seen)) { seen[ch[j]] = 1; queue[++m] = ch[j] } } for (i = 1; i <= n; i++) if (!(seq[i] in seen)) print seq[i] }' "$lock")"
 if [ -n "$orphans" ]; then
   echo "$lock carries packages no pin in $manifest needs, which uv installs into the venv anyway:" >&2;
   echo "$orphans" >&2;

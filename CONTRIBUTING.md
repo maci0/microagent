@@ -43,7 +43,8 @@ make OPT=ReleaseFast     # the build the CPU counters are read on
 
 `make check` also needs `shellcheck`, `ruff`, `yamllint`, `git` and `python3` on
 `PATH` (git because every linter reads its file list with `git ls-files`;
-python3 because `check-sbom` parses the SBOM with it).
+python3 because `check-sbom` parses the SBOM with it). The same Python must
+import PyYAML, which decodes workflow `run:` bodies for shellcheck.
 `make preflight` names each missing tool with the command that installs it, and
 `make check` runs it first, so a clean clone missing a linter says which one
 instead of stopping at `make: ruff: No such file or directory`. It also names
@@ -58,8 +59,9 @@ pins them, and `make lint-versions` names a local install that differs from the
 one CI runs:
 
 ```sh
-uv tool install ruff@0.16.4
-uv tool install yamllint==1.38.0
+uv venv .scratch/lintenv --python 3.12
+uv pip install --python .scratch/lintenv/bin/python --require-hashes -r lint-requirements.txt
+export PATH="$PWD/.scratch/lintenv/bin:$PATH"
 ```
 
 `shellcheck` comes with the runner image, so it has no pinned version. It is a
@@ -70,12 +72,12 @@ apt-get install -y shellcheck     # or: brew install shellcheck
 ```
 
 CI installs `ruff` and `yamllint` from [lint-requirements.txt](lint-requirements.txt),
-which pins them and the packages `yamllint` imports with one sha256 per
+which pins them and the packages `yamllint` and the workflow checker import with one sha256 per
 published artifact. It installs with `--require-hashes` into a venv on `PATH`,
 so the job never writes into the runner image's externally managed Python.
 `make lint-versions` fails when that file and the Makefile disagree on a
 version. The file is compiled by `uv` from `lint-requirements.in` (the command is in that
-file's header), so its transitive pins are whatever `yamllint` asks for and nothing is
+file's header), so its transitive pins are whatever the declared tools ask for and nothing is
 checked by hand.
 
 `zig fmt` covers the Zig and `build.zig.zon`, and needs nothing else.
@@ -250,7 +252,7 @@ lockfiles are inputs to the Python around the Zig, refreshed by hand:
 with the command that produces it in the comment at the top of
 `integrations/harbor/requirements.txt`. `make lint-lock` asks each of the two
 the same three questions, and refuses a lock that no longer carries the
-manifest's pin, has an entry with no `sha256`, or carries a package no pin in
+manifest's exact pin, has a missing or malformed 64-digit `sha256` digest, or carries a package no pin in
 the manifest needs. A lock left behind by an earlier pin therefore fails the
 gate instead of benchmarking a Harbor release the manifest no longer names, and
 a package nothing asks for never reaches the venv a score is measured in.
