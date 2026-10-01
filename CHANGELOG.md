@@ -32,6 +32,19 @@ release, and `microagent update` moves you to it.
   its contents rather than with the directory entry alone, which left every file
   under `.secrets/` in the diff. `search` and `ast` were not affected: ripgrep reads
   `!` in a glob the way the set was written for.
+- `make install` checks the Zig version build.zig.zon declares, as `make musl`
+  and `make release-assets` already do. It compiled with whatever compiler was
+  on PATH, so a contributor installing on a newer Zig put a binary on their
+  machine that no release ever published and no checksum describes. The README
+  sends readers to this target directly, and `check` reached it only as one
+  step of the gate.
+- The citation self-test writes its fixtures to a temporary directory instead
+  of the checkout root. A run cut short between creating the directory and the
+  trap that removes it left a `.check-refs-self-test.<pid>` of deliberately
+  stale Markdown behind; the directory is not in `.gitignore`, and the next
+  `make check-refs` picked its files up through the same
+  `git ls-files --cached --others --exclude-standard` list the tracked files
+  come from, then reported fixes to a file nobody was editing.
 
 ## [0.12.0] - 2026-10-01
 

@@ -701,7 +701,14 @@ DESTDIR ?=
 # and the license are copied in place: a truncated page fails to render and a
 # truncated grant is still readable text, and a `.tmp` beside them would be a
 # file `man` and dpkg's copyright scanner both have to know to skip.
-install: build
+#
+# The compiler is checked, for the reason `musl` names: this is the target that
+# puts a binary on a machine, and `build` alone compiles with whatever zig is on
+# PATH, so a contributor installing on a newer zig ships bytes no release ever
+# published and no checksum describes. `check` reached this only as one step
+# among the gate's, and a contributor reading the README runs `make install`
+# on its own.
+install: zig-version build
 	install -d -m 755 $(DESTDIR)$(BINDIR)
 	install -m755 $(BIN) $(DESTDIR)$(BINDIR)/microagent.tmp
 	mv -f $(DESTDIR)$(BINDIR)/microagent.tmp $(DESTDIR)$(BINDIR)/microagent

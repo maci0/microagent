@@ -20,9 +20,19 @@ set -eu
 # shellcheck disable=SC1007
 repo="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 gate="$repo/scripts/check-refs.sh"
-tmp="$repo/.check-refs-self-test.$$"
+# A scratch directory outside the repository, where every other script in the
+# gate puts its temporary files. This one wrote into the checkout root, which
+# is a place two things read the tree from: a run cut short between `mkdir` and
+# the trap leaves a `.check-refs-self-test.<pid>` holding Markdown full of
+# deliberately stale citations, it is not in .gitignore, and the next
+# `make check-refs` passes it to check-refs.sh through the same
+# `git ls-files --cached --others --exclude-standard` list the tracked files
+# come from. The gate then reports a fix it never made, in a file that is not
+# the one being edited. check-refs.sh resolves its own root and rewrites
+# relative to it, so the scratch directory is passed as a real path and the
+# fixtures are read and written by absolute path.
+tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-mkdir -p "$tmp"
 
 fail() { echo "check-refs-self-test: $1" >&2; exit 1; }
 run() { sh "$gate" "$1" 2>&1 || true; }
