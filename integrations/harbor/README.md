@@ -24,7 +24,7 @@ not execute in their containers. Pick another with `make musl
 MUSL_ARCH=<arch>`, or pass a binary of any architecture through
 `MICROAGENT_BINARY`. Neither file is committed.
 
-The binary is statically linked, about 1.6 MB, with no runtime dependencies:
+The binary is statically linked, about 0.9 MB, with no runtime dependencies:
 it runs in `python:slim`, bare `ubuntu` and distroless images alike.
 
 ## Run

@@ -78,9 +78,9 @@ connection is refused, which is everything up to the first request:
 
 `ReleaseSmall` is smallest in every column, 28% to 41% below `ReleaseFast`, and under half of
 `ReleaseSafe`'s. It is the build the release assets, `make` and `make musl` produce, so the numbers
-here are the numbers of what ships. The price is some CPU, not memory: `--version` retires 63,683
-instructions against 46,256 for `ReleaseFast`, and a 5,000-frame stream 37.8 million against 27.0
-million, about 1.4 times. The shipped build carries its own word-at-a-time `memcpy` (`src/copy.zig`),
+here are the numbers of what ships. The price is some CPU, not memory: `--version` retires 43,156
+instructions against 33,030 for `ReleaseFast`, and a 5,000-frame stream 37.8 million against 27.0
+million, about 1.3 times. The shipped build carries its own word-at-a-time `memcpy` (`src/copy.zig`),
 because the compiler runtime's is a byte loop in this mode and a run spent a third of its instructions
 in it. The harness is under 1% of a turn either way, so
 [docs/performance.md](performance.md) measures its CPU on `ReleaseFast` and this file measures its
@@ -101,14 +101,14 @@ release builds are stripped, Debug keeps its symbols.
 
 | build | binary |
 | --- | --- |
-| `zig build -Doptimize=ReleaseSmall` (stripped) | 937,232 B (0.89 MiB) |
-| `zig build -Doptimize=ReleaseFast` (stripped) | 1,766,160 B (1.68 MiB) |
-| `zig build -Doptimize=ReleaseSafe` (stripped) | 1,636,392 B (1.56 MiB) |
-| `zig build` (Debug, unstripped) | 46,433,805 B (44.28 MiB) |
+| `zig build -Doptimize=ReleaseSmall` (stripped) | 931,368 B (0.89 MiB) |
+| `zig build -Doptimize=ReleaseFast` (stripped) | 1,897,944 B (1.81 MiB) |
+| `zig build -Doptimize=ReleaseSafe` (stripped) | 1,718,976 B (1.64 MiB) |
+| `zig build` (Debug, unstripped) | 45,730,040 B (43.61 MiB) |
 
-The file size and the resident set are related and not the same: the release modes differ by up to 1.9x
+The file size and the resident set are related and not the same: the release modes differ by up to 1.8x
 in file size and by 1.3x to 2.7x in memory, and a large file that is never touched costs no memory.
-No runtime, no package manager, no node_modules, no Python. Thirteen files under `src/`, 24 674 lines
+No runtime, no package manager, no node_modules, no Python. Thirteen files under `src/`, 34 037 lines
 (`wc -l src/*.zig`):
 
 | file | role |
@@ -135,8 +135,8 @@ so its spread is given:
 
 | harness | instructions | CPU time |
 | --- | --- | --- |
-| microagent, ReleaseFast (not shipped) | 46,256 | 0.23 ms (+-2%) |
-| **microagent, ReleaseSmall (the release asset)** | **63,683** | **0.13 ms** (+-2%) |
+| microagent, ReleaseFast (not shipped) | 33,030 | 0.23 ms (+-2%) |
+| **microagent, ReleaseSmall (the release asset)** | **43,156** | **0.13 ms** (+-2%) |
 | claude 2.1.284 | 12.2 M | 7.6 ms (+-4%) |
 | codex 0.157.1 | 8.3 M | 13.1 ms (+-7%) |
 | grok 1.0.41 | 138 M | 27.4 ms (+-1%) |
@@ -146,7 +146,8 @@ so its spread is given:
 This table replaces a wall-clock one (hyperfine means, 1.4-2.5 ms for microagent). Wall clock at
 this scale measures the machine more than the binary: the same `--version` on the same binary took
 442 us and 1.7 ms in one earlier session, and this table was taken with a load average above 40, when
-no wall-clock figure would have been fair to any row. The microagent rows are this tree, measured later; the ReleaseSmall build spends 1.4x the
+no wall-clock figure would have been fair to any row. The microagent instruction counts are this
+tree, re-measured with the same `perf` on the machine the header names; the ReleaseSmall build spends 1.3x the
 instructions of ReleaseFast before it prints a byte; both are under a millisecond of CPU.
 
 A gauntlet loop starts an agent once per review, so startup is per-review overhead. On a 60 s review,
@@ -166,16 +167,16 @@ Prompt caching keys on the exact byte prefix of a request, so a turn's body must
 turn's body plus the new messages. That holds only while nothing constant sits *behind* the growing
 array.
 
-The tool schemas used to be written after `messages`. They are 4,123 bytes for the nine built-in
-tools, and behind the conversation they fell outside the cacheable prefix on every turn of every
-run, so the provider re-read them each time:
+The tool schemas used to be written after `messages`. They are 4,306 bytes for the nine built-in
+tools (the length of `tools_json` in `src/main.zig`), and behind the conversation they fell outside
+the cacheable prefix on every turn of every run, so the provider re-read them each time:
 
 | | un-cacheable tail per turn |
 | --- | --- |
-| tool schemas written after `messages` | 4,123 bytes (~1,030 tokens) |
+| tool schemas written after `messages` | 4,306 bytes (~1,077 tokens) |
 | written before, as now | **2 bytes** |
 
-Over a 100-turn review that was 0.41 MB of repeated prefill, invisible to every counter in this file,
+Over a 100-turn review that was 0.43 MB of repeated prefill, invisible to every counter in this file,
 because `cached_tokens` counts what was reused and never what was not.
 
 JSON member order is not significant, so the constant fields go first and `messages` ends the body.
@@ -190,21 +191,22 @@ run:
 
 | | bytes |
 | --- | --- |
-| system prompt | 2,273 |
-| the nine tool schemas | 4,123 |
-| the rest of the body: model, stream flags, `max_tokens`, JSON scaffolding | 120 |
-| **everything a request carries besides the conversation** | **6,516** |
+| system prompt, as the `{"role":"system","content":"..."}` object | 3,784 |
+| the nine tool schemas (`tools_json` in `src/main.zig`) | 4,306 |
+| the rest of the body: model, stream flags, `max_tokens`, JSON scaffolding | 123 |
+| **everything a request carries besides the conversation** | **8,213** |
 
-That 6,516 is the entire fixed cost of a request, and the schemas are nearly two thirds of it. A
+That 8,213 is the entire fixed cost of a request, and the schemas are just over half of it. A
 `--reasoning-effort` adds the `reasoning` member to the last row, nothing else. The block is re-sent
 every turn and cached from the second turn on, so it is a prefix cost, not a per-turn one (see
 [Un-cacheable request bytes](#un-cacheable-request-bytes) for the part that is not).
 
-With the remote presets on the tool schemas are 7,519 bytes and the fixed cost 9,912: the five
-remote tools ship compact descriptions and schemas (`terse_tools` in `src/mcp.zig`, used only for the
-preset's own host), because the servers send 8.4 KB for them, of which most is examples and emphasis.
+With the remote presets on, the eight preset tools (`terse_tools` in `src/mcp.zig`, used only for a
+preset's own host) ship compact descriptions and schemas. What they add to the body is a
+configuration rather than a constant of the tree: each is offered under `mcp__<server>__<tool>`, so
+its entry's length depends on the server names the config gives the presets.
 
-An earlier figure of 933 tokens, read from a run's usage line, covered six of the seven tools; the
+An earlier figure of 933 tokens, read from a run's usage line, covered six of the nine tools; the
 bytes above replace it because they can be re-derived from the tree. Competitor CLIs in one-shot mode
 reported no comparable number on this machine, so none is claimed for them.
 
@@ -283,7 +285,7 @@ per token spent.
 On the 23-task Terminal-Bench 2 sample ([below](#terminal-bench-2-23-task-sample)) the limit never
 fires: 16.5 M input tokens is about 66 MB of prompt, which spread over the turns those tasks took is
 72-143 KB per request (a range because the benchmark does not keep the turn count), against a 400 KB
-limit. The fixed 6,516 bytes is 5-9% of one request. That prompt is evidence the agent
+limit. The fixed 8,213 bytes is 6-11% of one request. That prompt is evidence the agent
 accumulated, not fixed harness cost and not compaction; the limit is inert at benchmark scale and
 binds only on long runs.
 
@@ -859,6 +861,10 @@ exception column.
 - **Other installed harnesses on the task benchmark.** `claude` was rate-limited until the weekly
   reset, `grok` returned HTTP 402 (balance exhausted), `codex` refuses to run outside a trusted
   directory without an extra flag, `crush` reported its model unavailable.
+- **The harnesses `bench/overhead.sh` drives that no table here carries.** Its default `agents` list
+  also names `gemini`, `cursor-agent`, `clanker` and `dsh`. The script measures whichever of its
+  list is on `PATH` and skips the rest, so those four are measured on a host that has them and write
+  no row in this file. Nothing above claims a figure for any of them.
 - **kimi on Harbor.** Harbor's `kimi-cli` agent refuses to run ("kimi-cli is no longer maintained.
   Please use the new Kimi Code CLI"), and `kimi-code` reaches the provider but every credential in
   `~/.secrets` returns `401 The API Key appears to be invalid or may have expired` against
