@@ -189,14 +189,14 @@ const max_error_body_bytes: usize = 16 * 1024;
 const tools_json =
     \\[
     \\{"type":"function","function":{"name":"bash","description":"Run a shell command in the current directory, which is where every call starts: no shell and no `cd` carries over, so do not prefix one.","parameters":{"type":"object","properties":{"command":{"type":"string","description":"Shell command"},"timeout_ms":{"type":"integer","description":"Timeout in milliseconds, default 120000, at most 600000"}},"required":["command"]}}},
-    \\{"type":"function","function":{"name":"read","description":"Read a file as text. Refuses credentials files (.env, private keys, keystores, anything under .secrets or .ssh).","parameters":{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","description":"1-based first line"},"limit":{"type":"integer","description":"Max lines"}},"required":["path"]}}},
-    \\{"type":"function","function":{"name":"write","description":"Create or overwrite a file, creating parent directories. Refuses credentials files, as `read` does.","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}},
-    \\{"type":"function","function":{"name":"edit","description":"Replace an exact string in a file. old_string must occur once unless replace_all is set; new_string must not contain old_string. Refuses credentials files.","parameters":{"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean"}},"required":["path","old_string","new_string"]}}},
-    \\{"type":"function","function":{"name":"multi_edit","description":"Several `edit`s, in one file or across files, applied in order on the text the earlier ones left; nothing is written unless all are accepted. Prefer it to repeated `edit` calls.","parameters":{"type":"object","properties":{"edits":{"type":"array","items":{"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean"}},"required":["path","old_string","new_string"]}}},"required":["edits"]}}},
+    \\{"type":"function","function":{"name":"read","description":"Read a file as text. Refuses credentials files (.env, private keys, keystores, anything under .secrets or .ssh).","parameters":{"type":"object","properties":{"path":{"type":"string","description":"File to read"},"offset":{"type":"integer","description":"1-based first line"},"limit":{"type":"integer","description":"Max lines"}},"required":["path"]}}},
+    \\{"type":"function","function":{"name":"write","description":"Create or overwrite a file, creating parent directories. Refuses credentials files, as `read` does.","parameters":{"type":"object","properties":{"path":{"type":"string","description":"File to create or overwrite"},"content":{"type":"string","description":"The whole text the file is left holding"}},"required":["path","content"]}}},
+    \\{"type":"function","function":{"name":"edit","description":"Replace an exact string in a file. old_string must occur once unless replace_all is set; new_string must not contain old_string. Refuses credentials files.","parameters":{"type":"object","properties":{"path":{"type":"string","description":"File to edit"},"old_string":{"type":"string","description":"Text to find, matched exactly and not as a pattern"},"new_string":{"type":"string","description":"Text that replaces it"},"replace_all":{"type":"boolean","description":"Replace every occurrence rather than refusing an ambiguous match"}},"required":["path","old_string","new_string"]}}},
+    \\{"type":"function","function":{"name":"multi_edit","description":"Several `edit`s, in one file or across files, applied in order on the text the earlier ones left; nothing is written unless all are accepted. Prefer it to repeated `edit` calls.","parameters":{"type":"object","properties":{"edits":{"type":"array","description":"The edits to apply, up to 64","items":{"type":"object","properties":{"path":{"type":"string","description":"File to edit"},"old_string":{"type":"string","description":"Text to find, matched exactly"},"new_string":{"type":"string","description":"Text that replaces it"},"replace_all":{"type":"boolean","description":"Replace every occurrence rather than refusing an ambiguous match"}},"required":["path","old_string","new_string"]}}},"required":["edits"]}}},
     \\{"type":"function","function":{"name":"search","description":"Search file contents with ripgrep; returns file:line:text matches. Skips credentials files.","parameters":{"type":"object","properties":{"pattern":{"type":"string","description":"Regular expression"},"path":{"type":"string","description":"Directory or file, default ."},"glob":{"type":"string","description":"Glob filter, e.g. *.zig"}},"required":["pattern"]}}},
     \\{"type":"function","function":{"name":"ast","description":"Structural search or rewrite with ast-grep, matching syntax, not text. `lang` is one ast-grep supports, and Zig is not among them, so use `search` on a Zig tree. Skips credentials files. Set rewrite to apply it to every match; a rewrite whose result the pattern still matches is refused.","parameters":{"type":"object","properties":{"pattern":{"type":"string","description":"ast-grep pattern with metavariables, e.g. $A == $A"},"lang":{"type":"string","description":"Language, e.g. python, javascript, go, rust"},"path":{"type":"string","description":"Directory or file, default ."},"rewrite":{"type":"string","description":"Replacement pattern; when set the matches are rewritten in place"}},"required":["pattern","lang"]}}},
     \\{"type":"function","function":{"name":"git","description":"Read repository state: status, diff, log, show, blame. Refuses a credentials file as path or rev. Use it instead of git through bash.","parameters":{"type":"object","properties":{"cmd":{"type":"string","enum":["status","diff","log","show","blame"],"description":"What to read"},"path":{"type":"string","description":"File or directory to scope to"},"rev":{"type":"string","description":"Revision for diff/show/blame, e.g. HEAD~3"},"limit":{"type":"integer","description":"Max output lines, default 400"}},"required":["cmd"]}}},
-    \\{"type":"function","function":{"name":"todo","description":"Keep the steps of a long task. Send the whole list each time: it replaces the last one and is returned.","parameters":{"type":"object","properties":{"items":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"},"status":{"type":"string","enum":["pending","doing","done"]}},"required":["text","status"]}}},"required":["items"]}}}
+    \\{"type":"function","function":{"name":"todo","description":"Keep the steps of a long task. Send the whole list each time: it replaces the last one and is returned.","parameters":{"type":"object","properties":{"items":{"type":"array","description":"The whole list, not a delta","items":{"type":"object","properties":{"text":{"type":"string","description":"What the step is to do"},"status":{"type":"string","enum":["pending","doing","done"],"description":"Where the step stands"}},"required":["text","status"]}}},"required":["items"]}}}
     \\]
 ;
 
@@ -3270,12 +3270,21 @@ fn sendRequest(open: *std.http.Client.Request, chunk: []u8, prefix: []const u8, 
     try open.connection.?.flush();
 }
 
-/// The request headers carrying the credential. The authorization header is
-/// `.override` rather than `.privileged`, because the client drops a privileged
-/// header on a redirect, and dropping it costs a 401 from every provider.
+/// The request headers every turn to this provider carries: the credential and
+/// the identity this client answers with.
+///
+/// The authorization header is `.override` rather than `.privileged`, because
+/// the client drops a privileged header on a redirect, and dropping it costs a
+/// 401 from every provider.
+///
+/// The `User-Agent` is here beside it rather than spelled at the call site,
+/// because the same binary talks to three HTTP surfaces (this one, a remote MCP
+/// server, and `update`) and one header each means the toolchain's name reaches
+/// two of them by default. `net.user_agent` is the spelling they share.
 fn authHeaders(arena: std.mem.Allocator, api_key: []const u8) !std.http.Client.Request.Headers {
     return .{
         .authorization = .{ .override = try std.fmt.allocPrint(arena, "Bearer {s}", .{api_key}) },
+        .user_agent = .{ .override = net.user_agent },
     };
 }
 
@@ -3295,6 +3304,7 @@ fn withStallTimeout(io: Io, seconds: u32, comptime operation: anytype, args: any
 const Endpoint = struct {
     uri: std.Uri,
     shown_url: []const u8,
+    /// The credential and identity headers, every turn of the run.
     auth: std.http.Client.Request.Headers,
 };
 
@@ -3521,6 +3531,8 @@ fn streamChatOnce(
         }
         const req = openChatRequest(client, uri, .{
             .redirect_behavior = .unhandled,
+            // The key and the identity ride in one header block, built once per
+            // run: `authHeaders` is where both are spelled.
             .headers = auth_headers,
             .extra_headers = &.{
                 .{ .name = "content-type", .value = "application/json" },
@@ -5573,6 +5585,76 @@ test "the tool schema sits inside the cacheable prefix, not behind the conversat
     try std.testing.expectEqualStrings(tools_json, body[tools_at + 8 ..][0..tools_json.len]);
 }
 
+// Every parameter the schema names says what it is for. A tool's `description`
+// explains the tool, and a bare `"path"` or `"content"` under it leaves the
+// model guessing what the argument holds: `content` is the whole file or a
+// fragment, `edits` is the whole list or a delta, and nothing on the wire says
+// which. Those are the only words the model reads about an argument, so a
+// parameter that declares none is a contract this side left out.
+test "every parameter the tool schema names is described" {
+    // The schema is a list of functions, so a walk of it is a walk of every
+    // `properties` object it holds, at any depth: an item object inside an
+    // array declares arguments too, and the ones `multi_edit` and `todo` take
+    // live there rather than beside it.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena_state.allocator(), tools_json, .{});
+
+    var found: usize = 0;
+    var described: usize = 0;
+    var undeclared: std.ArrayList([]const u8) = .empty;
+    try checkParameters(arena_state.allocator(), parsed.value, &found, &described, &undeclared);
+    // The walk has to have reached something, or a schema written in a shape
+    // this walk cannot see would pass by finding nothing.
+    try std.testing.expect(found > 0);
+    try std.testing.expectEqualSlices([]const u8, &.{}, undeclared.items);
+    try std.testing.expectEqual(found, described);
+}
+
+/// Every `properties` object the value holds, and the ones whose members all
+/// carry a `description`. `undeclared` collects the arguments left bare, so a
+/// failure names the argument rather than only a count.
+fn checkParameters(
+    arena: std.mem.Allocator,
+    value: std.json.Value,
+    found: *usize,
+    described: *usize,
+    undeclared: *std.ArrayList([]const u8),
+) !void {
+    switch (value) {
+        .object => |obj| {
+            var properties: ?std.json.ObjectMap = null;
+            var it = obj.iterator();
+            while (it.next()) |entry| {
+                if (std.mem.eql(u8, entry.key_ptr.*, "properties")) {
+                    if (entry.value_ptr.* == .object) properties = entry.value_ptr.*.object;
+                    continue;
+                }
+                // Anything else can hold a nested schema, so the walk is not
+                // only over the object that names `properties`.
+                try checkParameters(arena, entry.value_ptr.*, found, described, undeclared);
+            }
+            if (properties) |props| {
+                found.* += 1;
+                var complete = true;
+                var names = props.iterator();
+                while (names.next()) |arg| {
+                    if (arg.value_ptr.* != .object) continue;
+                    if (arg.value_ptr.*.object.get("description") == null) {
+                        complete = false;
+                        try undeclared.append(arena, arg.key_ptr.*);
+                    }
+                }
+                if (complete) described.* += 1;
+            }
+        },
+        .array => |items| for (items.items) |item| {
+            try checkParameters(arena, item, found, described, undeclared);
+        },
+        else => {},
+    }
+}
+
 // A provider reuses a cached prefix between invocations, not only between the
 // turns of one: the bytes ahead of the conversation have to be the same bytes
 // the next run sends. They are, as long as nothing that varies per invocation
@@ -5807,6 +5889,17 @@ test "the api key is sent as the request's authorization header" {
         .override => |value| try std.testing.expectEqualStrings("Bearer sk-two words", value),
         else => return error.TestUnexpectedResult,
     }
+
+    // The identity goes beside the key rather than being left to the client
+    // library, which sends the toolchain's name for it. The same binary speaks
+    // to a provider, to a remote MCP server and to the release API, and a
+    // provider reading its access log has to be able to tell which client is
+    // calling; two of the three said "zig" until this field existed.
+    switch (headers.user_agent) {
+        .override => |value| try std.testing.expectEqualStrings(net.user_agent, value),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(!std.mem.startsWith(u8, net.user_agent, "zig/"));
 }
 
 test "only a bash call that names a runner counts as verification" {

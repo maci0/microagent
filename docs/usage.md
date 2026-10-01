@@ -570,7 +570,9 @@ timeout        = 30                  # seconds, 1 to 600, the default
 Every request is a `POST` to the url with `Content-Type: application/json` and
 `Accept: application/json, text/event-stream`, and the answer is read as a JSON body or as an event
 stream, whichever the server sends; notifications and server requests in a stream are ignored, and a
-stream that ends without the answer is an error. After `initialize` the client sends
+stream that ends without the answer is an error. Every request carries `User-Agent: microagent/<version>`,
+the same one the provider call and `microagent update` send, so an operator reading a server's log
+sees which client is calling rather than the name of the library it was built with. After `initialize` the client sends
 `MCP-Protocol-Version` with the supported revision selected by the server (`2025-03-26` or
 `2025-06-18`), and echoes an `Mcp-Session-Id` the server assigned. Unsupported revisions and
 missing version strings fail initialization; stdio also supports `2024-11-05` and `2025-11-25`. Between

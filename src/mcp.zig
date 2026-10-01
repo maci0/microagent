@@ -523,7 +523,7 @@ pub const Server = struct {
             .redirect_behavior = .unhandled,
             // A body cannot be inflated without a window buffer, and a
             // JSON-RPC answer is small text: ask for it as it is.
-            .headers = .{ .accept_encoding = .omit },
+            .headers = .{ .accept_encoding = .omit, .user_agent = .{ .override = net.user_agent } },
             .extra_headers = extra[0..extra_len],
         });
         defer req.deinit();
@@ -3697,6 +3697,11 @@ test "a streamable-HTTP server is connected, listed and called over loopback" {
     try std.testing.expect(std.mem.startsWith(u8, first, "POST /mcp HTTP/1.1\r\n"));
     try std.testing.expect(std.ascii.indexOfIgnoreCase(first, "content-type: application/json\r\n") != null);
     try std.testing.expect(std.ascii.indexOfIgnoreCase(first, "accept: application/json, text/event-stream\r\n") != null);
+    // The program names itself on the wire, the same way the provider call and
+    // `update` do. Left to the client library this is the toolchain's name, and
+    // a server operator reading a log cannot tell which client is calling.
+    try std.testing.expect(std.ascii.indexOfIgnoreCase(first, "user-agent: " ++ net.user_agent ++ "\r\n") != null);
+    try std.testing.expect(std.ascii.indexOfIgnoreCase(first, "user-agent: zig/") == null);
     try std.testing.expect(std.mem.indexOf(u8, first, "\"protocolVersion\":\"2025-03-26\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, first, "\"clientInfo\":{\"name\":\"microagent\",\"version\":\"test\"}") != null);
     // Nothing to echo before the server has said anything.

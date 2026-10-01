@@ -452,7 +452,7 @@ fn exchange(
     } else &.{};
     return client.fetch(.{
         .location = .{ .url = url },
-        .headers = .{ .user_agent = .{ .override = "microagent/" ++ version } },
+        .headers = .{ .user_agent = .{ .override = net.user_agent } },
         .privileged_headers = auth_headers,
         .response_writer = &capped.writer,
     });

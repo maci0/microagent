@@ -25,6 +25,20 @@ const chat = @import("chat.zig");
 /// reader.
 pub const env_surrounding = " \t\r\n";
 
+/// The `User-Agent` every request this program sends carries, and the one
+/// place it is spelled.
+///
+/// There are three HTTP surfaces here -- the provider completions call, a
+/// remote MCP server, and `update` against the release API -- and a client
+/// library that is not told otherwise sends `user-agent: zig/<version>
+/// (std.http)` on every one of them. That names the toolchain a run happens to
+/// be built with rather than the program that made the request, so a provider
+/// or an operator reading a log cannot tell which client is calling, and the
+/// three surfaces answered three different identities for the same binary.
+/// `update` already sent `microagent/<version>` on its own; this is that
+/// spelling, shared.
+pub const user_agent = "microagent/" ++ @import("build_options").version;
+
 /// The bytes that cannot appear in a header value: every C0 control and DEL.
 /// A CR or an LF ends the header line, so a value carrying one is not a value
 /// the request writer can carry, and the rest of the line becomes headers the
@@ -42,6 +56,16 @@ pub const header_control_bytes = blk: {
 /// control and DEL.
 pub fn hasHeaderControlBytes(value: []const u8) bool {
     return std.mem.indexOfAny(u8, value, &header_control_bytes) != null;
+}
+
+test "every HTTP surface names the program rather than the toolchain" {
+    // The library's own default is what a request sent without this header
+    // carries, so the guard is against drifting back to it by leaving a surface
+    // alone rather than against a particular spelling.
+    try std.testing.expect(!std.mem.startsWith(u8, user_agent, "zig/"));
+    try std.testing.expect(std.mem.startsWith(u8, user_agent, "microagent/"));
+    // A header value has to be writable as one: no byte here may end the line.
+    try std.testing.expect(!hasHeaderControlBytes(user_agent));
 }
 
 /// How much of a value a message quotes back, bounded on the bytes that come

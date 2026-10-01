@@ -30,7 +30,27 @@ release, and `microagent update` moves you to it.
   named `callParams`, so the harness and the call read the same code rather
   than two copies of it.
 
+- Every parameter in the tool schema now says what it is for. `read`, `write`,
+  `edit`, `multi_edit` and `todo` declared `path`, `content`, `old_string`,
+  `new_string`, `replace_all`, `edits`, `text` and `status` with no
+  `description`, so the only words the model read about each of them were its
+  name: whether `content` is the whole file or a fragment, and whether `edits`
+  is the whole list or a delta on the last one, were answers the schema did not
+  give and the tools did ask for. A test walks every `properties` object in the
+  schema, at any depth, and fails naming the argument if one is left bare.
+
 ### Fixed
+
+- Every HTTP request now carries `User-Agent: microagent/<version>`. The
+  provider completions call and a remote MCP server were left to the client
+  library's default, which names the toolchain the binary was built with
+  (`zig/0.16.0 (std.http)`), so two of the program's three HTTP surfaces
+  identified themselves as a compiler and `microagent update`, the third, sent
+  the program's own name. A provider or an MCP server operator reading an
+  access log could not tell which client was calling, and the header differed
+  for the same binary depending on where it was pointed. One spelling in
+  `net.user_agent` now serves all three, and the MCP section of `docs/usage.md`
+  says so where it lists the headers a request carries.
 
 - A lazy MCP preset whose `initialize` answer is refused no longer keeps its
   child running. The one handshake failure that is this run's own judgement
