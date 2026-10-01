@@ -818,6 +818,17 @@ pub const Servers = struct {
         if (server.lazy) {
             if (!handshake(io, arena, server, server.client_version, deadline)) {
                 server.dead = true;
+                // A preset is the only server whose handshake happens here
+                // rather than in `connect`, so this is the only place a
+                // stdio child can be found unusable without the run stopping.
+                // Marking it dead is not the same as stopping it: without the
+                // retire the child keeps running, and keeps its slot in the
+                // interrupt table, for every remaining turn of the run. A
+                // handshake can fail with the child alive and well -- a server
+                // whose `tools/list` is not a catalogue, or which selected a
+                // revision this build does not speak, answers and then sits
+                // there waiting -- so the timeout paths alone do not cover it.
+                server.retireIfDead(io);
                 return std.fmt.allocPrint(arena, "error: MCP server {s} did not answer ({s})", .{
                     server.name,
                     if (server.last_error.len != 0) server.last_error else "no answer",
@@ -2640,6 +2651,45 @@ test "a lazy MCP handshake shares the tool call deadline and a dead server is no
     try std.testing.expect(std.mem.indexOf(u8, slow_answer, "Timeout") != null);
     // initialize and tools/list may be attempted; tools/call must not start.
     try std.testing.expect(slow.items[0].next_id <= 3);
+}
+
+test "a lazy server whose handshake is refused stops holding its child" {
+    // A handshake can fail with the child alive and answering: a server that
+    // picks a protocol revision this build does not speak is refused on the
+    // `initialize` it answered, not on a timeout. Marking such a server dead
+    // is not the same as stopping it, and the difference is paid for by every
+    // remaining turn of the run: the child keeps running, and keeps its slot
+    // in the interrupt table, which is 64 entries shared with every tool call
+    // the run makes.
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    const io = std.testing.io;
+    var env: std.process.Environ.Map = .init(arena);
+    const before = tool_mod.liveChildGroups();
+
+    // The version the fake server answers `initialize` with, replaced by one
+    // outside the list this build supports, so the handshake is refused on
+    // shape while the child is still sitting in its read loop.
+    const other = try std.mem.replaceOwned(u8, arena, fake_server, "2025-06-18", "1999-01-01");
+    var spawned: std.ArrayList(Server) = .empty;
+    spawnOne(io, arena, &env, .{ .name = "unrecognized", .command = "/bin/sh", .args = &.{ "-c", other } }, &spawned);
+    defer for (spawned.items) |*server| server.reap(io);
+    try std.testing.expectEqual(@as(usize, 1), spawned.items.len);
+    const server = &spawned.items[0];
+    server.lazy = true;
+    // Published for as long as the child runs, which is what the handler reads
+    // and what the retire below is measured against.
+    try std.testing.expectEqual(before + 1, tool_mod.liveChildGroups());
+
+    const tool: Tool = .{ .name = "echo", .exposed = "mcp__unrecognized__echo", .description = "echo", .schema = "{}" };
+    const answer = try Servers.call(io, arena, .{ .server = server, .tool = &tool }, "{}", net.durationMs(10_000));
+    try std.testing.expect(std.mem.indexOf(u8, answer, "did not answer") != null);
+    try std.testing.expect(server.dead);
+    // The child and its interrupt-table slot are gone. The reap the defer above
+    // runs finds nothing left to do, so the table is back where this test found
+    // it rather than holding a dead server's group for the next one.
+    try std.testing.expectEqual(before, tool_mod.liveChildGroups());
 }
 
 test "a server that cannot be started, or that exits, is skipped" {
