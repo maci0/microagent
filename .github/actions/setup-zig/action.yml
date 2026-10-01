@@ -42,11 +42,11 @@ runs:
     # on every push.
     #
     # Every key carries `runner.arch` as well as `runner.os`, because os alone
-    # is not a machine: `macos-15-intel` is X64 and `macos-14` is ARM64, and both
-    # answer `runner.os` as `macOS`. Sharing one key between them makes the two
-    # jobs race to save the same entry, and the cache action keeps the first
-    # and drops the second, so whichever runner is second never gets a cache of
-    # its own: the X64 job restores the ARM64 tree's build products and
+    # is not a machine: `macos-15-intel` is X64 and `macos-15` is ARM64, and
+    # both answer `runner.os` as `macOS`. Sharing one key between them makes
+    # the two jobs race to save the same entry, and the cache action keeps the
+    # first and drops the second, so whichever runner is second never gets a
+    # cache of its own: the X64 job restores the ARM64 tree's build products and
     # recompiles the standard library from cold on every push, which is the
     # cost these caches exist to remove.
     #
@@ -58,19 +58,24 @@ runs:
     # recompiling it from nothing.
     #
     # The hashed set is every input the build reads, not only src/: build.zig
-    # embeds config.example.toml into the binary, so an edit to it changes the
-    # bytes of every artifact without touching a line under src/, and a key
-    # that left it out would restore the previous commit's cache entry for
-    # every push that changed nothing but that file. Zig's cache is
-    # content-addressed, so a stale restore costs a recompile rather than a
-    # wrong binary; the key is here so the restore is a hit instead.
+    # embeds config.example.toml into the binary and copies the two files it
+    # hands the test sandbox into the cache, so an edit to any of the three
+    # changes the bytes of every artifact without touching a line under src/,
+    # and a key that left one out would restore the previous commit's cache
+    # entry for every push that changed nothing but that file. The two the
+    # sandbox carries are docs/usage.md and
+    # integrations/harbor/microagent_agent.py, the two names in build.zig's
+    # tracked_data list alongside config.example.toml, so the key hashes what
+    # that list copies and the embed it reads. Zig's cache is content-addressed,
+    # so a stale restore costs a recompile rather than a wrong binary; the key
+    # is here so the restore is a hit instead.
     - name: restore the project build cache
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: .zig-cache
         key: >-
           zig-local-${{ runner.os }}-${{ runner.arch }}-${{ steps.zig.outputs.version }}-${{
-          hashFiles('build.zig', 'build.zig.zon', 'src/**',
+          hashFiles('build.zig', 'build.zig.zon', 'src/**', 'docs/usage.md',
           'config.example.toml', 'integrations/harbor/microagent_agent.py') }}
         restore-keys: |
           zig-local-${{ runner.os }}-${{ runner.arch }}-${{ steps.zig.outputs.version }}-

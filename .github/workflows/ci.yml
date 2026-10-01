@@ -46,13 +46,18 @@ jobs:
         include:
           - os: ubuntu-24.04
             release_target: x86_64-linux-musl
-          - os: macos-14
+          # The arm64 image, the one that starts `aarch64-macos`. This row used
+          # to name `macos-14`, which GitHub has begun deprecating and removes
+          # from the fleet entirely on 2026-11-02, after a stretch of scheduled
+          # brownouts that fail jobs for a reason that is not a test failure.
+          # `macos-15` is the supported arm64 image and starts the same asset.
+          - os: macos-15
             release_target: aarch64-macos
           # The x86_64 macOS image is the only runner that starts
-          # `x86_64-macos`. macos-14 is Apple silicon, so without this row the
-          # second of the two macOS assets the release publishes is
-          # cross-compiled and never run, and a Mach-O that links but does not
-          # start would ship and fail on a user's machine instead of here.
+          # `x86_64-macos`. The arm64 image above is Apple silicon, so without
+          # this row the second of the two macOS assets the release publishes
+          # is cross-compiled and never run, and a Mach-O that links but does
+          # not start would ship and fail on a user's machine instead of here.
           # The `macos-13` image this row used to name is retired: GitHub
           # removes an image from the runner fleet, and a matrix row naming a
           # label no runner answers to never starts, so the job is red on
