@@ -85,7 +85,7 @@ pub fn resolveWritableRoots(
                 try std.fs.path.resolve(arena, &.{sdir_exp})
             else
                 try std.fs.path.resolve(arena, &.{ cwd, sdir_exp });
-            _ = std.Io.Dir.cwd().createDirPathStatus(io, resolved_sdir, session.log_dir_mode) catch |err| {
+            session.ensureDir(io, arena, resolved_sdir, "microagent: sandbox: the session directory {s} could not be created ({s}); it is still a writable root, and a tool call that writes under it will fail on its own\n") catch {
                 // The store is opened after this, and a mode is not applied to
                 // a directory that already exists, so a failure here is not one
                 // the store's own create can come back from: it decides, and
@@ -95,9 +95,6 @@ pub fn resolveWritableRoots(
                 // repeat of one the operator gets rather than the only one,
                 // and a sandbox-enabled run on a store it cannot create says
                 // so before any tool call is refused.
-                net.note(io, arena, "microagent: sandbox: the session directory {s} could not be created ({s}); it is still a writable root, and a tool call that writes under it will fail on its own\n", .{
-                    chat.safeTextAll(arena, resolved_sdir), @errorName(err),
-                });
             };
             try appendRoot(io, arena, &roots, trimTrailingSep(resolved_sdir));
         }

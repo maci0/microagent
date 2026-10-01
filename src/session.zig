@@ -111,14 +111,38 @@ const max_session_suffix_bytes = std.fmt.count("{d}", .{session_name_attempts - 
 /// to a directory that already exists, so an operator who pointed
 /// MICROAGENT_SESSION_DIR at a shared store keeps the mode they gave it.
 ///
-/// `pub` because the sandbox module makes the same directory earlier than this
-/// one does, on a run with `enabled = true`: the store is opened after the
-/// writable roots are resolved, and a mode applied to a directory that already
-/// exists is not applied at all. A second creator that spelled its own mode
-/// therefore decided this one, and the default directory mode is a 0o755 the
-/// first paragraph above is written against.
+/// The directory mode reaches the sandbox through `ensureDir` below rather
+/// than by being exported: the sandbox creates the same directory earlier than
+/// this module does, on a run with `enabled = true`, and a mode applied to a
+/// directory that already exists is not applied at all, so whoever creates it
+/// first decides it for both. Handing out the mode let the sandbox spell its own
+/// create beside it, and the two copies agreed only until one of them was
+/// edited. `log_file_mode` is read by this module alone.
 pub const log_file_mode: Io.File.Permissions = @enumFromInt(@as(std.posix.mode_t, 0o600));
-pub const log_dir_mode: Io.File.Permissions = @enumFromInt(@as(std.posix.mode_t, 0o700));
+const log_dir_mode: Io.File.Permissions = @enumFromInt(@as(std.posix.mode_t, 0o700));
+
+/// Creates the session store directory if it is not there, with this module's
+/// mode, and reports a failure through `fmt` rather than to stderr itself.
+///
+/// Two callers make this directory and both must apply the same mode, because a
+/// mode is not applied to a directory that already exists: whoever runs first
+/// decides it for both. The sandbox makes it before the writable roots are
+/// resolved, on a run with `enabled = true`, and the store opens it after. A
+/// mode constant exported for the sandbox to spell beside its own call would be
+/// the same creator written twice, and the two copies answer to one constant
+/// only until one of them is edited; this is the single call instead, so the
+/// sandbox holds no copy of the mode and cannot drift from it.
+///
+/// The message is the caller's, with `{s}` for the directory and `{s}` for the
+/// error, because the two failures are different facts: a sandbox-enabled run
+/// that could not make its own writable root keeps going, while a run whose
+/// store is missing records nothing.
+pub fn ensureDir(io: Io, arena: std.mem.Allocator, session_dir: []const u8, comptime fmt: []const u8) !void {
+    _ = std.Io.Dir.cwd().createDirPathStatus(io, session_dir, log_dir_mode) catch |err| {
+        net.note(io, arena, fmt, .{ chat.safeTextAll(arena, session_dir), @errorName(err) });
+        return err;
+    };
+}
 
 /// This run's log, under a name nothing already holds.
 ///
@@ -212,8 +236,7 @@ pub fn openAt(io: Io, arena: std.mem.Allocator, env: *const std.process.Environ.
         return null;
     };
     const cwd = recordCwd(arena, env, resolved);
-    _ = std.Io.Dir.cwd().createDirPathStatus(io, session_dir, log_dir_mode) catch |err| {
-        net.note(io, arena, "microagent: the session directory {s} could not be created ({s}); the rest of this run is not recorded\n", .{ shown, @errorName(err) });
+    ensureDir(io, arena, session_dir, "microagent: the session directory {s} could not be created ({s}); the rest of this run is not recorded\n") catch {
         return null;
     };
     const stamp = logStamp(now_ns);

@@ -13,7 +13,7 @@
 //! ```text
 //! chat                      the value types a turn is made of, its JSON writer
 //! net       <- chat         sinks, deadlines, the CA bundle, which urls may carry a credential
-//! sandbox   <- net, chat    which directories a run may write under, and the kernel rules
+//! sandbox   <- net, chat, session   which directories a run may write under, and the kernel rules
 //! session   <- net, chat    the per-run JSONL log: naming, pruning, appending
 //! tool      <- net, chat, sandbox   every tool and the process runner they share
 //! skill     <- net, chat    named instruction documents and the tool that loads one
