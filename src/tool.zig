@@ -3161,6 +3161,19 @@ fn expectedLines(arena: std.mem.Allocator, raw: []const u8, offset: usize, limit
     return buf.toOwnedSlice(arena);
 }
 
+// The bytes one replacement made of a file. A refusal here is the bug the test
+// that asks for it exists to catch, and the line printed names the match that
+// was not found.
+fn expectEdited(edited: Edited) error{TestUnexpectedResult}![]u8 {
+    return switch (edited) {
+        .refused => |message| {
+            std.debug.print("refused: {s}\n", .{message});
+            return error.TestUnexpectedResult;
+        },
+        .text => |t| t.bytes,
+    };
+}
+
 // A ranged read streams the file rather than pulling it whole, so the lines it
 // hands back are assembled across read boundaries instead of split out of one
 // buffer. What it must not change is the bytes: the same offset and limit give
@@ -3191,30 +3204,12 @@ test "a CRLF file is shown without carriage returns and edited from what was sho
     // Exactly the text the read above returned, which is what a model quotes
     // back. Against a byte-exact match this finds nothing.
     const edited = try applyEdit(arena, path, try arena.dupe(u8, "one\r\ntwo\r\nthree\r\n"), "one\ntwo", "ONE\nTWO", false);
-    const text = switch (edited) {
-        .refused => |message| {
-            // A refusal here is the bug this test exists to catch, and the
-            // line it returns names the match that was not found.
-            std.debug.print("refused: {s}\n", .{message});
-            return error.TestUnexpectedResult;
-        },
-        .text => |t| t.bytes,
-    };
-    try std.testing.expectEqualStrings("ONE\r\nTWO\r\nthree\r\n", text);
+    try std.testing.expectEqualStrings("ONE\r\nTWO\r\nthree\r\n", try expectEdited(edited));
 
     // An LF file is untouched by the same call, which is the other half of the
     // rule: the file's own ending decides, not the host it is read on.
     const lf = try applyEdit(arena, path, try arena.dupe(u8, "one\ntwo\n"), "one\ntwo", "ONE\nTWO", false);
-    const lf_text = switch (lf) {
-        .refused => |message| {
-            // A refusal here is the bug this test exists to catch, and the
-            // line it returns names the match that was not found.
-            std.debug.print("refused: {s}\n", .{message});
-            return error.TestUnexpectedResult;
-        },
-        .text => |t| t.bytes,
-    };
-    try std.testing.expectEqualStrings("ONE\nTWO\n", lf_text);
+    try std.testing.expectEqualStrings("ONE\nTWO\n", try expectEdited(lf));
 }
 
 test "a ranged read returns the same lines the whole-file read used to return" {

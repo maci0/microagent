@@ -270,16 +270,7 @@ pub const Server = struct {
     }
 
     fn writeStdio(io: Io, file: Io.File, bytes: []const u8, timeout: Io.Timeout) !void {
-        const Outcome = union(enum) { written: anyerror!void, expired: Io.Cancelable!void };
-        var slots: [2]Outcome = undefined;
-        var select: Io.Select(Outcome) = .init(io, &slots);
-        defer select.cancelDiscard();
-        try select.concurrent(.written, Io.File.writeStreamingAll, .{ file, io, bytes });
-        try select.concurrent(.expired, Io.Timeout.sleep, .{ timeout, io });
-        return switch (try select.await()) {
-            .written => |result| result,
-            .expired => error.Timeout,
-        };
+        try net.withDeadline(io, timeout, Io.File.writeStreamingAll, .{ file, io, bytes });
     }
 
     /// The next line the server wrote, held across reads. `error.Timeout` from
@@ -484,21 +475,7 @@ pub const Server = struct {
         timeout_ms: u64,
     ) !?std.json.Value {
         if (timeout_ms == 0) return error.Timeout;
-        const Outcome = union(enum) {
-            answered: anyerror!?std.json.Value,
-            expired: Io.Cancelable!void,
-        };
-        var slots: [2]Outcome = undefined;
-        var select: Io.Select(Outcome) = .init(io, &slots);
-        // Both tasks are joined before this returns, so nothing is left
-        // writing into `self` or the arenas.
-        defer select.cancelDiscard();
-        try select.concurrent(.answered, exchange, .{ self, scratch, http, id, method, params_json });
-        try select.concurrent(.expired, Io.Timeout.sleep, .{ net.durationMs(timeout_ms), io });
-        return switch (try select.await()) {
-            .answered => |answer| answer,
-            .expired => error.Timeout,
-        };
+        return net.withDeadline(io, net.durationMs(timeout_ms), exchange, .{ self, scratch, http, id, method, params_json });
     }
 
     /// One POST. A request (`id` set) returns its answer, read from a JSON

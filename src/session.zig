@@ -961,9 +961,7 @@ test "a session directory that cannot be used is named, and keeps no log" {
     // spelling a run is given reaches it and the cleanup takes it with the rest.
     const store = try storeRelative(arena, io, f.tmp);
 
-    // No home in the environment, so `recordCwd` leaves the working
-    // directory whole and the test keeps asserting on the directory it
-    // opened the store in.
+    // An environment with no home, so `recordCwd` keeps the directory whole.
     var no_env: std.process.Environ.Map = .init(std.testing.allocator);
     defer no_env.deinit();
 
@@ -1190,9 +1188,7 @@ test "a run's own log is counted by the retention window, not left past it" {
         try store.tmp.dir.writeFile(io, .{ .sub_path = name, .data = "{}" });
     }
 
-    // No home in the environment, so `recordCwd` leaves the working
-    // directory whole and the test keeps asserting on the directory it
-    // opened the store in.
+    // An environment with no home, so `recordCwd` keeps the directory whole.
     var no_env: std.process.Environ.Map = .init(std.testing.allocator);
     defer no_env.deinit();
     var session: ?Session = open(io, arena, &no_env, dir_path, "test/model") orelse return error.TestUnexpectedResult;
@@ -1294,9 +1290,7 @@ test "a session log is readable by its owner alone" {
     const arena = store.arena();
     const relative = try std.fs.path.join(arena, &.{ try storeRelative(arena, io, store.tmp), "modes" });
 
-    // No home in the environment, so `recordCwd` leaves the working
-    // directory whole and the test keeps asserting on the directory it
-    // opened the store in.
+    // An environment with no home, so `recordCwd` keeps the directory whole.
     var no_env: std.process.Environ.Map = .init(std.testing.allocator);
     defer no_env.deinit();
     var session = open(io, arena, &no_env, relative, "test/model") orelse return error.TestUnexpectedResult;
@@ -1358,9 +1352,7 @@ test "a store whose name is not plain text is created where it was named" {
     const arena = store.arena();
 
     const hostile = try std.fs.path.join(arena, &.{ try store.path(), "s\x1b[2J\xffstore" });
-    // No home in the environment, so `recordCwd` leaves the working
-    // directory whole and the test keeps asserting on the directory it
-    // opened the store in.
+    // An environment with no home, so `recordCwd` keeps the directory whole.
     var no_env: std.process.Environ.Map = .init(std.testing.allocator);
     defer no_env.deinit();
     var live: ?Session = open(io, arena, &no_env, hostile, "test/model") orelse return error.TestUnexpectedResult;
@@ -1626,9 +1618,7 @@ test "a store that cannot be created gives the run no log rather than a silent o
     try store.tmp.dir.writeFile(io, .{ .sub_path = "blocked", .data = "not a directory" });
     const blocked = try std.fmt.allocPrint(arena, "{s}{c}blocked{c}sessions", .{ try store.path(), std.fs.path.sep, std.fs.path.sep });
 
-    // No home in the environment, so `recordCwd` leaves the working
-    // directory whole and the test keeps asserting on the directory it
-    // opened the store in.
+    // An environment with no home, so `recordCwd` keeps the directory whole.
     var no_env: std.process.Environ.Map = .init(std.testing.allocator);
     defer no_env.deinit();
     try std.testing.expectEqual(@as(?Session, null), open(io, arena, &no_env, blocked, "test/model"));

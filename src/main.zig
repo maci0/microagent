@@ -3281,19 +3281,7 @@ fn authHeaders(arena: std.mem.Allocator, api_key: []const u8) !std.http.Client.R
 /// These operations return borrowed views or arena allocations; their owner
 /// survives cancellation, and both tasks are joined before the buffers move.
 fn withStallTimeout(io: Io, seconds: u32, comptime operation: anytype, args: anytype) !@typeInfo(@typeInfo(@TypeOf(operation)).@"fn".return_type.?).error_union.payload {
-    const Outcome = union(enum) {
-        answered: @typeInfo(@TypeOf(operation)).@"fn".return_type.?,
-        expired: Io.Cancelable!void,
-    };
-    var slots: [2]Outcome = undefined;
-    var select: Io.Select(Outcome) = .init(io, &slots);
-    defer select.cancelDiscard();
-    try select.concurrent(.answered, operation, args);
-    try select.concurrent(.expired, Io.Timeout.sleep, .{ net.durationMs(@as(u64, seconds) * std.time.ms_per_s), io });
-    return switch (try select.await()) {
-        .answered => |answer| answer,
-        .expired => error.Timeout,
-    };
+    return net.withDeadline(io, net.durationMs(@as(u64, seconds) * std.time.ms_per_s), operation, args);
 }
 
 /// Where a request goes and what authorizes it, both settled by `opts` before
@@ -3445,12 +3433,6 @@ fn reaskWaitMs(io: Io, budget: Budget, ask: u32, arena: std.mem.Allocator, shown
     return wait;
 }
 
-/// Streams one completion, printing visible text as it arrives and accumulating
-/// tool calls and token counters. Text on stderr is tool activity; stdout is
-/// the model's own output plus one JSON usage line per response.
-///
-/// One ask, not the whole turn: `streamChat` above is what turns a provider's
-/// own reported failure into another one.
 /// One `data:` line of a completion stream, as the raw bytes between the line
 /// breaks. Returns true where the line is the terminator.
 ///
@@ -3478,6 +3460,12 @@ fn applyStreamLine(
     return false;
 }
 
+/// Streams one completion, printing visible text as it arrives and accumulating
+/// tool calls and token counters. Text on stderr is tool activity; stdout is
+/// the model's own output plus one JSON usage line per response.
+///
+/// One ask, not the whole turn: `streamChat` above is what turns a provider's
+/// own reported failure into another one.
 fn streamChatOnce(
     client: *std.http.Client,
     io: Io,
@@ -8070,20 +8058,14 @@ test "the usage reference names every tool a [tools.<name>] table takes, and cou
     defer gpa.free(doc);
 
     var count: usize = 0;
-    inline for (@typeInfo(chat_mod.Tool).@"enum".fields) |field| {
-        count += 1;
-        const name: []const u8 = field.name;
-        if (!namesWholeToken(doc, name)) {
-            std.debug.print("\n" ++ usage_doc_path ++ ": does not name the tool {s}, so a user has to read the source to find it\n", .{name});
-            return error.TestUnexpectedResult;
-        }
-    }
-    inline for (@typeInfo(mcp_mod.Preset).@"enum".fields) |field| {
-        count += 1;
-        const name: []const u8 = field.name;
-        if (!namesWholeToken(doc, name)) {
-            std.debug.print("\n" ++ usage_doc_path ++ ": does not name the tool {s}, so a user has to read the source to find it\n", .{name});
-            return error.TestUnexpectedResult;
+    inline for (.{ chat_mod.Tool, mcp_mod.Preset }) |Enum| {
+        inline for (@typeInfo(Enum).@"enum".fields) |field| {
+            count += 1;
+            const name: []const u8 = field.name;
+            if (!namesWholeToken(doc, name)) {
+                std.debug.print("\n" ++ usage_doc_path ++ ": does not name the tool {s}, so a user has to read the source to find it\n", .{name});
+                return error.TestUnexpectedResult;
+            }
         }
     }
 

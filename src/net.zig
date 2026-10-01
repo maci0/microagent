@@ -712,6 +712,41 @@ pub fn durationMs(ms: u64) Io.Timeout {
     return .{ .duration = .{ .raw = .{ .nanoseconds = ms *| std.time.ns_per_ms }, .clock = .awake } };
 }
 
+/// Runs `operation(args)` as a task raced against the clock, and returns its
+/// payload, `error.Timeout` when the clock won, or whatever the operation
+/// failed with. Both tasks are joined before this returns, so nothing writes
+/// into the caller's buffers after they move. A caller whose operation hands
+/// back ownership when the clock wins needs its own race rather than this one.
+pub fn withDeadline(
+    io: Io,
+    timeout: Io.Timeout,
+    comptime operation: anytype,
+    args: anytype,
+) !payloadOf(@typeInfo(@TypeOf(operation)).@"fn".return_type.?) {
+    const Outcome = union(enum) {
+        answered: @typeInfo(@TypeOf(operation)).@"fn".return_type.?,
+        expired: Io.Cancelable!void,
+    };
+    var slots: [2]Outcome = undefined;
+    var select: Io.Select(Outcome) = .init(io, &slots);
+    defer select.cancelDiscard();
+    try select.concurrent(.answered, operation, args);
+    try select.concurrent(.expired, Io.Timeout.sleep, .{ timeout, io });
+    return switch (try select.await()) {
+        .answered => |answer| answer,
+        .expired => error.Timeout,
+    };
+}
+
+/// What `withDeadline` returns for an operation returning `R`: the payload of
+/// its error union, however many layers of `anyerror` the caller wrapped it in.
+fn payloadOf(comptime R: type) type {
+    return switch (@typeInfo(R)) {
+        .error_union => |info| payloadOf(info.payload),
+        else => R,
+    };
+}
+
 /// The retry schedule both network paths use: the wait before the first retry,
 /// doubled per attempt. The doubling count and the base are shared, the cap is
 /// the caller's because the two waits are not the same promise (the run's is
