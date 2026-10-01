@@ -891,12 +891,36 @@ check-changelog:
 # being pointed at. The section each check prints is dropped: a release
 # publishes that text, and here it is eight copies of notes nobody is reading.
 # The reason a check fails is on stderr and still shows.
+#
+# The order is asked of awk rather than of `sort -V`, which is a GNU extension
+# BSD sort has no spelling of, so a macOS runner answered `illegal option` and
+# the version list came back empty. `set -e` does not catch that: the pipeline
+# is the last command of a substitution read as a for-list, which POSIX sh
+# evaluates before the loop and ignores the status of, so the loop ran zero
+# times and this target reported success on a CHANGELOG it had not opened. The
+# empty list is therefore refused outright as well, so a changelog that really
+# does carry no released version is a finding rather than a green run.
+#
+# Three numeric components, compared as numbers so `0.10.0` follows `0.9.0`
+# rather than preceding it, which is what a lexical sort of the same lines
+# gives and the whole reason `sort -V` was reached for. Each component is split
+# off with `split` rather than with a `-F`/`-v` flag or a `gensub`, so the awk
+# is the POSIX one a stock macOS ships rather than the GNU one, and the zero
+# padding makes the key a fixed-width string every `sort` on either platform
+# orders the same way under the LC_ALL this file exports.
 check-changelog-history:
 	@set -eu; \
-	for v in $$(awk '/^## \[/ { \
+	versions="$$(awk '/^## \[/ { \
 	  name = $$0; sub(/^## \[/, "", name); sub(/\].*/, "", name); \
-	  if (name ~ /^[0-9]+\.[0-9]+\.[0-9]+$$/) print name \
-	}' CHANGELOG.md | sort -V); do \
+	  if (name !~ /^[0-9]+\.[0-9]+\.[0-9]+$$/) next; \
+	  split(name, part, "."); \
+	  printf "%03d%03d%03d %s\n", part[1], part[2], part[3], name \
+	}' CHANGELOG.md | sort -k1,1 | cut -d' ' -f2-)"; \
+	test -n "$$versions" || { \
+	  echo "CHANGELOG.md names no released version, so the history this target checks is empty" >&2; \
+	  exit 1; \
+	}; \
+	for v in $$versions; do \
 	  $(MAKE) --no-print-directory check-changelog VERSION=$$v >/dev/null; \
 	done
 

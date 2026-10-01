@@ -18,6 +18,21 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- `make check-changelog-history` no longer sorts versions with `sort -V`, a GNU
+  extension BSD `sort` has no spelling of. On the two macOS runners the target
+  reads the released sections with, `sort` refused the flag, the version list
+  came back empty, and the loop ran zero times: the target reported success over
+  a changelog it had never opened. The order now comes from an awk that sorts
+  the three components as numbers, and an empty list is a finding rather than a
+  green run. `bench/test_scripts.py` runs the target against a BSD-shaped
+  `sort` and a changelog with no released version, so both are held.
+
+- `scripts/lint-versions-selftest.sh` edits through a temporary file and a
+  rename rather than `sed -i`. BSD `sed` reads the first operand as its backup
+  suffix, so on macOS the old spelling rewrote a file named after the script and
+  left the manifest it was asked to perturb untouched, and every case below the
+  failure read a tree the perturbation had never reached.
+
 - `docs/microagent.1` documents `HOME`, which the run reads for every default
   path. The man page was the one reader of the list of variables this build
   reads that no check held, so a name added to it could reach two documents out

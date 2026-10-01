@@ -117,6 +117,84 @@ def check() -> None:
         check_sbom(directory, env)
         check_rows(directory, env)
         check_locks(directory, env)
+        check_changelog_order(directory, env)
+
+
+def check_changelog_order(directory: Path, env: dict[str, str]) -> None:
+    """The changelog history target must not depend on a GNU-only sort.
+
+    `sort -V` is a GNU extension BSD sort has no spelling of, so the macOS
+    runners this repository publishes binaries for answered it with an
+    "illegal option", the version list came back empty, and the target
+    reported success over a CHANGELOG it had never opened. `set -e` does
+    not catch that: the pipeline is the last command of a substitution read
+    as a for-list, which the shell evaluates before the loop and ignores the
+    status of. A BSD-style `sort` on PATH reproduces it exactly, and a
+    CHANGELOG with no released version proves the empty list is refused
+    rather than passed over.
+    """
+    fixture = directory / "changelog"
+    fixture.mkdir()
+    shutil.copy2(ROOT / "Makefile", fixture / "Makefile")
+    shutil.copy2(ROOT / "build.zig.zon", fixture / "build.zig.zon")
+    git = shutil.which("git")
+    expect(git is not None, "Git is required for the changelog fixture")
+    # because: the Makefile reads its file lists through git, in a private temporary checkout
+    subprocess.run([git, "init", "-q", str(fixture)], check=True)  # noqa: S603
+    # The 0.y rule is not what this checks, so the copy carries one section
+    # per shape the ordering has to get right: a double-digit minor is the
+    # whole reason `sort -V` was reached for in the first place.
+    (fixture / "CHANGELOG.md").write_text(
+        "## [Unreleased]\n\n### Added\n\n- nothing yet\n\n"
+        + "".join(
+            f"## [0.{minor}.0] - 2026-01-0{index + 1}\n\n### Added\n\n- note\n\n"
+            for index, minor in enumerate((1, 2, 9, 10, 11))
+        ),
+        encoding="utf-8",
+    )
+    system_sort = shutil.which("sort")
+    expect(system_sort is not None, "sort is required to build the BSD stand-in")
+    bsd_sort = directory / "bin" / "sort"
+    bsd_sort.write_text(
+        "#!/bin/sh\n"
+        "# A BSD sort(1) stand-in: -V, --version-sort and --parallel have no\n"
+        "# spelling there, and a flag it has no spelling for is answered the\n"
+        "# way it is answered there.\n"
+        'for argument in "$@"; do\n'
+        '  case "$argument" in\n'
+        "    -V|--version-sort|--parallel) echo 'sort: illegal option' >&2; exit 2;;\n"
+        "  esac\n"
+        "done\n"
+        f'exec {system_sort} "$@"\n',
+        encoding="utf-8",
+    )
+    bsd_sort.chmod(0o700)
+    make = shutil.which("make")
+    expect(make is not None, "make is required to run the changelog target")
+    made = dict(env, PATH=f"{directory / 'bin'}{os.pathsep}{env['PATH']}")
+    # because: this repository's own target, over a synthetic changelog in a temporary directory
+    result = subprocess.run(  # noqa: S603
+        [make, "--no-print-directory", "check-changelog-history"],
+        cwd=fixture,
+        env=made,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    expect(result.returncode == 0, result)
+    # The empty list is a finding, not a green run over nothing.
+    (fixture / "CHANGELOG.md").write_text("## [Unreleased]\n\n### Added\n\n- nothing yet\n", encoding="utf-8")
+    result = subprocess.run(  # noqa: S603
+        [make, "--no-print-directory", "check-changelog-history"],
+        cwd=fixture,
+        env=made,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    expect(result.returncode != 0 and "names no released version" in result.stderr, result)
 
 
 def check_locks(directory: Path, env: dict[str, str]) -> None:

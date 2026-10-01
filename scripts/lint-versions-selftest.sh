@@ -115,13 +115,29 @@ expect() {
   restore
 }
 
+# Edit a file in place, POSIX sh and POSIX sed on either platform. `sed -i`
+# is a GNU extension: BSD sed reads the backup suffix as its first operand, so
+# on macOS `sed -i 's/x/y/' file` rewrites the file named `s/x/y/` and reports
+# "can't open s/x/y/", leaving `file` untouched and the case below reading a
+# tree the perturbation never reached. The rewrite goes through a file in the
+# scratch directory and is renamed over the original. The rename takes the
+# mode the redirect gave the new file rather than the one the old one had,
+# which is why `restore` puts the backup back rather than this being the last
+# write: every case ends with the file as the tree found it.
+edit_in_place() {
+  target="$1"
+  shift
+  sed "$@" "$target" > "$work/$(basename "$target").edited" || return 1
+  mv -f "$work/$(basename "$target").edited" "$target"
+}
+
 # The interpreter floors. Each manifest is moved on its own, because a floor
 # raised in one and not the other is exactly the drift the loop over both was
 # written to catch: with only one manifest read, one of these two cases passes
 # the gate, and which one is the question this target exists to answer.
-drop_linter_floor() { sed -i 's/--python-version 3\.12/--python-version 3.11/' "$linter_manifest"; }
-drop_harbor_floor() { sed -i 's/--python-version 3\.12/--python-version 3.11/' "$manifest"; }
-drop_ruff_target() { sed -i 's/^target-version = "py312"/target-version = "py311"/' "$ruff_config"; }
+drop_linter_floor() { edit_in_place "$linter_manifest" 's/--python-version 3\.12/--python-version 3.11/'; }
+drop_harbor_floor() { edit_in_place "$manifest" 's/--python-version 3\.12/--python-version 3.11/'; }
+drop_ruff_target() { edit_in_place "$ruff_config" 's/^target-version = "py312"/target-version = "py311"/'; }
 expect "the linter manifest's interpreter floor" "$linter_manifest" drop_linter_floor
 expect "the Harbor manifest's interpreter floor" "$manifest" drop_harbor_floor
 expect "ruff.toml's target-version" "$ruff_config" drop_ruff_target
@@ -130,7 +146,7 @@ expect "ruff.toml's target-version" "$ruff_config" drop_ruff_target
 # version the gate runs and the four places that have to agree with it are the
 # Makefile, lint-requirements.in, lint-requirements.txt and ruff.toml, so the file
 # the script reads the compiled pin back out of is what moves here.
-drop_ruff_pin() { sed -i "s/^ruff==$ruff_pin_seen/ruff==0.0.1/" "$linter_lock"; }
+drop_ruff_pin() { edit_in_place "$linter_lock" "s/^ruff==$ruff_pin_seen/ruff==0.0.1/"; }
 expect "the ruff pin in lint-requirements.txt" "$linter_lock" drop_ruff_pin
 
 test "$bad" -eq 0
