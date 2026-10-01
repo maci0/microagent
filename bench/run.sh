@@ -51,11 +51,7 @@ run_id="${BENCH_RUN_ID:-$(date +%Y%m%dT%H%M%S)-$$}"
 
 # Keep row strings escaped and numeric columns typed, including error rows.
 record_row() {
-	python3 -c '
-import json, sys
-run, agent, task, wall, tokens, lines, result = sys.argv[1:]
-print(json.dumps({"run": run, "agent": agent, "task": task, "wall_s": None if wall == "null" else float(wall), "tokens": None if tokens == "null" else int(tokens), "lines": lines, "result": result}, allow_nan=False))
-' "$run_id" "$@" >>"$results"
+	python3 "$(dirname "$0")/row.py" "$run_id" "$@" >>"$results"
 }
 
 agents=${*:-microagent}

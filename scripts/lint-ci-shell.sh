@@ -74,60 +74,12 @@ trap 'rm -rf "$tmp"' EXIT
 
 # A body is named for the file it came from and its position in that file, so
 # two workflows cannot overwrite each other's bodies and a manifest row is keyed
-# by something that cannot collide or be misparsed.
-# PyYAML is already in the hashed linter install. Parsing the scalar gives
-# the checker exactly what Actions runs, including YAML quotes, folded lines,
-# chomping indicators, aliases and text resembling keys inside a heredoc.
-python3 - "$tmp" "$prelude" "$((prelude_lines + 2))" "$@" <<'PY'
-import re
-import sys
-from pathlib import Path
-
-try:
-    import yaml
-except ImportError:
-    sys.exit("lint-ci-shell.sh: Python needs PyYAML; install lint-requirements.txt into a venv on PATH")
-
-
-def fields(node):
-    return {key.value: value for key, value in node.value} if isinstance(node, yaml.MappingNode) else {}
-
-
-directory = Path(sys.argv[1])
-prelude = sys.argv[2]
-head = int(sys.argv[3])
-with (directory / "manifest").open("w", encoding="utf-8") as manifest:
-    for index, filename in enumerate(sys.argv[4:], 1):
-        try:
-            root = fields(yaml.compose(Path(filename).read_text(encoding="utf-8"), Loader=yaml.BaseLoader))
-        except (OSError, UnicodeError, yaml.YAMLError) as error:
-            sys.exit(f"{filename}: {error}")
-        owners = [*fields(root.get("jobs")).values(), root.get("runs")]
-        count = 0
-        for owner in owners:
-            steps = fields(owner).get("steps")
-            if not isinstance(steps, yaml.SequenceNode):
-                continue
-            for step in steps.value:
-                body = fields(step).get("run")
-                if body is None:
-                    continue
-                if not isinstance(body, yaml.ScalarNode):
-                    sys.exit(f"{filename}:{body.start_mark.line + 1}: run must be a YAML scalar")
-                count += 1
-                name = f"{index:06d}.{count:06d}"
-                value = re.sub(
-                    r"\$\{\{(?:'[^']*'|[^'}])*\}\}",
-                    lambda match: "github_expr" + "\\\n" * match.group().count("\n"),
-                    body.value,
-                )
-                (directory / f"{name}.sh").write_text(f"# shellcheck shell=bash\n{prelude}\n{value}\n", encoding="utf-8")
-                base = body.start_mark.line + (2 if body.style in ("|", ">") else 1)
-                # ponytail: folded/quoted scalars map to their start line;
-                # per-character source maps only if precise multiline locations are needed.
-                anchor = 0 if body.style == "|" else base
-                manifest.write(f"{name}\t{filename}\t{base - head}\t{anchor}\n")
-PY
+# by something that cannot collide or be misparsed. The extraction is a tracked
+# Python file rather than a heredoc, so ruff reads it and an editor does too;
+# PyYAML is already in the hashed linter install it imports. Parsing the scalar
+# gives the checker exactly what Actions runs, including YAML quotes, folded
+# lines, chomping indicators, aliases and text resembling keys inside a heredoc.
+python3 "$(dirname "$0")/lint-ci-shell-extract.py" "$tmp" "$prelude" "$((prelude_lines + 2))" "$@"
 
 # A workflow with no `run:` step is not an error: dependabot.yml is a schedule.
 # A tree with no shell at all is, because then the extraction is broken and the

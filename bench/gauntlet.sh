@@ -48,13 +48,7 @@ command -v python3 >/dev/null 2>&1 || {
 	exit 2
 }
 record_row() {
-	python3 -c '
-import json, sys
-run, agent, passed, failed, changed, wall, tokens, verify, rc = sys.argv[1:]
-def number(value):
-    return None if value in ("null", "-") else int(value)
-print(json.dumps({"run": run, "agent": agent, "passed": number(passed), "failed": number(failed), "changed_files": number(changed), "wall_s": number(wall), "tokens": number(tokens), "verify": None if verify == "null" else verify, "rc": number(rc)}))
-' "$run_id" "$@" >>"$root/bench/gauntlet-results.jsonl"
+	python3 "$(dirname "$0")/review_row.py" "$run_id" "$@" >>"$root/bench/gauntlet-results.jsonl"
 }
 
 agents=${*:-microagent}

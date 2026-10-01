@@ -504,7 +504,10 @@ def check_rows(directory: Path, env: dict[str, str]) -> None:
     bench = fixture / "bench"
     task = bench / "tasks/fixture"
     task.mkdir(parents=True)
-    for name in ("run.sh", "gauntlet.sh", "monotonic.sh", "portable.sh", "limit.py"):
+    # The row writers beside the scripts that call them: `record_row` reaches
+    # for one through `dirname $0`, so a staged tree without it is a tree the
+    # scripts cannot run in rather than a smaller fixture.
+    for name in ("run.sh", "gauntlet.sh", "monotonic.sh", "portable.sh", "limit.py", "row.py", "review_row.py"):
         (bench / name).write_bytes((ROOT / "bench" / name).read_bytes())
     (task / "setup.sh").write_text("printf '%s\\n' fixture > answer.txt\n")
     (task / "check.sh").write_text("exit 0\n")
