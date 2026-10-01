@@ -6,10 +6,13 @@ from `0.1.0`: under `0.y` the minor carries features and changes that alter a ru
 patch carries fixes, and a patch never changes what an existing invocation does. A `Security` entry is a
 minor entry too, because closing a hole narrows what an invocation may do as often as it changes an
 answer. The version lives in
-`build.zig.zon`, and the README is the one place that repeats it, in the install snippet and the status
-line; `make check-readme` refuses a bump that moves the former and leaves the latter behind, and both
-`make check` and the push workflow run it. `microagent --version` prints it, and the release workflow
-refuses to publish a tag that does not name it.
+`build.zig.zon`, and two documents repeat it rather than one: the README, in the install snippet and
+the status line, which `make check-readme` holds to the declared version, and the man page's `.TH`
+line, which `make check-man` holds to it and to every flag `--help` lists. A bump that moves the
+former and leaves either of the others behind ships an install command that fetches the previous
+release or a man page describing an older interface, and both `make check` and the push workflow run
+both targets. `microagent --version` prints it, and the release workflow refuses to publish a tag
+that does not name it.
 
 Only the latest release is supported. There is no backport window and no LTS line: a fix ships in the next
 release, and `microagent update` moves you to it.
@@ -30,6 +33,19 @@ release, and `microagent update` moves you to it.
   named `callParams`, so the harness and the call read the same code rather
   than two copies of it.
 
+- Every tool call reports how it ended and how long it took, on stderr, on the
+  line below the one that already names it: `ok` when it ran and its answer is
+  its result, `FAILED` when it was refused, errored, or its subprocess exited
+  nonzero or was signalled, and `not run` when the time budget was already
+  spent. The gutter line named a call before it ran and then said nothing about
+  it, so which of a run's tools failed and which were slow lived only in the
+  conversation, which goes to the provider and nowhere an operator reads; a
+  monitor reading stderr could see what was called but not what became of it.
+  The outcome is read from the same answer the model is handed, so the line
+  beside a call cannot disagree with what the call was told, and a call the
+  budget never reached says `not run` rather than looking like one that
+  answered.
+
 - Every parameter in the tool schema now says what it is for. `read`, `write`,
   `edit`, `multi_edit` and `todo` declared `path`, `content`, `old_string`,
   `new_string`, `replace_all`, `edits`, `text` and `status` with no
@@ -47,12 +63,12 @@ release, and `microagent update` moves you to it.
   refusals, which is what rots: the change that dropped its interpreter-floor
   check left every other one passing, so the gate said the same thing about a
   tree it should have refused. Its self-test asks, by perturbing each input and
-  requiring a refusal, and nothing in the tree ran it. It is out of `lint` on
-  the reasoning that it writes to files the gate reads, which it does not: each
-  is copied before it is touched and restored after every case, on the exit
-  path and on an interrupt too, and a run leaves the tree byte-identical. It
-  costs under two seconds, and `check-refs` already runs its self-test from
-  `lint` for the same reason.
+  requiring a refusal, and nothing in the tree ran it. It is in `lint` now,
+  having been kept out on the reasoning that it writes to files the gate reads,
+  which it does not: each is copied before it is touched and restored after
+  every case, on the exit path and on an interrupt too, and a run leaves the
+  tree byte-identical. It costs under two seconds, and `check-refs` already runs
+  its self-test from `lint` for the same reason.
 
 - shellcheck now also reads for a negated condition. `avoid-negated-conditions`
   was listed among the checks deliberately left off, on the reasoning that the

@@ -410,13 +410,13 @@ command.
 
 - The release JSON is attacker-shaped: every field becomes a tag, an asset name or a URL
   the updater acts on (`parseRelease`, `src/update.zig:179`). It is fuzzed against exactly
-  that (`fuzzRelease`, `src/update.zig:1339`; `fuzzSidecar`, `src/update.zig:1398`).
+  that (`fuzzRelease`, `src/update.zig:1591`; `fuzzSidecar`, `src/update.zig:1650`).
 - The repository the updater requests is a constant compiled into the binary (`default_repo`, `src/update.zig:12`, read into `release_api_url` at `src/update.zig:14`), not caller text,
   so a command line cannot steer it. The `--repo` flag that once let a caller name one is
   gone, and with it the `owner/name` validation that guarded it: a repository name is no
   longer an input at any boundary, and the release page, the asset and the sidecar are each
   held to the host allowlist before a request carries them (`trustedGithubUrl`, `src/update.zig:120`, applied in `run`, `src/update.zig:557`, at `src/update.zig:591` and `src/update.zig:635`; harness
-  `fuzzArgs`, `src/update.zig:859`).
+  `fuzzArgs`, `src/update.zig:1018`).
 - A body over the cap is refused while it streams, not after (`Capped`, `src/update.zig:218`, used in `fetchOnce`, `src/update.zig:389`). The API body is capped
   at 10 MB, the asset at 256 MB, the sidecar at 64 KB (`src/update.zig:18-20`).
 - `GITHUB_TOKEN` is narrowed to the releases API before any request carries it. `bearerFor`
@@ -527,7 +527,7 @@ the same bug returning.
 | MCP catalog pages share a 4 MiB JSON allowance and the original handshake deadline; repeated or invalid cursors fail discovery, and only complete catalogs are offered | partial tool discovery and a server expanding retained metadata through unlimited pages | `readTools`, `src/mcp.zig:1967`; `buildTools`, `src/mcp.zig:2013` |
 | Non-object MCP errors allocate and retain only their capped diagnostic | repeated large error strings or arrays accumulating full replies in the run allocator | `describeError`, `src/mcp.zig:1019`; `cappedJson`, `src/mcp.zig:1000` |
 | Values validated where they are set | a mistyped level or ceiling reaching the wire as a 400 | `ceiling`, `src/main.zig:1526`; `optionalCeiling`, `src/main.zig:1691` |
-| Fuzz corpora for the parsers that take untrusted bytes: the release body, the sidecar, the completion stream and the fold that reads it, the config file, both command lines, a JSON string, a tool call, a quoted value, a provider error body, the session store's names and its record, the request body a turn assembles from model text and tool output, and the server, tool, environment and header names an MCP entry is built from | malformed provider, release, config, command-line, tool-call, session-store, conversation or terminal-facing input, and a name that passes the entry checks but cannot be used afterwards | `fuzzRelease`, `src/update.zig:1339`; `fuzzSidecar`, `src/update.zig:1398`; `fuzzArgs`, `src/update.zig:859`; `fuzzStream`, `src/main.zig:6997`; `fuzzFrame`, `src/stream.zig:1888`; `fuzzFrameSequence`, `src/stream.zig:2177`; `fuzzArgs`, `src/main.zig:5258`; `fuzzConfig`, `src/config.zig:1964`; `fuzzJsonString`, `src/chat.zig:1438`; `fuzzToolCall`, `src/tool.zig:3743`; `fuzzSafeText`, `src/chat.zig:1249`; `fuzzTerminalSafe`, `src/tool.zig:4311`; `fuzzStoreNames`, `src/session.zig:1757`; `fuzzSessionRecord`, `src/session.zig:1885`; `fuzzBody`, `src/conversation.zig:888`; `fuzzEntryNames`, `src/mcp.zig:3285` |
+| Fuzz corpora for the parsers that take untrusted bytes: the release body, the sidecar, the completion stream and the fold that reads it, the config file, both command lines, a JSON string, a tool call, a quoted value, a provider error body, the session store's names and its record, the request body a turn assembles from model text and tool output, and the server, tool, environment and header names an MCP entry is built from | malformed provider, release, config, command-line, tool-call, session-store, conversation or terminal-facing input, and a name that passes the entry checks but cannot be used afterwards | `fuzzRelease`, `src/update.zig:1591`; `fuzzSidecar`, `src/update.zig:1650`; `fuzzArgs`, `src/update.zig:1018`; `fuzzStream`, `src/main.zig:6997`; `fuzzFrame`, `src/stream.zig:1888`; `fuzzFrameSequence`, `src/stream.zig:2177`; `fuzzArgs`, `src/main.zig:5258`; `fuzzConfig`, `src/config.zig:1964`; `fuzzJsonString`, `src/chat.zig:1438`; `fuzzToolCall`, `src/tool.zig:3743`; `fuzzSafeText`, `src/chat.zig:1249`; `fuzzTerminalSafe`, `src/tool.zig:4311`; `fuzzStoreNames`, `src/session.zig:1757`; `fuzzSessionRecord`, `src/session.zig:1885`; `fuzzBody`, `src/conversation.zig:888`; `fuzzEntryNames`, `src/mcp.zig:3285` |
 
 ## Gaps, ranked by exploitability and impact
 
