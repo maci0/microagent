@@ -344,6 +344,7 @@ pub const Server = struct {
         params_json: []const u8,
         timeout: Io.Timeout,
     ) !std.json.Value {
+        defer self.retireIfDead(io);
         const id = self.next_id;
         self.next_id += 1;
         switch (self.transport) {
@@ -705,7 +706,7 @@ pub const Server = struct {
             self.last_error = prefix;
             return;
         };
-        const value = std.json.parseFromSliceLeaky(std.json.Value, scratch, body, .{}) catch {
+        const value = self.parseFrame(scratch, body) catch {
             self.last_error = prefix;
             return;
         };
@@ -2610,6 +2611,7 @@ test "MCP stdio notifications cannot grow a request beyond its response allowanc
     try std.testing.expectEqual(@as(usize, 1), spawned.items.len);
     try std.testing.expectError(error.ResponseTooLarge, spawned.items[0].request(io, arena, "tools/call", "{}", net.durationMs(5000)));
     try std.testing.expect(spawned.items[0].dead);
+    try std.testing.expectEqual(@as(usize, 0), tool_mod.liveChildGroups());
 }
 
 test "an MCP server that never reads its stdin cannot block a request past its deadline" {
@@ -2627,6 +2629,7 @@ test "an MCP server that never reads its stdin cannot block a request past its d
     const params = try std.fmt.allocPrint(arena, "{{\"text\":\"{s}\"}}", .{pad});
     try std.testing.expectError(error.Timeout, spawned.items[0].request(io, arena, "tools/call", params, net.durationMs(100)));
     try std.testing.expect(spawned.items[0].dead);
+    try std.testing.expectEqual(@as(usize, 0), tool_mod.liveChildGroups());
 }
 
 test "a lazy MCP handshake shares the tool call deadline and a dead server is not retried" {
@@ -3298,6 +3301,7 @@ const FakeMcp = struct {
         /// A `400` to the call carrying a JSON-RPC error object, which is how a
         /// server reports a bad request while the status is also a refusal.
         call_error_status,
+        call_deep_refusal,
     };
 
     const init_frame = "{\"result\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"fake\",\"version\":\"1\"}},\"jsonrpc\":\"2.0\",\"id\":1}";
@@ -3450,6 +3454,7 @@ const FakeMcp = struct {
             .repeated_cursor, .catalog_oversize, .invalid_cursor, .failed_page => unreachable,
             .call_accepted => try self.reply(out, "202 Accepted", "Content-Type: application/json\r\n", call_frame),
             .call_error_status => try self.reply(out, "400 Bad Request", "Content-Type: application/json\r\n", "{\"jsonrpc\":\"2.0\",\"id\":3,\"error\":{\"code\":-32602,\"message\":\"bad args\"}}"),
+            .call_deep_refusal => try self.reply(out, "400 Bad Request", "Content-Type: application/json\r\n", "{\"error\":" ++ ("[" ** 300) ++ "0" ++ ("]" ** 300) ++ "}"),
             .unauthorized => unreachable,
         }
         return true;
@@ -3834,6 +3839,23 @@ test "a request answered 202 succeeds, and a refusal carries the server's reason
         "error: MCP server bad refused mcp__bad__echo: bad args (code -32602) (HTTP 400)",
         try Servers.call(io, arena, bad_call, "{}", net.durationMs(10_000)),
     );
+}
+
+test "a refusing HTTP body obeys the shared JSON depth guard" {
+    const gpa = std.testing.allocator;
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const arena = state.allocator();
+    const io = std.testing.io;
+    var client: std.http.Client = .{ .allocator = gpa, .io = io };
+    defer client.deinit();
+    const fake = try FakeMcp.start(gpa, io, .call_deep_refusal);
+    defer fake.finish();
+    var servers = try connectFake(io, arena, &client, fake, .{ .name = "deep" });
+    defer servers.shutdown(io);
+    const call = servers.resolve("mcp__deep__echo") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("error: MCP server deep refused mcp__deep__echo: HTTP 400", try Servers.call(io, arena, call, "{}", net.durationMs(10_000)));
+    try std.testing.expect(call.server.dead);
 }
 
 test "remote servers connect together, keep the config order, and one that fails is skipped" {

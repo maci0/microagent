@@ -610,26 +610,7 @@ pub fn ownString(gpa: std.mem.Allocator, text: []const u8) ![]u8 {
     return try gpa.dupe(u8, text);
 }
 
-/// Whether `cp` is a combining mark: a character drawn on top of the one before
-/// it rather than beside it.
-///
-/// A codepoint boundary is not yet a character boundary. The mark that follows
-/// belongs to the base character before it, so a cut between the two leaves two
-/// strings where the original spelled one: `e` and U+0301 are not the letters a
-/// reader or a model sees, and what `clamp` cuts is text a session log stores
-/// and every later turn re-sends, so the split is written down rather than only
-/// drawn.
-///
-/// This is the diacritic range and no more. It is not a full UAX #29
-/// grapheme-cluster break, and deliberately so: `std.unicode` carries no
-/// segmenter, and a hand-written one here would be a table nobody can check
-/// against the standard. An emoji ZWJ sequence, a regional-indicator flag pair,
-/// a skin-tone modifier and a Hangul syllable still cut between their
-/// components. Those render as a wrong glyph rather than as a different letter,
-/// which is a cosmetic cost against a table that is a page of ranges and
-/// silently wrong wherever it lags the standard. Upgrade path: implement
-/// `std.unicode`'s grapheme rules behind this predicate and let `clamp` call
-/// the same boundary walk once the standard is available to consult.
+// ponytail: three combining-mark blocks, not UAX #29 graphemes; use a Unicode segmenter for full clusters.
 fn isCombiningMark(cp: u21) bool {
     return switch (cp) {
         // COMBINING DIACRITICAL MARKS, the block a Latin, Greek or Cyrillic
@@ -643,35 +624,21 @@ fn isCombiningMark(cp: u21) bool {
     };
 }
 
-/// The first `max` bytes, cut on a UTF-8 character boundary. Every caller feeds
-/// text a model will read back: the two streams of one response in `main` and a
-/// tool's output in `tool`, all of which reach a JSON request body, so a cut in
-/// the middle of a codepoint would put invalid UTF-8 on the wire, and a cut
-/// between a base character and its combining mark would store one letter as
-/// two.
+/// A UTF-8 prefix under `max`, keeping the combining marks above with their
+/// preceding base. Every caller sends the result in a JSON request body.
 pub fn clamp(s: []const u8, max: usize) []const u8 {
     if (s.len <= max) return s;
     var end = max;
     while (end > 0 and s[end] & 0xc0 == 0x80) end -= 1;
-    // Backing up over the marks the cut landed among, rather than only the half
-    // a codepoint boundary leaves: `end` is a whole codepoint here, so each
-    // step reads one, and a stack of marks walks back over every one of them
-    // to the base they belong to.
-    //
-    // The step is measured against `end` rather than subtracted from it blind.
-    // A mark reaches the front of the string in NFD text, and a mark there has
-    // no base in front of it to be kept with, so there is nothing to back up
-    // to; `len` is then measured from a position nearer the front than the
-    // mark is wide, and subtracting it would run the index off the start of
-    // the string. That text has a mark with nothing to attach to, which is not
-    // what this cut has to keep whole, so the walk ends and what is there is
-    // what is kept.
+    // If the next codepoint is a mark, remove the preceding codepoint,
+    // walking its own bytes rather than subtracting the next mark's width.
     while (end > 0) {
         const len = utf8SequenceLen(s, end);
-        if (len == 0 or len > end) break;
+        if (len == 0) break;
         const cp = std.unicode.utf8Decode(s[end..][0..len]) catch break;
         if (!isCombiningMark(cp)) break;
-        end -= len;
+        end -= 1;
+        while (end > 0 and s[end] & 0xc0 == 0x80) end -= 1;
     }
     return s[0..end];
 }
@@ -1357,76 +1324,25 @@ test "a cut never leaves half a code point in the request body" {
     try std.testing.expectEqualStrings("", clamp("\u{1f600}", 2));
 }
 
-test "a cut never leaves a combining mark without the character it belongs to" {
-    // A base character and its mark spell one letter. Cut between them and the
-    // two halves are two different letters: a file that held `cafe` with an
-    // accent in NFD, the spelling a macOS filesystem hands back, arrives with
-    // its marks separate, and a result cut in one keeps the accent while
-    // dropping the letter it was drawn on. What the session log then stores and
-    // every later turn re-sends is not the text the file held.
-    const nfd = "cafe\u{0301} n";
-    // Every cut up to and past the end, so the byte the mark starts at is among
-    // them whichever one the text happens to put it on.
-    var n: usize = 0;
-    while (n <= nfd.len + 1) : (n += 1) {
-        const kept = clamp(nfd, n);
-        try std.testing.expect(kept.len <= n);
-        try std.testing.expect(std.unicode.utf8ValidateSlice(kept));
-        try std.testing.expect(std.mem.startsWith(u8, nfd, kept));
-        // Only the front of what was kept is asserted, and that is the whole of
-        // the property: a kept prefix that opens on a mark has lost the
-        // character that mark was drawn on, which is the split this exists to
-        // prevent. A mark later in the kept text is right where the original put
-        // it, with its base in front of it, so it is not asserted against. The
-        // walk is over codepoints, and `utf8SequenceLen` refusing one ends the
-        // check rather than reading a byte as a character.
-        if (kept.len == 0) continue;
-        const first_len = utf8SequenceLen(kept, 0);
-        if (first_len == 0) continue;
-        const first_cp = std.unicode.utf8Decode(kept[0..first_len]) catch 0;
-        try std.testing.expect(!isCombiningMark(first_cp));
+test "a cut keeps a base and combining marks whole at UTF-8 boundaries" {
+    const Case = struct { text: []const u8, boundaries: []const usize };
+    for ([_]Case{
+        .{ .text = "cafe\u{0301} n", .boundaries = &.{ 0, 1, 2, 3, 6, 7, 8 } },
+        .{ .text = "x\u{20ac}\u{0301}b", .boundaries = &.{ 0, 1, 6, 7 } },
+        .{ .text = "x\u{1f600}\u{0301}b", .boundaries = &.{ 0, 1, 7, 8 } },
+        .{ .text = "a\u{0301}\u{20d0}b", .boundaries = &.{ 0, 6, 7 } },
+        .{ .text = "\u{0301}ab", .boundaries = &.{ 0, 2, 3, 4 } },
+    }) |case| {
+        for (0..case.text.len + 2) |budget| {
+            var end: usize = 0;
+            for (case.boundaries) |boundary| {
+                if (boundary <= budget) end = boundary;
+            }
+            const kept = clamp(case.text, budget);
+            try std.testing.expect(std.unicode.utf8ValidateSlice(kept));
+            try std.testing.expectEqualStrings(case.text[0..end], kept);
+        }
     }
-    // A string that opens on a mark is text whose first letter is already
-    // missing, and the cut has nothing to keep it whole with. It is left as it
-    // is rather than walked off the front of: the mark is at index 0, there is
-    // no base in front of it, and backing up over it would run the index
-    // before the start of the string.
-    const orphan = "\u{0301}ab";
-    for ([_]usize{ 1, 2, 3, 4, 5 }) |budget| {
-        const kept = clamp(orphan, budget);
-        try std.testing.expect(kept.len <= budget);
-        try std.testing.expect(std.unicode.utf8ValidateSlice(kept));
-        try std.testing.expect(std.mem.startsWith(u8, orphan, kept));
-    }
-    // The walk ends and what is there is what is kept: the mark is at the very
-    // front, so a budget that reaches its end keeps it rather than running the
-    // index off the start of the string to drop it.
-    try std.testing.expectEqualStrings("\u{0301}", clamp(orphan, 2));
-    try std.testing.expectEqualStrings("\u{0301}ab", clamp(orphan, 5));
-    // The named cuts. A budget of 4 ends on the `e` with the mark still to
-    // come, so the `e` goes with the accent and only `ca` is kept; 5 lands
-    // inside the mark and the mark goes with the letter; 6 is past the mark and
-    // both are kept. Before the fix a budget of 6 kept the two bytes of the
-    // mark on their own, which is the accent without the letter it was drawn
-    // on.
-    try std.testing.expectEqualStrings("ca", clamp(nfd, 4));
-    try std.testing.expectEqualStrings("ca", clamp(nfd, 5));
-    try std.testing.expectEqualStrings("cafe\u{0301}", clamp(nfd, 6));
-    // The cut at the space is the boundary the cut already found, unchanged:
-    // the extra walk only backs up over a mark, and there is none there.
-    try std.testing.expectEqualStrings("cafe\u{0301} ", clamp(nfd, 7));
-    // NFC, where the accent is one codepoint, is unaffected: there is no mark of
-    // its own to be separated, and nothing past the cut is dropped. A budget of
-    // 5 ends exactly on the `é` and keeps it whole, which is the codepoint
-    // boundary the cut already found.
-    try std.testing.expectEqualStrings("caf\u{00e9}", clamp("caf\u{00e9} n", 5));
-    try std.testing.expectEqualStrings("caf\u{00e9} ", clamp("caf\u{00e9} n", 6));
-    // A stack of marks goes with the base as a whole: the cut lands past one
-    // mark and the walk backs up over each one in turn, so the `a` survives
-    // with both of its marks rather than with a fraction of the pair.
-    try std.testing.expectEqualStrings("a", clamp("a\u{0301}\u{0302}b", 3));
-    try std.testing.expectEqualStrings("a", clamp("a\u{0301}\u{0302}b", 4));
-    try std.testing.expectEqualStrings("a\u{0301}\u{0302}", clamp("a\u{0301}\u{0302}b", 5));
 }
 
 // A transport splits a body wherever it likes, so the split lands inside a

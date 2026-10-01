@@ -37,6 +37,10 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- HTTP MCP refusal bodies use the same JSON nesting guard as successful responses,
+  and every failed call releases a stdio server marked dead. Combining-mark truncation
+  walks the preceding character's own UTF-8 bytes, preserving multibyte text.
+
 - MCP discovery follows tool catalog pages with opaque cursor values, one
   deadline and a shared byte allowance. Failed catalogs cannot advertise partial
   tables, and duplicate detection no longer scans every earlier tool per entry.
