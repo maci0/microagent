@@ -64,8 +64,13 @@ a fragment with no invocation surface to hold a contract.
    `envValue`. A new variable that reads the environment but is missing from
    the empty-string paragraph in the help is the common form of this defect.
 
-5. **Defaults quoted in the help with no single source in the code.** `--max-turns` says
-   `default 100`; the session directory, the config path, and the
+5. **Defaults quoted in the help with no single source in the code.** Read the figures
+   the help text carries at face value and check each against the constant the
+   `comptimePrint` beside it prints: `--max-turns`, `--stall-timeout` and
+   `--max-tokens` each name a default the help builds from
+   `max_turns_default`, `default_stall_timeout_s` and `default_max_tokens` in
+   `src/main.zig`, so a figure that moved is a number in one of those, never a
+   literal to copy into this prompt. The session directory, the config path, and the
    update repository each carry a literal in the help text. Find the value the code
    actually falls back to and flag any literal that has drifted. A default that appears
    only in the help and only in the code is a defect even when the two agree today: it is

@@ -122,10 +122,12 @@ provider, or if the tree has been reduced to a fragment with nothing to gate or 
     steps in `setup-zig` are keyed on `runner.os` and `runner.arch`; the linter
     action caches through `setup-uv`'s own cache, which this file cannot key, so
     what it can be judged on is the `cache-dependency-glob` it declares.
-    `macos-15-intel` and `macos-14` are the two
-    x86_64 and arm64 images that answer `runner.os` as `macOS` alike, so a key without
-    the arch has two jobs racing to save one entry. A cache path that is this tree's own
-    build products must hash the sources and the toolchain; a `restore-keys` prefix that
+    `runner.arch` answers `X64` and `ARM64` while `runner.os` answers `macOS` for
+    both macOS images, so the two rows the `test` matrix runs must differ on arch
+    or the key has two jobs racing to save one entry; read the labels off the
+    `include:` list rather than off a name a retired image used to carry. A
+    cache path that is this tree's own build products must hash the sources and
+    the toolchain; a `restore-keys` prefix that
     falls back across an architecture, an operating system or a toolchain version lets a
     job restore a tree it cannot use. `actions/cache` and a cache save on an untrusted
     ref is worth a note only when the restore is shared across trigger levels, which
