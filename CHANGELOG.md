@@ -16,6 +16,15 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+### Added
+
+- Two more fuzz harnesses over untrusted input: the output of `git blame`, which
+  a repository, its attributes file and the user's pager choose, and a
+  repository's instructions file, which goes into the system role of every run
+  made in that tree. Both assert on what survives the pass rather than on that
+  it does not crash, so a name left in a blame line or a fence left able to
+  close the block the builder wrote is a failed check on every `zig build test`.
+
 ### Changed
 
 - A session log record's `cwd` carries the part of the working directory under the

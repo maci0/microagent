@@ -5434,6 +5434,105 @@ test "a blame line is only rewritten when it has the shape git prints" {
     );
 }
 
+// The output of a real `git blame`, which is whatever the repository, its
+// attributes file and the pager a user configured make of it. The pass reads
+// fixed-width fields back off a close paren rather than counting spaces, so the
+// corpus is the shapes that reach that arithmetic with something it cannot
+// use: the padding git aligns a short line number with, a boundary commit's
+// caret, a name holding its own parens, a date that is not a date, a hash of
+// the wrong width, a line cut short, and bytes no repository holds.
+//
+// `std.testing.fuzz` runs this corpus on every `zig build test`, and through the
+// fuzzer's mutations when the test binary is built in fuzz mode.
+const blame_corpus = [_][]const u8{
+    "",
+    "fatal: no such path",
+    "abc1234 (Rosa Fixture 2026-09-30 03:29:32 +0800 1) one",
+    "abc1234 (Rosa Fixture 2026-09-30 03:29:32 +0800 1) one\n",
+    "abc1234 (Rosa Fixture 2026-09-30 03:29:32 +0800    1) one",
+    "abc1234 (Rosa Fixture 2026-09-30 03:29:32 +0800 2000)     // it",
+    "abc1234 (Rosa Fixture 2026-09-30 03:29:32 -0730   42) x",
+    "abc1234 (Ma(rko)v 2026-09-30 03:29:32 +0800 1) call (x)",
+    "^abc1234 (Rosa Fixture 2026-09-30 03:29:32 +0800 1) one",
+    "0123456789abcdef0123456789abcdef (A U Thor 2026-01-02 03:04:05 -0000 3) two",
+    "abc1234 (Rosa Fixture 2026-09-30 03:29:32 +0800 1)",
+    "abc1234 (Rosa Fixture 2026-09-30 03:29:32 +0800)",
+    "abc1234 ( 2026-09-30 03:29:32 +0800 1)",
+    "abc1234 (2026-09-30 03:29:32 +0800 1)",
+    "abc1234 (Rosa Fixture 20xx-99-99 99:99:99 +0800 1) x",
+    "abc1234 (Rosa Fixture 2026-09-30 03:29:32 +0800 1)x",
+    "abc1234 (Rosa Fixture 2026-09-30 03:29:32 +0800 1)\tX",
+    "a (b (c) d 2026-09-30 03:29:32 +0800 7) e",
+    "a (b 2026-09-30 03:29:32 +0800 7) e",
+    "one\ntwo\nthree",
+    "one (two\nthree) 2026-09-30 03:29:32 +0800 1) four",
+    "\x00 (Name 2026-09-30 03:29:32 +0800 1) \x00",
+    "caf\u{00e9} (Marcel W. Wysocki 2026-09-29 23:23:33 +0800  1) main",
+    "\u{1f469}\u{200d}\u{1f4bb} (\u{200b} 2026-09-30 03:29:32 +0800 1) ",
+    "abc1234 (Rosa Fixture 2026-09-30 03:29:32 +0800 1) \xff\xfe",
+    "abc1234 (Rosa Fixture 2026-09-30 03:29:32 +0800 1) x\n" ** 8,
+    "abc1234 (Name 2026-09-30 03:29:32 +0800 " ** 16,
+    ("abc1234 (Name 2026-09-30 03:29:32 +0800 1) x\n" ** 8) ++ "abc1234 (Name",
+};
+
+test "a fuzzed blame keeps every line's hash, date and number and cuts nothing else" {
+    try std.testing.fuzz({}, fuzzBlameNames, .{ .corpus = &blame_corpus });
+}
+
+fn fuzzBlameNames(_: void, smith: *std.testing.Smith) !void {
+    const gpa = std.testing.allocator;
+    var scratch: [16 * 1024]u8 = undefined;
+    const text: []const u8 = if (smith.in) |seed| seed else scratch[0..smith.slice(&scratch)];
+
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const arena = state.allocator();
+    const got = try redactBlameNames(arena, text);
+
+    // The pass cuts inside one line, so both texts are split on the same bytes
+    // and walked together: a name that joined two lines or left one behind is a
+    // line count the two walks disagree on.
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    var rewritten = std.mem.splitScalar(u8, got, '\n');
+    var at: usize = 0;
+    while (lines.next()) |line| : (at += 1) {
+        const out = rewritten.next() orelse {
+            std.debug.print("\nblame: '{s}' lost line {d}\n", .{ text, at });
+            return error.TestUnexpectedResult;
+        };
+        const cut = blameNameCut(line);
+        if (cut) |c| {
+            // Only the name goes: the hash and the open paren in front of it, and
+            // the date, the zone, the number and the code behind it, are what a
+            // blame is read for.
+            if (!std.mem.startsWith(u8, out, line[0..c.head]) or !std.mem.endsWith(u8, out, c.tail)) {
+                std.debug.print("\nblame: '{s}' did not keep its hash and date: '{s}'\n", .{ line, out });
+                return error.TestUnexpectedResult;
+            }
+            try std.testing.expectEqual(c.head + c.tail.len, out.len);
+            for ([_][]const u8{ "+0800", "-0730", "2026-09-30" }) |field| {
+                if (std.mem.indexOf(u8, line, field) != null) try std.testing.expect(std.mem.indexOf(u8, out, field) != null);
+            }
+        } else if (!std.mem.eql(u8, line, out)) {
+            // A line git printed in another shape is passed through byte for
+            // byte rather than cut at a space that is not there.
+            std.debug.print("\nblame: line '{s}' holds no name to cut but was rewritten: '{s}'\n", .{ line, out });
+            return error.TestUnexpectedResult;
+        }
+        // A rewritten line carries no newline of its own into the next one, and
+        // nothing is dropped, so the result is no longer than what it came from.
+        try std.testing.expect(std.mem.indexOfScalar(u8, out, '\n') == null);
+        try std.testing.expect(out.len <= line.len);
+    }
+    if (rewritten.next()) |extra| {
+        std.debug.print("\nblame: '{s}' gained the line '{s}'\n", .{ text, extra });
+        return error.TestUnexpectedResult;
+    }
+
+    // The result is its own fixed point: a name already cut is not a name to
+    // cut, so redacting the same output twice says the same thing both times.
+    try std.testing.expectEqualStrings(got, try redactBlameNames(arena, got));
+}
 /// A real repository at `root` holding one commit by a named person, which is
 /// what the tests over `git show` and `git blame` read. The identity is set on
 /// the repository rather than with `-c` because that is where git reads it from
