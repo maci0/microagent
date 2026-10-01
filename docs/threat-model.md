@@ -5,9 +5,9 @@ carries a file reference, so the next pass can re-verify it against the code rat
 against this document. Flags, environment variables and the config file are documented in
 [usage.md](usage.md).
 
-Last reviewed: 2026-10-01, against `0.10.1` ([build.zig.zon](../build.zig.zon)) and the
-`Unreleased` section of [CHANGELOG.md](../CHANGELOG.md). This pass entered the surfaces added
-since the previous one: `--repl` and its stdin channel, `--temperature` and
+Last reviewed: 2026-10-01, against `0.12.0` ([build.zig.zon](../build.zig.zon)) and the
+`Unreleased` section of [CHANGELOG.md](../CHANGELOG.md). The pass before this one entered the
+surfaces added since the one before it: `--repl` and its stdin channel, `--temperature` and
 `MICROAGENT_TEMPERATURE`, `TMPDIR` as a sandbox writable root, the 128 KB `AGENTS.md` ceiling,
 and the 1000-turn default. It also corrected citations that had drifted: `make check-refs`
 did not recognise a qualified symbol (`config.parse`, `net.urlCarriesKey`), so every citation
@@ -19,6 +19,15 @@ against the function each one names. Earlier passes added the remote MCP transpo
 and the `[tools.<name>]` presets (summary row 14, two entry points, trust boundary 10, gap
 13), then the MCP-server and skills surfaces, and named the stall timeout as an entry point, a
 control and a gap. `fuzzConfig` moved to `config.zig`, and `loadStyle` was renamed `loadConfig`.
+
+This pass re-read the document against `0.12.0`. Fifty-five citations had drifted off their
+symbols and the gate was failing on every one of them; they are back on the line each symbol is
+defined on, and the last bare citation, which no rewrite can name a symbol for, is paired. The
+sandbox had no row in the mitigations table at all, although gaps 1 and 5 name it as the control
+that stands between a model-driven write and the rest of the filesystem: it is now a row, with the
+`applySandbox` false that leaves a run confined by nothing but the in-process path check, and
+`bash` outside both halves either way. `HOME` is an entry point the table had missed in its own
+right, since every default path is built under it.
 
 Cite a control as a pair, `` `symbol`, `path:line` ``, qualified or not, so the gate covers it
 from then on. No owner and no review cadence are named: neither is decided in this repository,
@@ -40,19 +49,19 @@ and inventing one would put a name against a document nobody signed.
 
 | # | Threat | Boundary | Exploitability | Impact | Control today |
 | --- | --- | --- | --- | --- | --- |
-| 1 | Repository content drives shell execution | repo → model → host | high: any content the model reads can carry an instruction | full compromise of the operator's account, files and keys | prompt wording (`system_prompt`, `src/conversation.zig:61`), command filter (`deny_commands`), and Landlock LSM confinement when sandbox enabled (gap 1) |
-| 2 | The provider's reply drives shell execution | provider → host | medium: needs a hostile, coerced or MITM'd endpoint | same as 1 | redirect refused (`streamChat`, `src/main.zig:3341`), response caps, timeouts, `bash` timeout default and ceiling (`default_bash_timeout_ms`, `src/tool.zig:70`; `max_bash_timeout_ms`, `src/tool.zig:65`) |
+| 1 | Repository content drives shell execution | repo → model → host | high: any content the model reads can carry an instruction | full compromise of the operator's account, files and keys | prompt wording (`system_prompt`, `src/conversation.zig:61`), a command filter that is empty unless the operator configures it (`deniedInCommand`, `src/tool.zig:1402`), and Landlock LSM confinement when the sandbox is enabled (gap 1) |
+| 2 | The provider's reply drives shell execution | provider → host | medium: needs a hostile, coerced or MITM'd endpoint | same as 1 | redirect refused (`streamChat`, `src/main.zig:3329`), response caps, timeouts, `bash` timeout default and ceiling (`default_bash_timeout_ms`, `src/tool.zig:70`; `max_bash_timeout_ms`, `src/tool.zig:65`) |
 | 3 | The API key is sent to whatever host the environment names | agent → provider | medium: any `https` host is accepted | provider account takeover, bill abuse | plaintext `http` refused off loopback (`net.urlCarriesKey`, `src/net.zig:671`, enforced at `src/main.zig:557`) |
 | 4 | A named CA bundle adds a trust anchor for every TLS connection of the run | environment/argv → agent, agent → provider and GitHub | medium: needs a write to the environment, or `--ca-bundle` on the command line | the API key to a machine in the middle, and a release asset that hashes as published | replaces the system store when the bundle loads; a bundle that is unreadable or holds no certificate is refused (`loadCaBundle`, `src/net.zig:64`); no policy on what a bundle may add (gap 3) |
-| 5 | Tools read and write outside the working tree | model → filesystem | high: `read`/`write`/`edit`/`multi_edit` take any path | overwrite `~/.ssh/authorized_keys`, a shell rc file, any file the operator can write | credential paths refused by name (`isCredentialPath`, `src/tool.zig:1825`); configurable sandbox (`[sandbox]` in config) enforces path checks and Landlock LSM rules to confine writes to writable roots (gap 5) |
+| 5 | Tools read and write outside the working tree | model → filesystem | high: `read`/`write`/`edit`/`multi_edit` take any path | overwrite `~/.ssh/authorized_keys`, a shell rc file, any file the operator can write | credential paths refused by name (`isCredentialPath`, `src/tool.zig:1892`); configurable sandbox (`[sandbox]` in config) enforces path checks and Landlock LSM rules to confine writes to writable roots (gap 5) |
 | 6 | Tool output carries credentials to the model and on to the provider | host → model → provider | low: needs a credential under a name the rules do not know, or one reached through shell indirection | secret exfiltration through a routine run | all six tools refuse or exclude a known credential name (`credential_globs`, `src/tool.zig:1694`; `credentialInCommand`, `src/tool.zig:1206`; `gitPathspecs`, `src/tool.zig:883`); the run's own keys are absent from a tool's environment (`scrubSecrets`, `src/main.zig:2198`) |
 | 7 | A compromised release replaces the binary | GitHub → host | low: needs the release account or its token | persistent, silent code execution on every later run | sha256 sidecar, host allowlist (`checksumMatches`, `src/update.zig:162`; `hostTrusted`, `src/update.zig:109`) |
 | 8 | The API key is visible in the process table | operator → host | low: needs a local reader | key theft by any other process or user on the box | none |
 | 9 | A hostile or malformed provider response exhausts memory or CPU | provider → agent | medium | run killed, machine memory spent | per-response cap (`max_response_bytes`, `src/stream.zig:20`), frame cap (`max_frame_bytes`, `src/main.zig:172`), error-body cap (`max_error_body_bytes`, `src/main.zig:187`), timeouts, process-group kill |
 | 10 | A hostile repository writes escape sequences to the operator's terminal | repo → terminal | high: any file the model echoes | terminal spoofing, clipboard tricks | control bytes escaped in the gutter (`toolCallLine`, `src/tool.zig:1004`, through `chat.safeText`, `src/chat.zig:688`) and scrubbed in error text (`terminalSafe`, `src/tool.zig:1055`) |
 | 11 | A hostile model result spends the operator's money | model → provider | medium: a runaway or looping run | unbounded bill on the provider account | per-request `max_tokens` (`buildBody`, `src/main.zig:3234`), turn and wall-clock ceilings, and an opt-in run-wide spend ceiling (`--max-spend-tokens`, `spendCeilingReached`, `src/main.zig:2691`); nothing bounds the spend of a run that set none (gap 8) |
-| 12 | An `[[mcp]]` table chooses a program the run executes | operator config → host | medium: needs a write to the config file, the environment or `--config` | arbitrary code execution as the operator; every tool result the server returns reaches the model | servers are read only from the config file (`--config`, `MICROAGENT_CONFIG` or `$HOME/.microagent/config.toml`), never from the working tree (`config.parse`, `src/config.zig:275`; `connect`, `src/mcp.zig:1570`), so a repository under review cannot add one; the server inherits the scrubbed environment, never the provider key (`scrubSecrets`, `src/main.zig:2198`); it is trusted exactly as far as a `bash` command the operator wrote, and no further |
-| 14 | A remote MCP server, or an enabled preset, returns text the model reads and receives what the model sends it | remote server → model, agent → remote server | medium: needs a hostile or compromised endpoint, or an operator who switched one on; a public endpoint working as intended is the ordinary case | prompt injection through a result (as row 1, by a path that is not the repository), the model's queries and the key seen by a third party | a result is untrusted text like any tool output: the system prompt says so, it is capped at `max_tool_output` (`resultText`, `src/mcp.zig:910`); presets are off until the config enables one (`toolKey`, `src/config.zig:673`); `https`, or `http` on loopback, with no userinfo (`validUrl`, `src/mcp.zig:1437`); no redirect, a 4 MB response ceiling and a per-request timeout that cancels the whole exchange (`exchange`, `src/mcp.zig:510`; `readAnswer`, `src/mcp.zig:600`; `post`, `src/mcp.zig:435`); the key is named in the file by variable, read before the scrub and removed from every child's environment (`withKeys`, `src/mcp.zig:1470`; `scrubSecrets`, `src/main.zig:2198`); the sandbox does not confine this traffic (gap 13) |
+| 12 | An `[[mcp]]` table chooses a program the run executes | operator config → host | medium: needs a write to the config file, the environment or `--config` | arbitrary code execution as the operator; every tool result the server returns reaches the model | servers are read only from the config file (`--config`, `MICROAGENT_CONFIG` or `$HOME/.microagent/config.toml`), never from the working tree (`config.parse`, `src/config.zig:275`; `connect`, `src/mcp.zig:1536`), so a repository under review cannot add one; the server inherits the scrubbed environment, never the provider key (`scrubSecrets`, `src/main.zig:2198`); it is trusted exactly as far as a `bash` command the operator wrote, and no further |
+| 14 | A remote MCP server, or an enabled preset, returns text the model reads and receives what the model sends it | remote server → model, agent → remote server | medium: needs a hostile or compromised endpoint, or an operator who switched one on; a public endpoint working as intended is the ordinary case | prompt injection through a result (as row 1, by a path that is not the repository), the model's queries and the key seen by a third party | a result is untrusted text like any tool output: the system prompt says so, it is capped at `max_tool_output` (`resultText`, `src/mcp.zig:887`); presets are off until the config enables one (`toolKey`, `src/config.zig:673`); `https`, or `http` on loopback, with no userinfo (`validUrl`, `src/mcp.zig:1414`); no redirect, a 4 MB response ceiling and a per-request timeout that cancels the whole exchange (`exchange`, `src/mcp.zig:487`; `readAnswer`, `src/mcp.zig:577`; `post`, `src/mcp.zig:426`); the key is named in the file by variable, read before the scrub and removed from every child's environment (`withKeys`, `src/mcp.zig:1447`; `scrubSecrets`, `src/main.zig:2198`); the sandbox does not confine this traffic (gap 13) |
 | 13 | A skill body is prompt text the model is told to follow | operator config → model | low: needs a write to a skills directory, the config file, or `MICROAGENT_SKILLS` | the run follows instructions the operator did not write, and the conversation is re-sent to the provider | skills are read only from the roots the config file or the variable names, else `$HOME/.microagent/skills`, never from the working tree (`roots`, `src/skill.zig:142`; `discover`, `src/skill.zig:216`), so a repository under review cannot install one; the listing escapes control bytes (`Skills.prompt`, `src/skill.zig:95`); a body reaches the conversation only when the model calls the tool, as a tool result under the same cap as any other |
 | 15 | `--repl` resets the money ceiling on every prompt, and one process serves them all | stdin → agent, model → provider | low: needs an operator who left the REPL open on a session nobody is watching | the spend ceiling the operator set bounds one prompt rather than the session, so a long session bills what a short one would have stopped | ceilings are read into `Options`, which `run` takes by value, so turn, time and spend all start again at each prompt (`run`, `src/main.zig:2752`); a prompt over 64 KB ends the run rather than being truncated (`max_repl_prompt_bytes`, `src/main.zig:665`); a prompt past a ceiling ends the session with that run's own exit status (gap 14) |
 
@@ -70,9 +79,9 @@ source tree and the host. The one asset worth stealing on its own is the API key
 | `--repl`, and standard input with it | a second untrusted prompt channel, read a line at a time and kept in one conversation across the whole process, where an `argv` prompt is one prompt in one process | `replPrompt`, `src/main.zig:679`, called from the run loop in `runMain`, `src/main.zig:441`; line cap `max_repl_prompt_bytes`, `src/main.zig:665` |
 | `--ca-bundle <file>` | the PEM file whose certificates vouch for the provider and for GitHub | `net.caBundlePath`, `src/net.zig:130`; `loadCaBundle`, `src/net.zig:64`; applied at `src/main.zig:477` and `run`, `src/update.zig:563` |
 | `--config <file>`, `MICROAGENT_CONFIG`, `~/.microagent/config.toml` | the provider settings (`model`, `base_url`, `api_key`, the last a credential in the clear), the `system_prompt_extra` text, skill roots, `[[mcp]]` and `[tools.<name>]` tables, denied shell commands, and sandbox settings: what the prompt says, what the run starts or contacts, which tools it offers, what shell execution refuses, and filesystem confinement | `configSource`, `src/main.zig:2513`; `loadConfig`, `src/main.zig:2260`; `config.parse`, `src/config.zig:275`; cap `max_config_bytes`, `src/main.zig:182` (64 KB) |
-| `[[mcp]]` tables in that config | programs the run starts over stdio, remote servers it sends POSTs to (`url`), and the tools they offer | `connect`, `src/mcp.zig:1570`; `handshake`, `src/mcp.zig:1906` |
-| `[tools.<name>]` tables in that config | which built-in tools the model is offered, and which of the public remote servers `web_search`, `context7`, `grep_app` and `deepwiki` are enabled (all four are off by default), with their url, key variable name and timeout | `toolKey`, `src/config.zig:673`; `toolConfigError`, `src/main.zig:980`; `builtinToolsJson`, `src/main.zig:3138`; refusal in `dispatchCall`, `src/main.zig:3965` |
-| Responses of a remote MCP server (JSON body or event stream) | text that becomes a tool result, and the session id echoed on later requests | `exchange`, `src/mcp.zig:510`; `readAnswer`, `src/mcp.zig:600`; `sseLine`, `src/mcp.zig:669` |
+| `[[mcp]]` tables in that config | programs the run starts over stdio, remote servers it sends POSTs to (`url`), and the tools they offer | `connect`, `src/mcp.zig:1536`; `handshake`, `src/mcp.zig:1872` |
+| `[tools.<name>]` tables in that config | which built-in tools the model is offered, and which of the public remote servers `web_search`, `context7`, `grep_app` and `deepwiki` are enabled (all four are off by default), with their url, key variable name and timeout | `toolKey`, `src/config.zig:673`; `toolConfigError`, `src/main.zig:980`; `builtinToolsJson`, `src/main.zig:3138`; refusal in `dispatchCall`, `src/main.zig:3953` |
+| Responses of a remote MCP server (JSON body or event stream) | text that becomes a tool result, and the session id echoed on later requests | `exchange`, `src/mcp.zig:487`; `readAnswer`, `src/mcp.zig:577`; `sseLine`, `src/mcp.zig:646` |
 | `skills` in that config, `MICROAGENT_SKILLS`, `~/.microagent/skills` | `SKILL.md` bodies the model may load, as prompt text | `roots`, `src/skill.zig:142`; `discover`, `src/skill.zig:216`; `call`, `src/skill.zig:478`; cap `max_skill_bytes`, `src/skill.zig:40` |
 | `AGENTS.md` in the working directory, or the paths `agents_files` names | repository text the run follows as instructions, appended to the system prompt between a begin and an end marker naming the file, with the prompt stating that the block governs the task and cannot widen it, lift the prompt's rules, authorize a credential, or send anything off the machine | `agentsBlock`, `src/main.zig:735`; `readAgentsFile`, `src/main.zig:828`; cap `max_agents_bytes`, `src/main.zig:146` (128 KB, raised from 16 KB in 0.10.0); `agents_files = []` turns the read off |
 | Command line, `update` | `--check` | `parseArgs`, `src/update.zig:523`; `run`, `src/update.zig:563`; dispatched from `runMain`, `src/main.zig:441`, at `src/main.zig:457` |
@@ -84,16 +93,17 @@ source tree and the host. The one asset worth stealing on its own is the API key
 | `MICROAGENT_CA_BUNDLE`, `SSL_CERT_FILE` | trust anchors for the provider host and for GitHub | `caBundlePath`, `src/net.zig:130`, read in `runMain` at `src/main.zig:510`; loaded at `src/main.zig:562` and `run`, `src/update.zig:563` |
 | `MICROAGENT_BUDGET_SECONDS`, `--budget` | wall-clock ceiling on the run, suspended time included | `optionalCeiling`, `src/main.zig:1688`; carried by `Budget`, `src/main.zig:2561` |
 | `MICROAGENT_MAX_SPEND_TOKENS`, `--max-spend-tokens <n>` | run-wide token ceiling, counted before each turn | `optionalCeiling`, `src/main.zig:1688`; read in `runMain` at `src/main.zig:512`; checked by `spendCeilingReached`, `src/main.zig:2691`, in `run`, `src/main.zig:2752` |
-| `MICROAGENT_STALL_TIMEOUT`, `--stall-timeout <s>` | connection setup and request write/read deadline, 120 s by default | `default_stall_timeout_s`, `src/main.zig:130`; `openChatRequest`, `src/main.zig:3407`; `withStallTimeout`, `src/main.zig:3283` |
+| `MICROAGENT_STALL_TIMEOUT`, `--stall-timeout <s>` | connection setup and request write/read deadline, 120 s by default | `default_stall_timeout_s`, `src/main.zig:130`; `openChatRequest`, `src/main.zig:3395`; `withStallTimeout`, `src/main.zig:3283` |
 | `MICROAGENT_SESSION_DIR` | where the JSONL run log is written | `sessionDir`, `src/session.zig:27`; read in `runMain` at `src/main.zig:513` |
+| `HOME` | the root of every default path: the config file, the session store, the skill roots, and the `~` a config value or `MICROAGENT_SKILLS` expands; it is trimmed, and an empty one is no home rather than a path off the root | `homeDir`, `src/net.zig:289`; `expandHome`, `src/net.zig:308`; held to one list in `env_vars`, `src/main.zig:2118` |
 | `TMPDIR` | a directory a sandboxed run may write to, added to the writable roots when the value is absolute and no other root covers it | `resolveWritableRoots`, `src/sandbox.zig:63`; read at `src/sandbox.zig:127`; a value that is not absolute adds no root |
 | `MDEBUG` | protocol notes and the resolved configuration on stderr, never a key | `debugEnabled`, `src/main.zig:1440`; `traceConfig`, `src/main.zig:2361` |
 | `GITHUB_TOKEN` | credential, presented only to `api.github.com` and never to a tool subprocess | `githubBearer`, `src/update.zig:144`; narrowed by `bearerFor`, `src/update.zig:155`; applied per request at `exchange`, `src/update.zig:442` |
 | GitHub release JSON | tag, page URL, asset names, download URLs | `parseRelease`, `src/update.zig:179` |
 | Downloaded asset and `.sha256` sidecar | bytes that become the running executable | `fetch`, `src/update.zig:345`; gated by `installIfVerified`, `src/update.zig:480` |
-| Streamed provider response (SSE) | model text and tool calls | `streamChat`, `src/main.zig:3341`; `applyFrame`, `src/stream.zig:560` |
+| Streamed provider response (SSE) | model text and tool calls | `streamChat`, `src/main.zig:3329`; `applyFrame`, `src/stream.zig:560` |
 | Tool call arguments | what the model wants done | `runTool`, `src/tool.zig:916` |
-| Files in the working tree | the model's evidence, and its instructions | `toolRead`, `src/tool.zig:1963`; the instructions block assembled by `agentsBlock`, `src/main.zig:735` between `agents_fence_open`, `src/main.zig:153` and `agents_fence_close` |
+| Files in the working tree | the model's evidence, and its instructions | `toolRead`, `src/tool.zig:2030`; the instructions block assembled by `agentsBlock`, `src/main.zig:735` between `agents_fence_open`, `src/main.zig:153` and `agents_fence_close` |
 
 There is no network listener, webhook, message consumer, scheduled job or IPC. microagent
 itself talks only to the provider's base URL and to GitHub, plus the remote MCP servers the config
@@ -116,7 +126,7 @@ ends the run rather than being truncated, so nothing partial is sent.
 ### Surface added by deployment
 
 - The binary runs whatever is on `PATH`: `rg`, `ast-grep`, `git` and `/bin/sh`
-  (`toolSearch`, `src/tool.zig:2531`; `toolAst`, `src/tool.zig:2565`; `toolGit`, `src/tool.zig:624`; `toolBash`, `src/tool.zig:1460`). A hostile `PATH` entry is a hostile
+  (`toolSearch`, `src/tool.zig:2598`; `toolAst`, `src/tool.zig:2632`; `toolGit`, `src/tool.zig:624`; `toolBash`, `src/tool.zig:1460`). A hostile `PATH` entry is a hostile
   tool, and `bash` runs whatever name the model typed.
 - The Harbor adapter runs the binary inside third-party task containers with the provider
   key in the container environment
@@ -142,7 +152,7 @@ ends the run rather than being truncated, so nothing partial is sent.
 4. **Agent → provider.** The key goes out in an `authorization` header (`authHeaders`, `authHeaders`, `src/main.zig:3273`) to whatever host `base_url` names, after the scheme check in
    `runMain`, `src/main.zig:441`, at `src/main.zig:557`.
 5. **Model → filesystem and process.** `bash` runs `/bin/sh -c` with the model's string
-   (`toolBash`, `src/tool.zig:1460`); `read`, `write`, `edit` and `multi_edit` take any path (`toolRead`, `src/tool.zig:1963`; `toolWrite`, `src/tool.zig:2143`; `toolEdit`, `src/tool.zig:2221`).
+   (`toolBash`, `src/tool.zig:1460`); `read`, `write`, `edit` and `multi_edit` take any path (`toolRead`, `src/tool.zig:2030`; `toolWrite`, `src/tool.zig:2210`; `toolEdit`, `src/tool.zig:2288`).
 6. **GitHub → host.** `update` downloads bytes and writes them over the running executable
    (`fetch`, `src/update.zig:345`; `installIfVerified`, `src/update.zig:480`).
    Validation point: (`installIfVerified`, `src/update.zig:480`).
@@ -151,20 +161,19 @@ ends the run rather than being truncated, so nothing partial is sent.
    written to the session log or to a tool result.
 8. **Operator config → host (MCP).** The `[[mcp]]` tables name programs the run starts as
    children before the first request; the tools they report are advertised to the model and
-   dispatched to them (`config.parse`, `src/config.zig:275`; `connect`, `src/mcp.zig:1570`).
+   dispatched to them (`config.parse`, `src/config.zig:275`; `connect`, `src/mcp.zig:1536`).
    Validation point: the tables come from the config file named by `--config`, the variable
    or `$HOME/.microagent/config.toml`, and from nowhere in the tree (`configSource`, `src/main.zig:2513`). The children inherit the scrubbed environment, which lacks the
    provider key (`scrubSecrets`, `src/main.zig:2198`). A server whose name or tool name
-   cannot be spelled in a tool name is refused (`validName`, `src/mcp.zig:1502`). What a
+   cannot be spelled in a tool name is refused (`validName`, `src/mcp.zig:1479`). What a
    configured server does with its own authority is the operator's decision, as with a
    `bash` command they write.
 10. **Remote MCP server → model, and agent → remote server.** A `url` table or a preset that is on
     sends each tool call's name and arguments to an HTTPS endpoint the operator named, and the text
     it answers with becomes a tool result, as a file's contents do. Validation points: the url
-    must be `https`, or `http` on loopback, with no userinfo (`validUrl`, `src/mcp.zig:1437`); a
-    redirect is an error, the body is capped at 4 MB and the request at its timeout (`exchange`, `src/mcp.zig:510`); the key is looked up by a variable name written in the file and sent in one
-    header (`withKeys`, `src/mcp.zig:1470`), and that variable is removed from the environment every
-    child inherits (`scrubSecrets`, `src/main.zig:2198`). Nothing checks what the endpoint says: a
+    must be `https`, or `http` on loopback, with no userinfo (`validUrl`, `src/mcp.zig:1414`); a
+    redirect is an error, the body is capped at 4 MB and the request at its timeout (`exchange`, `src/mcp.zig:487`); the key is looked up by a variable name written in the file and sent in one
+    header (`withKeys`, `src/mcp.zig:1447`), and that variable is removed from the environment every
     child inherits (`scrubSecrets`, `src/main.zig:2198`). Nothing checks what the endpoint says: a
     result can carry instructions, and it is untrusted for the same reason a file from a
     repository under review is.
@@ -193,8 +202,8 @@ command.
 | Provider API key | bills, model access, provider account | `argv`, the environment or the config file, then process memory |
 | `GITHUB_TOKEN` | releases API access, and repository scope beyond it | environment, then an `Authorization` header on `api.github.com` only (`bearerFor`, `src/update.zig:155`); absent from every tool subprocess (`secret_env_vars`, `src/main.zig:2175`) |
 | `api_key` in the config file | the same key, on disk and in the clear | read in `resolveKey`, `src/main.zig:2067`; the file is not a credentials path, so the `read` tool can open it: keep it out of a workspace the model is given |
-| Source tree and everything in it | `.env`, keys, unreleased work | read by (`toolRead`, `src/tool.zig:1963`), credentials refused by `isCredentialPath`, `src/tool.zig:1825`, sent to the provider in the request body |
-| A remote MCP server's key | access to the operator's account at that service | the environment, named by `api_key_env`; copied once by (`withKeys`, `src/mcp.zig:1470`), sent in one request header, removed from every child's environment (`scrubSecrets`, `src/main.zig:2198`); never in the config file or a log line |
+| Source tree and everything in it | `.env`, keys, unreleased work | read by (`toolRead`, `src/tool.zig:2030`), credentials refused by `isCredentialPath`, `src/tool.zig:1892`, sent to the provider in the request body |
+| A remote MCP server's key | access to the operator's account at that service | the environment, named by `api_key_env`; copied once by (`withKeys`, `src/mcp.zig:1447`), sent in one request header, removed from every child's environment (`scrubSecrets`, `src/main.zig:2198`); never in the config file or a log line |
 | Host compute and credentials | the shell inherits the environment minus this binary's own credentials | `scrubSecrets`, `src/main.zig:2198` |
 | The binary itself | a replaced copy runs on every later invocation | replaced at `replaceBinary`, `src/update.zig:464` |
 | Run logs | working directory below the home and no account name, model, token counts, finish reason | `~/.microagent/sessions`, capped at 200 logs, one per run (`pruneSessions`, `src/session.zig:471`; `max_session_logs`, `src/session.zig:359`; the `cwd` a record carries, `recordCwd`, `src/session.zig:252`) |
@@ -220,7 +229,7 @@ command.
 
 - **Prompt injection through source files.** A file, a test fixture or an issue template in the
   tree can say "run `curl … | sh`". The model reads it with the ordinary `read` tool
-  (`toolRead`, `src/tool.zig:1963`). Instructions carry no provenance, so the injected text is as
+  (`toolRead`, `src/tool.zig:2030`). Instructions carry no provenance, so the injected text is as
   trusted as the operator's prompt. The system prompt tells the model to treat tool output as data
   and to report such a file instead of acting on it (`system_prompt`, `src/conversation.zig:61`),
   but a hostile file can argue with that. This is the project's dominant risk, and it is a design
@@ -253,7 +262,7 @@ command.
   the model read out of the tree. They are fuzzed from the argument JSON to the gutter line
   and the limits it produces: the line stays one line inside its buffer with no byte a
   terminal acts on, and every count the model wrote is inside its ceiling before a
-  subprocess starts (`fuzzToolCall`, `src/tool.zig:3600`; `fuzzToolCall`, `src/tool.zig:3600`).
+  subprocess starts (`fuzzToolCall`, `src/tool.zig:3662`; `fuzzToolCall`, `src/tool.zig:3662`).
 - A call the provider gave no index, no id or no name, or whose arguments are not a JSON
   object, is dropped rather than dispatched (`keepRunnableCalls`, `src/stream.zig:104`;
   `argumentsAreAnObject`, `src/stream.zig:135`). The drop count is reported, so the turn
@@ -265,20 +274,20 @@ command.
   replayed `bash` runs once.
 - A stream exceeding the response byte cap stops reading and discards all pending calls,
   even if the provider keeps sending (`max_response_bytes`, `src/stream.zig:20`;
-  `streamChatOnce`, `src/main.zig:3481`). An exact-cap answer can finish normally.
+  `streamChatOnce`, `src/main.zig:3469`). An exact-cap answer can finish normally.
   A stream ending without `[DONE]` fails as truncated (`truncatedNotice`, `src/stream.zig:26`).
 - Connection setup, including TLS, request writes and each response read have a
   cancellable deadline, 120 s unless the operator raises it
-  (`default_stall_timeout_s`, `src/main.zig:130`; `openChatRequest`, `src/main.zig:3407`;
+  (`default_stall_timeout_s`, `src/main.zig:130`; `openChatRequest`, `src/main.zig:3395`;
   `withStallTimeout`, `src/main.zig:3283`). A configured time budget also cancels blocked
-  network operations (`streamChatWithinBudget`, `src/main.zig:3369`). The stall timeout is checked only for being a positive number
+  network operations (`streamChatWithinBudget`, `src/main.zig:3357`). The stall timeout is checked only for being a positive number
   (`ceiling`, `src/main.zig:1523`). Nothing refuses a figure larger than any run should
   wait, so a hostile environment that sets it very high turns the stall bound off (gap 12).
 - An error body from the provider is printed on stderr through (`terminalSafe`, `src/tool.zig:1055`) and capped at 16 KB (`max_error_body_bytes`, `src/main.zig:187`).
   Control bytes are scrubbed, so it cannot repaint the terminal.
 - Frames that are not JSON are counted and dropped (`applyFrame`, `src/stream.zig:560`;
-  folded by `streamChatOnce`, `src/main.zig:3481`). They are not fatal: the run continues on a partial turn
-  and reports the count in `streamChatOnce`, `src/main.zig:3481`.
+  folded by `streamChatOnce`, `src/main.zig:3469`). They are not fatal: the run continues on a partial turn
+  and reports the count in `streamChatOnce`, `src/main.zig:3469`.
 
 ### Agent → provider (information disclosure, spoofing)
 
@@ -290,7 +299,7 @@ command.
   one to three digits, each at most 255 (`isIpv4Loopback`, `src/net.zig:692`). So
   `127.evil.com`, `localhost.evil.com`, `127.1`, `127.0.0.256`, `localhost.` with a
   trailing dot, and other IPv6 spellings of loopback do not qualify. The remote MCP transport applies the same
-  rule to its urls (`validUrl`, `src/mcp.zig:1437`).
+  rule to its urls (`validUrl`, `src/mcp.zig:1414`).
 - The key goes to the base URL, which is the built-in OpenRouter one unless the operator
   named another. Only `MICROAGENT_API_KEY` is read, so a key another provider's tools
   export (`OPENAI_API_KEY`, `DEEPSEEK_API_KEY`) is never picked up and sent to the default
@@ -304,7 +313,7 @@ command.
   world-readable in the process table for the life of the run.
 - The conversation carries everything the model read, on every turn, by design
   (`buildBody`, `src/main.zig:3234`).
-- Redirects are not followed. `.redirect_behavior = .unhandled` (`streamChatOnce`, `src/main.zig:3481`) makes
+- Redirects are not followed. `.redirect_behavior = .unhandled` (`streamChatOnce`, `src/main.zig:3469`) makes
   a 3xx an error status, so a provider answering with a `Location` cannot walk the key off
   to whoever it names. The header carrying the key is the one the request writer reads
   (`authHeaders`, `src/main.zig:3273`), not a separately privileged field, so the unhandled
@@ -332,21 +341,21 @@ command.
   not caught. A command matching a configured command filter (`deny_commands` in config) is
   refused before execution (`deniedInCommand`, `src/tool.zig:1402`).
 - `read`, `write`, `edit` and `multi_edit` accept absolute paths and do not confine writes to the working
-  tree (`toolRead`, `src/tool.zig:1963`; `toolWrite`, `src/tool.zig:2143`; `toolEdit`, `src/tool.zig:2221`). Each refuses a path the credential tables name, and nothing else.
+  tree (`toolRead`, `src/tool.zig:2030`; `toolWrite`, `src/tool.zig:2210`; `toolEdit`, `src/tool.zig:2288`). Each refuses a path the credential tables name, and nothing else.
 - `write`, `edit` and `multi_edit` write through a temporary file and a rename. They follow a symlink to
   the real file first and carry the destination's permission bits over
-  (`writeFileAtomic`, `src/tool.zig:2198`; `permission_bits`, `src/tool.zig:2179`). A
+  (`writeFileAtomic`, `src/tool.zig:2265`; `permission_bits`, `src/tool.zig:2246`). A
   symlink planted in the tree therefore redirects a write, and a rewritten file keeps its
   mode instead of taking the process umask's.
-- `ast` with `rewrite` set applies its replacement to every match (`toolAst`, `src/tool.zig:2565`), so one model turn can rewrite a whole file set. A rewrite that
-  would still match its own output is refused (`astRewriteRefusal`, `src/tool.zig:2687`).
+- `ast` with `rewrite` set applies its replacement to every match (`toolAst`, `src/tool.zig:2632`), so one model turn can rewrite a whole file set. A rewrite that
+  would still match its own output is refused (`astRewriteRefusal`, `src/tool.zig:2754`).
   That is evidence the run reads back, not a sandbox: a replacement that re-matches through
   a form the pattern's literal text does not spell is still applied.
 - Bounded today: 60 s tool timeout (`tool_timeout_ms`, `src/tool.zig:60`); 120 s default
   (`default_bash_timeout_ms`, `src/tool.zig:70`) and 600 s ceiling for `bash`
   (`max_bash_timeout_ms`, `src/tool.zig:65`, applied through `bashTimeoutMs`, `src/tool.zig:1103`, and `boundedMs`, `src/tool.zig:81`), clipped to the budget's
   remaining time (`Budget`, `src/main.zig:2561`); captured output held at 96 KB and cut to
-  the 24 KB the model reads (`max_tool_output`, `src/tool.zig:25`; `runCapped`, `src/tool.zig:2760`); `--max-turns` (`max_turns_default`, `src/main.zig:112`); and the
+  the 24 KB the model reads (`max_tool_output`, `src/tool.zig:25`; `runCapped`, `src/tool.zig:2827`); `--max-turns` (`max_turns_default`, `src/main.zig:112`); and the
   wall-clock budget (`Budget`, `src/main.zig:2561`; `canAffordWait`, `src/main.zig:2625`).
 
 ### GitHub → host (spoofing, tampering, elevation of privilege)
@@ -400,12 +409,12 @@ The `Unreleased` section adds more of the same kinds:
 - a subprocess that printed its findings and then failed, having them thrown away;
 - a credential named at a depth in the path rather than at the leaf, which `search` and
   `git` already excluded while `read`, `write`, `edit` and `ast` still read it
-  (`isCredentialPath`, `src/tool.zig:1825`);
+  (`isCredentialPath`, `src/tool.zig:1892`);
 - an `ast --rewrite` that wrote a credentials file while the refusal told the model to
-  fetch it through `bash` (`credentialRefusal`, `src/tool.zig:1934`);
+  fetch it through `bash` (`credentialRefusal`, `src/tool.zig:2001`);
 - a key minted for one provider reaching another without a word (`resolveKey`, `src/main.zig:2067`);
 - a tool call that closed both its pipes and then slept, holding the turn past the
-  deadline the call already had (`waitBounded`, `src/tool.zig:2871`).
+  deadline the call already had (`waitBounded`, `src/tool.zig:2938`).
 
 The last two share the shape of the rest: a control the code assumed was implied turned
 out to be a separate thing. Each has a control named above; a regression in any of them is
@@ -425,48 +434,49 @@ the same bug returning.
 | Version comparison refuses a downgrade | installing an older build over a newer one | `compareVersions`, `src/update.zig:89`; `sameRelease`, `src/update.zig:56`; both applied in `run`, `src/update.zig:563`, at `src/update.zig:600-601` |
 | Atomic replace, only on `.replaced` | partial write, write on a refusal | `installIfVerified`, `src/update.zig:480`; `replaceBinary`, `src/update.zig:464` |
 | The key is refused on a plaintext `http` base URL off loopback; a `127.` host needs exactly four octets, every one range-checked | the key crossing a network path in the clear, or going to a name spelled like an address | `urlCarriesKey`, `src/net.zig:671`; `isLoopbackHost`, `src/net.zig:680`; `isIpv4Loopback`, `src/net.zig:692`; enforced at `src/main.zig:557` |
-| A refusal body reaches the model through the same escaping as any other untrusted server text, and a 4xx or 5xx is a refusal where a 2xx is not | a hostile server's text in the operator's terminal unescaped, or a 202 answering a request this client read as a failure and dropped | `exchange`, `src/mcp.zig:510`; `noteRefusal`, `src/mcp.zig:703`; `describeError`, `src/mcp.zig:1015` |
-| Remote MCP: `https` (or loopback `http`) urls with no userinfo, no redirect, a 4 MB response ceiling, a per-request timeout, presets off until enabled | a key or a query sent in the clear, a key replayed to a redirect target, an endpoint holding the run or its memory, a network call nobody asked for | `validUrl`, `src/mcp.zig:1437`; `exchange`, `src/mcp.zig:510`; `readAnswer`, `src/mcp.zig:600`; `toolKey`, `src/config.zig:673` |
-| The variables named by `api_key_env` are removed from the environment tool subprocesses and local MCP servers inherit, after the key is read | a `bash: env` that prints a remote server's key into the transcript and on to the provider | `withKeys`, `src/mcp.zig:1470`; `scrubSecrets`, `src/main.zig:2198` |
+| A refusal body reaches the model through the same escaping as any other untrusted server text, and a 4xx or 5xx is a refusal where a 2xx is not | a hostile server's text in the operator's terminal unescaped, or a 202 answering a request this client read as a failure and dropped | `exchange`, `src/mcp.zig:487`; `noteRefusal`, `src/mcp.zig:680`; `describeError`, `src/mcp.zig:992` |
+| Remote MCP: `https` (or loopback `http`) urls with no userinfo, no redirect, a 4 MB response ceiling, a per-request timeout, presets off until enabled | a key or a query sent in the clear, a key replayed to a redirect target, an endpoint holding the run or its memory, a network call nobody asked for | `validUrl`, `src/mcp.zig:1414`; `exchange`, `src/mcp.zig:487`; `readAnswer`, `src/mcp.zig:577`; `toolKey`, `src/config.zig:673` |
+| The variables named by `api_key_env` are removed from the environment tool subprocesses and local MCP servers inherit, after the key is read | a `bash: env` that prints a remote server's key into the transcript and on to the provider | `withKeys`, `src/mcp.zig:1447`; `scrubSecrets`, `src/main.zig:2198` |
 | Only `MICROAGENT_API_KEY` is read as the key | a key minted for one provider reaching another, with no hostile input at all: a variable another tool exported and a URL nobody set | `key_var`, `src/main.zig:2075`; `resolveKey`, `src/main.zig:2067` |
 | Userinfo redacted from every printed URL; every quoted diagnostic clipped and escaped | a password in the base URL copied into stderr, or a base URL carrying escape sequences repainting the terminal | `displayUrl`, `src/main.zig:1667`; `redactUserinfo`, `src/main.zig:1674`; `clip`, `src/main.zig:1710`; `quoteUntrusted`, `src/update.zig:40` |
-| Redirects unhandled | the key replayed to a host the provider names | `streamChatOnce`, `src/main.zig:3481` |
-| Argument vectors instead of a shell for `search`, `ast`, `git` | shell injection through a pattern or a path | `toolSearch`, `src/tool.zig:2531`; `toolAst`, `src/tool.zig:2565`; `toolGit`, `src/tool.zig:624` |
-| `--` separator, and a `rev` that may not start with `-` | an option smuggled in as a path or a revision | `gitArgv`, `src/tool.zig:810`; `gitPathspecs`, `src/tool.zig:883`; `toolSearch`, `src/tool.zig:2531`; `toolAst`, `src/tool.zig:2565` |
+| Redirects unhandled | the key replayed to a host the provider names | `streamChatOnce`, `src/main.zig:3469` |
+| Argument vectors instead of a shell for `search`, `ast`, `git` | shell injection through a pattern or a path | `toolSearch`, `src/tool.zig:2598`; `toolAst`, `src/tool.zig:2632`; `toolGit`, `src/tool.zig:624` |
+| `--` separator, and a `rev` that may not start with `-` | an option smuggled in as a path or a revision | `gitArgv`, `src/tool.zig:810`; `gitPathspecs`, `src/tool.zig:883`; `toolSearch`, `src/tool.zig:2598`; `toolAst`, `src/tool.zig:2632` |
 | Fixed git subcommands, no writes through the `git` tool | `bash`-strength git | `gitArgv`, `src/tool.zig:810` |
 | `git show` is given a format carrying the hash, the date and the subject, so the `Author:` and `Commit:` header lines it prints by default never reach the tool result; `log` is `--oneline` and never printed them | a commit author's name and email address re-sent to the provider on every later turn of a run that only wanted the patch | `gitArgv`, `src/tool.zig:810`; test at `src/tool.zig:5319` |
-| Every preset tool's description ends with one sentence telling the model that a call leaves the machine and that nothing belonging to the repository under review goes in an argument | a snippet, a path, a repository name or a person's name out of the tree landing in a third party's search or wiki log to answer a coding task | `off_host_note`, `presetDescription`, `src/mcp.zig:1101` |
-| Every tool subprocess and every stdio MCP server leads its own process group; the groups are published in one table, SIGKILLed on the way out, and taken with the terminal's interrupt | orphaned build trees and MCP servers holding resources, and a Ctrl+C that leaves a build writing files | `signalGroup`, `src/tool.zig:268`; `publishChildGroup`, `src/tool.zig:297`; `forwardInterruptsToToolGroup`, `src/tool.zig:343`; `runCapped`, `src/tool.zig:2760` |
+| Every preset tool's description ends with one sentence telling the model that a call leaves the machine and that nothing belonging to the repository under review goes in an argument | a snippet, a path, a repository name or a person's name out of the tree landing in a third party's search or wiki log to answer a coding task | `off_host_note`, `presetDescription`, `src/mcp.zig:1078` |
+| Every tool subprocess and every stdio MCP server leads its own process group; the groups are published in one table, SIGKILLed on the way out, and taken with the terminal's interrupt | orphaned build trees and MCP servers holding resources, and a Ctrl+C that leaves a build writing files | `signalGroup`, `src/tool.zig:268`; `publishChildGroup`, `src/tool.zig:297`; `forwardInterruptsToToolGroup`, `src/tool.zig:343`; `runCapped`, `src/tool.zig:2827` |
 | Output, response, frame, error-body and config caps; the response cap covers the whole response, not each field | memory exhaustion from a tool, a stream, an error body or a file | `max_tool_output`, `src/tool.zig:25`; `max_response_bytes`, `src/stream.zig:20`; `max_frame_bytes`, `src/main.zig:172`; `max_error_body_bytes`, `src/main.zig:187`; `max_config_bytes`, `src/main.zig:182` |
 | Tool-call index cap and a saturating cast; rejected call arguments still spend the shared response byte allowance | a provider asking for billions of slots, a wrapped index on a 32-bit build, or excessive indices bypassing the response allowance | `max_tool_calls`, `src/stream.zig:10`; `applyCallDelta`, `src/stream.zig:475`; `clampToResponseCap`, `src/stream.zig:451` |
-| Per-turn cap on what a turn's tool results add to the conversation; every call still answers, with a marker past the cap | one response asking for 64 full-size results: a 1.5 MB request billed before the next turn compacts | `max_turn_tool_output`, `src/main.zig:105`; `carriedToolResult`, `src/main.zig:4095`; `finishTurn`, `src/main.zig:3999` |
-| A tool call with no index, no id or no name, or with arguments that are not an object, is dropped rather than dispatched, and the drop reported | a partial or malformed stream entry becoming a command | `keepRunnableCalls`, `src/stream.zig:104`; `argumentsAreAnObject`, `src/stream.zig:135`; reported by `streamChatOnce`, `src/main.zig:3481` |
-| A call whose `id` the response already carried is dropped and the first kept | a relay or proxy replaying a frame, running `bash` twice or writing a file twice | `indexOfCallId`, `src/stream.zig:124`; test at `src/stream.zig:1434`; reported by `streamChatOnce`, `src/main.zig:3481` |
-| Credential paths refused by read, write, edit, multi_edit, search, ast and git; bash checks command words for credential names | credential contents sent to the provider or a credential rewritten by the model | `credentialPath`, `src/tool.zig:1909`; `credentialInCommand`, `src/tool.zig:1206`; `credential_globs`, `src/tool.zig:1694`; `toolRead`, `src/tool.zig:1963`; `toolWrite`, `src/tool.zig:2143`; `toolEdit`, `src/tool.zig:2221`; `toolMultiEdit`, `src/tool.zig:2427`; `toolSearch`, `src/tool.zig:2531`; `toolAst`, `src/tool.zig:2565`; `toolGit`, `src/tool.zig:624`; `toolBash`, `src/tool.zig:1460` |
-| The credentials refusal tells a call that would change the file from one that would not, so `ast` with `rewrite` on a credentials path gets the advice that no tool rewrites a key, not the one that sends the model to `bash` | a `write` through `--update-all` on a key file, and a model walking into the same refusal one turn later | `credentialRefusal`, `src/tool.zig:1934`; applied by `toolAst`, `src/tool.zig:2565` |
-| `search` and `ast` skip the same files as traversal globs; `git` excludes them from the diff and the show, including when the call names a path | a credential reaching the provider through a match or a patch | `credential_globs`, `src/tool.zig:1694`; `credential_pathspecs`, `src/tool.zig:1718`; `gitPathspecs`, `src/tool.zig:883` |
-| `write` refuses a call with no `content` | a truncated or forgotten argument emptying a file | `toolWrite`, `src/tool.zig:2143` |
-| `edit` and `multi_edit` refuse a replacement equal to, or still containing, the text it replaces | a re-issued call rewriting the same file twice | `applyEdit`, `src/tool.zig:2274` |
-| `write`, `edit` and `multi_edit` write through a rename, following a symlink and keeping the destination's permission bits | a half-written file where a whole one was, a link replaced by a regular file, a `0600` file coming back `0644` | `writeFileAtomic`, `src/tool.zig:2198`; `permission_bits`, `src/tool.zig:2179`; `resolveSymlinkTarget`, `src/net.zig:341` |
+| Per-turn cap on what a turn's tool results add to the conversation; every call still answers, with a marker past the cap | one response asking for 64 full-size results: a 1.5 MB request billed before the next turn compacts | `max_turn_tool_output`, `src/main.zig:105`; `carriedToolResult`, `src/main.zig:4083`; `finishTurn`, `src/main.zig:3987` |
+| A tool call with no index, no id or no name, or with arguments that are not an object, is dropped rather than dispatched, and the drop reported | a partial or malformed stream entry becoming a command | `keepRunnableCalls`, `src/stream.zig:104`; `argumentsAreAnObject`, `src/stream.zig:135`; reported by `streamChatOnce`, `src/main.zig:3469` |
+| A call whose `id` the response already carried is dropped and the first kept | a relay or proxy replaying a frame, running `bash` twice or writing a file twice | `indexOfCallId`, `src/stream.zig:124`; test at `src/stream.zig:1434`; reported by `streamChatOnce`, `src/main.zig:3469` |
+| Credential paths refused by read, write, edit, multi_edit, search, ast and git; bash checks command words for credential names | credential contents sent to the provider or a credential rewritten by the model | `credentialPath`, `src/tool.zig:1976`; `credentialInCommand`, `src/tool.zig:1206`; `credential_globs`, `src/tool.zig:1694`; `toolRead`, `src/tool.zig:2030`; `toolWrite`, `src/tool.zig:2210`; `toolEdit`, `src/tool.zig:2288`; `toolMultiEdit`, `src/tool.zig:2494`; `toolSearch`, `src/tool.zig:2598`; `toolAst`, `src/tool.zig:2632`; `toolGit`, `src/tool.zig:624`; `toolBash`, `src/tool.zig:1460` |
+| The credentials refusal tells a call that would change the file from one that would not, so `ast` with `rewrite` on a credentials path gets the advice that no tool rewrites a key, not the one that sends the model to `bash` | a `write` through `--update-all` on a key file, and a model walking into the same refusal one turn later | `credentialRefusal`, `src/tool.zig:2001`; applied by `toolAst`, `src/tool.zig:2632` |
+| `search` and `ast` skip the same files as traversal globs; `git` excludes them from the diff and the show, including when the call names a path | a credential reaching the provider through a match or a patch | `credential_globs`, `src/tool.zig:1694`; `credential_pathspecs`, `src/tool.zig:1767`; `gitPathspecs`, `src/tool.zig:883` |
+| `write` refuses a call with no `content` | a truncated or forgotten argument emptying a file | `toolWrite`, `src/tool.zig:2210` |
+| `edit` and `multi_edit` refuse a replacement equal to, or still containing, the text it replaces | a re-issued call rewriting the same file twice | `applyEdit`, `src/tool.zig:2341` |
+| `write`, `edit` and `multi_edit` write through a rename, following a symlink and keeping the destination's permission bits | a half-written file where a whole one was, a link replaced by a regular file, a `0600` file coming back `0644` | `writeFileAtomic`, `src/tool.zig:2265`; `permission_bits`, `src/tool.zig:2246`; `resolveSymlinkTarget`, `src/net.zig:341` |
 | `bash` timeout capped at 600 s and clipped to the budget left | model-chosen commands running with no deadline | `max_bash_timeout_ms`, `src/tool.zig:65`; `bashTimeoutMs`, `src/tool.zig:1103`; `Budget`, `src/main.zig:2561` |
-| A tool call's deadline covers the wait for the child as well as the drain of its pipes, and the process group is signalled when it passes | a command that closes both pipes and then sleeps holding the turn, the process-group reap never firing, and `--budget` not kept | `waitBounded`, `src/tool.zig:2871`; deadline taken by `runCapped`, `src/tool.zig:2760` |
+| Opt-in `[sandbox] enabled = true` confines writes: Landlock on Linux, a Seatbelt profile on macOS, `/` read-only with each writable root granted, binding through `PR_SET_NO_NEW_PRIVS` and `landlock_restrict_self`; in process, `isPathWritable` refuses `write`, `edit`, `multi_edit` and an `ast --rewrite` outside the roots, and an empty roots slice is the only way that restriction lifts | a model-driven write reaching `~/.ssh/authorized_keys`, a shell rc file, or any path outside the working tree | `applySandbox`, `src/sandbox.zig:427`; `applyLandlock`, `src/sandbox.zig:271`; `isPathWritable`, `src/sandbox.zig:167`; applied at `src/main.zig:579`, refused by `toolWrite`, `src/tool.zig:2210`, `toolEdit`, `src/tool.zig:2288` and `toolAst`, `src/tool.zig:2632` |
+| A tool call's deadline covers the wait for the child as well as the drain of its pipes, and the process group is signalled when it passes | a command that closes both pipes and then sleeps holding the turn, the process-group reap never firing, and `--budget` not kept | `waitBounded`, `src/tool.zig:2938`; deadline taken by `runCapped`, `src/tool.zig:2827` |
 | `max_tokens` on every request | one turn generating until the provider's own limit stops it | `default_max_tokens`, `src/main.zig:127`; `buildBody`, `src/main.zig:3234` |
 | `--max-spend-tokens` stops starting turns once the run has billed that many tokens, counted before each turn; before the first turn that starts at or past 80% of the cap it prints `<spent> of the <cap> token ceiling spent after <n> turn(s)` on stderr, once per run; a cap under 2, or a turn that jumps from below 80% to the cap, gets only the stop line | a run whose conversation re-sends itself every turn, billing more with fewer turns; a run started without a ceiling | `optionalCeiling`, `src/main.zig:1688`; `spendCeilingReached`, `src/main.zig:2691`; `spend_alarm_percent`, `src/main.zig:2679`; `spendAlarmDue`, `src/main.zig:2698`; `spendNotice`, `src/main.zig:2721`; printed and checked by `run`, `src/main.zig:2752` |
-| A failed subprocess keeps what it printed and reports its failure or nonzero exit status | a build, search or git command that printed useful output before failing reaching the model as a bare error or a clean result | `failedOutput`, `src/tool.zig:571`; `captureResult`, `src/tool.zig:476`; `Partial`, `src/tool.zig:2730` |
-| An `ast --rewrite` whose replacement still matches the pattern's own literal text is refused, as is a pattern of metavariables alone | a rewrite that re-applies itself to its own output on the next run | `astRewriteRefusal`, `src/tool.zig:2687`; test at `src/tool.zig:6086` |
+| A failed subprocess keeps what it printed and reports its failure or nonzero exit status | a build, search or git command that printed useful output before failing reaching the model as a bare error or a clean result | `failedOutput`, `src/tool.zig:571`; `captureResult`, `src/tool.zig:476`; `Partial`, `src/tool.zig:2797` |
+| An `ast --rewrite` whose replacement still matches the pattern's own literal text is refused, as is a pattern of metavariables alone | a rewrite that re-applies itself to its own output on the next run | `astRewriteRefusal`, `src/tool.zig:2754`; test at `src/tool.zig:6234` |
 | Control bytes escaped in the gutter and scrubbed in error bodies, bounded through one helper | terminal escape injection from repo content, a command-line argument, a config key or a value out of the release body | `toolCallLine`, `src/tool.zig:1004`; `terminalSafe`, `src/tool.zig:1055`; `chat.safeText`, `src/chat.zig:688`; `clip`, `src/main.zig:1710`; `quoteUntrusted`, `src/update.zig:40` |
-| Non-JSON frames counted and reported; a stream without `[DONE]` fails the turn; provider error fields are parsed as JSON, and null is not an error | a truncated or failed answer read as a finished one | `applyFrame`, `src/stream.zig:560`; `streamChatOnce`, `src/main.zig:3481`; `truncatedNotice`, `src/stream.zig:26`; `noteStreamError`, `src/stream.zig:217` |
+| Non-JSON frames counted and reported; a stream without `[DONE]` fails the turn; provider error fields are parsed as JSON, and null is not an error | a truncated or failed answer read as a finished one | `applyFrame`, `src/stream.zig:560`; `streamChatOnce`, `src/main.zig:3469`; `truncatedNotice`, `src/stream.zig:26`; `noteStreamError`, `src/stream.zig:217` |
 | A REPL line over 64 KB ends the run with exit 2 rather than being truncated, a prompt past a ceiling ends the session with that run's own exit status, and `/quit` or EOF exits 0 | a truncated prompt sent as a whole, and a session that keeps spending after a ceiling was reached without the caller being told | `replPrompt`, `src/main.zig:679`; cap `max_repl_prompt_bytes`, `src/main.zig:665`; the loop's exits at `src/main.zig:621-629` and `src/main.zig:653` |
-| Capped exponential backoff for retryable statuses and failures before the request body is completely on the wire; a complete POST is not replayed after a stalled flush or missing response head; a provider error frame is retried only with no content, tool calls, reported usage or malformed frames; `Retry-After` seconds or dates are clamped to 120 s, malformed or past dates fall back to backoff, and a wait the time budget cannot cover ends the turn | a dropped connection or rate limit ending the run; a billable response replayed; a malformed date overflowing clock arithmetic; a wait outliving the budget | `sendRequest`, `src/main.zig:3257`; `streamChatOnce`, `src/main.zig:3481`; `reaskWaitMs`, `src/main.zig:3434`; `retryableStatus`, `src/net.zig:739`; `retryBackoffMs`, `src/net.zig:729`; `retryAfterValueMs`, `src/net.zig:793`; `httpDateYear`, `src/net.zig:955`; `retryWaitMs`, `src/main.zig:4264`; `fetchOnce`, `src/update.zig:395` |
+| Capped exponential backoff for retryable statuses and failures before the request body is completely on the wire; a complete POST is not replayed after a stalled flush or missing response head; a provider error frame is retried only with no content, tool calls, reported usage or malformed frames; `Retry-After` seconds or dates are clamped to 120 s, malformed or past dates fall back to backoff, and a wait the time budget cannot cover ends the turn | a dropped connection or rate limit ending the run; a billable response replayed; a malformed date overflowing clock arithmetic; a wait outliving the budget | `sendRequest`, `src/main.zig:3257`; `streamChatOnce`, `src/main.zig:3469`; `reaskWaitMs`, `src/main.zig:3422`; `retryableStatus`, `src/net.zig:774`; `retryBackoffMs`, `src/net.zig:764`; `retryAfterValueMs`, `src/net.zig:828`; `httpDateYear`, `src/net.zig:990`; `retryWaitMs`, `src/main.zig:4252`; `fetchOnce`, `src/update.zig:395` |
 | Session log created exclusively at `0o600`, with new store directories at `0o700`; one prune after creation orders this program's log names by timestamp, suffix and path, applies count and age limits, and leaves the store unchanged if listing fails; working directories under the home are recorded with a home-relative marker | one run erasing another's log; unbounded growth; unrelated accounts reading run metadata or listing log names; the home account name appearing in the recorded working directory | `createSessionLog`, `src/session.zig:138`; `log_file_mode`, `src/session.zig:120`; `log_dir_mode`, `src/session.zig:121`; `recordCwd`, `src/session.zig:252`; `pruneSessionsTo`, `src/session.zig:501`; `logName`, `src/session.zig:421`; `max_session_logs`, `src/session.zig:359`; `max_session_log_age_days`, `src/session.zig:371` |
-| Connection setup and request write/read deadlines, and cancellation at the configured run deadline | a silent provider holding a run open during TLS, headers or streaming | `default_stall_timeout_s`, `src/main.zig:130`; `openChatRequest`, `src/main.zig:3407`; `withStallTimeout`, `src/main.zig:3283`; `streamChatWithinBudget`, `src/main.zig:3369` |
+| Connection setup and request write/read deadlines, and cancellation at the configured run deadline | a silent provider holding a run open during TLS, headers or streaming | `default_stall_timeout_s`, `src/main.zig:130`; `openChatRequest`, `src/main.zig:3395`; `withStallTimeout`, `src/main.zig:3283`; `streamChatWithinBudget`, `src/main.zig:3357` |
 | Tool subprocess arguments reject interior NUL bytes before spawn | the OS executing a truncated argument different from the checked model command | `ToolChild`, `src/tool.zig:96` |
-| MCP initialization and tool requests share the caller's deadline; stdio writes and reads share that deadline; complete lines and cumulative reply bytes stay within the response allowance; structured results allocate only their capped prefix | a server blocking a tool call past its budget, or replies and retained results growing memory without bound | `handshake`, `src/mcp.zig:1906`; `Servers.call`, `src/mcp.zig:831`; `writeStdio`, `src/mcp.zig:272`; `request`, `src/mcp.zig:339`; `readLine`, `src/mcp.zig:289`; `cappedJson`, `src/mcp.zig:996` |
-| MCP JSON nesting is limited to 256 levels before a parsed tree reaches schema, result or error serialization | a small reply with deeply nested arrays or objects crashing the run despite its byte ceiling | `max_frame_depth`, `src/mcp.zig:54`; `parseFrame`, `src/mcp.zig:393` |
-| MCP catalog pages share a 4 MiB JSON allowance and the original handshake deadline; repeated or invalid cursors fail discovery, and only complete catalogs are offered | partial tool discovery and a server expanding retained metadata through unlimited pages | `readTools`, `src/mcp.zig:1974`; `buildTools`, `src/mcp.zig:2020` |
-| Non-object MCP errors allocate and retain only their capped diagnostic | repeated large error strings or arrays accumulating full replies in the run allocator | `describeError`, `src/mcp.zig:1015`; `cappedJson`, `src/mcp.zig:996` |
+| MCP initialization and tool requests share the caller's deadline; stdio writes and reads share that deadline; complete lines and cumulative reply bytes stay within the response allowance; structured results allocate only their capped prefix | a server blocking a tool call past its budget, or replies and retained results growing memory without bound | `handshake`, `src/mcp.zig:1872`; `Servers.call`, `src/mcp.zig:808`; `writeStdio`, `src/mcp.zig:272`; `request`, `src/mcp.zig:330`; `readLine`, `src/mcp.zig:280`; `cappedJson`, `src/mcp.zig:973` |
+| MCP JSON nesting is limited to 256 levels before a parsed tree reaches schema, result or error serialization | a small reply with deeply nested arrays or objects crashing the run despite its byte ceiling | `max_frame_depth`, `src/mcp.zig:54`; `parseFrame`, `src/mcp.zig:384` |
+| MCP catalog pages share a 4 MiB JSON allowance and the original handshake deadline; repeated or invalid cursors fail discovery, and only complete catalogs are offered | partial tool discovery and a server expanding retained metadata through unlimited pages | `readTools`, `src/mcp.zig:1940`; `buildTools`, `src/mcp.zig:1986` |
+| Non-object MCP errors allocate and retain only their capped diagnostic | repeated large error strings or arrays accumulating full replies in the run allocator | `describeError`, `src/mcp.zig:992`; `cappedJson`, `src/mcp.zig:973` |
 | Values validated where they are set | a mistyped level or ceiling reaching the wire as a 400 | `ceiling`, `src/main.zig:1523`; `optionalCeiling`, `src/main.zig:1688` |
-| Fuzz corpora for the parsers that take untrusted bytes: the release body, the sidecar, the completion stream and the fold that reads it, the config file, both command lines, a JSON string, a tool call, a quoted value, a provider error body, the session store's names and its record, the request body a turn assembles from model text and tool output, and the server, tool, environment and header names an MCP entry is built from | malformed provider, release, config, command-line, tool-call, session-store, conversation or terminal-facing input, and a name that passes the entry checks but cannot be used afterwards | `fuzzRelease`, `src/update.zig:1345`; `fuzzSidecar`, `src/update.zig:1404`; `fuzzArgs`, `src/update.zig:865`; `fuzzStream`, `src/main.zig:6816`; `fuzzFrame`, `src/stream.zig:1888`; `fuzzFrameSequence`, `src/stream.zig:2177`; `fuzzArgs`, `src/main.zig:5158`; `fuzzConfig`, `src/config.zig:1964`; `fuzzJsonString`, `src/chat.zig:1438`; `fuzzToolCall`, `src/tool.zig:3600`; `fuzzSafeText`, `src/chat.zig:1249`; `fuzzTerminalSafe`, `src/tool.zig:4126`; `fuzzStoreNames`, `src/session.zig:1684`; `fuzzSessionRecord`, `src/session.zig:1812`; `fuzzBody`, `src/conversation.zig:888`; `fuzzEntryNames`, `src/mcp.zig:3093` |
+| Fuzz corpora for the parsers that take untrusted bytes: the release body, the sidecar, the completion stream and the fold that reads it, the config file, both command lines, a JSON string, a tool call, a quoted value, a provider error body, the session store's names and its record, the request body a turn assembles from model text and tool output, and the server, tool, environment and header names an MCP entry is built from | malformed provider, release, config, command-line, tool-call, session-store, conversation or terminal-facing input, and a name that passes the entry checks but cannot be used afterwards | `fuzzRelease`, `src/update.zig:1345`; `fuzzSidecar`, `src/update.zig:1404`; `fuzzArgs`, `src/update.zig:865`; `fuzzStream`, `src/main.zig:6804`; `fuzzFrame`, `src/stream.zig:1888`; `fuzzFrameSequence`, `src/stream.zig:2177`; `fuzzArgs`, `src/main.zig:5146`; `fuzzConfig`, `src/config.zig:1964`; `fuzzJsonString`, `src/chat.zig:1438`; `fuzzToolCall`, `src/tool.zig:3662`; `fuzzSafeText`, `src/chat.zig:1249`; `fuzzTerminalSafe`, `src/tool.zig:4188`; `fuzzStoreNames`, `src/session.zig:1674`; `fuzzSessionRecord`, `src/session.zig:1802`; `fuzzBody`, `src/conversation.zig:888`; `fuzzEntryNames`, `src/mcp.zig:3059` |
 
 ## Gaps, ranked by exploitability and impact
 
@@ -474,12 +484,23 @@ the same bug returning.
    rewrite run with full operator authority, and the instructions that trigger them can
    come from a file the run reads. The system prompt asks the model not to act on such a
    file (`system_prompt`, `src/conversation.zig:61`), the same trust the operator already placed in the prompt.
-   Command filtering (`deny_commands`) blocks dangerous command words before execution.
+   Command filtering is a control only where the operator configured it: `deny_commands` defaults to
+   an empty list (`Options`, `src/main.zig:222`), so a run that never set it refuses no
+   command at all and `deniedInCommand`, `src/tool.zig:1402`, has nothing to match. The example config
+   ships the list commented out ([config.example.toml](../config.example.toml)).
    When sandbox mode is enabled (`[sandbox]` in config), Linux Landlock rules or a macOS Seatbelt profile confine
-   all child process writes to designated directory roots.
+   all child process writes to designated directory roots, and the in-process path check refuses the
+   four tools that write even where the kernel sandbox could not be applied.
+   The kernel half fails open: where Landlock is unavailable, a seccomp policy refuses
+   `PR_SET_NO_NEW_PRIVS`, or `landlock_restrict_self` is refused, `applySandbox` returns false and
+   the run continues (`runMain`, `src/main.zig:441`, at `src/main.zig:579`), naming the mechanism on
+   stderr. What is left is the in-process check on `write`, `edit`, `multi_edit` and `ast
+   --rewrite`; `bash` and the MCP servers are never confined by either half, and a caller that
+   reads the operator's stderr as a refusal rather than as a warning has the protection it did not
+   ask for.
 2. **The credential rule is a name rule, and `bash` matches it on words.** All seven tools
    refuse a path the tables name, at any depth rather than only at the leaf
-   (`isCredentialPath`, `src/tool.zig:1825`), so none can put a known `.env` or private key
+   (`isCredentialPath`, `src/tool.zig:1892`), so none can put a known `.env` or private key
    in the model context. Two ways around it remain. A credential under a name the tables do
    not carry is still read. And (`credentialInCommand`, `src/tool.zig:1206`) tokenizes the
    command instead of parsing a shell, so a command that assembles a path at run time
@@ -498,12 +519,14 @@ the same bug returning.
    `https` host, and the key follows. A poisoned environment variable turns a review run
    into a key handoff to whoever answers on that name.
 5. **The tools are not confined to the working tree by default.** `read`, `write`, `edit` and `multi_edit` take and
-   follow an absolute path; (`writeFileAtomic`, `src/tool.zig:2198`) follows a symlink
+   follow an absolute path; (`writeFileAtomic`, `src/tool.zig:2265`) follows a symlink
    before writing; `ast --rewrite` applies its replacement to every match
-   (`toolAst`, `src/tool.zig:2565`). When sandbox mode is enabled (`[sandbox] enabled = true` in config),
-   in-process path checks refuse `write`, `edit` and `multi_edit` calls outside writable roots, and on Linux
-   (kernel 5.13+) Landlock rules, or on macOS a Seatbelt profile, confine filesystem modifications for microagent and all
-   spawned subprocesses.
+   (`toolAst`, `src/tool.zig:2632`). When sandbox mode is enabled (`[sandbox] enabled = true` in config),
+   in-process path checks refuse `write`, `edit`, `multi_edit` and an `ast --rewrite` outside writable
+   roots, and on Linux (kernel 5.13+) Landlock rules, or on macOS a Seatbelt profile, confine
+   filesystem modifications for microagent and all
+   spawned subprocesses. `bash` is outside both halves: it is confined only by the deny list and by
+   whatever the model is asked not to do.
 6. **The API key is accepted on the command line.** It is visible in the process table and
    in shell history. The README's first example uses the environment, and the flag cannot
    be made to match that.
@@ -566,7 +589,7 @@ the same bug returning.
 Each is a scenario, evidenced by the code path that enables it. None has been attempted.
 
 - **A poisoned test fixture.** A repository contains a fixture whose text tells the agent
-  to run a command. The model reads it with `read` (`toolRead`, `src/tool.zig:1963`) and,
+  to run a command. The model reads it with `read` (`toolRead`, `src/tool.zig:2030`) and,
   through `bash` (`toolBash`, `src/tool.zig:1460`), the command runs as the operator. The
   agent cannot tell file content from operator instruction. The prompt tells it to report
   such a file instead, and a persuasive enough file can argue with that.
@@ -575,7 +598,7 @@ Each is a scenario, evidenced by the code path that enables it. None has been at
   passes, because the attacker serves `https`.
 - **A symlink on the update path, or in the tree.** A link named `microagent` earlier on
   `PATH` is followed at install time (`replaceBinary`, `src/update.zig:464`). A link beside a source file
-  redirects a `write` or an `edit` (`resolveSymlinkTarget` call in `writeFileAtomic`, `src/tool.zig:2198`), so the run changes a file the operator never named.
+  redirects a `write` or an `edit` (`resolveSymlinkTarget` call in `writeFileAtomic`, `src/tool.zig:2265`), so the run changes a file the operator never named.
 - **Scraping through the harness.** `read` has no path restriction, so a run over a
   directory holding credentials under names the tables do not carry reads them and,
   through the model, can send them off the machine. There is no per-run file budget
@@ -593,7 +616,7 @@ Each is a scenario, evidenced by the code path that enables it. None has been at
   re-sent. The line cap bounds a prompt, not the session.
 - **A trust anchor from the environment.** A run started with `MICROAGENT_CA_BUNDLE`
   pointing at an attacker's file terminates both connections the run makes: the provider
-  request that carries the key (`authHeaders`, `src/main.zig:3273`, `streamChatOnce`, `src/main.zig:3481`) and the release download `update`
+  request that carries the key (`authHeaders`, `src/main.zig:3273`, `streamChatOnce`, `src/main.zig:3469`) and the release download `update`
   performs (`run`, `src/update.zig:563`). Nothing checks what the file certifies, so a
   certificate naming the attacker's host is enough.
 - **A poisoned task container.** The Harbor adapter hands the provider key to every task
