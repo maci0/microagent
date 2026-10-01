@@ -27,7 +27,7 @@ const net = @import("net.zig");
 pub fn sessionDir(env: *const std.process.Environ.Map, arena: std.mem.Allocator) []const u8 {
     if (env.get("MICROAGENT_SESSION_DIR")) |v| return std.mem.trim(u8, v, net.env_surrounding);
     const home = net.homeDir(env) orelse return "";
-    return std.fs.path.join(arena, &.{ home, ".microagent", "sessions" }) catch "";
+    return std.fs.path.join(arena, &.{ home, net.config_dir, "sessions" }) catch "";
 }
 
 test "the session directory is trimmed, and an empty one turns the log off" {

@@ -270,6 +270,15 @@ fn editDistance(a: []const u8, b: []const u8) ?usize {
     }
     return prev[b_len];
 }
+
+/// The directory every default path this program builds lives under, below the
+/// home: the config file, the session store and the skill roots each join it
+/// with a leaf of their own, from three modules. The segment is written here
+/// once so a run building one default and a reader of `--help`, which spells
+/// all three paths out, cannot disagree about the directory in the middle of
+/// them.
+pub const config_dir = ".microagent";
+
 /// `$HOME`, trimmed, or null when it is not set or holds nothing but
 /// whitespace. Every path built under it is a path no filesystem holds when
 /// the value carries the newline a wrapper that populates the environment from

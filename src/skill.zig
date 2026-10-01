@@ -169,7 +169,7 @@ pub fn roots(
         return out.items;
     }
     const home = net.homeDir(env) orelse return &.{};
-    const path = std.fs.path.join(arena, &.{ home, ".microagent", "skills" }) catch |err| {
+    const path = std.fs.path.join(arena, &.{ home, net.config_dir, "skills" }) catch |err| {
         lostRoots(io, arena, home, "$HOME", err);
         return &.{};
     };

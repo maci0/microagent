@@ -1309,6 +1309,41 @@ test "the help text states the ceilings and the budget grace the run uses" {
     try std.testing.expect(std.mem.indexOf(u8, help_text, grace) != null);
 }
 
+// The three paths the help text spells out, held to the paths the run builds.
+// The ceilings above are written from their constants, so a default that moves
+// takes the sentence with it; these three cannot be, because a reader needs
+// the tilde spelling and the code joins a home it resolved, so the two are
+// written differently by necessity. What makes that safe is that the
+// directory they share is one constant, `net.config_dir`, and this test spells
+// each path from it: a reader whose run looks in the default session store
+// that does not hold their history has no other way to find out, and a
+// `.microagent` moved in one module and not the other is that failure waiting
+// for the next release.
+test "the help text states the default paths the run builds" {
+    const gpa = std.testing.allocator;
+    const doc = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, usage_doc_path, gpa, .limited(max_usage_doc_bytes));
+    defer gpa.free(doc);
+    const block = fencedHelpBlock(doc) orelse {
+        std.debug.print("\n" ++ usage_doc_path ++ ": has no --help block under '## Flags and environment'\n", .{});
+        return error.TestUnexpectedResult;
+    };
+
+    // The rendered spellings, in the two forms the help uses: a tilde for the
+    // two it presents to a reader at a prompt, and `$HOME` for the skill roots,
+    // which it names the way the environment does.
+    const paths = [_][]const u8{
+        "~/" ++ net.config_dir ++ "/config.toml",
+        "~/" ++ net.config_dir ++ "/sessions",
+        "$HOME/" ++ net.config_dir ++ "/skills",
+    };
+    for (paths) |path| {
+        if (!namesWholeToken(block, path)) {
+            std.debug.print("\n--help does not state the default path {s}, which the run builds under {s}\n", .{ path, net.config_dir });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
 /// The value of an environment variable, or null when it is not set or is set
 /// to nothing but whitespace. A wrapper that builds its own environment exports
 /// the name with nothing behind it, and an empty string read as a value sends
@@ -2403,7 +2438,7 @@ fn configSource(env: *const std.process.Environ.Map, arena: std.mem.Allocator, c
         return .{ .path = std.fs.path.resolve(arena, &.{net.expandHome(env, arena, path)}) catch path, .named = true };
     }
     const home = net.homeDir(env) orelse return .{ .path = null, .named = false };
-    const path = std.fs.path.join(arena, &.{ home, ".microagent", "config.toml" }) catch
+    const path = std.fs.path.join(arena, &.{ home, net.config_dir, "config.toml" }) catch
         return .{ .path = null, .named = false };
     return .{ .path = std.fs.path.resolve(arena, &.{path}) catch path, .named = false };
 }
@@ -7781,7 +7816,71 @@ fn isEnvNameByte(c: u8) bool {
 // the first request, and the only place a user looks for its name is the help
 // text, so a variable that reached neither document is one a user finds by
 // reading this source.
+
+// Every flag the parser reads is named by the same two documents, and nothing
+// held them to it: the environment had this test and the flags had none, which
+// is the half of the surface that drifts silently. `valued_flags` is what
+// `parseArgs` reads, so a flag added there works from the next build, and the
+// only place a caller looks for its name is the help text. `make check-help`
+// holds the block in docs/usage.md to whatever `--help` prints, so it cannot
+// see a flag neither of the two names, and `make check-man` asks the man page
+// about the help text, which is silent for the same reason.
 //
+// The inventory is the table rather than the branches that index it: the
+// branches are `valuedFlag(name)` and nothing else, so a flag reaches one by
+// being a row, and the two switches reach theirs through the `isFlag` calls at
+// the top of the walk. Both spellings are required, since a `-p` a caller has
+// to find in the source is a surface nobody documented.
+test "the help text and the usage reference name every flag the parser reads" {
+    const gpa = std.testing.allocator;
+    const doc = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, usage_doc_path, gpa, .limited(max_usage_doc_bytes));
+    defer gpa.free(doc);
+    // The block the page reproduces `--help` into, not the whole file: a flag
+    // named in the exit-status table, in "How values resolve" or in an example
+    // is prose about the run, and a search of the file would be satisfied by
+    // those the same way a whole-file search for an environment variable is.
+    // The block is where a reader looks for a flag, so it is where it has to
+    // be, and a flag dropped from it while three other paragraphs still name
+    // it is exactly the drift this test exists to catch.
+    const block = fencedHelpBlock(doc) orelse {
+        std.debug.print("\n" ++ usage_doc_path ++ ": has no --help block under '## Flags and environment'\n", .{});
+        return error.TestUnexpectedResult;
+    };
+
+    // The two switches and the bare `--repl`. `-c` belongs to `update` and is
+    // held to its own text by the test in update.zig.
+    const switches = [_][]const u8{ "-h", "--help", "-V", "--version", "--repl" };
+    for (valued_flags) |flag| {
+        for ([_][]const u8{ flag.long, flag.short orelse "" }) |word| {
+            if (word.len == 0) continue;
+            if (!namesWholeToken(help_text, word) or !namesWholeToken(block, word)) {
+                std.debug.print("\n" ++ usage_doc_path ++ ": {s} is a flag the parser reads and a document naming it does not\n", .{word});
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
+    for (switches) |word| {
+        if (!namesWholeToken(help_text, word) or !namesWholeToken(block, word)) {
+            std.debug.print("\n" ++ usage_doc_path ++ ": {s} is a flag the parser reads and a document naming it does not\n", .{word});
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+/// The bytes between the first pair of ``` fences under the "Flags and
+/// environment" heading of the usage reference, which is where it reproduces
+/// `--help` verbatim. `make check-help` extracts the same block with awk, and a
+/// test that read a different span than the gate compares would be a test the
+/// gate cannot back: both have to be looking at the same lines, or a document
+/// that passes one fails the other with nothing changed in between.
+fn fencedHelpBlock(doc: []const u8) ?[]const u8 {
+    const heading = std.mem.indexOf(u8, doc, "## Flags and environment") orelse return null;
+    const open = std.mem.indexOfPos(u8, doc, heading, "```") orelse return null;
+    const body = open + 3;
+    const close = std.mem.indexOfPos(u8, doc, body, "```") orelse return null;
+    return doc[body..close];
+}
+
 // The empty-value rule is the narrower half and the one that drifts: a
 // variable one document lists among those an empty value leaves at their
 // default and the other does not makes the two disagree about what an empty
@@ -7818,10 +7917,19 @@ test "the help text and the usage reference name every variable the program read
         std.debug.print("\n--help has no paragraph saying an empty value is not a value\n", .{});
         return error.TestUnexpectedResult;
     };
-    const doc_rule = paragraphFrom(doc, rule_anchor) orelse {
+    // The document carries the anchor twice: once inside the fenced block that
+    // reproduces `--help` verbatim, and once in the "How values resolve" prose a
+    // reader reads as the rule itself. Only the second is prose about
+    // `empty_is_unset_vars`; the first is the help text, checked against itself
+    // by the line above, so anchoring on the first occurrence held the wrong
+    // paragraph to the list and let the prose drift from it silently. The prose
+    // follows the block in the document, so the last occurrence is the one.
+    const doc_at = std.mem.lastIndexOf(u8, doc, rule_anchor) orelse {
         std.debug.print("\n" ++ usage_doc_path ++ ": has no paragraph saying an empty value is not a value\n", .{});
         return error.TestUnexpectedResult;
     };
+    const doc_end = std.mem.indexOfPos(u8, doc, doc_at, "\n\n") orelse doc.len;
+    const doc_rule = doc[doc_at..doc_end];
     for (empty_is_unset_vars) |name| {
         if (!namesWholeToken(help_rule, name)) {
             std.debug.print("\n--help: {s} keeps its default on an empty value and the paragraph saying so does not name it\n", .{name});

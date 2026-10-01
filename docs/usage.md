@@ -234,7 +234,7 @@ variable is the run's, and the message stops the run as a bad argument would. `-
 A variable set to an empty string is not a value:
 `MICROAGENT_MODEL`, `MICROAGENT_BASE_URL`, `MICROAGENT_REASONING_EFFORT`,
 `MICROAGENT_TEMPERATURE`, `MICROAGENT_BUDGET_SECONDS`, `MICROAGENT_MAX_SPEND_TOKENS`, `MICROAGENT_MAX_TURNS`,
-`MICROAGENT_MAX_TOKENS`, `MICROAGENT_STALL_TIMEOUT` and `MDEBUG` keep their defaults,
+`MICROAGENT_MAX_TOKENS`, `MICROAGENT_STALL_TIMEOUT`, `MDEBUG` and `NO_COLOR` keep their defaults,
 `MICROAGENT_API_KEY` falls through to the config file's `api_key`, and `MICROAGENT_CA_BUNDLE` falls
 through to `SSL_CERT_FILE`.
 Three variables are the exception: `MICROAGENT_CONFIG`, `MICROAGENT_SESSION_DIR` and
