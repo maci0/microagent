@@ -134,9 +134,9 @@ self-update.
 ## Status
 
 Version 0.10.1. What works: the tool loop against OpenRouter, DeepSeek, OpenAI and any other
-OpenAI-compatible endpoint; repository instructions read from `AGENTS.md`; skills; MCP servers over
-stdio; the session log; verified self-update;
-reproducible release builds for Linux and macOS.
+OpenAI-compatible endpoint; an interactive session with `--repl`; repository instructions read
+from `AGENTS.md`; skills; MCP servers over stdio and over HTTP; the session log; verified
+self-update; reproducible release builds for Linux and macOS.
 
 Deliberately absent: session resume (gauntlet's `--retries` reruns a whole review), parallel tool
 calls, a TUI, Windows builds. Not built yet, with what would settle each on

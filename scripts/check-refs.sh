@@ -9,9 +9,15 @@
 #
 # What is checked is the pair, not the prose: a citation that names a symbol and
 # a file has to name the line that symbol is defined on, so a moved function
-# fails the gate rather than the reader. A citation with no symbol beside it is
-# a line inside a body, which nothing in the file names, so only the file and
-# the range are asked, and a line past the end of the file is refused.
+# fails the gate rather than the reader. The symbol may be written qualified with
+# the module it is reached through, as the threat model writes it (`config.parse`,
+# `net.urlCarriesKey`); the module is prose and the name after the dot is what the
+# source defines. A citation with no symbol beside it is a line inside a body,
+# which nothing in the file names, so the file and the range are asked, a line
+# past the end of the file is refused, and a line with no code on it is reported:
+# a bare citation is only right until something is inserted above it, and where
+# the line lands on a comment is how a drifted one shows. Pair it and the pair is
+# checked from then on.
 #
 # The definitions are read from the sources, so a symbol the source no longer
 # has is a finding as well: a control citing a function that was deleted is a
@@ -63,11 +69,17 @@ for file in "$@"; do
   # Every `path:line` or `path:a-b` in the file, with the symbol in the
   # backticks immediately before it when there is one. The symbol is captured
   # from the same backtick run, so `foo`, `src/a.zig:1` yields the pair and
-  # "checked at `src/a.zig:1`" yields the path alone.
+  # "checked at `src/a.zig:1`" yields the path alone. The symbol may be
+  # qualified with the module it is reached through, as the threat model
+  # writes it (`config.parse`, `net.urlCarriesKey`, `update.run`): the module
+  # is prose and the name after the dot is what the source defines, so the
+  # qualifier is dropped before the name is looked up. Without that the
+  # qualified citations were read as bare ones and never checked at all, which
+  # is how a control came to cite a line a hundred lines above its own body.
   status=0
   # because: the backticks are literal Markdown code spans, not command substitution
   # shellcheck disable=SC2016
-  grep -oE '`[A-Za-z_][A-Za-z0-9_]*`, `src/[a-z_]+\.zig:[0-9]+(-[0-9]+)?`|`src/[a-z_]+\.zig:[0-9]+(-[0-9]+)?`' \
+  grep -oE '`[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?`, `src/[a-z_]+\.zig:[0-9]+(-[0-9]+)?`|`src/[a-z_]+\.zig:[0-9]+(-[0-9]+)?`' \
     "$file" > "$tmp.refs" || status=$?
   [ "$status" -le 1 ] || exit 1
   while read -r ref; do
@@ -77,6 +89,8 @@ for file in "$@"; do
     # shellcheck disable=SC2016
     if printf '%s' "$ref" | grep -q '`, `'; then
       sym="$(printf '%s' "$ref" | sed 's/^`\([^`]*\)`, `.*/\1/')"
+      # The module qualifier is prose; the source defines the name after the dot.
+      sym="${sym##*.}"
       loc="$(printf '%s' "$ref" | sed 's/^.*`, `\([^`]*\)`$/\1/')"
     else
       sym=""
@@ -102,8 +116,12 @@ for file in "$@"; do
       fi
       if [ "$got" != "$want" ]; then
         if [ "$fix" = 1 ]; then
+          # The citation keeps whatever the prose put in front of the name: the
+          # lookup dropped the module, the rewrite matches the name as it is
+          # written, qualified or not, so a rewrite leaves `config.parse` alone.
           # Write and rename: portable to GNU and BSD sed.
-          sed "s|\`$sym\`, \`$path:$span\`|\`$sym\`, \`$path:$got\`|" "$file" > "$tmp.rewritten"
+          sed "s|\`\([A-Za-z_][A-Za-z0-9_]*\.\)\?$sym\`, \`$path:$span\`|\`\1$sym\`, \`$path:$got\`|" \
+            "$file" > "$tmp.rewritten"
           mv "$tmp.rewritten" "$file"
           printf '%s: moved %s from %s:%s to %s:%s\n' "$file" "$sym" "$path" "$want" "$path" "$got" >> "$tmp"
         else
@@ -121,6 +139,29 @@ for file in "$@"; do
       'BEGIN { exit !((first + 0) >= 1 && (last + 0) >= (first + 0) && (last + 0) <= (lines + 0)) }'; then
       printf '%s: cites %s:%s and the file has %s lines\n' "$file" "$path" "$span" "$lines" >> "$tmp"
       unfixed=1
+      continue
+    fi
+
+    # A citation with no symbol beside it is a line inside a body, and a body
+    # line is code. The line a reader lands on being a comment or an empty one
+    # means the citation drifted: the control it names moved and the line stayed.
+    # The pair above cannot see that, because the pair is rewritten by hand next
+    # to the diff, while a bare line is only ever right until something is
+    # inserted above it. This is a finding rather than a rewrite, because the
+    # gate has nothing to move a bare citation to: only the prose knows which
+    # function the line belongs to now. Pair the citation and the check covers
+    # it from then on.
+    if [ -z "$sym" ]; then
+      end="${span##*-}"
+      body="$(awk -v a="$want" -v b="$end" 'FNR >= a && FNR <= b { print }' "$path" |
+        awk 'BEGIN { code = 0 } { line = $0; sub(/^[ \t]+/, "", line); if (line != "" && line !~ /^\/\//) code = 1 } END { print code }')"
+      if [ "$body" != 1 ]; then
+        # because: the backticks are literal Markdown in the message, not a command substitution
+        # shellcheck disable=SC2016
+        printf '%s: cites %s:%s, a line with no code on it; name the symbol with it (`sym`, `%s:<line>`) so the pair is checked\n' \
+          "$file" "$path" "$span" "$path" >> "$tmp"
+        unfixed=1
+      fi
     fi
   done < "$tmp.refs"
   rm -f "$tmp.refs"

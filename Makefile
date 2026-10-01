@@ -170,7 +170,7 @@ help:
 	  'lint-python           ruff check and ruff format --check over every tracked .py file' \
 	  'lint-yaml             yamllint over every tracked .yml and .yaml file' \
 	  'lint-md               the Markdown checks over every tracked .md file, which no other linter reads' \
-	  'check-refs            every src/path:line citation in a .md file names the line its symbol is on' \
+	  'check-refs            every src/path:line citation in a .md file names the line its symbol is on, and a bare one names a line with code on it' \
 	  'check-refs FIX=1      rewrite each stale citation to the line its symbol is on' \
 	  'lint-versions         check ruff and yamllint against the versions the gate runs, and that lint-requirements.in names the same' \
 	  'lint-lock             check each lock carries its manifest pins, a hash each, and nothing else' \
@@ -592,6 +592,7 @@ lint-md:
 # so the citation is asked rather than the prose. The gate lives in scripts/ for
 # the reason lint-versions names: a recipe is shell nothing lints.
 check-refs:
+	sh scripts/check-refs-self-test.sh
 	sh scripts/check-refs.sh $(if $(FIX),-f) $(MD_SOURCES)
 
 # The CI gate, so a formatting, lint or test failure shows up here rather than
