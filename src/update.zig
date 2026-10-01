@@ -466,6 +466,15 @@ fn replaceBinary(io: std.Io, exe: []const u8, bytes: []const u8) !void {
     var af = try dir.createFileAtomic(io, target, .{ .replace = true, .make_path = true, .permissions = exec_mode });
     defer af.deinit(io);
     try af.file.writeStreamingAll(io, bytes);
+    // The run reported this install as done once `replace` returns, and the
+    // only copy of the new binary is the file the rename moved. A machine that
+    // loses power between the rename and the disk taking the bytes comes back
+    // with the name in place and nothing behind it, which is a working
+    // invocation that fails to exec: the one repair an operator least expects
+    // to need after a successful update. The flush costs one disk round trip
+    // once per update and nothing at all in a run that never updates, which is
+    // why it sits here and not on the path every tool call takes.
+    try af.file.sync(io);
     try af.replace(io);
 }
 

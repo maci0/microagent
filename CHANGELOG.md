@@ -57,6 +57,26 @@ release, and `microagent update` moves you to it.
 
 ### Changed
 
+- A session record is now flushed to disk before the run moves on. Every
+  response was written into the log and the run carried on as though it were
+  recorded, but the bytes sat in the page cache, so a machine that lost power
+  or kernel-panicked came back with a log whose tail was truncated to whatever
+  the last flush happened to cover -- records a monitor reading the store had
+  already counted, and that the run had already reported, gone. The file is
+  synced after each record now, one disk round trip against seconds of provider
+  time. A flush that fails is named on stderr and the run keeps appending
+  rather than dropping the store: the bytes are already on disk, and only the
+  guarantee failed. `update` syncs the binary it installed for the same reason
+  and the same price, once per update rather than once per turn.
+
+- The default config template is flushed to disk before the run says it was
+  written. The write already removed the file when the kernel refused it, but a
+  machine that stopped between the write and the close left the same truncated
+  file with nothing to remove it, and the next run read that prefix as the
+  operator's own settings rather than as the defaults. It is synced before the
+  claim now, and taken back down on the same terms as a failed write when the
+  flush itself cannot be promised.
+
 - The gate runs the self-test for its own version check. `lint-versions.sh` is
   the check that every record of a linter pin -- the Makefile, both manifests,
   the compiled lock and `ruff.toml` -- names one version, and it is a set of

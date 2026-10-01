@@ -2543,6 +2543,28 @@ fn writeDefaultConfig(io: Io, arena: std.mem.Allocator, source: ConfigSource) vo
         net.note(io, arena, "microagent: config {s}: the template could not be written ({s}); the built-in defaults are in force and no file was left\n", .{ shown, @errorName(err) });
         return;
     }
+    // The run tells the operator the template is there to edit, and the next
+    // run reads whatever is on disk as the operator's own settings. A crash
+    // between the write above and the close below would leave a truncated file
+    // that the unlink above only ever removes for a write the kernel refused:
+    // a file the run has already said it wrote, read back as half a config.
+    // Syncing before the claim makes the claim true, so a template that is
+    // reported written is one that survives the machine stopping right here.
+    if (file.sync(io)) |_| {} else |err| {
+        // The bytes reached the file and only the durability failed, but the
+        // next run would read this file as the operator's settings whether or
+        // not it reached the platter, so the half-guaranteed file is taken back
+        // down on the same terms as a failed write: what could not be promised
+        // is not left where it will be believed.
+        std.Io.Dir.cwd().deleteFile(io, path) catch |unlink_err| {
+            net.note(io, arena, "microagent: config {s}: the template could not be flushed to disk ({s}) and the file could not be removed ({s}); the built-in defaults are in force, and the next run reads the template as the operator's own settings until it is removed\n", .{
+                shown, @errorName(err), @errorName(unlink_err),
+            });
+            return;
+        };
+        net.note(io, arena, "microagent: config {s}: the template could not be flushed to disk ({s}); the built-in defaults are in force and no file was left\n", .{ shown, @errorName(err) });
+        return;
+    }
     net.note(io, arena, "microagent: config {s}: no file there, so the commented template was written; edit it to configure the run\n", .{shown});
 }
 

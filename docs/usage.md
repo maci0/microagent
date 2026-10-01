@@ -9,7 +9,7 @@ Everything a run reads and everything it writes. The [README](../README.md) is t
 - [Prompt cache](#prompt-cache)
 - [Config file](#config-file): [provider settings](#provider-settings), [system prompt addendum](#system-prompt-addendum), [repository instructions](#repository-instructions), [skills](#skills), [MCP servers](#mcp-servers), [tool set](#tool-set), [command filter](#command-filter)
 - [Tools](#tools)
-- [Output](#output): [stdout](#stdout), [exit status](#exit-status), [session log](#session-log)
+- [Output](#output): [stdout](#stdout), [exit status](#exit-status), [session log](#session-log), [what survives](#what-survives-and-how-to-get-it-back)
 - [Failure handling](#failure-handling)
 - [Driving it from gauntlet](#driving-it-from-gauntlet)
 - [Update](#update)
@@ -877,6 +877,38 @@ apart from one in `~/work/a`: the field is there because a monitor reports the r
 and the modes above are what keep the rest of the record to the account that made it. Deleting the store is
 `rm -r ~/.microagent/sessions`: nothing outside it holds anything from the run, and the binary never
 reads a log back.
+
+### What survives, and how to get it back
+
+The session log is the only durable artifact this program keeps of itself, and its durability
+is worth stating plainly because nothing else in the tree implies it. There is no database, no
+queue and no object storage: the working tree a run edits and the config file under
+`~/.microagent` are the operator's to back up, not this program's.
+
+**Each record is flushed to disk before the run carries on.** A record is written, synced, and
+only then does the run move to the next turn, so a record a monitor
+([toktop](https://github.com/maci0/toktop)) has already counted survives an unclean stop; the
+price is one disk round trip per response, against seconds of provider time. A flush that fails
+is named on stderr and the run keeps appending rather than dropping a store whose bytes are
+already on disk: what is at risk is the guarantee, not the data.
+
+**There is no backup and no restore procedure, because there is nothing to restore from.** The
+log is an append-only record of counters, a working directory and a model name, never prompt or
+output text. No reader replays it, so a lost or deleted log loses an accounting trail, not work.
+The RPO for that trail is whatever the operator backs up themselves: to keep the store across a
+machine loss, copy `~/.microagent/sessions`, and the config file beside it because it may hold an
+`api_key`, to your own backup. The RTO for restoring such a copy is a file copy: the store is
+JSONL a monitor reads directly, so putting the files back under `MICROAGENT_SESSION_DIR` is the
+whole restore, with no binary, no version match and no migration involved. Records are keyed by
+name and additive, so a log written by a later version stays readable and an older binary
+reading it ignores fields it does not know.
+
+**The store prunes itself, under two windows.** It keeps the 200 most recent logs and drops
+anything older than 30 days, on every run and without confirmation, oldest first. Both windows
+are measured against the machine's own clock, so a clock set forward ages the whole store out at
+once and a single run deletes all of it; back the store up before correcting a clock that jumped,
+and know that `MICROAGENT_SESSION_DIR` decides which directory is pruned, so copy one before
+changing the variable.
 
 ## Failure handling
 

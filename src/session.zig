@@ -715,6 +715,31 @@ fn write(io: Io, arena: std.mem.Allocator, session: *?Session, record: Record) v
     s.file.writeStreamingAll(io, line) catch |err| {
         net.note(io, arena, "microagent: the session log under {s} could not be written ({s}); the rest of this run is not recorded\n", .{ shown, @errorName(err) });
         close(io, session);
+        return;
+    };
+    // The record is on its way to the monitor the moment the write returns, and
+    // this run then keeps going as though the turn were recorded. Without a
+    // flush below that promise does not survive a power loss or a kernel panic:
+    // the bytes sit in the page cache, a monitor that already read them counts
+    // them, and a machine that comes back has a log whose tail is truncated to
+    // whatever the last flush happened to cover. A record that has been
+    // acknowledged must be readable after an unclean stop, so the file is
+    // synced here, once per record, before `write` returns.
+    //
+    // This is the one place a session write blocks on the disk. A response is
+    // already seconds of provider time, so the flush is a rounding error against
+    // the cost of losing the tail of every run on a busy machine, and the record
+    // is a handful of hundred bytes.
+    s.file.sync(io) catch |err| {
+        // The bytes themselves reached the file: the write above returned, and
+        // a monitor reading through the same page cache sees this record. Only
+        // the durability guarantee failed, so this is named and the run goes on
+        // appending rather than dropping a log whose contents are already on
+        // disk. It is the one failure here that does not close the store: what
+        // would be lost is the guarantee, not the data, and dropping the file
+        // would turn "this record may not survive a power cut" into "this record
+        // and every record after it are gone".
+        net.note(io, arena, "microagent: the session log under {s} could not be flushed to disk ({s}); records in it may be lost if this machine stops uncleanly\n", .{ shown, @errorName(err) });
     };
 }
 
@@ -1152,6 +1177,50 @@ test "a session log that cannot be written is dropped, not written to again" {
     const empty = try f.tmp.dir.readFileAlloc(io, "read-only.jsonl", alloc, .limited(64));
     defer alloc.free(empty);
     try std.testing.expectEqualStrings("", empty);
+}
+
+// A record `writeRecord` returned from is one the run and every monitor reading
+// the store have already been told about, so it has to be on disk before that
+// call returns rather than at some later flush or at close: a machine that stops
+// between the two loses a tail a monitor has already counted. The check reads
+// the store through the working directory while the session's own handle is
+// still open, so what it sees is what the filesystem holds for the write that
+// just returned and not a buffer waiting on a close that has not happened.
+test "a written record is on disk before the write returns" {
+    const alloc = std.testing.allocator;
+    var f = try StoreFixture.init(alloc);
+    defer f.deinit();
+    const io = f.io();
+    const arena = f.arena();
+
+    const pinned: i128 = 1_700_000_000_123_456_789;
+    const store = try storeRelative(arena, io, f.tmp);
+
+    // An environment with no home, so `recordCwd` keeps the directory whole.
+    var no_env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer no_env.deinit();
+
+    var session: ?Session = openAt(io, arena, &no_env, store, "test/model", pinned) orelse return error.TestUnexpectedResult;
+    defer close(io, &session);
+
+    var result: chat.ChatResult = .{ .completion_tokens = 3 };
+    writeRecord(io, arena, &session, 1, &result);
+    // Still open: the run carries on after a record, and a store that dropped
+    // itself here would fail the next write rather than this one.
+    try std.testing.expect(session != null);
+
+    // Read through the working directory, the way a run is given its store,
+    // while the session's own handle is still open.
+    const name = try std.fmt.allocPrint(arena, "{d}.jsonl", .{@as(u128, @intCast(pinned))});
+    const path = try std.fs.path.join(arena, &.{ store, name });
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .unlimited);
+    defer alloc.free(bytes);
+
+    // One whole record, newline included: a truncated line is what a write that
+    // did not finish leaves behind, and a reader could not tell it from a
+    // record that was never written.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, bytes, "\n"));
+    try std.testing.expect(std.mem.endsWith(u8, bytes, "\n"));
 }
 
 /// The shape `run` has around its log: a mutable session for the turns in
