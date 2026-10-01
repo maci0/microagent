@@ -158,7 +158,7 @@ measure() {
 		sed -n '1,20p' "$work/test.log" >&2
 		return 3
 	fi
-	matched=$(sed -n 's/^All \([0-9][0-9]*\) tests\? passed\..*/\1/p' "$work/test.log" | tail -n 1)
+	matched=$(sed -n 's/^All \([0-9][0-9]*\) tests\{0,1\} passed\..*/\1/p' "$work/test.log" | tail -n 1)
 	expected=2
 	[ "${2:-}" = baseline ] && expected=1
 	if [ "$matched" != "$expected" ]; then

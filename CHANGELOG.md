@@ -40,6 +40,7 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- Instruction-count parsing uses a POSIX regular expression on both GNU and BSD sed.
 - Portable benchmark tests resolve `true` through PATH on macOS, and the source-reference fixture uses an explicit condition that passes ShellCheck on hosted runners.
 
 - Workflow shell checks decode YAML quotes, folded scalars and block indicators,
