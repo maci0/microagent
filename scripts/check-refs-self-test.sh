@@ -30,8 +30,9 @@ line_of() { grep -n "$1" "$repo/$2" | head -1 | cut -d: -f1; }
 
 alpha_at="$(line_of '^pub fn safeText' src/chat.zig)"
 beta_at="$(line_of '^pub const max_tool_output' src/tool.zig)"
-[ -n "$alpha_at" ] && [ -n "$beta_at" ] ||
+if [ -z "$alpha_at" ] || [ -z "$beta_at" ]; then
   fail "could not find the symbols this test pins; a rename means these lines need updating"
+fi
 
 # 1. a qualified symbol is read as a pair: a wrong line for it is a finding.
 #    The threat model writes `config.parse` and `net.urlCarriesKey`, which the

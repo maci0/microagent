@@ -40,6 +40,8 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- Portable benchmark tests resolve `true` through PATH on macOS, and the source-reference fixture uses an explicit condition that passes ShellCheck on hosted runners.
+
 - Workflow shell checks decode YAML quotes, folded scalars and block indicators,
   keep `run:` text inside shell heredocs in the original step, and handle braces
   in quoted expressions. SBOM checks count direct pins from the manifests rather

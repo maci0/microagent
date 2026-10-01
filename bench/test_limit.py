@@ -50,9 +50,9 @@ def check() -> None:
         expect(result.returncode == 2 and "python3 is required" in result.stderr, result.stderr)
         expect(not unexpected.exists(), "a measurement ran without its deadline runner")
         for seconds in ("0", "-1", "1.5", "\uff11", str(sys.maxsize + 1)):
-            result = invoke(directory, [seconds, temp, "/bin/true"])
+            result = invoke(directory, [seconds, temp, "true"])
             expect(result.returncode == 2, result.stderr)
-        result = invoke(directory, [str(sys.maxsize), temp, "/bin/true"])
+        result = invoke(directory, [str(sys.maxsize), temp, "true"])
         expect(result.returncode == 0, result.stderr)
         for command, expected in (
             (["/bin/sh", "-c", "exit 7"], 7),
