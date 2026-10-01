@@ -279,10 +279,8 @@ pub fn compactMessages(
     // ladder to reach a size the pass above already computed. The extra byte is
     // the closing bracket the parse was given and the rewrite does not keep.
     var jb = chat_mod.JsonBuf.initCapacity(gpa, @max(size + 1, 1));
-    defer jb.list.deinit(gpa);
+    defer jb.deinit();
     try std.json.Stringify.value(parsed.value, .{}, jb.writer());
-    // `items()` hands the written bytes out of the writer, so it is asked once:
-    // a second call reads the writer after it has given them up.
     const written = jb.items();
     // The rewrite is a closed array and what goes back in the buffer is the open
     // one `buildBody` closes, so the `]` just written is dropped rather than
@@ -300,7 +298,7 @@ pub fn compactMessages(
     // conversation to an allocation that had no room for it: the `try` returns
     // with `msgs` empty, and the run dies of `OutOfMemory` on a prompt that is
     // the empty string rather than the one it had spent the run building.
-    try msgs.ensureUnusedCapacity(gpa, rewritten.len);
+    try msgs.ensureTotalCapacity(gpa, rewritten.len);
     msgs.clearRetainingCapacity();
     msgs.appendSliceAssumeCapacity(rewritten);
 }
@@ -308,7 +306,7 @@ pub fn compactMessages(
 pub fn appendMessage(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), role: []const u8, content: []const u8) !void {
     if (msgs.items.len > 1) try msgs.append(gpa, ',');
     var buf = chat_mod.JsonBuf.init(gpa);
-    defer buf.list.deinit(gpa);
+    defer buf.deinit();
     try buf.writer().writeAll("{\"role\":");
     try chat_mod.writeJsonString(buf.writer(), role);
     try buf.writer().writeAll(",\"content\":");
@@ -434,7 +432,7 @@ pub fn appendToolResults(gpa: std.mem.Allocator, msgs: *std.ArrayList(u8), count
         // run that has just allocated a buffer per result it had built.
         {
             var msg = chat_mod.JsonBuf.init(gpa);
-            defer msg.list.deinit(gpa);
+            defer msg.deinit();
             try msg.writer().writeAll("{\"role\":\"tool\",\"tool_call_id\":\"call_");
             try msg.writer().print("{d}", .{i});
             try msg.writer().writeAll("\",\"content\":");
@@ -534,6 +532,27 @@ test "a result that reads like a marker is elided rather than skipped" {
         try std.fmt.allocPrint(arena, elision_marker, .{blob.len}),
         parsed.value.array.items[2].object.get("content").?.string,
     );
+}
+
+test "compaction can reuse the conversation buffer when further growth is unavailable" {
+    const gpa = std.testing.allocator;
+    var msgs: std.ArrayList(u8) = .empty;
+    defer msgs.deinit(gpa);
+    try openConversation(gpa, &msgs, "system", "task");
+    try appendToolResults(gpa, &msgs, 80, "x" ** 8192);
+    try msgs.append(gpa, ']');
+    try msgs.shrinkAndFreePrecise(gpa, msgs.items.len);
+    msgs.items.len -= 1;
+    const before = msgs.items.len;
+    var limited = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 1, .resize_fail_index = 0 });
+    var floor: usize = 0;
+    try compactMessages(std.testing.io, limited.allocator(), &msgs, gpa, &floor);
+    try std.testing.expect(msgs.items.len < before / 2);
+    var read_state = std.heap.ArenaAllocator.init(gpa);
+    defer read_state.deinit();
+    const parsed = try parseConversation(read_state.allocator(), &msgs);
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 82), parsed.value.array.items.len);
 }
 
 test "compaction elides old tool output and keeps the recent turns" {

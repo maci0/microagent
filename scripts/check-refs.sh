@@ -173,8 +173,7 @@ if [ -s "$tmp" ]; then
     echo "citations rewritten; run the check again to see what is left" >&2
     exit 0
   fi
-  echo "every source citation in the tree is checked against the source:" >&2
-  echo "  docs/threat-model.md: cites toolCallLine at src/tool.zig:709, where it is defined on line 698" >&2
+  echo "source citations are stale or invalid" >&2
   echo "  'make check-refs FIX=1' rewrites each to the line its symbol is on" >&2
   exit 1
 fi

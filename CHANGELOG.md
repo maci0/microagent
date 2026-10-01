@@ -41,6 +41,24 @@ release, and `microagent update` moves you to it.
   the source has them on, and five that cited a line inside a function's body now name
   the function beside them, which is what lets the check verify the pair rather than a
   bare line that goes stale on the next insertion above it.
+- Built-in tool subprocesses reject NUL bytes before the OS can execute truncated arguments.
+- Responses past the byte ceiling stop reading, discard pending tool calls and exit incomplete,
+  even when the provider keeps the stream open. An answer exactly at the ceiling remains valid.
+- The memory benchmark rejects failed commands and unreadable measurements, checks ptrace
+  errors and resumes and reaps traced children when measurement fails. A command's own
+  SIGTRAP is delivered, while later exec stops are handled as tracer events.
+- Session home-path redaction checks the full prefix before slicing, avoiding crashes
+  in shorter working directories and incorrect redaction of unrelated paths.
+- MCP stdio deadlines include blocked request writes. Oversized complete lines and
+  notification floods are refused under the response allowance.
+- Lazy MCP initialization and the tool request share one deadline; dead servers are not
+  initialized again. Structured results retain error flags and allocate only their capped prefix.
+- Conversation compaction reuses the existing message buffer instead of reserving space
+  for both the old conversation and its replacement.
+- JSON buffers keep one owner throughout writes, so a failed allocation releases the
+  current buffer instead of leaking it or freeing an earlier allocation twice.
+- Provider stream errors are parsed as JSON, including whitespace and escaped field names;
+  a null error field does not turn a successful response into a failure.
 
 - A turn whose request body was completely on the wire is not sent a second time when the
   flush of it stalls past the stall timeout. The timeout was reported as a failure to send,
@@ -49,7 +67,8 @@ release, and `microagent update` moves you to it.
   ends the run with the same note rather than buying a second billable completion for one turn.
 
 - MCP tool names are checked against the provider's 64-character limit including their
-  server prefix; oversized names are reported and omitted from remote and preset schemas.
+  server prefix and its allowed letters, digits, dashes and underscores; unusable names
+  are reported and omitted from remote and preset schemas.
 
 ## [0.10.1] - 2026-10-01
 

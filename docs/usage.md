@@ -548,7 +548,7 @@ get plus the entry's `env`, so it never sees a provider key. Nor does it see the
 call carries the tool name and the model's arguments for it and nothing else. [What leaves the
 machine](#what-leaves-the-machine) has the whole list.
 
-Server and tool names may hold only letters, digits, dot, dash and underscore, and a name holding
+Server and tool names may hold only letters, digits, dash and underscore, and a name holding
 `__` is refused: the double underscore separates the three parts of an exposed name.
 
 A remote server is a table with a `url` in place of `command`:

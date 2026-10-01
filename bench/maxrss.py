@@ -9,7 +9,7 @@ The number is read at the last moment the process exists: it is started under pt
 PTRACE_O_TRACEEXIT, which stops it just before it exits, while /proc still holds its final
 high-water mark. Polling /proc instead misses a command that lives a few hundred microseconds, and
 the kernel's counter for waited-for children (`getrusage`) includes this interpreter's memory from
-before the exec, which is larger than the whole of a small harness. Nothing is traced but the exit.
+before the exec, which is larger than the whole of a small harness. Only exec and exit are traced.
 
 A command that starts other processes is measured by the first one only. Linux only; it needs
 permission to ptrace its own child, which the default `kernel.yama.ptrace_scope` gives.
@@ -22,12 +22,16 @@ import os
 import shutil
 import signal
 import sys
+from contextlib import suppress
 from pathlib import Path
+from typing import NoReturn
 
 PTRACE_TRACEME = 0
 PTRACE_CONT = 7
 PTRACE_SETOPTIONS = 0x4200
+PTRACE_O_TRACEEXEC = 0x10
 PTRACE_O_TRACEEXIT = 0x40
+PTRACE_EVENT_EXEC = 4
 PTRACE_EVENT_EXIT = 6
 EXEC_FAILED = 127
 
@@ -40,7 +44,37 @@ def hwm_kb(pid: int) -> int:
     for line in Path(f"/proc/{pid}/status").read_text(encoding="utf-8").splitlines():
         if line.startswith("VmHWM:"):
             return int(line.split()[1])
-    return 0
+    raise RuntimeError(f"no VmHWM for traced process {pid}")
+
+
+def ptrace(request: int, pid: int = 0, data: int = 0) -> None:
+    if libc.ptrace(request, pid, None, ctypes.c_void_p(data)) == -1:
+        raise OSError(ctypes.get_errno(), "ptrace")
+
+
+def exec_traced(exe: str, argv: list[str]) -> NoReturn:
+    try:
+        ptrace(PTRACE_TRACEME)
+        devnull = os.open(os.devnull, os.O_RDWR)
+        os.dup2(devnull, 1)
+        os.dup2(devnull, 2)
+        os.close(devnull)
+        # because: running the command under measurement is the whole job of this script
+        os.execv(exe, [exe, *argv[1:]])  # noqa: S606
+    finally:
+        os._exit(EXEC_FAILED)
+
+
+def kill_traced(pid: int) -> None:
+    with suppress(ProcessLookupError):
+        os.kill(pid, signal.SIGKILL)
+    while True:
+        # Even SIGKILL waits for the tracer to resume an exit stop.
+        with suppress(OSError):
+            ptrace(PTRACE_CONT, pid, signal.SIGKILL)
+        _, status = os.waitpid(pid, 0)
+        if os.WIFEXITED(status) or os.WIFSIGNALED(status):
+            return
 
 
 def peak_rss_kb(argv: list[str]) -> int:
@@ -49,30 +83,34 @@ def peak_rss_kb(argv: list[str]) -> int:
         raise SystemExit(f"maxrss.py: {argv[0]}: not found")
     pid = os.fork()
     if pid == 0:
-        libc.ptrace(PTRACE_TRACEME, 0, None, None)
-        devnull = os.open(os.devnull, os.O_RDWR)
-        os.dup2(devnull, 1)
-        os.dup2(devnull, 2)
-        try:
-            # because: running the command under measurement is the whole job of this script
-            os.execv(exe, [exe, *argv[1:]])  # noqa: S606
-        finally:
-            os._exit(EXEC_FAILED)
-    os.waitpid(pid, 0)  # the stop the exec delivers
-    libc.ptrace(PTRACE_SETOPTIONS, pid, None, ctypes.c_void_p(PTRACE_O_TRACEEXIT))
-    libc.ptrace(PTRACE_CONT, pid, None, None)
-    peak = 0
-    while True:
-        _, status = os.waitpid(pid, 0)
-        if os.WIFEXITED(status) or os.WIFSIGNALED(status):
-            return peak
-        deliver = os.WSTOPSIG(status)
-        if status >> 16 == PTRACE_EVENT_EXIT:
-            peak = hwm_kb(pid)
-            deliver = 0
-        elif deliver == signal.SIGTRAP:
-            deliver = 0
-        libc.ptrace(PTRACE_CONT, pid, None, ctypes.c_void_p(deliver))
+        exec_traced(exe, argv)
+    reaped = False
+    try:
+        _, status = os.waitpid(pid, 0)  # the stop the exec delivers
+        reaped = os.WIFEXITED(status) or os.WIFSIGNALED(status)
+        if reaped or os.WSTOPSIG(status) != signal.SIGTRAP:
+            raise RuntimeError(f"{argv[0]} did not reach its exec stop; tracing or exec failed")
+        ptrace(PTRACE_SETOPTIONS, pid, PTRACE_O_TRACEEXIT | PTRACE_O_TRACEEXEC)
+        ptrace(PTRACE_CONT, pid)
+        peak = 0
+        while True:
+            _, status = os.waitpid(pid, 0)
+            if os.WIFEXITED(status) or os.WIFSIGNALED(status):
+                reaped = True
+                code = os.waitstatus_to_exitcode(status)
+                if code != 0 or peak <= 0:
+                    raise RuntimeError(f"{argv[0]} exited {code}; no successful measurement")
+                return peak
+            deliver = os.WSTOPSIG(status)
+            if status >> 16 == PTRACE_EVENT_EXIT:
+                peak = hwm_kb(pid)
+                deliver = 0
+            elif status >> 16 == PTRACE_EVENT_EXEC:
+                deliver = 0
+            ptrace(PTRACE_CONT, pid, deliver)
+    finally:
+        if not reaped:
+            kill_traced(pid)
 
 
 def main() -> int:
@@ -88,7 +126,12 @@ def main() -> int:
     if not sys.platform.startswith("linux"):
         print("maxrss.py: /proc is Linux only; no number to report", file=sys.stderr)
         return 1
-    print(peak_rss_kb(sys.argv[1:]))
+    try:
+        peak = peak_rss_kb(sys.argv[1:])
+    except (OSError, RuntimeError) as err:
+        print(f"maxrss.py: {err}", file=sys.stderr)
+        return 1
+    print(peak)
     return 0
 
 

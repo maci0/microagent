@@ -284,12 +284,10 @@ pub fn deinitCalls(gpa: std.mem.Allocator, calls: *std.ArrayList(ToolCall)) void
 /// A byte buffer that hands out an `Io.Writer` (the std ArrayList lost its
 /// `writer` method in 0.16, so the adapter lives here once).
 pub const JsonBuf = struct {
-    list: std.ArrayList(u8) = .empty,
     allocating: Io.Writer.Allocating,
 
     pub fn init(allocator: std.mem.Allocator) JsonBuf {
-        var list: std.ArrayList(u8) = .empty;
-        return .{ .list = list, .allocating = Io.Writer.Allocating.fromArrayList(allocator, &list) };
+        return .{ .allocating = .init(allocator) };
     }
 
     /// A buffer that already has room for `capacity` bytes. Use it where the
@@ -297,21 +295,20 @@ pub const JsonBuf = struct {
     /// bytes does not walk the whole doubling ladder to get there, reallocating
     /// and copying at every step.
     pub fn initCapacity(allocator: std.mem.Allocator, capacity: usize) JsonBuf {
-        var list: std.ArrayList(u8) = .empty;
-        list.ensureTotalCapacityPrecise(allocator, capacity) catch return init(allocator);
-        return .{ .list = list, .allocating = Io.Writer.Allocating.fromArrayList(allocator, &list) };
+        return .{ .allocating = Io.Writer.Allocating.initCapacity(allocator, capacity) catch .init(allocator) };
+    }
+
+    pub fn deinit(self: *JsonBuf) void {
+        self.allocating.deinit();
     }
 
     pub fn writer(self: *JsonBuf) *Io.Writer {
         return &self.allocating.writer;
     }
 
-    /// Hands back the buffer and gives up ownership of it: the `Allocating` is
-    /// reset, so this is the last call on this `JsonBuf` and any write after it
-    /// starts a new buffer.
+    /// Borrows the written bytes until the next write or `deinit`.
     pub fn items(self: *JsonBuf) []u8 {
-        self.list = self.allocating.toArrayList();
-        return self.list.items;
+        return self.allocating.written();
     }
 };
 
@@ -918,10 +915,26 @@ test "the literal-byte table is the escape and ASCII rules it replaces" {
     }
 }
 
+test "JSON buffers release their allocation when any write fails" {
+    const Check = struct {
+        fn run(gpa: std.mem.Allocator, capacity: usize) !void {
+            var buf = JsonBuf.initCapacity(gpa, capacity);
+            defer buf.deinit();
+            writeJsonString(buf.writer(), "before") catch return error.OutOfMemory;
+            writeJsonString(buf.writer(), "x" ** 4096) catch return error.OutOfMemory;
+            writeJsonString(buf.writer(), "y" ** 16384) catch return error.OutOfMemory;
+            try std.testing.expect(buf.items().len > 20_000);
+        }
+    };
+    for ([_]usize{ 0, 8 }) |capacity| {
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{capacity});
+    }
+}
+
 test "json string escaping" {
     var buf = JsonBuf.init(std.testing.allocator);
     try writeJsonString(buf.writer(), "a\"b\\c\nd\t\u{7}");
-    defer buf.list.deinit(std.testing.allocator);
+    defer buf.deinit();
     try std.testing.expectEqualStrings("\"a\\\"b\\\\c\\nd\\t\\u0007\"", buf.items());
 }
 
@@ -934,7 +947,7 @@ test "every ASCII byte survives escaping" {
     for (&all, 0..) |*c, i| c.* = @intCast(i);
 
     var buf = JsonBuf.init(std.testing.allocator);
-    defer buf.list.deinit(std.testing.allocator);
+    defer buf.deinit();
     try writeJsonString(buf.writer(), &all);
 
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, buf.items(), .{});
@@ -954,7 +967,7 @@ test "a special byte at any offset escapes the way std.json escapes it" {
             text[at] = special;
 
             var ours = JsonBuf.init(std.testing.allocator);
-            defer ours.list.deinit(std.testing.allocator);
+            defer ours.deinit();
             try writeJsonString(ours.writer(), &text);
 
             var reference: Io.Writer.Allocating = .init(std.testing.allocator);
@@ -983,7 +996,7 @@ test "a string that is not UTF-8 still serializes as valid JSON" {
         const raw = case.bytes;
         const gpa = std.testing.allocator;
         var buf = JsonBuf.init(gpa);
-        defer buf.list.deinit(gpa);
+        defer buf.deinit();
         try writeJsonString(buf.writer(), raw);
 
         var parsed = try std.json.parseFromSlice(std.json.Value, gpa, buf.items(), .{});
@@ -1007,7 +1020,7 @@ test "a string that is not UTF-8 still serializes as valid JSON" {
 test "valid multibyte text passes through the escaper unchanged" {
     const text = "日本語 \u{1f1e8}\u{1f1ed} \u{1f469}\u{200d}\u{1f4bb}";
     var buf = JsonBuf.init(std.testing.allocator);
-    defer buf.list.deinit(std.testing.allocator);
+    defer buf.deinit();
     try writeJsonString(buf.writer(), text);
 
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, buf.items(), .{});
@@ -1395,7 +1408,7 @@ fn fuzzJsonString(_: void, smith: *std.testing.Smith) !void {
     const text: []const u8 = if (smith.in) |seed| seed else scratch[0..smith.slice(&scratch)];
 
     var buf = JsonBuf.init(gpa);
-    defer buf.list.deinit(gpa);
+    defer buf.deinit();
     try writeJsonString(buf.writer(), text);
     const quoted = buf.items();
 

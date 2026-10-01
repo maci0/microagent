@@ -306,6 +306,7 @@ test:
 # Exercise the actual CLI over loopback, without a provider account.
 test-cli: build
 	python3 scripts/test_cli.py $(BIN)
+	python3 bench/test_maxrss.py
 
 # The suite again on every source change, until Ctrl-C: the build system's own edit loop, and the
 # command a contributor runs all day. It is not what `check` runs, so a green watch is not a push.

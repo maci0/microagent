@@ -148,6 +148,7 @@ fn argumentsAreAnObject(gpa: std.mem.Allocator, args: []const u8) bool {
 const StreamFrame = struct {
     usage: ?UsageFrame = null,
     choices: []const Choice = &.{},
+    @"error": std.json.Value = .null,
     // What the provider says answered. Absent on a frame that omits them, which
     // is the rule `recordServed` follows: an earlier frame's value
     // stands rather than a later frame's absence emptying the field.
@@ -204,37 +205,6 @@ fn applyFinishReason(gpa: std.mem.Allocator, result: *chat_mod.ChatResult, value
     try chat_mod.keepChanged(gpa, &result.finish_reason, chat_mod.str(value));
 }
 
-/// The member a provider reports a mid-stream failure in, spelled as the bytes
-/// that key arrives as.
-const error_member = "\"error\":";
-
-/// Whether a frame carries a report of a failure rather than a chunk.
-///
-/// This is a byte test and it is exact. A model that writes `{"error": ...}`
-/// into its own answer has it escaped, so the bytes that spell a key never
-/// appear inside a string, and the only other way to reach them is a member of
-/// the frame itself. `"error":null` is not a report of anything, and a gateway
-/// that sends it on every chunk would otherwise put every chunk on the slow
-/// parse for no gain.
-///
-/// The declared shapes have no field for a member named `error`, since a struct
-/// field cannot be spelled that one, so a frame that reports a failure is read
-/// by the generic parse instead. That is where a frame that is nothing but a
-/// failure report lands anyway, and the shapes would have found nothing in it.
-fn reportsError(payload: []const u8) bool {
-    // The needle is one machine word, so each position is a load and a compare. `std.mem.indexOf`
-    // made a call per position, which was a quarter of a stream's instructions in `ReleaseSmall`.
-    comptime std.debug.assert(error_member.len == @sizeOf(u64));
-    const needle = std.mem.readInt(u64, error_member, .little);
-    var at: usize = 0;
-    while (at + error_member.len <= payload.len) : (at += 1) {
-        if (std.mem.readInt(u64, payload[at..][0..error_member.len], .little) != needle) continue;
-        const value = std.mem.trim(u8, payload[at + error_member.len ..], " \t");
-        return !std.mem.startsWith(u8, value, "null");
-    }
-    return false;
-}
-
 /// What a frame said went wrong, as the one line a note carries: the code the
 /// provider gave and the message under it, or whichever of the two it sent, and
 /// a placeholder for a frame that reported a failure and named no reason. The
@@ -246,6 +216,7 @@ fn reportsError(payload: []const u8) bool {
 /// same escaping as any other provider text.
 fn noteStreamError(gpa: std.mem.Allocator, result: *chat_mod.ChatResult, value: ?std.json.Value) !void {
     const v = value orelse return;
+    if (v == .null) return;
     if (result.stream_error.len != 0) return;
     var code: ?[]const u8 = null;
     var message: ?[]const u8 = null;
@@ -287,6 +258,7 @@ fn applyDeclared(
     };
 
     try chat_mod.recordServed(gpa, result, frame.model, frame.system_fingerprint);
+    try noteStreamError(gpa, result, frame.@"error");
 
     if (frame.usage) |u| {
         applyUsage(result, .{
@@ -601,10 +573,8 @@ pub fn applyFrame(
 ) !void {
     // The declared shapes cover every frame a provider sends in practice. The
     // generic parse behind them still runs for anything that does not fit, so
-    // this is a speedup and not a narrowing of what is accepted. A frame that
-    // reports a failure never takes it: the shapes have no member for an `error`
-    // to land in, because a struct field cannot be spelled that one.
-    if (!reportsError(payload) and try applyDeclared(scratch, gpa, payload, result, calls, out_buf, unparsable)) return;
+    // this is a speedup and not a narrowing of what is accepted.
+    if (try applyDeclared(scratch, gpa, payload, result, calls, out_buf, unparsable)) return;
 
     const root = std.json.parseFromSliceLeaky(std.json.Value, scratch, payload, .{}) catch |err| switch (err) {
         // Counted as unreadable only when it really was: a frame that would not
@@ -1714,6 +1684,23 @@ test "the served model and fingerprint are released with the response" {
 // the frames around it marks the turn, so a stream read on its own is a stream
 // the provider finished, and a turn that had already said something is put on
 // stdout as a whole answer. The report has to survive into the turn's notice.
+test "stream error reports follow JSON field spelling and null means no failure" {
+    const cases = [_]struct { frame: []const u8, message: []const u8 }{
+        .{ .frame = "{\"error\" : {\"message\":\"boom\"}}", .message = "boom" },
+        .{ .frame = "{\"\\u0065rror\":{\"message\":\"boom\"}}", .message = "boom" },
+        .{ .frame = "{\"error\":null}", .message = "" },
+        .{ .frame = "{\"error\":\nnull}", .message = "" },
+        .{ .frame = "{\"error\":null,\"choices\":\"generic path\"}", .message = "" },
+        .{ .frame = "{\"extra\":{\"error\":{\"message\":\"nested\"}}}", .message = "" },
+    };
+    for (cases) |case| {
+        var sink = FrameSink.init(std.testing.allocator);
+        defer sink.deinit();
+        try sink.feed(case.frame);
+        try std.testing.expectEqualStrings(case.message, sink.result.stream_error);
+    }
+}
+
 test "a failure the provider reported in the stream is kept, in its own words" {
     var sink = FrameSink.init(std.testing.allocator);
     defer sink.deinit();
@@ -1737,31 +1724,6 @@ test "a failure the provider reported in the stream is kept, in its own words" {
         \\{"error":{"message":"second report"}}
     );
     try std.testing.expectEqualStrings("provider_error: upstream timed out mid-generation", sink.result.stream_error);
-
-    // The shapes that carry the rest of a frame do not mistake the report for
-    // one: an `error` member is what sends a frame to the generic parse, and a
-    // frame without one still takes the declared one.
-    try std.testing.expect(!reportsError("{\"model\":\"m\",\"choices\":[]}"));
-    try std.testing.expect(!reportsError("{\"error\":null,\"model\":\"m\"}"));
-    try std.testing.expect(reportsError("{\"error\":{\"message\":\"boom\"}}"));
-    try std.testing.expect(reportsError("{\"error\": \"boom\"}"));
-    // A model that writes the member into its own answer has it escaped, so the
-    // bytes that spell a key cannot appear inside the string.
-    try std.testing.expect(!reportsError("{\"choices\":[{\"delta\":{\"content\":\"look at {\\\"error\\\": 1} here\"}}]}"));
-    // The member is found wherever it sits, including flush against the end, and a frame shorter
-    // than the member cannot hold it.
-    for (0..24) |pad| {
-        var frame: [64]u8 = undefined;
-        @memset(frame[0..pad], ' ');
-        const text = std.fmt.bufPrint(frame[pad..], "\"error\":{{}}", .{}) catch unreachable;
-        try std.testing.expect(reportsError(frame[0 .. pad + text.len]));
-        try std.testing.expect(!reportsError(frame[0 .. pad + error_member.len - 1]));
-    }
-    try std.testing.expect(!reportsError(""));
-    try std.testing.expect(!reportsError("\"error\""));
-    // The first occurrence decides, as it did when this searched with `indexOf`.
-    try std.testing.expect(!reportsError("{\"error\":null,\"x\":{\"error\":{}}}"));
-    try std.testing.expect(reportsError("{\"error\":{},\"x\":{\"error\":null}}"));
 
     // A frame reporting a failure the provider sent no reason for still ends the
     // turn: the notice needs words, not silence.

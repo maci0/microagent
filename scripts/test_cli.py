@@ -32,6 +32,7 @@ class Provider(BaseHTTPRequestHandler):
     hang_body = False
     billed_error = False
     invalid_usage = False
+    response_bytes = 0
 
     @classmethod
     def reset(cls) -> None:
@@ -45,9 +46,35 @@ class Provider(BaseHTTPRequestHandler):
         cls.hang_body = False
         cls.billed_error = False
         cls.invalid_usage = False
+        cls.response_bytes = 0
 
     def do_POST(self) -> None:
         Provider.seen.append(json.loads(self.rfile.read(int(self.headers["content-length"]))))
+        if Provider.response_bytes:
+            self.send_response(200)
+            self.send_header("content-type", "text/event-stream")
+            self.end_headers()
+            cap = 16 * 1024 * 1024
+            try:
+                if Provider.response_bytes > cap:
+                    call = {
+                        "index": 0,
+                        "id": "pending",
+                        "function": {"name": "bash", "arguments": '{"command":"touch ceiling-marker"}'},
+                    }
+                    self.wfile.write(
+                        ("data: " + json.dumps({"choices": [{"delta": {"tool_calls": [call]}}]}) + "\n\n").encode()
+                    )
+                chunk = ("data: " + json.dumps({"choices": [{"delta": {"content": "x" * 65536}}]}) + "\n\n").encode()
+                for _ in range(Provider.response_bytes // 65536):
+                    self.wfile.write(chunk)
+                if Provider.response_bytes > cap:
+                    self.rfile.read(1)  # No terminator: the byte ceiling must close the stream.
+                else:
+                    self.wfile.write(b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # The client has enforced its ceiling.
+            return
         if Provider.hang:
             if Provider.hang_body:
                 self.send_response(200)
@@ -262,6 +289,18 @@ def check_timeouts(binary: Path, root: Path, url: str) -> None:
             thread.join()
 
 
+def check_response_cap(binary: Path, root: Path, url: str) -> None:
+    Provider.reset()
+    Provider.response_bytes = 16 * 1024 * 1024
+    result = invoke(binary, root, url, ["exact response ceiling"], "")
+    expect(result.returncode == 0 and len(Provider.seen) == 1, result.stderr)
+    Provider.response_bytes += 65536
+    result = invoke(binary, root, url, ["oversized unfinished response"], "")
+    expect(result.returncode == 3 and len(Provider.seen) == 1 and "byte ceiling" in result.stderr, result.stderr)
+    expect(not (root / "ceiling-marker").exists(), "a tool from the oversized response was executed")
+    Provider.response_bytes = 0
+
+
 if __name__ == "__main__":
     binary = Path(sys.argv[1]).resolve(strict=True)
     with tempfile.TemporaryDirectory() as temp, ThreadingHTTPServer(("127.0.0.1", 0), Provider) as server:
@@ -271,6 +310,7 @@ if __name__ == "__main__":
             check_refs(Path(temp))
             check(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_timeouts(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
+            check_response_cap(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
         finally:
             server.shutdown()
             thread.join()

@@ -254,11 +254,7 @@ fn recordCwd(arena: std.mem.Allocator, env: *const std.process.Environ.Map, reso
     const root = std.mem.trim(u8, home, net.env_surrounding);
     if (root.len == 0 or !std.fs.path.isAbsolute(root)) return resolved;
     if (std.mem.eql(u8, resolved, root)) return home_marker;
-    // A directory shorter than the home, or one that does not start with it,
-    // is not under it. Checked before the slice rather than after the tail:
-    // `resolved[root.len..]` is out of bounds for a directory the home is not
-    // a prefix of at all, which is the ordinary case of a run in a container
-    // whose `HOME` is `/root` and whose working directory is `/workspace`.
+    // Check the prefix before slicing: shorter and unrelated paths are outside the home.
     if (!std.mem.startsWith(u8, resolved, root)) return resolved;
     const tail = resolved[root.len..];
     if (tail[0] != std.fs.path.sep) return resolved;
@@ -296,6 +292,8 @@ test "a record's cwd is the part of the working directory under the home" {
     // `/workspace/repo`, and dropping the prefix would leave one directory for
     // every trial in it.
     try std.testing.expectEqualStrings("/workspace/repo", recordCwd(arena, &env, "/workspace/repo"));
+    try std.testing.expectEqualStrings("/tmp", recordCwd(arena, &env, "/tmp"));
+    try std.testing.expectEqualStrings("/var/qwerty/data", recordCwd(arena, &env, "/var/qwerty/data"));
 
     // No home to cut against leaves the path as it is, and so does a home that
     // is not an absolute path: neither is a prefix of the directory, so
@@ -310,10 +308,7 @@ test "a record's cwd is the part of the working directory under the home" {
 
     // A directory shorter than the home, and one sharing a leading component
     // but not the whole prefix. Both used to slice past the end of the
-    // directory and abort the run before its first request: `HOME=/root` with
-    // a working directory of `/workspace`, or `/workspace/src` with a home of
-    // `/workspace/repository`, is an ordinary container and an ordinary
-    // subdirectory.
+    // directory and abort the run before its first request.
     try env.put("HOME", "/home/alice/long/home/path");
     try std.testing.expectEqualStrings("/home/alice/src", recordCwd(arena, &env, "/home/alice/src"));
     try env.put("HOME", "/workspace/repository");

@@ -98,6 +98,9 @@ const ToolChild = struct {
     pgid: std.posix.pid_t,
 
     pub fn spawn(io: Io, argv: []const []const u8, environ_map: ?*const std.process.Environ.Map) !ToolChild {
+        // POSIX argv is NUL-terminated; an interior NUL would execute a
+        // different command from the model argument we checked.
+        for (argv) |arg| if (std.mem.indexOfScalar(u8, arg, 0) != null) return error.InvalidArguments;
         try requireInstalled(io, argv[0], environ_map);
         const child = try std.process.spawn(io, .{
             .argv = argv,
@@ -185,6 +188,26 @@ fn findOnPath(io: Io, entries: []const u8, name: []const u8) !void {
 /// two descriptors into a number the test can see rather than a number the
 /// default limit would eventually reach.
 const missing_program_calls: usize = 8;
+
+test "tool subprocess arguments cannot execute a NUL-truncated command" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_path = dir_buf[0..try tmp.dir.realPath(io, &dir_buf)];
+    const command = try std.fmt.allocPrint(arena, "printf ran > '{s}/marker'", .{dir_path});
+    const cut_command = try std.mem.concat(arena, u8, &.{ command, "\x00ignored" });
+    for ([_][]const []const u8{
+        &.{ "/bin/sh", "-c", cut_command },
+        &.{ "/bin/sh\x00ignored", "-c", command },
+    }) |argv| {
+        try std.testing.expectError(error.InvalidArguments, runCapped(io, arena, argv, 1024, net.durationMs(1000), null, null));
+        try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "marker", .{}));
+    }
+}
 
 test "a delegated program that is not installed costs no descriptor and no process" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -6311,23 +6334,13 @@ fn expectNoProcessSurvived() !void {
     // `$$`: inside a nested `sh -c` the latter is still the outer shell's pid,
     // which has already exited, so the check below would pass on a process
     // that was never running.
-    const script = try std.fmt.allocPrint(arena, "sh -c 'sleep 30 & echo $! > {s}; wait' & exit 0", .{pid_path});
+    const script = try std.fmt.allocPrint(arena, "sh -c 'sleep 30 & child=$!; kill -0 \"$child\" && echo \"$child\" > {s}; wait' & exit 0", .{pid_path});
     try std.testing.expectError(error.Timeout, runCapped(io, arena, &.{ "/bin/sh", "-c", script }, 4096, net.durationMs(300), null, null));
 
     const raw = tmp.dir.readFileAlloc(io, pid_name, arena, .limited(64)) catch return error.GrandchildNotReported;
     const pid = try std.fmt.parseInt(std.posix.pid_t, std.mem.trim(u8, raw, " \t\r\n"), 10);
-    // The grandchild has to have been running for the check below to mean
-    // anything, and the poll cannot tell "the group signal took it down" from
-    // "no such process was ever there": a `kill` on a pid that was never alive
-    // fails the same way a `kill` on a pid that died under it does, so the
-    // first probe is taken before the loop and required to succeed. The timeout
-    // assertion above is not a substitute for it — that one proves the pipe was
-    // held open until the deadline, which a grandchild started and then gone
-    // satisfies just as well as one that outlived its group.
-    std.posix.kill(pid, .CONT) catch |err| {
-        std.debug.print("grandchild {d} was not running when the call timed out: {s}\n", .{ pid, @errorName(err) });
-        return error.GrandchildNotRunning;
-    };
+    // The shell only reports a child it has checked is alive. It may already
+    // have been killed and reaped when runCapped returns.
     // The kill is delivered asynchronously and the orphan is reaped by init
     // afterwards, so "gone" is a short poll rather than an instant check. Only
     // `ProcessNotFound` ends it in a pass, because only that one is the kernel

@@ -2239,7 +2239,7 @@ fn reportConfigProblem(io: Io, arena: std.mem.Allocator, source: ConfigSource, p
         .bad_value => net.note(io, arena, "microagent: config {s}: '{s}' is not a value this key takes; keeping the default\n", .{ configPathText(arena, source), key }),
         .unknown_key => net.note(io, arena, "microagent: config {s}: '{s}' is not a key this file uses; keeping the default\n", .{ configPathText(arena, source), key }),
         .bad_server => net.note(io, arena, "microagent: config {s}: the MCP server '{s}' has no command and no url, so it is skipped\n", .{ configPathText(arena, source), key }),
-        .bad_server_name => net.note(io, arena, "microagent: config {s}: the MCP server '{s}' is skipped; the name takes letters, digits, dot, dash and underscore and no '__', because it is half of every mcp__<server>__<tool> the model is offered\n", .{ configPathText(arena, source), key }),
+        .bad_server_name => net.note(io, arena, "microagent: config {s}: the MCP server '{s}' is skipped; the name takes letters, digits, dash and underscore and no '__', because it is half of every mcp__<server>__<tool> the model is offered\n", .{ configPathText(arena, source), key }),
         .mixed_server => net.note(io, arena, "microagent: config {s}: the MCP server '{s}' names both a command and a url, or an option only the other form takes, so it is skipped; a table is a command server or a url server, and api_key_env, api_key_header and timeout belong to a url server alone\n", .{ configPathText(arena, source), key }),
         .bad_url => net.note(io, arena, "microagent: config {s}: the url of the MCP server '{s}' is not one this run will POST to, so it is skipped; use https, or http on this machine, with no userinfo in the url\n", .{ configPathText(arena, source), key }),
         .unusable_server => net.note(io, arena, "microagent: config {s}: the MCP server '{s}' carries a value this run cannot use, so it is skipped rather than started without it\n", .{ configPathText(arena, source), key }),
@@ -2931,6 +2931,10 @@ fn runTurn(
     // the reason already on stderr.
     var result = streamChat(client, io, gpa, arena, opts, ep, prefix, budget, msgs.items) catch |err| switch (err) {
         error.BudgetExhausted => return .cut_off,
+        error.ResponseTooLarge => {
+            session_mod.writeFailure(io, arena, session, session_mod.elapsedMs(io, model_clock, asked), @errorName(err));
+            return .cut_off;
+        },
         // A call the provider never answered is still a turn the log has to
         // account for. Without the record the run's last line is the last
         // response that did arrive, so a monitor counting records reads a run
@@ -3563,7 +3567,7 @@ fn streamChatOnce(
     var scanned: usize = 0;
     var done = false;
     var unparsable: usize = 0;
-    while (!done) {
+    while (!done and !result.dropped) {
         // Check between reads too, so a busy stream stops without waiting for
         // the budget task to cancel its next blocking operation.
         if (budget.expired(io)) {
@@ -3600,6 +3604,7 @@ fn streamChatOnce(
                 done = true;
                 break;
             }
+            if (result.dropped) break;
         }
         // Drop what was consumed, so a long stream does not keep every frame.
         if (start > 0) {
@@ -3614,7 +3619,7 @@ fn streamChatOnce(
         // one: asked before the split, a complete line of exactly the ceiling
         // was refused for its own newline, and a short frame read alongside a
         // partial line counted the short frame against the long one.
-        if (frameOverran(pending.items)) {
+        if (!result.dropped and frameOverran(pending.items)) {
             net.note(io, arena, "microagent: a line of the completion stream from {s} passed {d} byte(s) without ending; the turn is discarded\n", .{
                 shown_url, pending.items.len,
             });
@@ -3634,24 +3639,21 @@ fn streamChatOnce(
 
     if (unparsable > 0)
         net.note(io, arena, "microagent: {d} frame(s) of the completion stream from {s} were not JSON, or carried a token count that is not a number; their content and their counts are not in this turn\n", .{ unparsable, shown_url });
-    // The turn's own ceiling, reached while the stream was still arriving. Past
-    // it `appendStreamed` and `applyCallDelta` drop every further byte, and a
-    // dropped argument fragment is what makes a tool call the next turn cannot
-    // dispatch: the run then reads its own `error: tool arguments are not valid
-    // JSON` and blames the model for a truncation nothing reported. Only a turn
-    // that arrived whole under the ceiling is a turn the model meant.
-    //
-    // `dropped` rather than the counter alone. `clamp` cuts on a codepoint
-    // boundary, so the last character before the ceiling is whatever fits: a
-    // response that arrives with one to three bytes of room and a character of
-    // two to four bytes to add keeps none of it, and the counter stops that
-    // far short of the ceiling. Reading the counter alone, that turn is
-    // reported as a finished one whose answer is short by a character nobody
-    // was told about.
-    if (result.dropped or result.streamed >= stream_mod.max_response_bytes)
-        net.note(io, arena, "microagent: the completion stream from {s} reached the {d} byte ceiling for one turn with {d} tool call(s) still being assembled; anything past it is not in this turn, and a tool call whose arguments were cut cannot be dispatched\n", .{
+    // Stop at the first dropped byte, even if the provider keeps sending.
+    // Discard every call from the incomplete turn. `dropped` preserves exact
+    // cap answers and UTF-8 cuts just below the cap.
+    if (result.dropped) {
+        try writeOutPrefix(io, arena, &out_buf, out_buf.items.len - chat_mod.partialTailLen(out_buf.items), shown_url);
+        out_buf.clearRetainingCapacity();
+        if (result.content.items.len != 0) {
+            try out_buf.append(gpa, '\n');
+            try writeOutPrefix(io, arena, &out_buf, out_buf.items.len, shown_url);
+        }
+        net.note(io, arena, "microagent: the completion stream from {s} passed the {d} byte ceiling for one turn with {d} tool call(s); the turn is discarded, its calls are not dispatched, and what is on stdout is a prefix of the answer\n", .{
             shown_url, stream_mod.max_response_bytes, calls.items.len,
         });
+        return error.ResponseTooLarge;
+    }
     // A failure the provider reported in the middle of the stream. It goes
     // before the terminator check below, because a provider that reports a
     // failure and then closes the stream cleanly is the case neither of the two
