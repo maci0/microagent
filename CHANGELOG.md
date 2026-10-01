@@ -35,6 +35,10 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- MCP replies are checked for excessive JSON nesting before parsing their trees,
+  so deeply nested schemas, structured results and errors cannot crash serialization.
+- Non-object MCP error replies retain only a capped diagnostic instead of the
+  complete serialized reply in the run allocator.
 - Every source citation in the threat model names the line its function is defined on
   again, so `make lint`, and the push workflow's lint job that runs it, is green on a
   tree the gates otherwise pass. Forty of the drifted citations were moved to the line

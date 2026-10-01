@@ -48,6 +48,11 @@ pub const tool_prefix = "mcp__";
 /// the biggest frame there is; past this the connection is not one this run
 /// can follow, and the server is skipped rather than grown for.
 const max_frame_bytes: usize = 4 * 1024 * 1024;
+
+/// Matches std.json.Stringify's maximum depth. A byte cap alone permits
+/// replies whose schemas, structured results or errors crash serialization.
+const max_frame_depth: usize = 256;
+
 /// The buffer a line is split out of is grown to hold the largest line a
 /// server sends, and it keeps that capacity for the run. A `tools/list` answer
 /// is the one line that is ever large, so the excess is handed back once the
@@ -344,11 +349,25 @@ pub const Server = struct {
     /// bytes that are not JSON). `error.ServerRefused`, with `last_error` set,
     /// when it is the server's error answer.
     fn answerFor(self: *Server, scratch: std.mem.Allocator, frame: []const u8, id: u64) !?std.json.Value {
-        const value = std.json.parseFromSliceLeaky(std.json.Value, scratch, frame, .{}) catch |err| {
+        const value = self.parseFrame(scratch, frame) catch |err| {
+            if (err == error.FrameTooDeep) return err;
             self.last_error = try std.fmt.allocPrint(self.run_arena, "not JSON ({s})", .{@errorName(err)});
             return null;
         };
         return self.answerIn(value, id);
+    }
+
+    fn parseFrame(self: *Server, scratch: std.mem.Allocator, frame: []const u8) !std.json.Value {
+        var scanner = std.json.Scanner.initCompleteInput(scratch, frame);
+        defer scanner.deinit();
+        while (try scanner.next() != .end_of_document) {
+            if (scanner.stackHeight() > max_frame_depth) {
+                self.last_error = "JSON frame nesting exceeds 256 levels";
+                self.dead = true;
+                return error.FrameTooDeep;
+            }
+        }
+        return std.json.parseFromSliceLeaky(std.json.Value, scratch, frame, .{});
     }
 
     fn answerIn(self: *Server, value: std.json.Value, id: u64) !?std.json.Value {
@@ -583,7 +602,8 @@ pub const Server = struct {
             }
         }
         if (!is_sse) {
-            const value = std.json.parseFromSliceLeaky(std.json.Value, scratch, pending.items, .{}) catch |err| {
+            const value = self.parseFrame(scratch, pending.items) catch |err| {
+                if (err == error.FrameTooDeep) return err;
                 self.last_error = try std.fmt.allocPrint(self.run_arena, "not JSON ({s})", .{@errorName(err)});
                 return error.ServerRefused;
             };
@@ -927,13 +947,13 @@ fn truncationNote(arena: std.mem.Allocator, kept: []const u8, cap: usize, total:
 }
 
 /// A JSON-RPC error value as a line: its message, with the code when there is
-/// one, and the whole value when it is not an object. A server's error text is
+/// one, and capped JSON when it is not an object. A server's error text is
 /// untrusted too, so it is escaped before it reaches a tool result the model
 /// reads and a gutter line the operator reads.
 fn describeError(arena: std.mem.Allocator, value: std.json.Value) ![]const u8 {
     const object = switch (value) {
         .object => |o| o,
-        else => return chat.safeTextAll(arena, try std.json.Stringify.valueAlloc(arena, value, .{})),
+        else => return chat.safeTextAll(arena, try cappedJson(arena, value, max_mcp_description_bytes)),
     };
     const message = chat.str(object.get("message")) orelse "no message";
     if (object.get("code")) |code| switch (code) {
@@ -1983,20 +2003,21 @@ fn fuzzTools(_: void, smith: *std.testing.Smith) !void {
     defer scratch_state.deinit();
     const scratch = scratch_state.allocator();
 
+    var server: Server = .{ .name = "srv", .run_arena = arena, .transport = .{ .stdio = undefined }, .tools = &.{} };
     // An answer is a result object, and a fuzzer that only ever produced valid
     // ones would never reach the object/array/string arms below it, so bytes
     // that are not an object are carried as the one member a real answer can
     // hold them in.
-    const parsed = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{}) catch blk: {
+    const parsed = server.parseFrame(arena, bytes) catch |err| blk: {
+        if (err == error.FrameTooDeep) return;
         var jb = chat.JsonBuf.init(arena);
         const w = jb.writer();
         try w.writeAll("{\"tools\":");
         try chat.writeJsonString(w, bytes);
         try w.writeAll("}");
-        break :blk try std.json.parseFromSliceLeaky(std.json.Value, arena, jb.items(), .{});
+        break :blk try server.parseFrame(arena, jb.items());
     };
 
-    const server: Server = .{ .name = "srv", .run_arena = arena, .transport = .{ .stdio = undefined }, .tools = &.{} };
     const built = buildTools(std.testing.io, arena, scratch, &server, parsed) orelse {
         // A non-object answer is refused, and a refusal leaves the table empty
         // rather than holding what a previous connection offered.
@@ -2355,6 +2376,74 @@ test "a name is half of an exposed tool name only when it can be spelled" {
     try std.testing.expect(!validName("a" ** 65));
 }
 
+test "an oversized non-object MCP error keeps only its capped diagnostic" {
+    var scratch_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer scratch_state.deinit();
+    const scratch = scratch_state.allocator();
+    const padding = try scratch.alloc(u8, 128 * 1024);
+    @memset(padding, 'x');
+    inline for ([_][]const u8{ "{{\"id\":1,\"error\":\"{s}\"}}", "{{\"id\":1,\"error\":[\"{s}\"]}}" }) |fmt| {
+        const frame = try std.fmt.allocPrint(scratch, fmt, .{padding});
+        var output_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer output_state.deinit();
+        var server: Server = .{ .name = "err", .run_arena = output_state.allocator(), .transport = undefined, .tools = &.{} };
+        try std.testing.expectError(error.ServerRefused, server.answerFor(scratch, frame, 1));
+        try std.testing.expect(server.last_error.len <= max_mcp_description_bytes);
+        try std.testing.expect(std.mem.indexOf(u8, server.last_error, "truncated") != null);
+        try std.testing.expect(output_state.queryCapacity() < 8 * max_mcp_description_bytes);
+    }
+}
+
+test "deeply nested MCP answers are refused before serialization in every transport" {
+    const nested = "[" ** 300 ++ "0" ++ "]" ** 300;
+    const frames = [_][]const u8{
+        "{\"id\":1,\"result\":{\"structuredContent\":" ++ "[" ** 255 ++ "0" ++ "]" ** 255 ++ "}}",
+        "{\"id\":1,\"result\":{\"structuredContent\":" ++ nested ++ "}}",
+        "{\"id\":1,\"result\":{\"tools\":[{\"name\":\"nested\",\"inputSchema\":{\"p\":" ++ nested ++ "}}]}}",
+        "{\"id\":1,\"error\":" ++ nested ++ "}",
+    };
+    for (frames) |frame| {
+        for (0..3) |transport| {
+            var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer state.deinit();
+            const arena = state.allocator();
+            var server: Server = .{ .name = "nested", .run_arena = arena, .transport = undefined, .tools = &.{} };
+            const answer: anyerror!?std.json.Value = if (transport == 0)
+                server.answerFor(arena, frame, 1)
+            else blk: {
+                const body = if (transport == 2) try std.fmt.allocPrint(arena, "data: {s}\n\n", .{frame}) else frame;
+                var reader: Io.Reader = .fixed(body);
+                var stopped_early = false;
+                const value = server.readAnswer(arena, &reader, transport == 2, 1, &stopped_early) catch |err| break :blk err;
+                break :blk @as(?std.json.Value, value);
+            };
+            const value = answer catch |err| {
+                try std.testing.expectEqual(error.FrameTooDeep, err);
+                try std.testing.expect(server.dead);
+                continue;
+            };
+            if (value) |result| {
+                if (result.object.get("tools") != null) {
+                    _ = buildTools(std.testing.io, arena, arena, &server, result);
+                } else {
+                    _ = try resultText(arena, "nested", result);
+                }
+            }
+            return error.TestUnexpectedResult;
+        }
+    }
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    var server: Server = .{ .name = "nested", .run_arena = arena, .transport = undefined, .tools = &.{} };
+    const at_limit = "{\"id\":1,\"result\":{\"structuredContent\":" ++ "[" ** 254 ++ "0" ++ "]" ** 254 ++ "}}";
+    const accepted = (try server.answerFor(arena, at_limit, 1)).?;
+    try std.testing.expectEqualStrings("[" ** 254 ++ "0" ++ "]" ** 254, try resultText(arena, "nested", accepted));
+    const brackets = "{\"id\":1,\"result\":{\"structuredContent\":\"" ++ "[" ** 300 ++ "\"}}";
+    _ = try server.answerFor(arena, brackets, 1);
+    try std.testing.expect(!server.dead);
+}
+
 test "an MCP stdio line at the frame ceiling is accepted and one byte over is refused" {
     var state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer state.deinit();
@@ -2537,8 +2626,11 @@ fn fuzzFrame(_: void, smith: *std.testing.Smith) !void {
     // only ever produced valid JSON would never reach the text arithmetic with
     // a piece of a length nobody chose, so unparseable bytes are carried as the
     // text of a result frame and the same reader runs over them.
-    const parsed = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{}) catch
-        try std.json.parseFromSliceLeaky(std.json.Value, arena, try carriedFrame(arena, bytes), .{});
+    var server: Server = .{ .name = "srv", .run_arena = arena, .transport = undefined, .tools = &.{} };
+    const parsed = server.parseFrame(arena, bytes) catch |err| blk: {
+        if (err == error.FrameTooDeep) return;
+        break :blk try server.parseFrame(arena, try carriedFrame(arena, bytes));
+    };
     const object = switch (parsed) {
         .object => |o| o,
         else => return,
@@ -2550,6 +2642,7 @@ fn fuzzFrame(_: void, smith: *std.testing.Smith) !void {
         // terminal, and nothing a terminal acts on survives the escaper.
         try std.testing.expect(described.len > 0);
         try std.testing.expect(std.mem.indexOf(u8, described, "\x1b") == null);
+        try std.testing.expect(described.len <= max_mcp_description_bytes + 32);
         // A refusal with a message is bounded at the description ceiling, and
         // the code is added to it rather than displacing it.
         if (value == .object and value.object.get("message") != null)
