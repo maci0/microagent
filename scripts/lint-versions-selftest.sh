@@ -44,6 +44,25 @@ for file in $files; do
 done
 
 work="$(mktemp -d)"
+# `sed` writing over the file it reads, as `sed -i` does, spelled out rather
+# than written as the `-i` option because `-i` is not portable: BSD sed, which
+# is the sed on the macOS side of the two platforms this release ships to, takes
+# a mandatory suffix argument after it and fails on `-i` alone, so every case
+# below edited nothing and the case reported a refusal the perturbation had
+# never caused. The write goes to a sibling and the rename moves it, which is
+# the form `make install` already uses here for the same reason. A sed that
+# fails part way has already written the sibling, so it is removed rather than
+# left beside the file for the next run to restore over.
+edit_in_place() {
+  target="$1"
+  shift
+  if sed "$@" "$target" > "$target.selftest-tmp"; then
+    mv -f "$target.selftest-tmp" "$target"
+  else
+    rm -f "$target.selftest-tmp"
+    return 1
+  fi
+}
 # Put every file back where the copy in $work holds it. Split from the cleanup
 # below because the cases between them still need $work: a case restores the
 # tree so the next one starts from what was found, and only the exit path
