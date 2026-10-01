@@ -184,8 +184,8 @@ pub const ChatResult = struct {
     /// by then, so a stream that reported a failure and one that ran to its end
     /// have to be told apart, and this is the field that tells them apart.
     stream_error: []u8 = &.{},
-    /// Bytes this one response has added to the run: the visible text and every
-    /// call's arguments together. `max_response_bytes` bounds a response, not
+    /// Bytes charged to this response: the visible text and every call's
+    /// arguments, including rejected calls. `max_response_bytes` bounds a response, not
     /// each stream in it, and the streams are not one: a provider that streams
     /// the full allowance of arguments for each of `max_tool_calls` calls holds
     /// a gigabyte of a single turn in memory, which is why the ceiling is one
@@ -202,22 +202,12 @@ pub const ChatResult = struct {
     /// mid-character, and the run's notice is what says the turn is not the
     /// whole of what the model meant to send.
     dropped: bool = false,
-    /// Tool calls the response carried at an index past the ceiling the agent
-    /// loop puts on one response's parallel calls, which the caller drops rather
-    /// than size the call list to. The count travels on the response for the
-    /// reason `dropped` does: the calls are gone from the turn, and a turn that
-    /// ran fewer calls than the model asked for with nothing said about it is a
-    /// turn whose work is smaller than the work it asked for.
-    over_cap: usize = 0,
+    /// Tool-call fragments at an index past the parallel-call ceiling. Their
+    /// arguments consume the byte allowance even though the calls are dropped.
+    over_cap_fragments: usize = 0,
     /// Calls removed for missing ids/names or malformed arguments. The loop
     /// must recover the missing work even when no runnable call remains.
     unusable_calls: usize = 0,
-    /// The index `over_cap` last counted, so a call streamed as one frame per
-    /// argument fragment is counted once rather than once per fragment. The
-    /// fragments of a call arrive together, and a provider that interleaved two
-    /// calls' fragments would break the `tool_call_id` pairing whatever the run
-    /// counted, so the last index is the whole of what has to be remembered.
-    over_cap_index: ?usize = null,
 
     /// The response outlives the turn's arena, so what a turn keeps is
     /// allocated here and released with the turn rather than at process exit.

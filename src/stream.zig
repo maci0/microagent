@@ -59,16 +59,16 @@ const DroppedCalls = struct {
 /// connect the two. Both reasons are on one line rather than two because they
 /// are the same fact about the same turn, and a turn that lost calls to each of
 /// them is one line that names both.
-pub fn droppedCallNotice(arena: std.mem.Allocator, url: []const u8, dropped: DroppedCalls, over_cap: usize) ?[]const u8 {
-    if (dropped.unusable == 0 and over_cap == 0) return null;
-    if (dropped.unusable == 0) return std.fmt.allocPrint(arena, "microagent: the completion stream from {s} asked for {d} tool call(s) past the {d} this run dispatches at once; they are not dispatched, and the model is asked again without them", .{
-        url, over_cap, max_tool_calls,
+pub fn droppedCallNotice(arena: std.mem.Allocator, url: []const u8, dropped: DroppedCalls, over_cap_fragments: usize) ?[]const u8 {
+    if (dropped.unusable == 0 and over_cap_fragments == 0) return null;
+    if (dropped.unusable == 0) return std.fmt.allocPrint(arena, "microagent: the completion stream from {s} carried {d} tool-call fragment(s) at indices past the {d} calls this run dispatches at once; those calls are not dispatched, and the model is asked again without them", .{
+        url, over_cap_fragments, max_tool_calls,
     }) catch "microagent: some tool calls from the completion stream were past the parallel-call ceiling; they are not dispatched";
-    if (over_cap == 0) return std.fmt.allocPrint(arena, "microagent: {d} tool call(s) from {s} carried no id or no name, or arguments that are not a JSON object; they are not dispatched, and the model is asked again without them", .{
+    if (over_cap_fragments == 0) return std.fmt.allocPrint(arena, "microagent: {d} tool call(s) from {s} carried no id or no name, or arguments that are not a JSON object; they are not dispatched, and the model is asked again without them", .{
         dropped.unusable, url,
     }) catch "microagent: some tool calls from the completion stream could not be dispatched; the model is asked again without them";
-    return std.fmt.allocPrint(arena, "microagent: {d} tool call(s) from {s} could not be dispatched ({d} carried no id or no name, or arguments that are not a JSON object; {d} were past the {d} this run dispatches at once); the model is asked again without them", .{
-        dropped.unusable + over_cap, url, dropped.unusable, over_cap, max_tool_calls,
+    return std.fmt.allocPrint(arena, "microagent: {d} tool call(s) from {s} carried no id or no name, or arguments that are not a JSON object; {d} additional tool-call fragment(s) used indices past the {d} calls this run dispatches at once; those calls are not dispatched, and the model is asked again without them", .{
+        dropped.unusable, url, over_cap_fragments, max_tool_calls,
     }) catch "microagent: some tool calls from the completion stream could not be dispatched; the model is asked again without them";
 }
 
@@ -491,15 +491,10 @@ fn applyCallDelta(
     // the count is what says what happened to them.
     const idx = chat_mod.numCount(index);
     if (idx >= max_tool_calls) {
-        // Counted per call rather than per fragment: a provider streams one
-        // call as an id and a name, then as many argument fragments as the
-        // arguments need, every one of them repeating this index. Counting each
-        // of those as a call is what made a single long-argument call past the
-        // ceiling read as a response asking for dozens of parallel calls.
-        if (result.over_cap_index == null or result.over_cap_index.? != idx) {
-            result.over_cap += 1;
-            result.over_cap_index = idx;
-        }
+        // Discarded arguments still spend the response allowance. Fragments
+        // may interleave, so report their count without calling it a call count.
+        if (args) |text| _ = clampToResponseCap(result, text);
+        result.over_cap_fragments += 1;
         return;
     }
     while (calls.items.len <= idx) try calls.append(gpa, .{ .id = "", .name = "" });
@@ -1539,10 +1534,21 @@ test "a call streamed in fragments still reads as one argument object" {
     try std.testing.expectEqualStrings("{\"command\": \"ls -l\"}", calls.items[0].args.items);
 }
 
-// The parallel-call ceiling drops a call the model asked for, and the assistant
-// message the provider reads next names only the calls that were kept. So the
-// ceiling counts what it turned away, and a turn that stayed under it says
-// nothing.
+test "arguments for rejected tool calls still consume the response byte allowance" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    const chunk = "x" ** 65536;
+    const frame = try std.fmt.allocPrint(arena, "{{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":{d},\"function\":{{\"arguments\":\"{s}\"}}}}]}}}}]}}", .{ max_tool_calls, chunk });
+    var sink = FrameSink.init(std.testing.allocator);
+    defer sink.deinit();
+    for (0..max_response_bytes / chunk.len + 1) |_| try sink.feed(frame);
+    try std.testing.expectEqual(max_response_bytes, sink.result.streamed);
+    try std.testing.expect(sink.result.dropped);
+    try std.testing.expectEqual(@as(usize, 0), sink.calls.items.len);
+    try std.testing.expectEqual(@as(usize, 257), sink.result.over_cap_fragments);
+}
+
 test "a tool call past the parallel-call ceiling is counted and reported" {
     const gpa = std.testing.allocator;
     var run_state = std.heap.ArenaAllocator.init(gpa);
@@ -1559,39 +1565,41 @@ test "a tool call past the parallel-call ceiling is counted and reported" {
     var out_buf: std.ArrayList(u8) = .empty;
     var unparsable: usize = 0;
     try applyFrame(arena, arena, past, &result, &calls, &out_buf, &unparsable);
-    // The call past the cap is not in the list at all, so it cannot be sized
-    // into it: this is the same count the notice reports.
+    // The call past the cap is not retained and cannot grow the call list.
     try std.testing.expectEqual(@as(usize, 1), calls.items.len);
-    try std.testing.expectEqual(@as(usize, 1), result.over_cap);
+    try std.testing.expectEqual(@as(usize, 1), result.over_cap_fragments);
 
-    const notice = droppedCallNotice(arena, "http://x", .{}, result.over_cap).?;
-    try std.testing.expect(std.mem.indexOf(u8, notice, "1 tool call(s)") != null);
+    const notice = droppedCallNotice(arena, "http://x", .{}, result.over_cap_fragments).?;
+    try std.testing.expect(std.mem.indexOf(u8, notice, "1 tool-call fragment(s)") != null);
     try std.testing.expect(std.mem.indexOf(u8, notice, "not dispatched") != null);
 
-    // The same call streamed as the fragments a long argument arrives in is
-    // one call past the ceiling, not one per fragment.
-    result.over_cap = 0;
-    result.over_cap_index = null;
+    // Count fragments without claiming how many calls they belong to.
+    result.over_cap_fragments = 0;
     for (0..4) |_| {
         const part = std.fmt.bufPrint(&buf, "{{\"choices\":[{{\"delta\":{{\"tool_calls\":[" ++
             "{{\"index\":{d},\"function\":{{\"arguments\":\"[1, 2\"}}}}" ++
             "]}}}}]}}", .{max_tool_calls}) catch unreachable;
         try applyFrame(arena, arena, part, &result, &calls, &out_buf, &unparsable);
     }
-    try std.testing.expectEqual(@as(usize, 1), result.over_cap);
+    try std.testing.expectEqual(@as(usize, 4), result.over_cap_fragments);
+    result.over_cap_fragments = 0;
+    for (0..4) |i| {
+        try applyCallDelta(arena, .{ .integer = @intCast(max_tool_calls + i % 2) }, null, null, "x", &result, &calls);
+    }
+    try std.testing.expectEqual(@as(usize, 4), result.over_cap_fragments);
 
-    // Both reasons at once is one line naming both, and the counts add.
+    // Calls and fragments are different units, so each count names its unit.
     const joined = droppedCallNotice(arena, "http://x", .{ .unusable = 3 }, 2).?;
-    try std.testing.expect(std.mem.indexOf(u8, joined, "5 tool call(s)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, joined, "3 carried no id") != null);
+    try std.testing.expect(std.mem.indexOf(u8, joined, "3 tool call(s)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, joined, "2 additional tool-call fragment(s)") != null);
 
     // An index that saturates rather than wrapping is the same case: the cap is
     // what catches it, and it is counted.
-    result.over_cap = 0;
+    result.over_cap_fragments = 0;
     try applyCallDelta(arena, .{ .number_string = "not a number" }, null, null, null, &result, &calls);
-    try std.testing.expectEqual(@as(usize, 0), result.over_cap);
+    try std.testing.expectEqual(@as(usize, 0), result.over_cap_fragments);
     try applyCallDelta(arena, .{ .float = 1e30 }, null, null, null, &result, &calls);
-    try std.testing.expectEqual(@as(usize, 1), result.over_cap);
+    try std.testing.expectEqual(@as(usize, 1), result.over_cap_fragments);
     try std.testing.expectEqual(@as(usize, 1), calls.items.len);
 }
 
@@ -1945,10 +1953,9 @@ fn fuzzFrame(_: void, smith: *std.testing.Smith) !void {
     try std.testing.expectEqualStrings(content, if (shape.hasContent()) sink.result.content.items else "");
 
     if (shape == .over_cap_call) {
-        // An index past the cap drops the call and says so once, whatever the
-        // fragments that follow it repeat.
+        // An index past the cap drops the call and counts the fragment.
         try std.testing.expectEqual(@as(usize, 0), sink.calls.items.len);
-        try std.testing.expectEqual(@as(usize, 1), sink.result.over_cap);
+        try std.testing.expectEqual(@as(usize, 1), sink.result.over_cap_fragments);
         return;
     }
     if (!shape.hasCall()) {
@@ -2059,7 +2066,7 @@ test "every frame shape the harness writes is a frame the fold reads" {
         const want_calls: usize = if (shape == .over_cap_call) 0 else if (shape.hasCall()) 1 else 0;
         try std.testing.expectEqual(want_calls, sink.calls.items.len);
         if (want_calls == 1) try std.testing.expectEqualStrings("bash", sink.calls.items[0].name);
-        try std.testing.expectEqual(@as(usize, if (shape == .over_cap_call) 1 else 0), sink.result.over_cap);
+        try std.testing.expectEqual(@as(usize, if (shape == .over_cap_call) 1 else 0), sink.result.over_cap_fragments);
     }
 }
 
@@ -2101,12 +2108,11 @@ fn checkRawAccounting(gpa: std.mem.Allocator, payload: []const u8) !void {
         try std.testing.expectEqual(@as(usize, 0), sink.unparsable);
     try std.testing.expect(sink.result.streamed <= max_response_bytes);
     try std.testing.expect(sink.calls.items.len <= max_tool_calls);
-    // One budget, and it is the answer text and every call's arguments
-    // together: a `streamed` the two held separately do not add up to is a
-    // counter that lets a response past the cap.
+    // Retained bytes are charged, and discarded calls spend the allowance too.
     var held: usize = sink.result.content.items.len;
     for (sink.calls.items) |call| held += call.args.items.len;
-    try std.testing.expectEqual(held, sink.result.streamed);
+    try std.testing.expect(held <= sink.result.streamed);
+    if (sink.result.over_cap_fragments == 0) try std.testing.expectEqual(held, sink.result.streamed);
 }
 
 /// The strings a delta carries, drawn as whole tokens: a token list is the

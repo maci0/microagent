@@ -33,6 +33,7 @@ class Provider(BaseHTTPRequestHandler):
     billed_error = False
     invalid_usage = False
     response_bytes = 0
+    response_calls = False
 
     @classmethod
     def reset(cls) -> None:
@@ -47,6 +48,7 @@ class Provider(BaseHTTPRequestHandler):
         cls.billed_error = False
         cls.invalid_usage = False
         cls.response_bytes = 0
+        cls.response_calls = False
 
     def do_POST(self) -> None:
         Provider.seen.append(json.loads(self.rfile.read(int(self.headers["content-length"]))))
@@ -65,7 +67,12 @@ class Provider(BaseHTTPRequestHandler):
                     self.wfile.write(
                         ("data: " + json.dumps({"choices": [{"delta": {"tool_calls": [call]}}]}) + "\n\n").encode()
                     )
-                chunk = ("data: " + json.dumps({"choices": [{"delta": {"content": "x" * 65536}}]}) + "\n\n").encode()
+                delta = (
+                    {"tool_calls": [{"index": 64, "function": {"arguments": "x" * 65536}}]}
+                    if Provider.response_calls
+                    else {"content": "x" * 65536}
+                )
+                chunk = ("data: " + json.dumps({"choices": [{"delta": delta}]}) + "\n\n").encode()
                 for _ in range(Provider.response_bytes // 65536):
                     self.wfile.write(chunk)
                 if Provider.response_bytes > cap:
@@ -298,7 +305,11 @@ def check_response_cap(binary: Path, root: Path, url: str) -> None:
     result = invoke(binary, root, url, ["oversized unfinished response"], "")
     expect(result.returncode == 3 and len(Provider.seen) == 1 and "byte ceiling" in result.stderr, result.stderr)
     expect(not (root / "ceiling-marker").exists(), "a tool from the oversized response was executed")
-    Provider.response_bytes = 0
+    Provider.response_calls = True
+    result = invoke(binary, root, url, ["--stall-timeout", "1", "oversized rejected tool arguments"], "")
+    expect(result.returncode == 3 and len(Provider.seen) == 1 and "byte ceiling" in result.stderr, result.stderr)
+    expect(not (root / "ceiling-marker").exists(), "a tool from the oversized rejected-call response was executed")
+    Provider.reset()
 
 
 if __name__ == "__main__":

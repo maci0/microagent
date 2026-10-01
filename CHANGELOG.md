@@ -35,6 +35,9 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- Arguments of rejected tool calls still spend the response byte allowance, so
+  excessive indices cannot bypass the ceiling. Rejection diagnostics count
+  streamed fragments without treating interleaved fragments as separate calls.
 - MCP replies are checked for excessive JSON nesting before parsing their trees,
   so deeply nested schemas, structured results and errors cannot crash serialization.
 - Non-object MCP error replies retain only a capped diagnostic instead of the

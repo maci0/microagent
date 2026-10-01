@@ -2961,7 +2961,7 @@ fn runTurn(
     session_mod.writeRecord(io, arena, session, model_ms, &result);
     spent.* +|= result.total_tokens;
     try finishTurn(io, arena, gpa, msgs, &result, usage, budget, tool_env, progress, opts.skills, mcp, opts.disabled_tools, opts.deny_commands, opts.writable_roots);
-    if (result.unusable_calls != 0 or result.over_cap != 0) {
+    if (result.unusable_calls != 0 or result.over_cap_fragments != 0) {
         try conversation_mod.appendMessage(gpa, msgs, "user", "Some requested tool calls were not dispatched because their id/name or JSON arguments were invalid, or the parallel-call limit was exceeded. Reissue only the missing work as valid tool calls.");
         return .wants_tools;
     }
@@ -3720,7 +3720,7 @@ fn streamChatOnce(
     // assistant message that goes back names fewer calls than the stream did.
     const dropped = stream_mod.keepRunnableCalls(gpa, &result.calls);
     result.unusable_calls = dropped.unusable;
-    if (stream_mod.droppedCallNotice(arena, shown_url, dropped, result.over_cap)) |notice| net.note(io, arena, "{s}\n", .{notice});
+    if (stream_mod.droppedCallNotice(arena, shown_url, dropped, result.over_cap_fragments)) |notice| net.note(io, arena, "{s}\n", .{notice});
     if (dropped.duplicate > 0) net.note(io, arena, "microagent: the completion stream from {s} carried {d} tool call(s) whose id this response had already delivered; they are not dispatched a second time\n", .{ shown_url, dropped.duplicate });
     return result;
 }
