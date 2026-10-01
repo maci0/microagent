@@ -112,7 +112,8 @@ make check-changelog-history # the 0.y bump rule over every released section, ol
 `make check` runs, in order: `preflight`, `zig-version`,
 `check-unreleased`, `check-changelog-history`, `check-readme`, `check-help`, `check-man`, `fmt-check`, `lint`
 (`lint-versions`, `lint-lock`, `check-sbom`, shellcheck over the tracked scripts
-and over the `run:` steps in the workflows, `ruff check`, `ruff format --check`,
+and over the `run:` steps in the workflows, with a shellcheck directive that
+silences nothing refused in both, `ruff check`, `ruff format --check`,
 yamllint, the Markdown check and `check-refs`), `zig build test`,
 `zig build test-sanitize`, and `check-binary` (a `ReleaseSmall` build whose
 binary it then starts). These are the checks

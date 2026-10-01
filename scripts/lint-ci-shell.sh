@@ -126,6 +126,23 @@ status=0
 # shellcheck disable=SC2086
 shellcheck $SHELLCHECK_OPTS -s bash "$tmp"/*.sh > "$tmp/report" || status=$?
 
+# The same bodies are asked the question the scripts are asked above: a
+# directive naming a check nothing raises is silencing nothing. Two were
+# carrying that here, both `SC2312` in a step running `set -o pipefail`, which
+# the checker reads itself and so never raised it; they are gone. The check runs
+# over the extracted bodies rather than the documents because the bodies are
+# what the checker reads, so the answer is about the same text the report above
+# is about, and `-s bash` is passed on for the reason the invocation above
+# passes it: a body carries no shebang. The bodies are the glob the checker
+# above reads, so the question is asked of exactly the files its report is
+# about.
+status_stale=0
+# because: the options arrive as one Makefile variable and shellcheck takes
+# them as separate words, so the split is the point
+# shellcheck disable=SC2086
+SHELLCHECK_OPTS="$SHELLCHECK_OPTS" sh "$(dirname "$0")/lint-shell-stale.sh" \
+  -s bash "$tmp"/*.sh > "$tmp/stale" 2>&1 || status_stale=$?
+
 # The report, named back to the workflow it came from: shellcheck opens each
 # finding with `In <file> line <n>:`, and both halves are a temporary path and
 # a line counted from a header this script wrote. Literal blocks map line by
@@ -150,6 +167,34 @@ awk -v base="$tmp/" '
   { print }
 ' "$tmp/manifest" "$tmp/report"
 
+# The stale report is named back the same way, and it is what the gate fails on
+# when it names anything. The line is the directive's own in the body, so the
+# same header shift the report above applies applies here too.
+if [ "$status_stale" -ne 0 ] && [ -s "$tmp/stale" ]; then
+  awk -F: -v base="$tmp/" '
+    FNR == NR { split($0, f, "\t"); shift_of[f[1]] = f[3]; where[f[1]] = f[2]; next }
+    {
+      path = $1
+      sub("^" base, "", path)
+      sub("[.]sh$", "", path)
+      # The rest of the line carries the temporary path the body was extracted
+      # to, which is the half of the report an author cannot act on, so it is
+      # dropped: the line in front is the workflow and the line in it.
+      msg = $0
+      sub("^" $1 ":" $2 ":", "", msg)
+      if (path in where) printf "%s:%d: %s\n", where[path], $2 + shift_of[path], msg
+      else print $0
+    }
+  ' "$tmp/manifest" "$tmp/stale" >&2
+  echo "every shellcheck disable in a workflow run: body names a check the tree never raises, so it silences nothing" >&2
+fi
+
 rm -rf "$tmp"
 trap - EXIT
+# The checker's own status is what the gate exits on, and the stale check only
+# ever turns a pass into a failure, so a report that named nothing leaves it
+# exactly as it was rather than resetting it to zero.
+if [ "$status_stale" -ne 0 ]; then
+  status="$status_stale"
+fi
 exit "$status"

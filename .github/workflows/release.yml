@@ -187,17 +187,17 @@ jobs:
             exit 1
           fi
 
-          # because: the step runs `set -o pipefail`, so the assignment takes the exit status
-          # of the last command in it and `set -e` stops the step when that fails, so the
-          # return value is not masked here
-          # shellcheck disable=SC2312
+          # No `disable=SC2312` here: this step runs `set -o pipefail`, so the
+          # assignment already takes the exit status of the last command in the
+          # pipeline and `set -e` stops the step when that fails. shellcheck
+          # reads pipefail itself and does not raise the finding, so the two
+          # directives that were here silenced nothing: they were a warning
+          # nothing could report, and a step that later dropped pipefail would
+          # have had its masked return value silenced by a directive whose own
+          # `# because:` line said pipefail was the thing making it safe.
           published="$(gh release view "${GITHUB_REF_NAME}" --json assets --jq '.assets[].name' | sort)"
           # compgen rather than ls, which mangles a name carrying a character
           # its own output columns are made of.
-          # because: the step runs `set -o pipefail`, so the assignment takes the exit status
-          # of the last command in it and `set -e` stops the step when that fails, so the
-          # return value is not masked here
-          # shellcheck disable=SC2312
           built="$(cd dist && compgen -G 'microagent-*' | sort)"
           if [ "$published" != "$built" ]; then
             echo "the published release and this tag's build disagree on the asset list" >&2

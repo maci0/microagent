@@ -169,7 +169,7 @@ help:
 	  'fmt-check             what check runs over the same files, without rewriting' \
 	  'check                 preflight, zig-version, check-unreleased, check-changelog-history, check-readme, check-help, check-man, fmt-check, the linters, the tests, an optimized build' \
 	  'lint                  the version and lock checks, the release inventory, then shellcheck, ruff and yamllint' \
-	  'lint-shell            shellcheck over every tracked .sh file' \
+	  'lint-shell            shellcheck over every tracked .sh file, and refuse a directive that silences nothing' \
 	  'lint-ci               shellcheck over the run: steps, and the action pins and runner semantics, in the workflows and composite actions' \
 	  'lint-python           ruff check and ruff format --check over every tracked .py file' \
 	  'lint-yaml             yamllint over every tracked .yml and .yaml file' \
@@ -554,6 +554,25 @@ SHELLCHECK_OPTS := -x --enable=$(SHELLCHECK_CHECKS)
 # grep reads a file a line at a time. The marker is matched as three whole
 # words after the indentation, so a mention of it in prose does not satisfy it,
 # and the scan stops at the first line that is not a comment.
+#
+# A reason is not the other half of what makes a suppression reviewable, and
+# this is: a directive that silences nothing is not a suppression but a comment
+# shaped like one, and the reason above it reads as an answer to a question
+# nobody is asking any more. The dangerous case is a directive the fix for its
+# own finding left behind. That fix cannot come back on its own, so the
+# directive outlives it, and a later edit reintroducing the class is silenced by
+# a line whose reason says this code is safe. lint-shell-stale.sh asks that by
+# stripping every directive and running the checker again, so a name the tree
+# raises nowhere is what a directive naming it is silencing nothing over. Two
+# were carrying that in release.yml, both SC2312 in a step running
+# `set -o pipefail`, which shellcheck reads itself and so never raised it; the
+# directives are gone and the check is what stops the next pair arriving.
+# lint-ci-shell.sh asks the same question of the workflow `run:` bodies it
+# extracts, which is where those two were, so the answer covers every body the
+# gate checks rather than the tracked scripts alone. Its self-test runs in
+# lint for the reason lint-versions-selftest.sh does: a refusal that stops
+# running reads exactly like a refusal that passes. The Python side of this
+# needs no script, because RUF100 asks it on every run.
 
 lint-shell:
 	@set -eu; \
@@ -582,6 +601,8 @@ lint-shell:
 	    exit 1; \
 	  }; \
 	done; \
+	SHELLCHECK_OPTS='$(SHELLCHECK_OPTS)' sh scripts/lint-shell-stale-selftest.sh; \
+	SHELLCHECK_OPTS='$(SHELLCHECK_OPTS)' sh scripts/lint-shell-stale.sh $$files; \
 	$(TRACKED) -z '*.sh' | xargs -0 shellcheck $(SHELLCHECK_OPTS)
 
 # The shell in the workflows is the same language under the same options, and

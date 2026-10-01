@@ -77,6 +77,22 @@ release, and `microagent update` moves you to it.
   claim now, and taken back down on the same terms as a failed write when the
   flush itself cannot be promised.
 
+- The gate refuses a shellcheck directive that silences nothing. The reason
+  rule already asked every `# shellcheck disable=` for a `# because:` line and a
+  named check, so a suppression reads as deliberate; nothing asked whether it
+  was still needed, and a directive outlives the finding it silenced when the
+  fix for that finding never touched it again. It then covers only a
+  regression, while its reason reads as an answer about the code as it stands.
+  Two were carrying that in `release.yml`, both `SC2312` in a step running
+  `set -o pipefail`, which shellcheck reads itself and so never raised it: they
+  are gone. `lint-shell-stale.sh` asks the question by stripping every
+  directive and running the checker again, so a name the tree raises nowhere is
+  what a directive naming it is silencing nothing over; its self-test runs from
+  `lint` for the reason the version check's does, a refusal that stops running
+  reading exactly like a refusal that passes. `lint-ci` asks the same question
+  of the `run:` bodies it extracts, which is where those two were. The Python
+  side needs no script, because `RUF100` asks it on every run.
+
 - The gate runs the self-test for its own version check. `lint-versions.sh` is
   the check that every record of a linter pin -- the Makefile, both manifests,
   the compiled lock and `ruff.toml` -- names one version, and it is a set of
