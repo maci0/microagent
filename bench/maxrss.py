@@ -23,6 +23,7 @@ import shutil
 import signal
 import sys
 from contextlib import suppress
+from functools import cache
 from pathlib import Path
 from typing import NoReturn
 
@@ -36,8 +37,28 @@ PTRACE_EVENT_EXIT = 6
 EXEC_FAILED = 127
 
 libc = ctypes.CDLL(None, use_errno=True)
-libc.ptrace.argtypes = [ctypes.c_long, ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p]
-libc.ptrace.restype = ctypes.c_long
+
+
+@cache
+def _libc_ptrace() -> object:
+    """libc's `ptrace`, or False where libc has no such symbol.
+
+    The lookup is the first call rather than three module-level lines because a
+    host whose libc carries no `ptrace` raises `AttributeError` the moment the
+    attribute is read, and reading it while the module loads put that traceback
+    ahead of the refusal `main` gives on this platform, ahead of the argument
+    check, and ahead of `main` itself. macOS is such a host, and `main` is
+    written to send a macOS contributor one line saying the measurement is
+    Linux's rather than a missing-symbol traceback ending in a name they then
+    have to look up. Cached, so libc is asked once.
+    """
+    try:
+        symbol = libc.ptrace
+    except AttributeError:
+        return False
+    symbol.argtypes = [ctypes.c_long, ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p]
+    symbol.restype = ctypes.c_long
+    return symbol
 
 
 def hwm_kb(pid: int) -> int:
@@ -48,7 +69,10 @@ def hwm_kb(pid: int) -> int:
 
 
 def ptrace(request: int, pid: int = 0, data: int = 0) -> None:
-    if libc.ptrace(request, pid, None, ctypes.c_void_p(data)) == -1:
+    call = _libc_ptrace()
+    if call is False:
+        raise RuntimeError("this host's libc has no ptrace; the measurement is Linux's")
+    if call(request, pid, None, ctypes.c_void_p(data)) == -1:
         raise OSError(ctypes.get_errno(), "ptrace")
 
 

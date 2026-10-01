@@ -77,6 +77,16 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- `bench/maxrss.py` reports a host without `ptrace` instead of a traceback.
+  It asked libc for the symbol at import, and a libc that carries no such
+  symbol raises `AttributeError` the moment the attribute is read -- so on
+  macOS, which the script's own guard is written for, a contributor got a
+  missing-symbol traceback ending in a name they then had to look up, ahead of
+  the one line saying the measurement is Linux's, ahead of the argument check
+  and ahead of `main` itself. The lookup is now the first call, cached, and a
+  libc without the symbol is refused with that same line. A check in
+  `bench/test_maxrss.py` holds the refusal.
+
 - `git blame` honours the `limit` the tool schema advertises. Every other
   subcommand's line cap was applied by `gitResult` and this one was not: the
   redaction pass sat where the cut would have gone, so a blame of a generated

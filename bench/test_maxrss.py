@@ -66,10 +66,37 @@ def check_tracing_failure() -> None:
         raise AssertionError("a child survived a ptrace failure")
 
 
+def check_libc_without_ptrace() -> None:
+    """A libc with no ptrace is refused, not a traceback.
+
+    macOS is such a libc, and `main` is written to send a contributor there one
+    line saying the measurement is Linux's. Asking libc for the symbol while
+    the module loads put the missing-symbol AttributeError ahead of that
+    refusal, so the run ended in a traceback ending in a name the reader then
+    had to look up.
+    """
+    asked: list[int] = []
+
+    def no_ptrace() -> object:
+        asked.append(1)
+        return False
+
+    with patch.object(maxrss, "_libc_ptrace", no_ptrace):
+        try:
+            maxrss.ptrace(maxrss.PTRACE_TRACEME)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("a libc without ptrace was called anyway")
+    if not asked:
+        raise AssertionError("the missing symbol was never asked about")
+
+
 if __name__ == "__main__":
     if sys.platform.startswith("linux"):
         check()
         check_tracing_failure()
+        check_libc_without_ptrace()
         print("Memory benchmark checks passed")
     else:
         print("Memory benchmark checks skipped: Linux only")
