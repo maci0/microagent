@@ -41,6 +41,27 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- `git` now prints paths as the tree spells them. Every command the `git` tool
+  runs was asked for `--no-pager` and nothing else, which left `core.quotePath`
+  at its default of on, so a file with a name that is not ASCII came back
+  written as a C-style octal escape inside double quotes: a repository holding
+  `café.txt` reported `AM "caf\303\251.txt"`, and `日本語.txt` and `🚀.txt` the
+  same. That string is not a path. The quotes and the backslashes are git's
+  spelling rather than the file's, and a run that has just been shown where its
+  change landed has no name it can hand back to `read`, to `edit` or to the
+  `git` tool's own `path` -- it gets a file that does not exist, for every file
+  in the tree whose name needs escaping. `-c core.quotePath=false` goes on the
+  command line rather than into a config, so it holds for whatever repository
+  the tool runs in, which is not one whose settings this program wrote.
+
+- A ranged `read` no longer leaves a carriage return on the last line of a file
+  that ends in one. Every line but the last was split on `\n` and had a
+  trailing `\r` dropped; the last was whatever followed the final `\n` and was
+  written whole. On a file cut before its newline -- `one\r\ntwo\r`, the shape a
+  CRLF file has once its terminator is gone -- the two paths disagreed about the
+  same line, and the model was handed a byte `old_string` had to reproduce to
+  match it.
+
 - Every HTTP request now carries `User-Agent: microagent/<version>`. The
   provider completions call and a remote MCP server were left to the client
   library's default, which names the toolchain the binary was built with

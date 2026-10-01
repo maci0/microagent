@@ -820,8 +820,19 @@ fn gitArgv(
     // Reserving it replaces the walk up the doubling ladder, which on the turn
     // arena leaves every intermediate block behind. `toolSearch` and `toolAst`
     // reserve for the same reason and the same shape of list.
-    try argv.ensureTotalCapacity(arena, 10 + credential_pathspecs.len);
+    try argv.ensureTotalCapacity(arena, 12 + credential_pathspecs.len);
     try argv.appendSlice(arena, &.{ "git", "--no-pager" });
+    // Every path git prints is spelled the way the tree spells it, as UTF-8
+    // rather than as the C-style octal escapes git defaults to. A file named
+    // `café.txt` otherwise arrives as `"caf\303\251.txt"`, which is a name the
+    // model cannot pass back to `read`, `edit` or this tool's own `path`: the
+    // quotes and the backslashes are git's spelling rather than the file's, so a
+    // run that has just been shown where the change landed cannot open it.
+    // `status`, `diff`, `log` and `show` all print paths, and every one of them
+    // escapes a byte above 0x7f by default. The setting is on the command line
+    // rather than in a config so it holds for whatever repository the tool runs
+    // in, which is not one whose settings this program wrote.
+    try argv.appendSlice(arena, &.{ "-c", "core.quotePath=false" });
     if (std.mem.eql(u8, cmd, "status")) {
         try argv.appendSlice(arena, &.{ "status", "--short", "--branch" });
     } else if (std.mem.eql(u8, cmd, "diff")) {
@@ -2173,7 +2184,11 @@ fn readLines(io: Io, arena: std.mem.Allocator, path: []const u8, offset: usize, 
     // paths and the boundary is the same one.
     if (consumed == max_read_bytes) return readFailed(arena, path, error.StreamTooLong);
     if (rest.items.len > 0 and line + 1 >= offset and taken < limit) {
-        try buf.appendSlice(arena, rest.items);
+        // The last line, dropped the same way every line before it is: the
+        // carriage return of a CRLF line is an invisible byte at the end of the
+        // line, and a file cut before its newline still carries one.
+        const end = if (rest.items[rest.items.len - 1] == '\r') rest.items.len - 1 else rest.items.len;
+        try buf.appendSlice(arena, rest.items[0..end]);
         try buf.append(arena, '\n');
     }
     return buf.items;
@@ -3460,6 +3475,14 @@ const read_lines_corpus = [_][]const u8{
     " {\"a\":1}\n {\"b\":2}\n",
     "\n\n\n\n\n\n\n\n\n\nleading blanks",
     "trailing\n\n\n\n\n\n\n",
+    // A last line that ends in a carriage return and no newline of its own: the
+    // shape a file written on Windows and cut before its terminator has. Every
+    // other line drops the `\r` on the way out, so a range over this file agreed
+    // with the split-based reader on every line but that one.
+    "one\r\ntwo\r",
+    "\r",
+    "abc\r",
+    "a\r\nb\r",
 };
 
 test "a fuzzed ranged read frames the file the same way the split-based reader did" {
@@ -5606,6 +5629,63 @@ test "a blamed line does not carry the name of whoever wrote it" {
     }
 }
 
+// A path git prints is a path the model has to spell back, on the next turn, to
+// `read`, to `edit` or to this tool's own `path`. Git's default is to write a
+// path holding a byte above 0x7f as a C-style octal escape inside double
+// quotes, so a repository holding `café.txt` reports `AM "caf\303\251.txt"`,
+// and that string is not a name: the quotes and the backslashes are git's
+// spelling rather than the file's, and a model that hands the line back
+// verbatim gets a path that does not exist. Nothing else in the result names
+// the file, so a change the run just made cannot be opened.
+test "a path git prints is the path the tree spells" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // Three spellings of a name that is not ASCII, one per width: a two-byte, a
+    // three-byte and a four-byte character. A git that escapes one of them
+    // escapes all three, and a fix that handled only the two-byte case would
+    // pass on a filename the tree is just as likely to carry the other two in.
+    const names = [_][]const u8{ "caf\u{00e9}.txt", "\u{65e5}\u{672c}\u{8a9e}.txt", "\u{1f680}.txt" };
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+
+    // Committed first and edited after, so the working tree holds a change
+    // against each of them and both `status` and `diff` have a path to print.
+    for (names) |name| try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "x\n" });
+    try commitOneFixture(io, arena, root);
+    for (names) |name| try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "y\n" });
+
+    // The octal lead bytes a git escaping a path above 0x7f writes: `é` is C3,
+    // `日` is E6 and the rocket is F0.
+    const escapes = [_][]const u8{ "\\303", "\\346", "\\360" };
+    for ([_][]const u8{ "status", "diff" }) |cmd| {
+        const rev: ?[]const u8 = if (std.mem.eql(u8, cmd, "diff")) "HEAD" else null;
+        const res = try runCapped(io, arena, try gitIn(arena, root, cmd, rev, null), 1 << 20, net.durationMs(60_000), null, null);
+        const text = res.stdout;
+        for (names) |name| {
+            if (std.mem.indexOf(u8, text, name) == null) {
+                std.debug.print("git {s} printed no '{s}': {s}\n", .{ cmd, name, text });
+                return error.TestUnexpectedResult;
+            }
+        }
+        for (escapes) |escape| {
+            if (std.mem.indexOf(u8, text, escape) != null) {
+                std.debug.print("git {s} escaped a path it had no reason to: {s}\n", .{ cmd, text });
+                return error.TestUnexpectedResult;
+            }
+        }
+        // What the model reads has to be text it can hand back.
+        try std.testing.expect(std.unicode.utf8ValidateSlice(text));
+    }
+}
+
 // The `YYYY-MM-DD` git printed on the first line it gave, which the cut has to
 // leave standing. The name can hold spaces of its own, so the date is found by
 // its shape rather than by the first gap after the paren.
@@ -5650,6 +5730,24 @@ test "a blame line keeps its date on every line, however the number is padded" {
     try std.testing.expectEqualStrings(
         "50f8f504 (2026-09-29 06:44:53 -0730   42) x",
         try redactBlameNames(arena, "50f8f504 (Marcel W. Wysocki 2026-09-29 06:44:53 -0730   42) x"),
+    );
+
+    // A name is not ASCII, and the fields the cut is counted back from are:
+    // `Zoë Ünïcode Ñoño Ñame` is eleven characters over twenty-nine bytes, so a
+    // count taken in characters rather than bytes lands inside the name and takes
+    // the date with it. Every line below is the same line with a name of
+    // another width, and what has to survive the cut is the same in each.
+    try std.testing.expectEqualStrings(
+        "c290f01 (2026-09-29 23:23:33 +0800  1) x",
+        try redactBlameNames(arena, "c290f01 (Zo\u{00eb} \u{00dc}n\u{00ef}code 2026-09-29 23:23:33 +0800  1) x"),
+    );
+    try std.testing.expectEqualStrings(
+        "c290f01 (2026-09-29 23:23:33 +0800  1) x",
+        try redactBlameNames(arena, "c290f01 (\u{65e5}\u{672c}\u{8a9e} 2026-09-29 23:23:33 +0800  1) x"),
+    );
+    try std.testing.expectEqualStrings(
+        "c290f01 (2026-09-29 23:23:33 +0800  1) x",
+        try redactBlameNames(arena, "c290f01 (\u{1f469}\u{200d}\u{1f4bb} 2026-09-29 23:23:33 +0800  1) x"),
     );
 }
 
@@ -5732,6 +5830,13 @@ const blame_corpus = [_][]const u8{
     "abc1234 (Rosa Fixture 2026-09-30 03:29:32 +0800 1) x\n" ** 8,
     "abc1234 (Name 2026-09-30 03:29:32 +0800 " ** 16,
     ("abc1234 (Name 2026-09-30 03:29:32 +0800 1) x\n" ** 8) ++ "abc1234 (Name",
+    // A name is not ASCII: the date, the zone and the number beside it are, and
+    // the cut is counted back from those rather than forward from the name, so a
+    // name of two or three bytes to the character has to leave them where they
+    // were rather than shift the whole line.
+    "abc1234 (Zo\u{00eb} \u{00dc}n\u{00ef}code \u{00d1}o\u{00f1}o \u{00d1}ame 2026-09-30 03:29:32 +0800 1) x",
+    "abc1234 (\u{65e5}\u{672c}\u{8a9e} 2026-09-30 03:29:32 +0800    42) y",
+    "abc1234 (\u{1f469}\u{200d}\u{1f4bb} 2026-09-30 03:29:32 -0730 2000) z",
 };
 
 test "a fuzzed blame keeps every line's hash, date and number and cuts nothing else" {
@@ -5993,6 +6098,12 @@ fn fuzzGitArgv(_: void, smith: *std.testing.Smith) !void {
     // no model value can stand where they are and no pager can interpose.
     try std.testing.expectEqualStrings("git", argv[0]);
     try std.testing.expectEqualStrings("--no-pager", argv[1]);
+    // The setting that decides how git spells a path in its output. Left at its
+    // default, every path above 0x7f is written as a C-style octal escape inside
+    // quotes -- `café.txt` arrives as `"caf\303\251.txt"` -- so a run shown
+    // where its change landed has no name it can hand to `read` or `edit`.
+    try std.testing.expectEqualStrings("-c", argv[2]);
+    try std.testing.expectEqualStrings("core.quotePath=false", argv[3]);
 
     // The separator is where the fixed words end, and the tail after it is the
     // exclusion set plus the model's own path, in that order and complete. A
