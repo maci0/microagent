@@ -118,7 +118,10 @@ a value of --print, is a task, and so is the word "update" anywhere but
 first: as the first argument it is the subcommand below, and a task of
 that name is written after a flag or a --. "help update" is that
 subcommand's own text, and a word after "help" that names no subcommand
-is a usage error rather than this text. A
+is a usage error rather than this text; a second word is a usage error
+too, and it names the word that names no subcommand rather than only
+counting what arrived, so help update --check says --check is the one
+that is wrong. A
 second bare word is the one thing this does not read as a task: two prompts
 are a usage error. A word that names no flag is answered with the one it
 is closest to, so --modl says did you mean --model?; a word close to none

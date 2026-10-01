@@ -57,6 +57,22 @@ release, and `microagent update` moves you to it.
   its contents rather than with the directory entry alone, which left every file
   under `.secrets/` in the diff. `search` and `ast` were not affected: ripgrep reads
   `!` in a glob the way the set was written for.
+- A `help` invocation with more than one argument names the word that is wrong.
+  The message carried the count alone, which sends the reader back to the command
+  line to work out which of the words was the mistake, and a flag is the usual
+  one: `help update --check` is a reader who expected `--check` to do something.
+  The count is kept, because a reader who passed a whole phrase is told by the
+  number that they did. The single-argument case already named its word; this is
+  that message for the count.
+- `bench/monotonic.sh` reads perl's `CLOCK_MONOTONIC` before `/proc/uptime` on
+  every host, so a Linux laptop that suspended mid-benchmark no longer books the
+  suspend as harness time. `/proc/uptime` is `CLOCK_BOOTTIME` by its own man
+  page, and it was preferred on Linux, so the two hosts' numbers answered
+  different questions and `docs/benchmark.md` compared them anyway. perl answers
+  `CLOCK_MONOTONIC` on Linux too, so the suspend-free clock wins wherever perl is
+  installed; the `/proc/uptime` reading remains the fallback for a Linux host
+  without it, and the page now says a number from the fallback is not comparable
+  with one from `CLOCK_MONOTONIC`.
 - `make install` checks the Zig version build.zig.zon declares, as `make musl`
   and `make release-assets` already do. It compiled with whatever compiler was
   on PATH, so a contributor installing on a newer Zig put a binary on their
@@ -95,6 +111,20 @@ release, and `microagent update` moves you to it.
   held a bare `read_text()`, so a run under a locale whose default codec is not
   UTF-8 raised `UnicodeDecodeError` inside the cleanup and skipped the kill,
   leaving the descendant process this exists to reap alive.
+
+### Security
+
+- The `git` tool's credential exclusions reach a credential at any path depth. A
+  git pathspec holding neither a `/` nor a wildcard is anchored at the
+  repository root, so `:(exclude,icase)credentials` excluded `./credentials` and
+  left `deploy/credentials` in the patch, and `:(exclude,icase).secrets/**` left
+  `deploy/.secrets/openrouter` the same way — the shape the `isCredentialPath`
+  rule refuses at any depth, and the one the ripgrep globs beside them already
+  covered. Every bare name in the set now carries the `**/` spelling beside the
+  anchored one; a pattern that already carries a wildcard is left alone, since
+  it matches at any depth on its own and `**/` in front of it would exclude
+  nothing at all. This is the second and separate hole from the `Fixed` entry
+  above, which was the leading `!` and a directory's contents.
 
 ## [0.12.0] - 2026-10-01
 
