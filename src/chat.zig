@@ -624,8 +624,39 @@ fn isCombiningMark(cp: u21) bool {
     };
 }
 
-/// A UTF-8 prefix under `max`, keeping the combining marks above with their
-/// preceding base. Every caller sends the result in a JSON request body.
+/// A code point that carries no glyph of its own and renders only as part of a
+/// cluster with a base: the joiner that glues a ZWJ emoji sequence together, a
+/// variation selector that picks the emoji or text picture for the base before
+/// it, an emoji modifier (skin tone) that recolors a base, the regional
+/// indicators a flag is a pair of, and the tag characters a flag subdivision
+/// spells its letters with. Left at the end of a clamped prefix they read as
+/// nothing, so the model is shown an emoji that has silently lost the face,
+/// the tone, or half of its flag. The combining marks above are the same kind
+/// of character for a script that writes with them; these are the ones an
+/// emoji sequence is written with, and they are exactly the set a run of them
+/// leaves the cluster joined to rather than the base itself.
+fn isClusterContinuation(cp: u21) bool {
+    return switch (cp) {
+        // ZERO WIDTH JOINER, the glue in 👩‍👩‍👧.
+        0x200d => true,
+        // VARIATION SELECTOR-15 and -16, which pick the text or emoji picture
+        // for the base before them (❤ with, ❤ without).
+        0xfe0e, 0xfe0f => true,
+        // EMOJI MODIFIER FITZPATRICK TYPE-1-2..TYPE-6, the skin tones 👍🏻.
+        0x1f3fb...0x1f3ff => true,
+        // REGIONAL INDICATOR SYMBOL LETTER A..Z, the halves a flag is made of.
+        0x1f1e6...0x1f1ff => true,
+        // TAG characters, the ASCII a subdivision flag (🏴󠁧󠁢󠁥󠁮󠁧󠁿) spells with.
+        0xe0020...0xe007f => true,
+        // COMBINING ENCLOSING KEYCAP, the mark after 1️⃣.
+        0x20e3 => true,
+        else => false,
+    };
+}
+
+/// A UTF-8 prefix under `max`, keeping the combining marks and cluster
+/// continuations above with the base they attach to. Every caller sends the
+/// result in a JSON request body.
 pub fn clamp(s: []const u8, max: usize) []const u8 {
     if (s.len <= max) return s;
     var end = max;
@@ -639,6 +670,22 @@ pub fn clamp(s: []const u8, max: usize) []const u8 {
         if (!isCombiningMark(cp)) break;
         end -= 1;
         while (end > 0 and s[end] & 0xc0 == 0x80) end -= 1;
+    }
+    // The kept prefix may end on a cluster continuation whose base is just
+    // before it (a woman then a joiner, a thumb then a skin tone). That base is
+    // present, so the forward walk above, which only looks at what comes after
+    // the cut, does not see it: without this the prefix keeps a dangling
+    // joiner or a tone that renders as nothing. Step back over any run of them
+    // so the cut never leaves a continuation with nothing for it to join.
+    while (end > 0) {
+        // The last code point of the kept prefix.
+        var start = end - 1;
+        while (start > 0 and s[start] & 0xc0 == 0x80) start -= 1;
+        const len = utf8SequenceLen(s, start);
+        if (len == 0 or start + len != end) break; // not the whole last code point
+        const cp = std.unicode.utf8Decode(s[start..][0..len]) catch break;
+        if (!isClusterContinuation(cp)) break;
+        end = start;
     }
     return s[0..end];
 }
@@ -1341,6 +1388,44 @@ test "a cut keeps a base and combining marks whole at UTF-8 boundaries" {
             const kept = clamp(case.text, budget);
             try std.testing.expect(std.unicode.utf8ValidateSlice(kept));
             try std.testing.expectEqualStrings(case.text[0..end], kept);
+        }
+    }
+}
+
+test "a cut never leaves an emoji cluster ending on a bare joiner or modifier" {
+    // A joiner, a variation selector, a skin tone and a regional indicator all
+    // render as nothing on their own: the model would be shown an emoji that
+    // has silently lost the face, the tone, or half of its flag. So a cut that
+    // lands on one falls back to the last base the cluster had rather than
+    // keeping a base followed by a joiner that joins to nothing.
+    const Case = struct { text: []const u8, at_each: []const usize, boundary: usize };
+    for ([_]Case{
+        // A family, three people joined: a cut on a joiner falls back to the
+        // last whole person rather than keeping one followed by a joiner.
+        .{ .text = "\u{1f469}\u{200d}\u{1f469}\u{200d}\u{1f467}", .at_each = &.{ 7, 10 }, .boundary = 4 },
+        // A thumb in one skin tone: a cut on the tone keeps the plain thumb.
+        .{ .text = "x\u{1f44d}\u{1f3fd}y", .at_each = &.{ 6, 9 }, .boundary = 5 },
+        // A heart with a variation selector: the selector says which picture
+        // of it to draw, so a cut that leaves it cannot keep it.
+        .{ .text = "x\u{2764}\u{fe0f}y", .at_each = &.{ 5, 7 }, .boundary = 4 },
+        // An England flag, whose tag characters spell the letters: a cut on
+        // one of them is not a flag.
+        .{ .text = "\u{1f3f4}\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f}", .at_each = &.{ 8, 12 }, .boundary = 4 },
+        // A flag made of two regional indicators.
+        .{ .text = "a\u{1f1e6}\u{1f1fa}b", .at_each = &.{ 6, 9 }, .boundary = 1 },
+    }) |case| {
+        // Whatever the budget, what is kept is whole text and a prefix of the
+        // input: the cut never lands inside a character.
+        for (0..case.text.len + 2) |budget| {
+            const kept = clamp(case.text, budget);
+            try std.testing.expect(std.unicode.utf8ValidateSlice(kept));
+            try std.testing.expect(std.mem.startsWith(u8, case.text, kept));
+            try std.testing.expect(kept.len <= @min(budget, case.text.len));
+        }
+        for (case.at_each) |at| {
+            // The exact cut, so a change that stops trimming a dangling joiner
+            // is a failure rather than something the loop above waves through.
+            try std.testing.expectEqualStrings(case.text[0..case.boundary], clamp(case.text, at));
         }
     }
 }
