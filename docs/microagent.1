@@ -1,5 +1,7 @@
-.\" Man page for microagent. The option and environment lists below are checked
-.\" against `microagent --help` by `make check-man`, so the two cannot drift.
+.\" Man page for microagent. Every flag `microagent --help` and
+.\" `microagent update --help` list appears below, and `make check-man` checks
+.\" each one is here, so a flag cannot be added to the binary and left out of
+.\" this page. The ENVIRONMENT section is not checked: nothing reads it.
 .TH MICROAGENT 1 "2026-10-01" "microagent 0.10.1" "User Commands"
 .SH NAME
 microagent \- tiny OpenAI-compatible coding agent
@@ -348,8 +350,13 @@ microagent update --check
 .RE
 .SH SEE ALSO
 .BR rg (1),
-.BR "ast\-grep" (1),
 .BR git (1)
+.PP
+ast\-grep, the third program the
+.B ast
+tool runs, ships no manual page; its command line reference is at
+.UR https://ast-grep.github.io/reference/cli
+.UE .
 .PP
 The full reference, including the config file, the tool set and the sandbox, is
 in
