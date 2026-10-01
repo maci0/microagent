@@ -28,6 +28,7 @@ class Provider(BaseHTTPRequestHandler):
     """
 
     seen: ClassVar[list[dict[str, Any]]] = []
+    paths: ClassVar[list[str]] = []
     empty = False
     trailing_newline = True
     bad_call = False
@@ -54,6 +55,7 @@ class Provider(BaseHTTPRequestHandler):
         cls.response_calls = False
 
     def do_POST(self) -> None:
+        Provider.paths.append(self.path)
         Provider.seen.append(json.loads(self.rfile.read(int(self.headers["content-length"]))))
         if Provider.response_bytes:
             self.send_response(200)
@@ -141,6 +143,7 @@ def invoke(
     binary: Path, root: Path, url: str, args: list[str], prompts: str, **extra_env: str
 ) -> subprocess.CompletedProcess[str]:
     Provider.seen.clear()
+    Provider.paths.clear()
     # A wholly synthetic environment keeps user credentials and settings out.
     env = {
         "PATH": os.environ.get("PATH", ""),
@@ -318,6 +321,20 @@ def check_response_cap(binary: Path, root: Path, url: str) -> None:
     Provider.reset()
 
 
+def check_endpoint_paths(binary: Path, root: Path, url: str) -> None:
+    Provider.reset()
+    for suffix, expected in (
+        ("", "/chat/completions"),
+        ("/v1/", "/v1/chat/completions"),
+        ("/v1?api-version=fixture", "/v1/chat/completions?api-version=fixture"),
+        ("/v1/?api-version=fixture/", "/v1/chat/completions?api-version=fixture/"),
+        ("/v1#fixture", "/v1/chat/completions"),
+        ("/gateway%2Fv1?key=a%26b#fixture", "/gateway%2Fv1/chat/completions?key=a%26b"),
+    ):
+        result = invoke(binary, root, url.removesuffix("/v1") + suffix, ["endpoint path check"], "")
+        expect(result.returncode == 0 and Provider.paths == [expected], (result.stderr, Provider.paths))
+
+
 def load_harbor() -> ModuleType:
     # Exercise the actual readers without installing Harbor or starting a container.
     base = ModuleType("harbor.agents.base")
@@ -426,6 +443,7 @@ if __name__ == "__main__":
             check(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_timeouts(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_response_cap(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
+            check_endpoint_paths(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_harbor_numbers(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_harbor_connection_values(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
         finally:

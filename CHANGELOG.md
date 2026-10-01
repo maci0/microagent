@@ -35,6 +35,8 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- Completion requests append to the base URL's path while preserving its
+  query and percent encoding, rather than appending inside a query or fragment.
 - URL credentials stay redacted in configuration errors, malformed endpoint
   values and allocation failures as well as request diagnostics.
 - Harbor validates endpoint hosts, ports and control characters, and refuses

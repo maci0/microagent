@@ -3226,9 +3226,14 @@ const Endpoint = struct {
 };
 
 fn endpoint(arena: std.mem.Allocator, opts: Options) !Endpoint {
-    const url = try std.fmt.allocPrint(arena, "{s}/chat/completions", .{std.mem.trimEnd(u8, opts.base_url, "/")});
+    var uri = std.Uri.parse(opts.base_url) catch return error.InvalidUrl;
+    // Append to the parsed path, retaining encoded bytes and the query. A
+    // fragment is local URL metadata and never belongs to the HTTP request.
+    uri.path = .{ .percent_encoded = try std.fmt.allocPrint(arena, "{s}/chat/completions", .{std.mem.trimEnd(u8, uri.path.percent_encoded, "/")}) };
+    uri.fragment = null;
+    const url = try std.fmt.allocPrint(arena, "{f}", .{uri});
     return .{
-        .uri = std.Uri.parse(url) catch return error.InvalidUrl,
+        .uri = uri,
         // What the notes below name, and what the userinfo a base url may carry
         // never reaches: the run's log is not the place for a password.
         .shown_url = displayUrl(arena, url),
