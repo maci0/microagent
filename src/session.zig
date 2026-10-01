@@ -254,6 +254,12 @@ fn recordCwd(arena: std.mem.Allocator, env: *const std.process.Environ.Map, reso
     const root = std.mem.trim(u8, home, net.env_surrounding);
     if (root.len == 0 or !std.fs.path.isAbsolute(root)) return resolved;
     if (std.mem.eql(u8, resolved, root)) return home_marker;
+    // A directory shorter than the home, or one that does not start with it,
+    // is not under it. Checked before the slice rather than after the tail:
+    // `resolved[root.len..]` is out of bounds for a directory the home is not
+    // a prefix of at all, which is the ordinary case of a run in a container
+    // whose `HOME` is `/root` and whose working directory is `/workspace`.
+    if (!std.mem.startsWith(u8, resolved, root)) return resolved;
     const tail = resolved[root.len..];
     if (tail[0] != std.fs.path.sep) return resolved;
     return std.fmt.allocPrint(arena, "{s}{s}{s}", .{ home_marker, std.fs.path.sep_str, tail[1..] }) catch resolved;
@@ -301,6 +307,24 @@ test "a record's cwd is the part of the working directory under the home" {
     try std.testing.expectEqualStrings("/home/alice/x", recordCwd(arena, &env, "/home/alice/x"));
     try env.put("HOME", "  ");
     try std.testing.expectEqualStrings("/home/alice/x", recordCwd(arena, &env, "/home/alice/x"));
+
+    // A directory shorter than the home, and one sharing a leading component
+    // but not the whole prefix. Both used to slice past the end of the
+    // directory and abort the run before its first request: `HOME=/root` with
+    // a working directory of `/workspace`, or `/workspace/src` with a home of
+    // `/workspace/repository`, is an ordinary container and an ordinary
+    // subdirectory.
+    try env.put("HOME", "/home/alice/long/home/path");
+    try std.testing.expectEqualStrings("/home/alice/src", recordCwd(arena, &env, "/home/alice/src"));
+    try env.put("HOME", "/workspace/repository");
+    try std.testing.expectEqualStrings("/workspace/src", recordCwd(arena, &env, "/workspace/src"));
+    try std.testing.expectEqualStrings("/workspace", recordCwd(arena, &env, "/workspace"));
+    // Still under the home on a real boundary, with the home merely longer
+    // than the directory that replaced its tail.
+    try std.testing.expectEqualStrings(
+        "~" ++ sep ++ "src",
+        recordCwd(arena, &env, "/workspace/repository/src"),
+    );
 }
 
 /// The stamp a run's log is named from, from a clock reading in nanoseconds. A
