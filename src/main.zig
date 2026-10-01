@@ -2492,6 +2492,21 @@ const Budget = struct {
         return Io.Timestamp.now(io, budget_clock).nanoseconds >= d;
     }
 
+    /// The deadline can exceed the OS timestamp range. Bound each wait and
+    /// recheck the original deadline, retaining the full budget and clock.
+    fn sleep(self: Budget, io: Io) Io.Cancelable!void {
+        const d = self.deadline_ns orelse return;
+        while (true) {
+            const now = Io.Timestamp.now(io, budget_clock).nanoseconds;
+            if (now >= d) return;
+            const until = @min(d, now + std.math.maxInt(u64));
+            try Io.Timeout.sleep(.{ .deadline = .{
+                .raw = .{ .nanoseconds = until },
+                .clock = budget_clock,
+            } }, io);
+        }
+    }
+
     /// Milliseconds left on the budget, or null when there is no budget. Zero
     /// means expired; callers that only care about that use `expired`.
     ///
@@ -3277,7 +3292,7 @@ fn streamChatWithinBudget(
     budget: Budget,
     msgs: []const u8,
 ) !chat_mod.ChatResult {
-    const deadline = budget.deadline_ns orelse return streamChatOnce(client, io, gpa, arena, opts, ep, prefix, budget, msgs);
+    if (budget.deadline_ns == null) return streamChatOnce(client, io, gpa, arena, opts, ep, prefix, budget, msgs);
     if (budget.expired(io)) return error.BudgetExhausted;
     const Outcome = union(enum) {
         answered: anyerror!chat_mod.ChatResult,
@@ -3295,8 +3310,7 @@ fn streamChatWithinBudget(
         .expired => {},
     };
     try select.concurrent(.answered, streamChatOnce, .{ client, io, gpa, arena, opts, ep, prefix, budget, msgs });
-    const timeout: Io.Timeout = .{ .deadline = .{ .raw = .{ .nanoseconds = deadline }, .clock = budget_clock } };
-    try select.concurrent(.expired, Io.Timeout.sleep, .{ timeout, io });
+    try select.concurrent(.expired, Budget.sleep, .{ budget, io });
     return switch (try select.await()) {
         .answered => |answer| answer,
         .expired => error.BudgetExhausted,

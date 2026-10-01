@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import shutil
@@ -12,7 +13,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from socketserver import BaseRequestHandler, ThreadingTCPServer
 from threading import Thread
+from types import ModuleType
 from typing import Any, ClassVar
+from unittest.mock import patch
 
 
 class Provider(BaseHTTPRequestHandler):
@@ -134,7 +137,9 @@ def expect(condition: object, detail: object) -> None:
         raise AssertionError(detail)
 
 
-def invoke(binary: Path, root: Path, url: str, args: list[str], prompts: str) -> subprocess.CompletedProcess[str]:
+def invoke(
+    binary: Path, root: Path, url: str, args: list[str], prompts: str, **extra_env: str
+) -> subprocess.CompletedProcess[str]:
     Provider.seen.clear()
     # A wholly synthetic environment keeps user credentials and settings out.
     env = {
@@ -145,6 +150,7 @@ def invoke(binary: Path, root: Path, url: str, args: list[str], prompts: str) ->
         "MICROAGENT_SKILLS": "",
         "MICROAGENT_SESSION_DIR": str(root / "sessions"),
     }
+    env.update(extra_env)
     # because: the explicitly supplied local binary is the program under test
     result = subprocess.run(  # noqa: S603
         [str(binary), *args],
@@ -312,6 +318,63 @@ def check_response_cap(binary: Path, root: Path, url: str) -> None:
     Provider.reset()
 
 
+def check_harbor_numbers(binary: Path, root: Path, url: str) -> None:
+    Provider.reset()
+    # Exercise the actual readers without installing Harbor or starting a container.
+    base = ModuleType("harbor.agents.base")
+    base.__dict__["BaseAgent"] = object
+    spec = importlib.util.spec_from_file_location(
+        "adapter_check", Path(__file__).resolve().parent.parent / "integrations/harbor/microagent_agent.py"
+    )
+    if spec is None or spec.loader is None:
+        raise AssertionError("the Harbor adapter could not be loaded")
+    adapter = importlib.util.module_from_spec(spec)
+    with patch.dict(sys.modules, {"harbor.agents.base": base}):
+        spec.loader.exec_module(adapter)
+    widths = (
+        ("MICROAGENT_MAX_TOKENS", 32),
+        ("MICROAGENT_STALL_TIMEOUT", 32),
+        ("MICROAGENT_MAX_TURNS", 64),
+        ("MICROAGENT_BUDGET_SECONDS", 64),
+        ("MICROAGENT_MAX_SPEND_TOKENS", 64),
+    )
+    for name, bits in widths:
+        value = str(1 << bits)
+        with patch.dict(
+            os.environ, {"MICROAGENT_API_KEY": "test", "MICROAGENT_BASE_URL": url, name: value}, clear=True
+        ):
+            try:
+                adapter.validate_env()
+            except RuntimeError as error:
+                expect(name in str(error), error)
+            else:
+                raise AssertionError(f"Harbor accepted invalid {name}={value}")
+        result = invoke(binary, root, url, ["number check"], "", **{name: value})
+        expect(result.returncode == 2 and name in result.stderr.splitlines()[0] and not Provider.seen, result.stderr)
+        maximum = str((1 << bits) - 1)
+        with patch.dict(
+            os.environ, {"MICROAGENT_API_KEY": "test", "MICROAGENT_BASE_URL": url, name: maximum}, clear=True
+        ):
+            adapter.validate_env()
+        result = invoke(binary, root, url, ["number boundary"], "", **{name: maximum})
+        expect(result.returncode == 0 and len(Provider.seen) == 1, result.stderr)
+        if name == "MICROAGENT_BUDGET_SECONDS":
+            result = invoke(binary, root, url, ["--budget", maximum, "budget boundary"], "")
+            expect(result.returncode == 0 and len(Provider.seen) == 1, result.stderr)
+    for name in ("MICROAGENT_MAX_TOKENS", "MICROAGENT_STALL_TIMEOUT", "MICROAGENT_MAX_SPEND_TOKENS"):
+        for value in ("١٢", "+12", "1_2"):
+            with patch.dict(os.environ, {name: value}, clear=True):
+                forwarded = adapter.optional_ceiling(name)
+            expect(forwarded == "12", (name, value, forwarded))
+            result = invoke(binary, root, url, ["canonical number"], "", **{name: forwarded})
+            expect(result.returncode == 0 and len(Provider.seen) == 1, result.stderr)
+            if name == "MICROAGENT_MAX_TOKENS":
+                expect(Provider.seen[0]["max_tokens"] == 12, Provider.seen)
+    expect(
+        adapter.checked_int("MICROAGENT_AGENT_TIMEOUT_SEC", str(1 << 64)) == 1 << 64, "Harbor's own timeout was capped"
+    )
+
+
 if __name__ == "__main__":
     binary = Path(sys.argv[1]).resolve(strict=True)
     with tempfile.TemporaryDirectory() as temp, ThreadingHTTPServer(("127.0.0.1", 0), Provider) as server:
@@ -322,6 +385,7 @@ if __name__ == "__main__":
             check(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_timeouts(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_response_cap(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
+            check_harbor_numbers(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
         finally:
             server.shutdown()
             thread.join()

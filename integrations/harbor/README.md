@@ -89,6 +89,8 @@ naming the variable:
 - a non-numeric or zero `MICROAGENT_MAX_TURNS`, `MICROAGENT_BUDGET_SECONDS`,
   `MICROAGENT_AGENT_TIMEOUT_SEC`, `MICROAGENT_MAX_TOKENS`,
   `MICROAGENT_MAX_SPEND_TOKENS` or `MICROAGENT_STALL_TIMEOUT`;
+- generation and stall ceilings above `4294967295`, or turn, budget and spend
+  ceilings above `18446744073709551615`;
 - a `MICROAGENT_REASONING_EFFORT` that is not one of `minimal`, `low`,
   `medium`, `high`, `none`;
 - a `MICROAGENT_BASE_URL` the binary would refuse (no scheme, or http to
@@ -96,6 +98,8 @@ naming the variable:
 
 `MICROAGENT_MAX_TURNS` is passed as `--max-turns`, and the binary reads the
 same name itself, so either route ends at the same ceiling.
+Accepted numbers are forwarded as decimal digits, including when Python reads
+an underscore, a leading plus or non-ASCII digits in the host value.
 
 ### The budget cap
 

@@ -159,6 +159,11 @@ def checked_int(name: str, raw: str) -> int:
         raise RuntimeError(f"{name} must be a whole number, got {raw!r}") from None
     if value < 1:
         raise RuntimeError(f"{name} must be at least 1, got {raw!r}")
+    # All published binaries have 64-bit turns/budget/spend counts; generation
+    # and stall ceilings are u32. Harbor's own timeout is not a binary argument.
+    bits = 32 if name in ("MICROAGENT_MAX_TOKENS", "MICROAGENT_STALL_TIMEOUT") else 64
+    if name != "MICROAGENT_AGENT_TIMEOUT_SEC" and value >= 1 << bits:
+        raise RuntimeError(f"{name} must be at most {(1 << bits) - 1}, got {raw!r}")
     return value
 
 
@@ -179,14 +184,12 @@ def optional_ceiling(name: str) -> str | None:
     Checked for the reason the numeric knobs are, and by the same reader: the
     binary refuses anything that is not a whole number of at least 1, and
     refusing it there costs a container start and a binary upload before the
-    reason is printed. The value is returned as written rather than as the int
-    it parses to, because it is handed to the container as the string the
-    operator wrote."""
+    reason is printed. Return decimal digits, so every spelling Python accepts
+    also reaches the binary as a number it can read."""
     value = trimmed_env(name)
     if not value:
         return None
-    checked_int(name, value)
-    return value
+    return str(checked_int(name, value))
 
 
 def max_tokens() -> str | None:

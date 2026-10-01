@@ -35,6 +35,10 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- Very large accepted time budgets wait within the OS timestamp range instead
+  of expiring immediately, while retaining the original deadline and clock.
+- Harbor checks numeric ceilings against the binary's integer ranges before
+  setup and forwards accepted number spellings as decimal digits.
 - Failed POSIX subprocess launches close their pipes and reap their children,
   including MCP startup failures, invalid executables and oversized arguments
   or environments. The build patches its cached Zig library for this cleanup.
