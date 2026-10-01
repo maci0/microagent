@@ -189,12 +189,22 @@ test -n "$hash_command" || {
 	echo "SHA256_CMD is empty, so the digests this inventory records cannot be read" >&2
 	exit 2
 }
+hash() {
+	width=$1
+	shift
+	output=$("$@") || return $?
+	value=${output%% *}
+	[ "${#value}" -eq "$width" ] || return 1
+	case "$value" in *[!A-Fa-f0-9]*) return 1 ;; esac
+	printf '%s\n' "$value"
+}
+
 digest() {
 	path="$1"
 	# because: hash_command is a word list, and "shasum -a 256" is three of them
 	# shellcheck disable=SC2086
 	set -- $hash_command
-	"$@" "$path" | cut -d' ' -f1
+	hash 64 "$@" "$path"
 }
 
 # SPDX 2.3 requires a package whose files were analyzed to carry a
@@ -215,15 +225,16 @@ sha1() {
 	# because: sha1_command is a word list, and "shasum -a 1" is three of them
 	# shellcheck disable=SC2086
 	set -- $sha1_command
-	"$@"
+	hash 40 "$@"
 }
 file_digests=
 # because: assets is a space-separated list and each name is one word
 # shellcheck disable=SC2086
 for name in $(printf '%s\n' $assets | sort); do
-	file_digests="$file_digests$(sha1 < "$dist/$name" | cut -d' ' -f1)"
+	file_digest=$(sha1 < "$dist/$name")
+	file_digests="$file_digests$file_digest"
 done
-verification_code="$(printf '%s' "$file_digests" | sha1 | cut -d' ' -f1)"
+verification_code="$(printf '%s' "$file_digests" | sha1)"
 test -n "$verification_code" || {
 	echo "the verification code could not be computed, so the inventory would carry none where SPDX requires one" >&2
 	exit 1

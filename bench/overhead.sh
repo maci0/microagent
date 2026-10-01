@@ -11,6 +11,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bench/portable.sh"
 agents=${*:-microagent claude gemini codex crush grok kimi opencode cursor-agent clanker dsh}
 prompt="Reply with exactly: pong"
+failed=0
 
 # The tree's own gitignored .scratch/, for the reason bench/run.sh and
 # bench/gauntlet.sh build theirs there rather than under ${TMPDIR:-/tmp}: /tmp is
@@ -87,6 +88,7 @@ for agent in $agents; do
 	# quoted it arrives as one argument and runs the name alone
 	# shellcheck disable=SC2086
 	run_limited 180 "$work" $words "$prompt" >"$work/out" 2>&1
+	rc=$?
 	# Both ends of the clock are checked, not just the first. An empty reading
 	# is not an error awk reports, it reads as a field worth 0, so a second
 	# reading that failed divided one raw nanosecond count by a billion and
@@ -100,7 +102,13 @@ for agent in $agents; do
 	# Only microagent prints a machine-readable cumulative total.
 	tokens=$(grep -o '"total_tokens":[0-9]*' "$work/out" 2>/dev/null | tail -1 | cut -d: -f2)
 	[ -z "$tokens" ] && tokens=-
+	if [ "$rc" -ne 0 ]; then
+		wall="fail($rc)"
+		tokens=-
+		failed=1
+	fi
 	rm -rf "$work"
 
 	printf '%-14s %10s %10s %10s %10s\n' "$agent" "$startup" "$peak" "$wall" "$tokens"
 done
+exit "$failed"

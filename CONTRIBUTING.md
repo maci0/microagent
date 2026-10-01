@@ -23,7 +23,7 @@ setup: `lint-requirements.in`, `lint-requirements.txt`, `ruff.toml`,
 Zig 0.16.0 or newer, the minimum declared as `.minimum_zig_version` in
 [build.zig.zon](build.zig.zon). There is no dependency to install, no service to
 start and no configuration to copy: a clone plus a Zig toolchain builds and
-tests. A newer Zig builds the project, but `make check` wants exactly 0.16.0,
+tests. A newer Zig requires review of the library patch below; `make check` wants exactly 0.16.0,
 the version CI installs and the release assets are built with. `make
 zig-version` runs that check alone. 0.16.0 is also the newest stable release;
 [docs/performance.md](docs/performance.md#the-toolchain) says why there is no

@@ -37,6 +37,12 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- Benchmark interruptions give commands time to flush before process-group cleanup.
+  Missing deadline support, failed overhead prompts, failed instruction samples, Harbor
+  runs and summaries are reported as failures. Custom Harbor endpoints supply their
+  actual egress host and a JSON-escaped provider configuration. SBOM hash failures or
+  malformed digests stop generation and preserve the previous inventory.
+
 - HTTP MCP refusal bodies use the same JSON nesting guard as successful responses,
   and every failed call releases a stdio server marked dead. Combining-mark truncation
   walks the preceding character's own UTF-8 bytes, preserving multibyte text.

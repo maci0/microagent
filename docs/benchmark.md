@@ -9,7 +9,9 @@ section names the script, test or tool its numbers came from; none was produced 
 and task numbers come from `bench/overhead.sh` and `bench/run.sh` as committed. Those scripts also run
 on macOS: elapsed time there is monotonic too, read from `perl`'s `Time::HiRes` instead of
 `/proc/uptime`, a host with neither reports no-clock instead of a wall-clock figure, and the run
-ceiling and process-group cleanup use the same Python standard-library runner on both platforms.
+ceiling and process-group cleanup require Python 3 and use the same standard-library runner on both
+platforms. An interrupted command receives the signal and has up to five seconds to flush its logs
+before group cleanup. Overhead rows whose prompt failed report the exit status instead of a timing.
 
 ## Contents
 

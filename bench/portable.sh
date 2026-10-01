@@ -5,6 +5,11 @@
 #
 #   run_limited SECS DIR CMD.. -> run CMD in DIR, TERM it after SECS, KILL any
 #                               remaining processes before returning
+command -v python3 >/dev/null 2>&1 || {
+	printf '%s\n' 'bench/portable.sh: python3 is required for benchmark deadlines; no measurement was run' >&2
+	exit 2
+}
+
 run_limited() {
 	python3 "${root:?benchmark checkout root is required}/bench/limit.py" "$@"
 }

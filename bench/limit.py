@@ -11,6 +11,11 @@ import time
 from contextlib import suppress
 
 
+def ignore_interrupts() -> None:
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(signum, signal.SIG_IGN)
+
+
 def supervise(directory: str, argv: list[str], status_fd: int) -> None:
     """Keep the group leader alive after the command reports its exit status."""
     os.setsid()
@@ -24,11 +29,9 @@ def supervise(directory: str, argv: list[str], status_fd: int) -> None:
         print(f"run_limited: {error}", file=sys.stderr)
         result = 127 if isinstance(error, FileNotFoundError) else 126
     else:
-        for signum in (signal.SIGINT, signal.SIGTERM):
-            signal.signal(signum, signal.SIG_IGN)
+        ignore_interrupts()
         result = child.wait()
-    for signum in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(signum, signal.SIG_IGN)
+    ignore_interrupts()
     os.write(status_fd, str(result).encode("ascii"))
     os.close(status_fd)
     while True:
@@ -72,9 +75,7 @@ def run(seconds: int, directory: str, argv: list[str]) -> int:
         finally:
             os._exit(1)
     os.close(child_fd)
-    expired = False
-    interrupted = 0
-    result = b""
+    expired, interrupted, result = False, 0, b""
 
     def on_signal(signum: int, _frame: object) -> None:
         raise InterruptedError(signum)
@@ -92,9 +93,11 @@ def run(seconds: int, directory: str, argv: list[str]) -> int:
             result = os.read(status_fd, 16)
     except InterruptedError as error:
         interrupted = error.args[0]
+        ignore_interrupts()
+        signal_group(pid, interrupted)
+        wait_status(status_fd, 5)
     finally:
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
-        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        ignore_interrupts()
         signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
         # The supervisor's PID cannot be recycled until this final wait.
         # Kill the group before reaping, even when its command exited early.

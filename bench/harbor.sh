@@ -98,17 +98,7 @@ tasks=${TASKS:-$default_tasks}
 include=""
 for task in $tasks; do include="$include -i $id_prefix$task"; done
 
-# harbor refuses egress to a host it cannot infer from the model name, and a
-# custom base url is exactly that: a trial then hangs until its timeout.
 allow_host=""
-if [ -n "$agent_network_closed" ]; then
-	# The agent has no network at all here, so the provider is the one host it is
-	# let reach: the base url's, less scheme, path and port.
-	allow_host=${MICROAGENT_BASE_URL:-https://openrouter.ai/api/v1}
-	allow_host=${allow_host#*://}
-	allow_host=${allow_host%%/*}
-	allow_host=${allow_host%%:*}
-fi
 model_micro=deepseek/deepseek-v4-flash
 model_open=openrouter/deepseek/deepseek-v4-flash
 # The endpoint a provider other than the default serves, and the name opencode
@@ -123,7 +113,6 @@ openrouter) ;;
 nvidia)
 	model_micro=deepseek-ai/deepseek-v4.1-flash
 	model_open=nvidia/deepseek-ai/deepseek-v4.1-flash
-	allow_host=integrate.api.nvidia.com
 	provider_url=${MICROAGENT_BASE_URL:-https://integrate.api.nvidia.com/v1}
 	opencode_provider=nvidia
 	opencode_name=NVIDIA
@@ -133,7 +122,6 @@ deepseek)
 	# DeepSeek's own API, which names V4.1 Flash `deepseek-flash`.
 	model_micro=deepseek-flash
 	model_open=deepseek/deepseek-flash
-	allow_host=api.deepseek.com
 	provider_url=${MICROAGENT_BASE_URL:-https://api.deepseek.com/v1}
 	opencode_provider=deepseek
 	opencode_name=DeepSeek
@@ -144,6 +132,22 @@ deepseek)
 	exit 2
 	;;
 esac
+# Use the endpoint actually passed to the harness, including custom proxies.
+if [ -n "$agent_network_closed" ] || [ -n "$provider_url" ]; then
+	allow_host=$("$python" -c '
+import sys
+from urllib.parse import urlsplit
+try:
+    url = sys.argv[1]
+    parsed = urlsplit(url)
+    port = parsed.port
+    if any(ord(c) < 32 or ord(c) == 127 for c in url) or parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError
+except ValueError:
+    sys.exit("bench/harbor.sh: invalid provider URL")
+print(parsed.hostname)
+' "${provider_url:-${MICROAGENT_BASE_URL:-https://openrouter.ai/api/v1}}") || exit 2
+fi
 # The window Kimi Code is told the model has; V4.1 Flash's is a million tokens.
 kimi_context_size=1048576
 opencode_config=""
@@ -158,11 +162,11 @@ if [ -n "$provider_url" ]; then
 	fi
 	# The microagent adapter reads the endpoint from the environment.
 	export MICROAGENT_BASE_URL="$provider_url"
-	# Assembled from single-quoted pieces around the values that vary, so
-	# the quotes in the JSON are the quotes of an argument. Written with
-	# backslashes inside one string, they reach harbor as literal backslashes
-	# whenever the string is expanded unquoted.
-	opencode_config='{"provider":{"'$opencode_provider'":{"npm":"@ai-sdk/openai-compatible","name":"'$opencode_name'","options":{"baseURL":"'$provider_url'","apiKey":"{env:OPENAI_API_KEY}"},"models":{"'$opencode_model'":{}}}}}'
+	opencode_config=$("$python" -c '
+import json, sys
+provider, name, model, url = sys.argv[1:]
+print(json.dumps({"provider": {provider: {"npm": "@ai-sdk/openai-compatible", "name": name, "options": {"baseURL": url, "apiKey": "{env:OPENAI_API_KEY}"}, "models": {model: {}}}}}))
+' "$opencode_provider" "$opencode_name" "$opencode_model" "$provider_url") || exit 2
 fi
 
 # A job name no earlier run already holds, printed on stdout.
@@ -189,6 +193,25 @@ new_job() {
 	printf '%s' "$base"
 }
 
+mkdir -p "$jobs_dir" || exit 2
+job_log=""
+trap '[ -z "$job_log" ] || rm -f "$job_log"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# Preserve the measured command's status while showing only its final lines.
+run_tail() {
+	line_count=$1
+	shift
+	job_log=$(mktemp "$jobs_dir/.harbor-log-XXXXXX") || return 2
+	"$@" >"$job_log" 2>&1
+	run_status=$?
+	tail -n "$line_count" "$job_log"
+	rm -f "$job_log"
+	job_log=""
+	return "$run_status"
+}
+
 for harness in $harnesses; do
 	job=$(new_job "$harness-$bench")
 	echo "=== $job: $bench, ${jobs} at a time"
@@ -212,9 +235,9 @@ for harness in $harnesses; do
 			MICROAGENT_AGENT_TIMEOUT_SEC=$agent_timeout \
 			MICROAGENT_BUDGET_SECONDS=$budget \
 			MICROAGENT_MAX_TURNS=1200 \
-			$harbor run -d "$dataset" $include "$@" \
+			run_tail 6 "$harbor" run -d "$dataset" $include "$@" \
 			-a microagent_agent:Microagent -m "$model_micro" \
-			--jobs-dir "$jobs_dir" -n "$jobs" --job-name "$job" 2>&1 | tail -6
+			--jobs-dir "$jobs_dir" -n "$jobs" --job-name "$job" || exit $?
 		;;
 	opencode)
 		set -- "$@" -a opencode -m "$model_open"
@@ -224,7 +247,7 @@ for harness in $harnesses; do
 		set -- "$@" --jobs-dir "$jobs_dir" -n "$jobs" --job-name "$job"
 		# because: the same $include as the microagent arm above, split the same way
 		# shellcheck disable=SC2086
-		$harbor run -d "$dataset" $include "$@" 2>&1 | tail -6
+		run_tail 6 "$harbor" run -d "$dataset" $include "$@" || exit $?
 		;;
 	kimi)
 		# Kimi Code takes any OpenAI-compatible endpoint from these variables, so
@@ -240,12 +263,12 @@ for harness in $harnesses; do
 		set -- "$@" --jobs-dir "$jobs_dir" -n "$jobs" --job-name "$job"
 		# because: the same $include as the microagent arm above, split the same way
 		# shellcheck disable=SC2086
-		$harbor run -d "$dataset" $include "$@" 2>&1 | tail -6
+		run_tail 6 "$harbor" run -d "$dataset" $include "$@" || exit $?
 		;;
 	*)
 		echo "unknown harness '$harness'" >&2
 		exit 2
 		;;
 	esac
-	$python "$root/integrations/harbor/summarize.py" "$jobs_dir/$job" 2>/dev/null | tail -25
+	run_tail 25 "$python" "$root/integrations/harbor/summarize.py" "$jobs_dir/$job" || exit $?
 done

@@ -39,6 +39,16 @@ runs=${RUNS:-3}
 # enough that doubling a path's work does.
 tolerance=${TOLERANCE:-10}
 
+for value in "$runs" "$tolerance"; do
+	case "$value" in
+	'' | *[!0-9]*) echo 'bench/instructions.sh: RUNS and TOLERANCE must be decimal integers' >&2; exit 2 ;;
+	esac
+done
+[ "$runs" -gt 0 ] 2>/dev/null || {
+	echo 'bench/instructions.sh: RUNS must be a positive platform integer' >&2
+	exit 2
+}
+
 command -v perf >/dev/null 2>&1 || {
 	# Say which platform rather than leaving a macOS contributor to install
 	# something that will never be there.
@@ -143,18 +153,35 @@ measure() {
 	# This is not hypothetical: --test-filter does not reach tests declared in
 	# an imported module, so a row naming one reads as a passing measurement of
 	# nothing at all.
-	matched=$("$bin" 2>&1 | sed -n 's/^All \([0-9][0-9]*\) tests\? passed\..*/\1/p' | tail -n 1)
-	if [ "${2:-}" != baseline ] && [ -n "$matched" ] && [ "$matched" -le 1 ]; then
-		printf 'bench/instructions.sh: the filter %s selected no test, so the row would measure an empty binary\n' "$filter" >&2
+	if ! "$bin" >"$work/test.log" 2>&1; then
+		printf 'bench/instructions.sh: the selected test failed for filter %s\n' "$filter" >&2
+		sed -n '1,20p' "$work/test.log" >&2
+		return 3
+	fi
+	matched=$(sed -n 's/^All \([0-9][0-9]*\) tests\? passed\..*/\1/p' "$work/test.log" | tail -n 1)
+	expected=2
+	[ "${2:-}" = baseline ] && expected=1
+	if [ "$matched" != "$expected" ]; then
+		printf 'bench/instructions.sh: filter %s must select %s tests including the reference block, found %s\n' "$filter" "$expected" "${matched:-no count}" >&2
 		return 3
 	fi
 	i=0
 	samples="$work/samples"
 	: >"$samples"
 	while [ "$i" -lt "$runs" ]; do
-		perf stat -e instructions "$bin" </dev/null 2>&1 |
-			grep -oE '[0-9,]+[[:space:]]+instructions' |
-			grep -oE '^[0-9,]+' | tr -d ',' >>"$samples"
+		if ! perf stat -e instructions "$bin" </dev/null >"$work/perf.log" 2>&1; then
+			printf 'bench/instructions.sh: perf failed for filter %s\n' "$filter" >&2
+			sed -n '1,20p' "$work/perf.log" >&2
+			return 3
+		fi
+		sample=$(grep -oE '[0-9,]+[[:space:]]+instructions' "$work/perf.log" | grep -oE '^[0-9,]+' | tr -d ',')
+		case "$sample" in
+		'' | *[!0-9]*)
+			printf 'bench/instructions.sh: perf reported no single instruction count for filter %s\n' "$filter" >&2
+			return 3
+			;;
+		esac
+		printf '%s\n' "$sample" >>"$samples"
 		i=$((i + 1))
 	done
 	[ -s "$samples" ] || {
@@ -196,22 +223,18 @@ while IFS='|' read -r name filter units; do
 	if [ "${1:-}" = --check ] && [ "$per" != - ]; then
 		want=$(awk -F'\t' -v n="$name" '$1 == n { print $2 }' "$root/bench/instructions.baseline" 2>/dev/null)
 		if [ -n "$want" ] && [ "$want" -gt 0 ]; then
-			# Compare in tenths so the ratio is an integer and the comparison
-			# does not have to do division on a float. The ratio is computed
-			# in awk rather than in `$(( ))`, which bench/gauntlet.sh does for
-			# the same reason: shell arithmetic is only as wide as `long`, and
-			# `per * 1000` for the 512 KB read row is past 2^32, so a shell
-			# with a 32-bit long wraps it and the row reads as a regression or
-			# an improvement that is only arithmetic. The two sides of the band
-			# are reported apart: above it a path retired more work than the
-			# baseline records, below it fewer, and the second is a stale
-			# baseline rather than a regression to fix.
-			now=$(awk -v per="$per" -v want="$want" 'BEGIN { printf "%d", per * 1000 / want }')
-			if [ "$now" -gt "$((1000 + tolerance * 10))" ]; then
+			# Keep ratios and tolerance arithmetic in awk so a large count
+			# or percentage cannot wrap a shell integer.
+			direction=$(awk -v per="$per" -v want="$want" -v tol="$tolerance" 'BEGIN {
+				ratio = per * 100 / want
+				if (ratio > 100 + tol) print "regressed"
+				else if (ratio < 100 - tol) print "improved"
+			}')
+			if [ "$direction" = regressed ]; then
 				printf '  REGRESSION: %s is %s per unit, baseline %s (band +/-%s%%): fix the code that retired more\n' \
 					"$name" "$per" "$want" "$tolerance"
 				regressed=1
-			elif [ "$now" -lt "$((1000 - tolerance * 10))" ]; then
+			elif [ "$direction" = improved ]; then
 				printf '  IMPROVED: %s is %s per unit, baseline %s (band +/-%s%%): re-record bench/instructions.baseline\n' \
 					"$name" "$per" "$want" "$tolerance"
 				improved=1

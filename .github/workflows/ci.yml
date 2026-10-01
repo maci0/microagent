@@ -21,15 +21,9 @@ on:
 permissions:
   contents: read
 
-# The key is the pull request when there is one and the ref otherwise, not
-# `github.ref` alone. This workflow runs on `push` to every branch as well as
-# on `pull_request`, so a commit on a branch that has a pull request starts two
-# runs, and `github.ref` names them differently: `refs/heads/<branch>` for the
-# push and `refs/pull/<n>/merge` for the pull request. Keyed on the ref, the
-# group never matches across the two, so neither run cancels the other and the
-# 40-minute cross-build job runs twice over the same commit. Keyed on the pull
-# request number the push run joins the pull request's group and is superseded
-# by it, which is the one run whose result is read.
+# New runs supersede older runs for the same pull request or pushed ref.
+# Push and pull_request events have separate groups: push payloads do not
+# contain a pull request number, so this does not deduplicate those events.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
