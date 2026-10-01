@@ -738,6 +738,165 @@ test "update: only a github host is fetched from, however the url spells it" {
     try std.testing.expect(!trustedGithubUrl(try std.fmt.bufPrint(&url_buf, "https://{s}/x", .{host[0 .. max_host_len + 1]})));
 }
 
+// The trailing labels of a host, read one at a time rather than matched as a
+// suffix, so the oracle the harness below uses is a second reading of "a github
+// host" and not the one `hostTrusted` happens to implement. A host the install
+// accepts is `github.com` itself, or a name in front of `github.com` or
+// `githubusercontent.com`: the bare `githubusercontent.com` is not one of
+// them, which is the case a suffix match is most likely to lose.
+fn githubHostByLabels(host: []const u8) bool {
+    if (std.ascii.eqlIgnoreCase(host, "github.com")) return true;
+    // `*.github.com`: at least one label in front of `github` `com`.
+    // `*.githubusercontent.com`: at least one in front of `githubusercontent` `com`.
+    var labels = std.mem.splitBackwardsScalar(u8, host, '.');
+    const last = labels.next() orelse return false;
+    if (!std.ascii.eqlIgnoreCase(last, "com")) return false;
+    const owner = labels.next() orelse return false;
+    if (std.ascii.eqlIgnoreCase(owner, "github")) return labels.next() != null;
+    if (!std.ascii.eqlIgnoreCase(owner, "githubusercontent")) return false;
+    return labels.next() != null;
+}
+
+// The url a release body spells is the second half of the trust chain:
+// `parseRelease` reads `browser_download_url` and `html_url` out of a body from
+// the API, and what those bytes say is what decides whether a binary is
+// downloaded and installed over the running one. A host check that answers
+// true for a url the HTTP client would send somewhere else is the one bug in
+// this file that ends with somebody else's binary running as this one, so the
+// check is fuzzed rather than left to the table above: that table can only hold
+// the spellings somebody already thought of, and this reads a host out of a
+// string, where a string has more spellings than a list of them.
+//
+// The assertions are the properties the install path relies on, and each is one
+// a crash would not show. `std.testing.fuzz` runs this corpus on every `zig
+// build test`, and through the fuzzer's mutations when the test binary is built
+// in fuzz mode.
+const trusted_url_corpus = [_][]const u8{
+    "",
+    "https://github.com/maci0/microagent/releases/tag/v0.1.0",
+    "https://api.github.com/repos/maci0/microagent/releases/latest",
+    "https://release-assets.githubusercontent.com/microagent",
+    "https://objects.githubusercontent.com/x",
+    "https://codeload.github.com/x",
+    "HTTPS://GITHUB.COM/maci0/microagent",
+    "HttPs://GitHub.CoM/x",
+    "https://github.com:443/maci0/microagent",
+    "https://api.github.com:8443/x",
+    "https://github.com:/x",
+    "https://github.com:443abc/x",
+    "https://github.com:0/x",
+    "https://github.com:65535/x",
+    "https://github.com:65536/x",
+    "https://github.com:99999999999999999999/x",
+    "https://github.com.evil.com/x",
+    "https://evil.githubusercontent.com.evil.com/x",
+    "https://githubusercontent.com/x",
+    "https://notgithub.com/x",
+    "https://github.co/x",
+    "https://github.commmm/x",
+    "https://xgithub.com/x",
+    "https://github.com\\@evil.com/x",
+    "https://github.com\\.evil.com/x",
+    "https://user@github.com/x",
+    "https://user:pass@github.com/x",
+    "https://user@api.github.com/x",
+    "https://user@release-assets.githubusercontent.com/x",
+    "https://x@github.com:443@evil.com/x",
+    "https://@github.com/x",
+    "https://github.com@evil.com/x",
+    "https://github.com x",
+    "https://github.com\tx",
+    "https://github.com\n/x",
+    "https://github.com/x\r\nHost: evil.example",
+    "https://github.com/x\nHost: evil.example",
+    "https://\ngithub.com/x",
+    "https://github.com\r/x",
+    "http://github.com/x",
+    "//github.com/x",
+    "github.com/x",
+    "/github.com/x",
+    "https:/github.com/x",
+    "https:github.com/x",
+    "https//github.com/x",
+    "httpsx://github.com/x",
+    "://github.com/x",
+    "https://",
+    "https:///maci0/microagent",
+    "https://github.com",
+    "https://github.com/",
+    "https://github.com?x=1",
+    "https://github.com#f",
+    "https://github.com:443?x=1",
+    "https://.github.com/x",
+    "https://github.com./x",
+    "https://GITHUB.COM/x",
+    "https://github.com/%2e%2e/x",
+    "https://github.com/../x",
+    "https://\x00github.com/x",
+    "https://github.com\x00/x",
+    "https://github.com/日/x",
+    "https://xn--github.com/x",
+    "https://github.com." ++ "a" ** 300,
+    "https://" ++ "a" ** 300 ++ ".github.com/x",
+};
+
+test "update: fuzz: a url is trusted only for the host and the scheme it names" {
+    try std.testing.fuzz({}, fuzzTrustedUrl, .{ .corpus = &trusted_url_corpus });
+
+    // Both answers are reachable, or every assertion below is vacuous: a
+    // harness whose seeds all take one branch proves nothing about the other.
+    try std.testing.expect(trustedGithubUrl("https://github.com/maci0/microagent/releases/tag/v0.1.0"));
+    try std.testing.expect(!trustedGithubUrl("https://github.com.evil.com/x"));
+}
+
+fn fuzzTrustedUrl(_: void, smith: *std.testing.Smith) !void {
+    var raw: [2 * 1024]u8 = undefined;
+    const url: []const u8 = if (smith.in) |seed| seed else raw[0..smith.slice(&raw)];
+
+    const trusted = trustedGithubUrl(url);
+
+    // The answer is the same every time, because the check reads only its
+    // argument: one run asks about three urls out of one release body, and a
+    // check that answered differently for two of them would be one holding
+    // state between them.
+    try std.testing.expectEqual(trusted, trustedGithubUrl(url));
+
+    if (!trusted) return;
+
+    // A trusted url is sent as a request line and as header values, so no byte
+    // of one ends a line: the same rule the API key and an MCP server's key are
+    // held to, on the one url an attacker writes.
+    try std.testing.expect(!net.hasHeaderControlBytes(url));
+    try std.testing.expect(std.ascii.startsWithIgnoreCase(url, "https://"));
+
+    // The host the check read is the host the request will name, and it has to
+    // be a host the answer is allowed to name. This is the assertion a bypass
+    // breaks, and its oracle is `githubHostByLabels` above rather than
+    // `hostTrusted`, so two copies of the same mistake cannot agree.
+    const rest = url["https://".len..];
+    const slash = std.mem.findScalar(u8, rest, '/') orelse rest.len;
+    const authority = rest[0..slash];
+    var host = authority;
+    if (std.mem.findScalar(u8, host, ':')) |colon| host = host[0..colon];
+    if (!githubHostByLabels(host)) {
+        std.debug.print("\ntrusted a url whose host is '{s}': {s}\n", .{ host, url });
+        return error.TestUnexpectedResult;
+    }
+
+    // The userinfo and the backslash are the two ways a url names one host and
+    // reaches another, so what is left before the host is `https://` and
+    // nothing else.
+    try std.testing.expect(std.mem.indexOfAny(u8, authority, "@\\ \t\r\n") == null);
+    // A port is digits, and the request names it after the host: a trusted url
+    // whose port is not a number is one this check and the HTTP client read
+    // differently.
+    if (std.mem.findScalar(u8, authority, ':')) |colon| {
+        const port = authority[colon + 1 ..];
+        try std.testing.expect(port.len > 0);
+        for (port) |c| try std.testing.expect(std.ascii.isDigit(c));
+    }
+}
+
 test "update: the command line reads --check, -h and -V, and refuses the rest" {
     try std.testing.expect(parseArgs(&.{}) == .install);
     try std.testing.expect(parseArgs(&.{"--check"}) == .check);
@@ -1050,6 +1209,99 @@ test "update: only the releases API carries the GitHub token" {
     try std.testing.expect(bearerFor("https://user@api.github.com/repos/o/r", bearer) == null);
     try std.testing.expect(bearerFor("https://api.github.com", bearer) == null);
     try std.testing.expect(bearerFor(release_api_url, null) == null);
+}
+
+// The second half of the same trust chain, and the one that costs a secret
+// rather than a binary: `bearerFor` decides whether a request carries the
+// `GITHUB_TOKEN`, and the url it reads is the one a release body or a redirect
+// wrote. A prefix check that answers true for a host the request will not go
+// to is a token handed to whoever asked for it, so the check is fuzzed for the
+// same reason `trustedGithubUrl` is and against the same oracle: the answer has
+// to be the one a reader of the url would give, and not the one this check's
+// own prefix literal happens to produce.
+//
+// The oracle is spelled out here rather than taken from the check. A url that
+// is `https` and whose host is exactly `api.github.com` is the only one that
+// may carry the token, so the harness reads the host out of the url the way the
+// install does and compares. `std.testing.fuzz` runs this corpus on every `zig
+// build test`, and through the fuzzer's mutations when the test binary is built
+// in fuzz mode.
+const bearer_url_corpus = [_][]const u8{
+    "",
+    "https://api.github.com/repos/o/r/releases/latest",
+    "https://api.github.com/",
+    "https://api.github.com",
+    "HTTPS://API.GITHUB.COM/repos/o/r",
+    "HttPs://Api.GitHub.Com/x",
+    "https://API.GITHUB.COM/x",
+    "https://api.github.com:443/x",
+    "https://api.github.com:8443/x",
+    "https://api.github.com./x",
+    "https://api.github.com.evil.com/x",
+    "https://api.github.com@evil.com/x",
+    "https://user@api.github.com/x",
+    "https://api.github.com\\@evil.com/x",
+    "https://api.github.comevil.com/x",
+    "https://evilapi.github.com/x",
+    "https://x.api.github.com/x",
+    "https://api.github.com\n/x",
+    "https://api.github.com x",
+    "https://api.github.com\t/x",
+    "https://api.github.com\x00/x",
+    "https://api.github.com/%0d%0aHost:evil",
+    "http://api.github.com/x",
+    "//api.github.com/x",
+    "api.github.com/x",
+    "https:/api.github.com/x",
+    "https://github.com/maci0/microagent/releases/download/v0.2.0/x",
+    "https://release-assets.githubusercontent.com/x",
+    "https://codeload.github.com/x",
+    "https://objects.githubusercontent.com/x",
+    "https://api.github.com",
+    "xhttps://api.github.com/x",
+    " https://api.github.com/x",
+    "https://api.github.com//x",
+    "https://api.github.com/../x",
+    "https://api.github.com/日",
+};
+
+test "update: fuzz: the token rides only to the api host, whatever the url spells" {
+    try std.testing.fuzz({}, fuzzBearerFor, .{ .corpus = &bearer_url_corpus });
+
+    // Both answers are reachable, or the assertions below prove nothing.
+    try std.testing.expectEqualStrings("Bearer t", bearerFor("https://api.github.com/x", "Bearer t").?);
+    try std.testing.expect(bearerFor("https://github.com/x", "Bearer t") == null);
+}
+
+fn fuzzBearerFor(_: void, smith: *std.testing.Smith) !void {
+    var raw: [2 * 1024]u8 = undefined;
+    const url: []const u8 = if (smith.in) |seed| seed else raw[0..smith.slice(&raw)];
+    const bearer: ?[]const u8 = "Bearer ghp_example";
+
+    const got = bearerFor(url, bearer);
+
+    // The answer reads only its arguments, so the same call twice is the same
+    // answer, and no token is the answer however the url is spelled.
+    try std.testing.expectEqual(got != null, bearerFor(url, bearer) != null);
+    try std.testing.expect(bearerFor(url, null) == null);
+
+    // The oracle: a url is the API's only when it is `https`, when the host
+    // before the first `/` is exactly `api.github.com`, and when there is a `/`
+    // at all. Read here from the bytes rather than from the check's own
+    // literal, so the two cannot be the same reading of the same bug.
+    const rest = if (std.ascii.startsWithIgnoreCase(url, "https://")) url["https://".len..] else "";
+    const slash = std.mem.indexOfScalar(u8, rest, '/');
+    const host = if (slash) |at| rest[0..at] else "";
+    const is_api = std.ascii.eqlIgnoreCase(host, "api.github.com") and slash != null;
+    const want = if (is_api) bearer else null;
+    if (got != null or want != null) {
+        try std.testing.expectEqual(want, got);
+    }
+
+    // Whatever it decided, the value it handed over is the caller's own token
+    // and not a copy, an extension, or a url spliced into it: a bearer that is
+    // not the one that went in is a token this path invented.
+    if (got) |b| try std.testing.expectEqualStrings("Bearer ghp_example", b);
 }
 
 test "update: checksum line is the published hex, two spaces, and the basename" {
