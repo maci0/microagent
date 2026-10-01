@@ -2551,6 +2551,19 @@ const budget_clock: Io.Clock = .boot;
 /// not the gap between two unrelated origins.
 const model_clock: Io.Clock = .awake;
 
+/// The clock a tool call's own time is measured on: `.awake`, for the reason a
+/// tool's timeout is. A child that was not running spent none of its own time,
+/// so a machine that was asleep is not charged for a tool as though it were.
+/// The same clock as `model_clock`, named apart because a call's time is a
+/// different measure from a response's and the two must not be added up.
+const tool_clock: Io.Clock = .awake;
+
+/// How one dispatched tool call ended, as the line beside the call's gutter
+/// says it did. `ok` is the ordinary one; the other two are what a reader of
+/// stderr is looking for, because a call that failed or was never run left
+/// nothing behind but the model's own record of it inside the conversation.
+const ToolOutcome = enum { ok, failed, not_run };
+
 /// The run's time budget as an instant on the clock the loop already reads.
 /// Every part of a turn asks this, not just the top of the loop: a provider
 /// that is slow rather than broken hands the loop one long turn, and a budget
@@ -3960,6 +3973,49 @@ fn writeOutPrefix(
     net.dropPending(out_buf, null, len);
 }
 
+/// What one dispatched call left behind on stderr, as the answer to the three
+/// questions a reader of a run asks about it: did it succeed, how long did it
+/// take, and which call it was.
+///
+/// The gutter line a call writes before it runs names the call and its
+/// argument, and says nothing about what came back: a `bash` that exited 7 and
+/// one that exited 0 draw the same line. Everything this reports on that line
+/// otherwise lives only in the conversation, which goes to the provider and
+/// nowhere an operator or a monitor reads. A run read from stderr alone
+/// therefore could not say which of its tools failed, and a call the budget
+/// refused to pay for was indistinguishable from one that ran.
+///
+/// One line per call, beside the one that already announces it, so the gutter
+/// is one announcement and one outcome rather than two announcements. The name
+/// is bounded like the gutter's own and the call id is not drawn at all: it is
+/// the provider's bytes and it is on the request, where a reader looking for
+/// one call finds it. `elapsed_ms` is on `tool_clock`, so a suspended machine
+/// is not charged for a child that was not running.
+///
+/// The gutter line without the stream it goes to, so the shape a reader parses
+/// is a value a test can hold rather than a write a test has to capture. Kept
+/// beside `noteToolOutcome` for the reason `toolCallLine` is kept beside
+/// `noteToolCall`: one spelling of the line, not two that can drift.
+fn toolOutcomeLine(arena: std.mem.Allocator, name: []const u8, outcome: ToolOutcome, elapsed_ms: u64) ![]const u8 {
+    return std.fmt.allocPrint(arena, "  {s} {s} in {d}ms\n", .{
+        switch (outcome) {
+            .ok => "ok",
+            .failed => "FAILED",
+            .not_run => "not run",
+        },
+        chat_mod.safeText(arena, name, 40),
+        elapsed_ms,
+    });
+}
+
+/// The line itself, on stderr. An allocation that fails writes nothing, which
+/// is what every other diagnostic here does: this line reports a call, and the
+/// call itself is unaffected by whether it could be announced.
+fn noteToolOutcome(io: Io, arena: std.mem.Allocator, name: []const u8, outcome: ToolOutcome, elapsed_ms: u64) void {
+    const line = toolOutcomeLine(arena, name, outcome, elapsed_ms) catch return;
+    net.writeErr(io, line);
+}
+
 /// One tool call, to whichever half of the tool surface answers for its name:
 /// the run's skill set for `skill`, and the tool module for the seven built
 /// ins. Everything else about a call -- the argument check, the gutter line,
@@ -4026,9 +4082,10 @@ fn finishTurn(
         // assistant turn that names calls the conversation never answers is one
         // the next request rejects, so the loop below would spend a turn on a
         // 400 instead of on the answer.
-        const output = if (budget.expired(io))
-            "error: not run, the run's time budget is exhausted"
-        else blk: {
+        const output = if (budget.expired(io)) blk: {
+            noteToolOutcome(io, arena, call.name, .not_run, 0);
+            break :blk "error: not run, the run's time budget is exhausted";
+        } else blk: {
             // Both flags are read from what the run actually did, so they are
             // set here rather than from the model's request: a call the budget
             // refused to pay for never ran, and an edit that never ran is
@@ -4052,11 +4109,17 @@ fn finishTurn(
             // loads from belongs to the run, and a run that found no skills
             // never advertised the name, so a call to it here is the model
             // asking for a tool the schema did not offer.
-            break :blk dispatchCall(io, arena, skills, mcp, disabled, call, budget.toolCeilingMs(io), tool_env, deny_commands, writable_roots) catch |err|
+            const started_ns = Io.Timestamp.now(io, tool_clock).nanoseconds;
+            const answer = dispatchCall(io, arena, skills, mcp, disabled, call, budget.toolCeilingMs(io), tool_env, deny_commands, writable_roots) catch |err| blk2: {
                 // A tool that fails outright (rather than reporting its own
                 // failure as text) is named here, so a result reading
                 // `error: OutOfMemory` says which of the calls ran out.
-                try std.fmt.allocPrint(arena, "error: {s}: {s}", .{ chat_mod.safeText(arena, call.name, 40), @errorName(err) });
+                const spelled = try std.fmt.allocPrint(arena, "error: {s}: {s}", .{ chat_mod.safeText(arena, call.name, 40), @errorName(err) });
+                noteToolOutcome(io, arena, call.name, .failed, session_mod.elapsedMs(io, tool_clock, started_ns));
+                break :blk2 spelled;
+            };
+            noteToolOutcome(io, arena, call.name, if (tool_mod.resultFailed(answer)) .failed else .ok, session_mod.elapsedMs(io, tool_clock, started_ns));
+            break :blk answer;
         };
         // A tool result is capped at `max_tool_output`, so the message holding
         // it is bounded before the first byte is written. Reserving that now
@@ -8612,4 +8675,29 @@ test "repository instructions and skills reject named pipes before opening" {
     const skills: skill_mod.Skills = .{ .items = &.{.{ .name = "pipe", .description = "", .path = path }} };
     const answer = try skill_mod.call(io, arena, "{\"name\":\"pipe\"}", skills);
     try std.testing.expect(std.mem.indexOf(u8, answer, "NotFile") != null);
+}
+
+// A run read from stderr alone has to answer, for every call the model made:
+// did it succeed, how long did it take, and which call it was. The gutter line
+// a call draws before it runs names the third and none of the first two, so a
+// `bash` that exited 7 and one that exited 0 drew the same line and the only
+// record of the difference was the conversation, which goes to the provider.
+// Each outcome is one fixed word and one duration, so a reader grepping the
+// gutter for the calls that failed needs no per-tool vocabulary, and the
+// budget's own refusal is a third word rather than a silent absence.
+test "the outcome line names the call, whether it worked, and how long it took" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    try std.testing.expectEqualStrings("  ok bash in 12ms\n", try toolOutcomeLine(arena, "bash", .ok, 12));
+    try std.testing.expectEqualStrings("  FAILED bash in 60000ms\n", try toolOutcomeLine(arena, "bash", .failed, 60_000));
+    try std.testing.expectEqualStrings("  not run search in 0ms\n", try toolOutcomeLine(arena, "search", .not_run, 0));
+
+    // An MCP call's name is prefixed and can be long, so the name is bounded
+    // the way every other diagnostic here treats one: the line stays a line
+    // whatever the model called the tool.
+    const long = try toolOutcomeLine(arena, "mcp__x" ++ "y" ** 200, .failed, 5);
+    try std.testing.expect(std.mem.endsWith(u8, long, " in 5ms\n"));
+    try std.testing.expect(long.len < 80);
 }

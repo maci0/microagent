@@ -775,6 +775,19 @@ characters in a path or command written as `\xNN` so a line stays one line.
 `NO_COLOR` set to anything but an empty string, or `TERM=dumb`, leaves the bold out even at a
 terminal.
 
+Each tool call also reports how it ended, on the line below its own gutter line: `ok` when it ran
+and its answer is its result, `FAILED` when it was refused, errored, or its subprocess exited
+nonzero or was signalled, and `not run` when the time budget was already spent. The call's own time
+follows, so a run read from stderr alone answers which calls failed and which were slow:
+
+```text
+⏺ bash: cargo test
+  FAILED bash in 1834ms
+```
+
+Those outcomes otherwise live only in the conversation, which goes to the provider and nowhere an
+operator reads.
+
 `cached_tokens` is the part of the prompt the provider served from its cache, read from whichever of
 `prompt_tokens_details.cached_tokens`, `prompt_cache_hit_tokens` or `cache_read_input_tokens` the
 endpoint sends. The conversation is re-sent every turn byte for byte (no message dropped, reordered

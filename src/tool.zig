@@ -3093,6 +3093,60 @@ pub fn toolResult(arena: std.mem.Allocator, output: []const u8) ![]const u8 {
     return truncationNote(arena, kept, max_tool_output, output.len);
 }
 
+/// The prefix `captureResult` gives a result that is nothing but a status, one
+/// it writes when a child captured no output of its own. The status follows in
+/// the spelling `appendExitStatus` gives it, which is what `resultFailed` reads
+/// to tell a child that succeeded from one that did not.
+const no_output_note = "(no output, ";
+
+/// Whether a tool result is a failure rather than the tool's answer.
+///
+/// Every failure this module produces is spelled one of four ways, so one
+/// reader can tell a refused call and a failed subprocess from a tool that ran
+/// and said nothing: an `error: ` prefix (the model-facing failure every tool,
+/// the MCP path and the skill loader return), a `refused: ` prefix (the
+/// sandbox, the credential filter and the command filter), an exit status that
+/// is not a clean exit (which `captureResult` writes beside a failing child's
+/// output as `(exit: N)`, and on its own as `(no output, <status>)` when the
+/// child printed nothing), and an MCP server's own `isError` marker. A clean
+/// child returns its captured bytes whole, so a result opening with `(exit: `
+/// is one whose child did not exit cleanly, and the `(no output, ...)` form is
+/// a failure only when the status inside it is not `exited 0`.
+///
+/// A tool whose own answer happens to begin with one of these prefixes is
+/// called a failure here, which errs toward reporting a call that may have
+/// worked. Nothing downstream acts on the answer: it names the outcome on
+/// stderr and leaves the call itself untouched, so the cost of the mistake is
+/// one misleading word beside a call the model can still read.
+///
+/// `pub` because `main` reports the outcome of every dispatched call from it,
+/// and because `mcp` builds the same result shape this classifies.
+pub fn resultFailed(output: []const u8) bool {
+    if (std.mem.startsWith(u8, output, "error: ")) return true;
+    if (std.mem.startsWith(u8, output, "refused: ")) return true;
+    // The exit note `captureResult` writes beside the output a failing child
+    // produced is written only when the child did not exit cleanly, so its
+    // presence is the failure.
+    if (std.mem.startsWith(u8, output, "(exit: ")) return true;
+    // The whole-of-the-result form is written for a child that captured
+    // nothing, whether it succeeded or not, so the status inside it decides:
+    // `(no output, exited 0)` is a tool that ran and said nothing, and one
+    // that exited nonzero or was signalled is the failure the other spelling
+    // names.
+    if (std.mem.startsWith(u8, output, no_output_note)) {
+        const status = output[no_output_note.len..];
+        if (std.mem.endsWith(u8, status, ")")) {
+            const word = status[0 .. status.len - 1];
+            if (std.mem.eql(u8, word, "exited 0")) return false;
+            return word.len > 0;
+        }
+    }
+    // A server that answered and marked its own result an error is a failure
+    // whose text says so, in the spelling `mcp` writes it.
+    if (std.mem.startsWith(u8, output, "(the MCP server marked this result an error)")) return true;
+    return false;
+}
+
 /// The room the note below is held back from the cap before the cut rather
 /// than measured after it, so the note survives the caller's own `clamp` with
 /// the cap and the true size it names. It is a cap on the text `kept` is cut
@@ -7750,4 +7804,34 @@ test "credential checks follow chains within the kernel symlink limit" {
     const path = try std.fs.path.join(arena, &.{ root, target });
     try std.testing.expectEqualStrings("SECRET=keep", try tmp.dir.readFileAlloc(io, target, arena, .limited(64)));
     try std.testing.expect(credentialPath(io, arena, path) != null);
+}
+
+test "a result that failed is named whatever shape its failure took" {
+    // A call an operator cannot tell from one that worked is a blind spot:
+    // everything these spellings say lives in the conversation, which goes to
+    // the provider and nowhere an operator reads. Each spelling below is one
+    // this module produces, and a result the tools wrote is not one of them.
+    try std.testing.expect(resultFailed("error: missing path"));
+    try std.testing.expect(resultFailed("refused: path 'x' is outside the sandbox writable roots"));
+    // The two shapes `captureResult` writes a child's status in: beside the
+    // output a failing child produced, and on its own when it printed nothing.
+    // Which one is written depends on whether the child printed anything, and
+    // the second is written for a clean exit too, which is what the case below
+    // that is not a failure exists for.
+    try std.testing.expect(resultFailed("(exit: 7)"));
+    try std.testing.expect(resultFailed("(no output, exited 7)"));
+    try std.testing.expect(resultFailed("(no output, signalled 9)"));
+    try std.testing.expect(resultFailed("(the MCP server marked this result an error)\ntext"));
+
+    // The ordinary results: a tool that found something, one that found
+    // nothing, one whose own answer carries an exit note as data rather than at
+    // the front of the result, and the empty one a tool that ran no bytes.
+    try std.testing.expect(!resultFailed(""));
+    try std.testing.expect(!resultFailed("no matches found"));
+    // A child that ran and printed nothing and exited cleanly is the case the
+    // exit status inside the note has to be read for: the note is written for
+    // it exactly as it is written for a failure.
+    try std.testing.expect(!resultFailed("(no output, exited 0)"));
+    try std.testing.expect(!resultFailed("the exit note is data here:\n(exit: 0)"));
+    try std.testing.expect(!resultFailed("src/main.zig\n"));
 }

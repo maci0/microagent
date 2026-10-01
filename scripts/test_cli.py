@@ -38,6 +38,10 @@ class Provider(BaseHTTPRequestHandler):
     invalid_usage = False
     response_bytes = 0
     response_calls = False
+    # The one tool call the ordinary response makes, when it makes one at all.
+    # "" is the ordinary response: a case sets it to the arguments of a call
+    # it wants to see dispatched, and clears it again after its own assertions.
+    tool_call_args = ""
 
     @classmethod
     def reset(cls) -> None:
@@ -53,6 +57,17 @@ class Provider(BaseHTTPRequestHandler):
         cls.invalid_usage = False
         cls.response_bytes = 0
         cls.response_calls = False
+        cls.tool_call_args = ""
+
+    @staticmethod
+    def tool_call_frame() -> dict[str, Any]:
+        """The one tool call a case asks for, as the choice that carries it.
+
+        Its own method because the switch it reads is one more thing `do_POST`
+        decides, and that method is already at the limit this project lints to.
+        """
+        call = {"index": 0, "id": "call", "function": {"name": "bash", "arguments": Provider.tool_call_args}}
+        return {"delta": {"content": "working", "tool_calls": [call]}, "finish_reason": "tool_calls"}
 
     def do_POST(self) -> None:
         Provider.paths.append(self.path)
@@ -95,8 +110,13 @@ class Provider(BaseHTTPRequestHandler):
                 self.end_headers()
             self.rfile.read(1)  # Wait for the client to enforce its deadline and close.
             return
+        choice = (
+            self.tool_call_frame()
+            if Provider.tool_call_args
+            else ({"delta": {"content": "" if Provider.empty else "answer"}, "finish_reason": "stop"})
+        )
         frame = {
-            "choices": [{"delta": {"content": "" if Provider.empty else "answer"}, "finish_reason": "stop"}],
+            "choices": [choice],
             "usage": {"prompt_tokens": 10, "completion_tokens": 1, "total_tokens": 11},
         }
         if Provider.bad_call:
@@ -321,6 +341,26 @@ def check_response_cap(binary: Path, root: Path, url: str) -> None:
     Provider.reset()
 
 
+def check_tool_outcomes(binary: Path, root: Path, url: str) -> None:
+    Provider.reset()
+    # A call the model makes that fails is the case nothing used to record:
+    # the gutter line names the command, and whether it worked lived only in
+    # the conversation, which goes to the provider. One run read from stderr
+    # alone could not say which of its tools failed or which were slow, so
+    # each outcome here is pinned to the line it draws.
+    for command, word in (("exit 0", "ok"), ("exit 7", "FAILED")):
+        Provider.tool_call_args = json.dumps({"command": command})
+        result = invoke(binary, root, url, ["--max-turns", "1", "run it"], "")
+        expect(result.returncode == 3, (command, result.stderr))
+        outcomes = [line for line in result.stderr.splitlines() if line.startswith("  ")]
+        expect(len(outcomes) == 1, (command, result.stderr))
+        expect(word in outcomes[0], (command, result.stderr))
+        # The duration is a number rather than a placeholder, so the line
+        # answers how long the call took and not only whether it worked.
+        expect(outcomes[0].endswith("ms"), (command, result.stderr))
+    Provider.tool_call_args = ""
+
+
 def check_endpoint_paths(binary: Path, root: Path, url: str) -> None:
     Provider.reset()
     for suffix, expected in (
@@ -443,10 +483,14 @@ if __name__ == "__main__":
             check(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_timeouts(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_response_cap(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
+            check_tool_outcomes(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_endpoint_paths(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_harbor_numbers(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_harbor_connection_values(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
         finally:
             server.shutdown()
             thread.join()
-    print("CLI checks passed: REPL, ceilings, usage, sessions, input, deadlines, exit statuses and citations")
+    print(
+        "CLI checks passed: REPL, ceilings, usage, sessions, tool outcomes, "
+        "input, deadlines, exit statuses and citations"
+    )
