@@ -3112,13 +3112,24 @@ fn buildBody(arena: std.mem.Allocator, opts: Options, messages: []const u8) ![]u
 /// which on a long run is the largest single memcpy the harness makes. The
 /// bytes on the wire are the same ones in the same order; only the copy is
 /// gone.
-fn sendRequest(open: *std.http.Client.Request, chunk: []u8, prefix: []const u8, msgs: []const u8) !void {
+///
+/// `on_the_wire` is set once every byte has been handed to the socket, which
+/// is the same moment the provider can stop waiting for more and parse the
+/// turn. A `withStallTimeout` around this call can expire before `flush`
+/// returns and so report `error.Timeout` for a body that is already
+/// completely sent: without the flag the caller would class that as a
+/// pre-wire failure and re-POST a turn the provider has already generated
+/// and billed.
+fn sendRequest(open: *std.http.Client.Request, chunk: []u8, prefix: []const u8, msgs: []const u8, on_the_wire: *bool) !void {
     open.transfer_encoding = .{ .content_length = prefix.len + msgs.len + body_close.len };
     var bw = try open.sendBodyUnflushed(chunk);
     try bw.writer.writeAll(prefix);
     try bw.writer.writeAll(msgs);
     try bw.writer.writeAll(body_close);
     try bw.end();
+    // Everything above wrote into the connection's send buffer; from here the
+    // provider can be reading the turn whether or not `flush` reports back.
+    on_the_wire.* = true;
     try open.connection.?.flush();
 }
 
@@ -3393,8 +3404,15 @@ fn streamChatOnce(
         req_slot = req;
         net.releaseDeadStack();
         const open = &req_slot.?;
-        withStallTimeout(io, opts.stall_timeout_s, sendRequest, .{ open, &body_chunk, prefix_now, msgs }) catch |err| {
-            if (worthAnotherAttempt(.sending, err) and waitBeforeRetry(io, arena, shown_url, attempt, "sending the request body to", err, budget)) continue;
+        // Whether the body was complete before the failure, which decides the
+        // stage: a turn already on the wire is a turn the provider may have
+        // billed, so the retry has to become the head rule rather than the
+        // sending one.
+        var body_sent = false;
+        withStallTimeout(io, opts.stall_timeout_s, sendRequest, .{ open, &body_chunk, prefix_now, msgs, &body_sent }) catch |err| {
+            const stage: request_stage = if (body_sent) .head else .sending;
+            if (worthAnotherAttempt(stage, err) and waitBeforeRetry(io, arena, shown_url, attempt, "sending the request body to", err, budget)) continue;
+            if (body_sent) noteTurnSentInFull(io, arena, shown_url, @errorName(err));
             return err;
         };
         if (debug_enabled) std.debug.print("[mdebug] request sent, body={d} bytes\n", .{prefix_now.len + msgs.len + body_close.len});
@@ -3403,9 +3421,7 @@ fn streamChatOnce(
             // `worthAnotherAttempt` returns false for a head whatever the
             // error, so this is the operator's half of that: a run that lost a
             // billable turn says so rather than reporting a connection fault.
-            net.note(io, arena, "microagent: the request to {s} was sent in full and its response never arrived ({s}); it is not sent again, because a second POST of one turn is a second billable completion\n", .{
-                shown_url, @errorName(err),
-            });
+            noteTurnSentInFull(io, arena, shown_url, @errorName(err));
             return err;
         };
         if (debug_enabled) std.debug.print("[mdebug] head status={d} enc={s}\n", .{ @intFromEnum(response.head.status), @tagName(response.head.content_encoding) });
@@ -4061,6 +4077,15 @@ const request_stage = enum {
 fn worthAnotherAttempt(stage: request_stage, err: anyerror) bool {
     if (stage == .head) return false;
     return net.transientTransportError(err);
+}
+
+/// The operator's half of the head rule: a run that has lost a turn the
+/// provider may already have generated says so, rather than reporting a bare
+/// connection fault that reads as a fault nobody was billed for.
+fn noteTurnSentInFull(io: Io, arena: std.mem.Allocator, url: []const u8, err: []const u8) void {
+    net.note(io, arena, "microagent: the request to {s} was sent in full and its response never arrived ({s}); it is not sent again, because a second POST of one turn is a second billable completion\n", .{
+        url, err,
+    });
 }
 
 /// Names the endpoint and the step that failed, then sleeps before the next
@@ -6101,6 +6126,25 @@ test "a turn is resent only while the provider cannot have read it" {
     try std.testing.expect(!worthAnotherAttempt(.head, error.ConnectionRefused));
     try std.testing.expect(!worthAnotherAttempt(.opened, error.OutOfMemory));
     try std.testing.expect(!worthAnotherAttempt(.sending, error.InvalidUrl));
+}
+
+// A body whose last byte reached the socket is a body the provider can parse,
+// and a `flush` that stalls past the stall timeout reports `error.Timeout`
+// with the turn already in flight. Treating that as a pre-wire failure re-POSTs
+// a turn the provider has generated: the one duplicate this run cannot price in
+// advance. The stage the caller computes has to be the head one there, which
+// is the same rule a lost head answers to.
+test "a body already on the wire is not resent, whatever the error was" {
+    const body_sent = true;
+    const stage: request_stage = if (body_sent) .head else .sending;
+    try std.testing.expectEqual(request_stage.head, stage);
+    try std.testing.expect(!worthAnotherAttempt(stage, error.Timeout));
+    try std.testing.expect(!worthAnotherAttempt(stage, error.BrokenPipe));
+
+    // Before the last byte, the same timeout is weather and is still retried,
+    // so the flag narrows the rule rather than replacing it.
+    const still_sending = false;
+    try std.testing.expect(worthAnotherAttempt(if (still_sending) .head else .sending, error.Timeout));
 }
 
 // The one failure after the request is on the wire that is asked again is the

@@ -26,6 +26,12 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- A turn whose request body was completely on the wire is not sent a second time when the
+  flush of it stalls past the stall timeout. The timeout was reported as a failure to send,
+  which the retry schedule answered by re-POSTing a request the provider may already have
+  generated and billed; a stall after the last byte is now classified as a lost head, which
+  ends the run with the same note rather than buying a second billable completion for one turn.
+
 - MCP tool names are checked against the provider's 64-character limit including their
   server prefix; oversized names are reported and omitted from remote and preset schemas.
 
