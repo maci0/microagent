@@ -35,6 +35,10 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- URL credentials stay redacted in configuration errors, malformed endpoint
+  values and allocation failures as well as request diagnostics.
+- Harbor validates endpoint hosts, ports and control characters, and refuses
+  control characters in API keys before setup without quoting the key.
 - Very large accepted time budgets wait within the OS timestamp range instead
   of expiring immediately, while retaining the original deadline and clock.
 - Harbor checks numeric ceilings against the binary's integer ranges before

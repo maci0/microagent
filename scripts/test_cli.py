@@ -318,8 +318,7 @@ def check_response_cap(binary: Path, root: Path, url: str) -> None:
     Provider.reset()
 
 
-def check_harbor_numbers(binary: Path, root: Path, url: str) -> None:
-    Provider.reset()
+def load_harbor() -> ModuleType:
     # Exercise the actual readers without installing Harbor or starting a container.
     base = ModuleType("harbor.agents.base")
     base.__dict__["BaseAgent"] = object
@@ -331,6 +330,12 @@ def check_harbor_numbers(binary: Path, root: Path, url: str) -> None:
     adapter = importlib.util.module_from_spec(spec)
     with patch.dict(sys.modules, {"harbor.agents.base": base}):
         spec.loader.exec_module(adapter)
+    return adapter
+
+
+def check_harbor_numbers(binary: Path, root: Path, url: str) -> None:
+    Provider.reset()
+    adapter = load_harbor()
     widths = (
         ("MICROAGENT_MAX_TOKENS", 32),
         ("MICROAGENT_STALL_TIMEOUT", 32),
@@ -375,6 +380,42 @@ def check_harbor_numbers(binary: Path, root: Path, url: str) -> None:
     )
 
 
+def check_harbor_connection_values(binary: Path, root: Path, url: str) -> None:
+    Provider.reset()
+    adapter = load_harbor()
+    invalid = (
+        ("MICROAGENT_BASE_URL", "https://"),
+        ("MICROAGENT_BASE_URL", "https://localhost:65536/v1"),
+        ("MICROAGENT_BASE_URL", "https://localhost:invalid/v1"),
+        ("MICROAGENT_BASE_URL", "https://localhost:/v1"),
+        ("MICROAGENT_BASE_URL", "https://[::1]:/v1"),
+        ("MICROAGENT_BASE_URL", "http://fixtureuser:fixturesecret@192.0.2.1/v1"),
+        ("MICROAGENT_BASE_URL", "https://fixtureuser:fixturesecret@localhost:invalid/v1"),
+        ("MICROAGENT_BASE_URL", "fixtureuser:fixturesecret@host/v1"),
+        ("MICROAGENT_BASE_URL", "https://localhost/v1\nheader"),
+        ("MICROAGENT_API_KEY", "fixture\nheader"),
+        ("MICROAGENT_API_KEY", "fixture\x7f"),
+    )
+    for name, value in invalid:
+        with patch.dict(
+            os.environ, {"MICROAGENT_API_KEY": "test", "MICROAGENT_BASE_URL": url, name: value}, clear=True
+        ):
+            try:
+                adapter.validate_env()
+            except RuntimeError as error:
+                expect(name in str(error), error)
+                expect("fixture" not in str(error), error)
+            else:
+                raise AssertionError(f"Harbor accepted invalid {name}")
+        result = invoke(binary, root, url, ["connection setting check"], "", **{name: value})
+        expect(result.returncode in (1, 2) and not Provider.seen, result.stderr)
+        expect("fixturesecret" not in result.stderr and "fixtureuser" not in result.stderr, result.stderr)
+    for value in (url, "https://localhost:65535/v1", "https://[::1]:443/v1"):
+        with patch.dict(os.environ, {"MICROAGENT_API_KEY": "fixture", "MICROAGENT_BASE_URL": value}, clear=True):
+            adapter.validate_env()
+            expect(adapter.base_url() == value and adapter.api_key() == "fixture", value)
+
+
 if __name__ == "__main__":
     binary = Path(sys.argv[1]).resolve(strict=True)
     with tempfile.TemporaryDirectory() as temp, ThreadingHTTPServer(("127.0.0.1", 0), Provider) as server:
@@ -386,6 +427,7 @@ if __name__ == "__main__":
             check_timeouts(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_response_cap(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_harbor_numbers(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
+            check_harbor_connection_values(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
         finally:
             server.shutdown()
             thread.join()

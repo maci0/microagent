@@ -534,14 +534,14 @@ fn runMain(init: std.process.Init) !u8 {
     // is: a caller who left the scheme off is told their key was about to go
     // out in the clear, which is a security warning about a value that never
     // reaches the network.
-    if (std.Uri.parse(opts.base_url)) |_| {} else |_| return configError(io, "{s} is not a url", .{clip(opts.base_url)});
+    if (std.Uri.parse(opts.base_url)) |_| {} else |_| return configError(io, "{s} is not a url", .{clip(displayUrl(arena, opts.base_url))});
     // The url is written into the request line as parsed, so a control byte in
     // one ends that line and everything after it is a request line of the
     // caller's own making. The key is held to the same rule above.
     if (net.hasHeaderControlBytes(opts.base_url))
         return configError(io, "the base url holds a control character, which cannot go in a request line", .{});
     if (!net.urlCarriesKey(opts.base_url))
-        return configError(io, "the API key would go to {s} in the clear; use an https base url, or http on loopback", .{clip(opts.base_url)});
+        return configError(io, "the API key would go to {s} in the clear; use an https base url, or http on loopback", .{clip(displayUrl(arena, opts.base_url))});
 
     var client: std.http.Client = .{ .allocator = gpa, .io = io };
     defer client.deinit();
@@ -1601,15 +1601,13 @@ fn displayUrl(arena: std.mem.Allocator, url: []const u8) []const u8 {
 }
 
 /// The url with a password in it removed, for the notes that name the
-/// endpoint. Only a url carrying a scheme is rewritten: the authority a bare
-/// `user:pass@host/v1` holds is not a url this program can parse, and such a
-/// base url is refused before the first request, so it never reaches a note.
+/// endpoint, including malformed values reported by configuration errors.
 fn redactUserinfo(arena: std.mem.Allocator, url: []const u8) []const u8 {
-    const scheme_end = std.mem.indexOf(u8, url, "://") orelse return url;
-    const rest = url[scheme_end + "://".len ..];
+    const authority_start = if (std.mem.indexOf(u8, url, "://")) |end| end + "://".len else 0;
+    const rest = url[authority_start..];
     const authority_end = std.mem.indexOfAny(u8, rest, "/?#") orelse rest.len;
     const at = std.mem.lastIndexOfScalar(u8, rest[0..authority_end], '@') orelse return url;
-    return std.fmt.allocPrint(arena, "{s}[redacted]@{s}", .{ url[0 .. scheme_end + "://".len], rest[at + 1 ..] }) catch url;
+    return std.fmt.allocPrint(arena, "{s}[redacted]@{s}", .{ url[0..authority_start], rest[at + 1 ..] }) catch "[redacted URL]";
 }
 
 /// An optional ceiling from a flag or a variable, or the message saying the
@@ -4269,6 +4267,9 @@ test "a base url that carries credentials does not print them" {
     );
     // Not a url at all, so there is no authority to look in.
     try std.testing.expectEqualStrings("openrouter.ai", displayUrl(arena, "openrouter.ai"));
+    try std.testing.expectEqualStrings("[redacted]@host/v1", displayUrl(arena, "user:sk-secret@host/v1"));
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectEqualStrings("[redacted URL]", redactUserinfo(failing.allocator(), "https://user:sk-secret@host/v1"));
     // The base url is whatever the operator's shell passed, and the notes name
     // it on every failure, so it reaches the terminal the way every other value
     // a diagnostic quotes does: no control byte, and no byte that is not text.

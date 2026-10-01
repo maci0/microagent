@@ -145,8 +145,14 @@ def api_key() -> str:
     # by a test there.
     value = trimmed_env("MICROAGENT_API_KEY")
     if value:
+        reject_controls("MICROAGENT_API_KEY", value)
         return value
     raise RuntimeError("no model provider key in the host environment: set MICROAGENT_API_KEY before running harbor")
+
+
+def reject_controls(name: str, value: str) -> None:
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
+        raise RuntimeError(f"{name} contains a control character")
 
 
 def checked_int(name: str, raw: str) -> int:
@@ -254,13 +260,21 @@ def base_url() -> str:
     after a container start and a binary upload, which is the most expensive
     place to learn it. Checked here, it stops the run at the command line."""
     value = trimmed_env("MICROAGENT_BASE_URL") or DEFAULT_BASE_URL
-    parts = urlsplit(value)
+    reject_controls("MICROAGENT_BASE_URL", value)
+    try:
+        parts = urlsplit(value)
+        host = parts.hostname
+        # Accessing the property validates port syntax and the u16 range.
+        _ = parts.port
+    except ValueError:
+        raise RuntimeError("MICROAGENT_BASE_URL must have a valid host and port (0 to 65535)") from None
+    if not host or parts.netloc.endswith(":"):
+        raise RuntimeError("MICROAGENT_BASE_URL must have a host and a valid port")
     if parts.scheme not in ("http", "https"):
-        raise RuntimeError(f"MICROAGENT_BASE_URL must be an http or https url, got {value!r}")
+        raise RuntimeError("MICROAGENT_BASE_URL must be an http or https url")
     if parts.scheme == "http" and not is_loopback((parts.hostname or "").lower()):
         raise RuntimeError(
-            f"MICROAGENT_BASE_URL is {value!r}: the api key would go to it in the clear, "
-            "so it must be https, or http on loopback"
+            "MICROAGENT_BASE_URL would send the api key in the clear, so it must be https, or http on loopback"
         )
     return value
 

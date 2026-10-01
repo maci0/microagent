@@ -93,8 +93,9 @@ naming the variable:
   ceilings above `18446744073709551615`;
 - a `MICROAGENT_REASONING_EFFORT` that is not one of `minimal`, `low`,
   `medium`, `high`, `none`;
-- a `MICROAGENT_BASE_URL` the binary would refuse (no scheme, or http to
-  anything but loopback).
+- a `MICROAGENT_BASE_URL` with no scheme or host, an invalid port, or http to
+  anything but loopback;
+- control characters inside `MICROAGENT_API_KEY` or `MICROAGENT_BASE_URL`.
 
 `MICROAGENT_MAX_TURNS` is passed as `--max-turns`, and the binary reads the
 same name itself, so either route ends at the same ceiling.
