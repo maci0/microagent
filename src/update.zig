@@ -257,9 +257,11 @@ fn fail(io: std.Io, comptime fmt: []const u8, args: anytype) u8 {
     return 1;
 }
 
-/// The outcome of a download that could not be started or waited for. These
-/// are the failures of this process rather than of the network, so the line
-/// says which and the caller is not asked to retry.
+/// The outcome of a download that could not be started, waited for, or read.
+/// These are the failures of this process rather than of the network, so the
+/// line says which and the caller is not asked to retry: the run has no body to
+/// give and no other endpoint to try, and a second attempt would print the same
+/// line.
 fn giveUp(io: std.Io, what: []const u8, err: anyerror) Outcome {
     _ = fail(io, "could not download {s} ({s})", .{ what, @errorName(err) });
     return .{ .body = null, .retry = false };
@@ -379,14 +381,6 @@ fn fetch(
 /// machine that suspended mid-wait is a machine whose operator is not watching.
 const sleep_clock: std.Io.Clock = .awake;
 
-/// The download that could not be started, made or read. None of those is
-/// retried: the run has no body to give and no other endpoint to try, and a
-/// second attempt would print the same line.
-fn notDownloaded(io: std.Io, what: []const u8, err: anyerror) Outcome {
-    _ = fail(io, "could not download {s} ({s})", .{ what, @errorName(err) });
-    return .{ .body = null, .retry = false };
-}
-
 /// One GET, raced against its own deadline. `client.fetch` has no timeout
 /// option, so the clock is a task of its own and the exchange is the other:
 /// whichever finishes first ends this, and the one that did not is cancelled
@@ -433,7 +427,7 @@ fn fetchOnce(
             return .{ .body = null, .retry = true };
         },
     }
-    const body = capped.body.toOwnedSlice() catch |err| return notDownloaded(io, what, err);
+    const body = capped.body.toOwnedSlice() catch |err| return giveUp(io, what, err);
     return .{ .body = body, .retry = false };
 }
 
