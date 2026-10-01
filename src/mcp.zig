@@ -834,29 +834,17 @@ pub const Servers = struct {
             tool_call.tool = findTool(server, tool_call.tool.exposed) orelse
                 return std.fmt.allocPrint(arena, "error: MCP server {s} no longer offers {s}", .{ server.name, tool_call.tool.exposed });
         }
-        const args = std.mem.trim(u8, args_text, " \t\r\n");
-        if (args.len != 0) {
-            // The parse is here only to decide whether the request can be sent,
-            // so the tree it builds is dropped before the round trip rather than
-            // kept in the run's arena, for the reason the handshake gives.
-            var args_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-            defer args_state.deinit();
-            _ = std.json.parseFromSliceLeaky(std.json.Value, args_state.allocator(), args, .{}) catch
-                return "error: tool arguments are not valid JSON";
-        }
-        var pb = chat.JsonBuf.init(arena);
-        try pb.writer().writeAll("{\"name\":");
-        try chat.writeJsonString(pb.writer(), tool_call.tool.name);
-        try pb.writer().writeAll(",\"arguments\":");
-        try pb.writer().writeAll(if (args.len == 0) "{}" else args);
-        try pb.writer().writeAll("}");
+        const pb = callParams(arena, tool_call.tool.name, args_text) catch |err| switch (err) {
+            error.ArgumentsNotJson => return "error: tool arguments are not valid JSON",
+            else => |e| return e,
+        };
 
         net.writeErr(io, try std.fmt.allocPrint(arena, "\u{23fa} {s}\n", .{chat.safeText(arena, tool_call.tool.exposed, net.shown_name_bytes)}));
         // The answer is parsed in a scratch arena and only the text built from
         // it is kept, for the reason the handshake gives.
         var scratch_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer scratch_state.deinit();
-        const result = server.request(io, scratch_state.allocator(), "tools/call", pb.items(), deadline) catch |err| {
+        const result = server.request(io, scratch_state.allocator(), "tools/call", pb, deadline) catch |err| {
             if (err == error.ServerRefused or err == error.HttpStatus)
                 return std.fmt.allocPrint(arena, "error: MCP server {s} refused {s}: {s}", .{ server.name, tool_call.tool.exposed, server.last_error });
             return std.fmt.allocPrint(arena, "error: MCP server {s} did not answer {s} ({s})", .{ server.name, tool_call.tool.exposed, @errorName(err) });
@@ -886,6 +874,38 @@ pub const Servers = struct {
         }
     }
 };
+
+/// The `params` of one `tools/call`: the server's own name for the tool, and
+/// the argument object the model wrote. The arguments are spliced in as the
+/// bytes the model sent rather than re-serialized, which is only safe because
+/// they were parsed as JSON first: a truncated or a double-spelled object is
+/// refused here rather than handed to a server that would answer with its own
+/// parse error. Empty arguments become `{}`, so a call with none still carries
+/// the member a server reading `params.arguments` expects.
+///
+/// The name and the arguments are the two halves of the frame a model
+/// reaches a third party with, and they cross that boundary as text neither
+/// this binary nor the server wrote, so the fuzz harness below drives this
+/// function and reads the frame back the way a server's parser does.
+fn callParams(arena: std.mem.Allocator, tool_name: []const u8, args_text: []const u8) ![]u8 {
+    const args = std.mem.trim(u8, args_text, " \t\r\n");
+    if (args.len != 0) {
+        // The parse is here only to decide whether the request can be sent,
+        // so the tree it builds is dropped before the round trip rather than
+        // kept in the run's arena, for the reason the handshake gives.
+        var args_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer args_state.deinit();
+        _ = std.json.parseFromSliceLeaky(std.json.Value, args_state.allocator(), args, .{}) catch
+            return error.ArgumentsNotJson;
+    }
+    var pb = chat.JsonBuf.init(arena);
+    try pb.writer().writeAll("{\"name\":");
+    try chat.writeJsonString(pb.writer(), tool_name);
+    try pb.writer().writeAll(",\"arguments\":");
+    try pb.writer().writeAll(if (args.len == 0) "{}" else args);
+    try pb.writer().writeAll("}");
+    return pb.items();
+}
 
 /// What a `tools/call` result says, as the model reads it: the text blocks in
 /// order, and a note for a block that is not text. An `isError` result keeps
@@ -2813,6 +2833,172 @@ fn carriedFrame(arena: std.mem.Allocator, bytes: []const u8) ![]const u8 {
     try chat.writeJsonString(w, bytes);
     try w.writeAll("}]}}");
     return jb.items();
+}
+
+// The other half of what a server sees, and the half this binary assembles: a
+// `tools/call` request carries the tool's own name and the argument object the
+// model wrote, and the arguments are spliced into the frame as the bytes the
+// model sent rather than re-serialized. The JSON check in front of the splice
+// is the only thing between the two, and it is what no other harness here
+// reaches: `fuzzTools` reads a server's `tools/list` answer, and this one
+// writes the request that answer's tool is then called with.
+//
+// A model controls both members and a third party reads them, so the property
+// worth asserting is the round trip: whatever the model wrote comes back out
+// of the frame as the value it was, and the frame as a whole is a JSON object
+// a server's parser accepts. A missing brace, a comma in the wrong place or an
+// unescaped name is a turn whose every later call to that server is refused,
+// and none of them is a crash anywhere else. `std.testing.fuzz` runs this
+// corpus on every `zig build test`, and through the fuzzer's mutations when
+// the test binary is built in fuzz mode.
+const call_corpus = [_][]const u8{
+    "",
+    "   ",
+    "{}",
+    "{\"text\":\"hi\"}",
+    "{\"text\":\"hi\"}   ",
+    "  \t\r\n{\"text\":\"hi\"}\n",
+    "{\"command\":\"ls -la\"}",
+    "{\"n\":0}",
+    "{\"n\":-1}",
+    "{\"n\":1e300}",
+    "{\"a\":null,\"b\":true,\"c\":false}",
+    "{\"nested\":{\"deep\":{\"deeper\":[1,2,3]}}}",
+    "{\"empty_list\":[],\"empty_obj\":{}}",
+    "{\"quote\":\"a\\\"b\",\"backslash\":\"a\\\\b\"}",
+    "{\"text\":\"caf\u{00e9} \u{65e5}\u{8a00}\u{1f600}\"}",
+    "{\"text\":\"\u{0}\u{1b}[31m\u{7f}\"}",
+    "{\"deploy\":\"\u{202e}gnp.exe\"}",
+    "{\"text\":\"\"}",
+    "[1,2,3]",
+    "\"a string\"",
+    "null",
+    "5",
+    "{\"text\":\"hi\"",
+    "{\"text\":",
+    "{\"text\":\"hi\"}{",
+    "{\"text\":\"hi\",}",
+    "{,}",
+    "{\"a\":1} trailing",
+    "{\"a\":1}\n{\"b\":2}",
+    "\u{0}",
+    "{\"a\":\"\u{0}\"}",
+    "\"\\ud800\"",
+    "{\"a\":" ** 16,
+    "{\"a\":1," ** 32 ++ "\"b\":2}",
+    "{\"text\":\"" ++ "x" ** 4096 ++ "\"}",
+};
+
+test "a fuzzed tool call reaches the server as the arguments the model wrote" {
+    try std.testing.fuzz({}, fuzzCallParams, .{ .corpus = &call_corpus });
+}
+
+fn fuzzCallParams(_: void, smith: *std.testing.Smith) !void {
+    var raw: [8 * 1024]u8 = undefined;
+    const text: []const u8 = if (smith.in) |seed| seed else raw[0..smith.slice(&raw)];
+
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    // The tool name is the server's own and the model reaches the frame through
+    // it, so it is a second member of the same seed rather than a fixed string:
+    // it is written with the escaper here, and a name carrying a quote or a
+    // control byte is the one that ends the frame early.
+    var name_buf: [256]u8 = undefined;
+    const name = name_buf[0..smith.slice(&name_buf)];
+
+    const args = std.mem.trim(u8, text, " \t\r\n");
+    const params = callParams(arena, name, text) catch |err| switch (err) {
+        // The one refusal this boundary is written to make: bytes that are not
+        // JSON never reach the wire, and refusing them is the whole point of
+        // splicing the model's bytes in unserialized. Anything else is a bug in
+        // the harness or in the builder, and a crash-only harness would say
+        // nothing about which of the two it was.
+        error.ArgumentsNotJson => {
+            try std.testing.expect(args.len != 0);
+            // The refusal is held to those bytes and not to a shorter or longer
+            // run of them: the same parse that refused them here has to refuse
+            // them again, or the answer to "is this JSON?" depends on who
+            // asked. The two failure kinds are both a parse failure, so the set
+            // is what is checked rather than one spelling of it.
+            var args_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+            defer args_state.deinit();
+            const again = std.json.parseFromSliceLeaky(std.json.Value, args_state.allocator(), args, .{});
+            if (again) |_| {
+                return error.TestUnexpectedResult;
+            } else |parse_err| switch (parse_err) {
+                error.SyntaxError, error.UnexpectedEndOfInput => {},
+                else => return error.TestUnexpectedResult,
+            }
+            return;
+        },
+        else => |e| return e,
+    };
+
+    // The frame as a whole, which is what a server's parser reads: `writeFrame`
+    // wraps the params, and the wrapper's own braces and commas are half of
+    // what a wrong splice breaks.
+    var frame_buf = chat.JsonBuf.init(arena);
+    try Server.writeFrame(frame_buf.writer(), 7, "tools/call", params);
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena, frame_buf.items(), .{});
+    const object = switch (parsed) {
+        .object => |o| o,
+        else => return error.TestUnexpectedResult,
+    };
+
+    // The members a server dispatches on are the ones this run wrote, and none
+    // of the model's text is among them: a model that could name its own method
+    // or forge an id would be answering its own request.
+    try std.testing.expectEqualStrings("2.0", chat.str(object.get("jsonrpc")) orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqualStrings("tools/call", chat.str(object.get("method")) orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqual(@as(i64, 7), object.get("id").?.integer);
+    const p = switch (object.get("params").?) {
+        .object => |o| o,
+        else => return error.TestUnexpectedResult,
+    };
+
+    // The pair assertion across the boundary the harness crosses: the name is
+    // written before and read back after, and a name that came back as
+    // something else is a `tools/call` the server resolves to another tool or
+    // to none.
+    if (std.unicode.utf8ValidateSlice(name)) {
+        try std.testing.expectEqualStrings(name, chat.str(p.get("name")) orelse return error.TestUnexpectedResult);
+    } else {
+        // Bytes that are not UTF-8 come back as the replacement the provider
+        // reads rather than as the bytes on the wire, so the property is that
+        // what came back is still a name and still a string.
+        try std.testing.expect(std.unicode.utf8ValidateSlice(chat.str(p.get("name")) orelse return error.TestUnexpectedResult));
+    }
+
+    // The arguments are the pair on the other side. Empty is spelled `{}` by the
+    // builder, so a call with none still carries the member; what came back is
+    // the value the model wrote, and a value it did not write is a request the
+    // server acts on for a reason the model never gave.
+    const sent = switch (p.get("arguments") orelse return error.TestUnexpectedResult) {
+        .object => |o| o,
+        // The builder accepts any JSON value, not only an object: a bare array
+        // or string that parses is a `tools/call` whose `arguments` is that
+        // value, and whether a server accepts it is the server's call. What is
+        // asserted here is only that the frame carries it unchanged.
+        .array, .string, .integer, .float, .number_string, .bool, .null => return,
+    };
+    if (args.len == 0) {
+        try std.testing.expectEqual(@as(usize, 0), sent.count());
+        return;
+    }
+    const wanted = try std.json.parseFromSliceLeaky(std.json.Value, arena, args, .{});
+    const want = switch (wanted) {
+        .object => |o| o,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(want.count(), sent.count());
+    for (want.keys()) |key| {
+        const got = sent.get(key) orelse return error.TestUnexpectedResult;
+        const a = try std.json.Stringify.valueAlloc(arena, want.get(key).?, .{});
+        const b = try std.json.Stringify.valueAlloc(arena, got, .{});
+        try std.testing.expectEqualStrings(a, b);
+    }
 }
 
 // A server that answers the handshake and then goes away is the ordinary way

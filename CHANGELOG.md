@@ -16,6 +16,20 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+### Added
+
+- A `tools/call` request now has a fuzz harness of its own. The arguments a
+  model writes are spliced into the JSON-RPC frame as the bytes it sent rather
+  than re-serialized, behind a JSON check that is the only thing between a
+  model and a third-party server, and no harness reached that side: the
+  existing ones read what a server sends, not the request its tools are then
+  called with. The harness holds the round trip -- the tool name and the
+  argument object come back out of the frame a server's parser accepts as the
+  value the model wrote, and bytes that are not JSON are refused for those
+  bytes and not for a shorter run of them. The check itself moves into a
+  named `callParams`, so the harness and the call read the same code rather
+  than two copies of it.
+
 ### Fixed
 
 - A lazy MCP preset whose `initialize` answer is refused no longer keeps its
