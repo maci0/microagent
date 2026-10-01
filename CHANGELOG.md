@@ -39,6 +39,22 @@ release, and `microagent update` moves you to it.
   give and the tools did ask for. A test walks every `properties` object in the
   schema, at any depth, and fails naming the argument if one is left bare.
 
+### Changed
+
+- The gate reads the workflows for what they mean to the runner, not only for
+  how they are spelled. `lint-actions.sh` asked of every external `uses:` that
+  it was pinned to a full commit sha, and now asks the six things a wrong value
+  leaves a run green rather than red, which nothing a check on a `run:` body can
+  reach: a composite action's `run:` step naming the `shell:` Actions runs no
+  default for, a `timeout-minutes` on every job so a hung step cannot sit there
+  until the workflow's six-hour ceiling, a `permissions:` block on every
+  workflow rather than the repository's default scope, no `write-all` asked of a
+  workflow or a job, a `concurrency` group on every workflow, and a checkout
+  that sets `persist-credentials: false` so the job's token is not left in
+  `.git/config`. Both workflows already satisfied every one of them; the
+  self-test that exercises the checker now reads the workflows the gate itself
+  reads, so a rule that fired on one of them fails here rather than on a push.
+
 ### Fixed
 
 - `git blame` honours the `limit` the tool schema advertises. Every other

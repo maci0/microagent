@@ -233,6 +233,14 @@ def check_locks(directory: Path, env: dict[str, str]) -> None:
 
 
 def check_workflows(directory: Path, env: dict[str, str]) -> None:
+    # The workflow-level invariants lint-actions.sh enforces, so a fixture built
+    # to test one rule is not refused by one of the others: every fixture built
+    # to test something else carries a permissions block, a concurrency group
+    # and a timeout. The block at the end of this function takes exactly one
+    # invariant out of a fixture at a time, which is what those two lines are
+    # for.
+    header = "permissions:\n  contents: read\nconcurrency:\n  group: ci-${{ github.ref }}\n  cancel-in-progress: true\n"
+    job = "  lint:\n    runs-on: ubuntu-24.04\n    timeout-minutes: 5\n    steps:\n"
     workflow = directory / "workflow.yml"
     composite = directory / "action.yml"
     record = directory / "shell-bodies.json"
@@ -259,9 +267,11 @@ def check_workflows(directory: Path, env: dict[str, str]) -> None:
         ),
     )
     workflow.write_text(
-        "jobs:\n  lint:\n    steps:\n" + "".join(f"      - run: {scalar}\n" for scalar, _ in values), encoding="utf-8"
+        header + "jobs:\n" + job + "".join(f"      - run: {scalar}\n" for scalar, _ in values), encoding="utf-8"
     )
-    composite.write_text("runs:\n  using: composite\n  steps:\n    - run: echo action\n", encoding="utf-8")
+    composite.write_text(
+        "runs:\n  using: composite\n  steps:\n    - run: echo action\n      shell: bash\n", encoding="utf-8"
+    )
     try:
         result = run(
             ROOT / "scripts/lint-ci-shell.sh", str(workflow), str(composite), env=env, SHELL_BODIES=str(record)
@@ -282,10 +292,10 @@ def check_workflows(directory: Path, env: dict[str, str]) -> None:
             8,
         ),
     ):
-        workflow.write_text(f"jobs:\n  lint:\n    steps:\n      - run: {scalar}\n", encoding="utf-8")
+        workflow.write_text(header + "jobs:\n" + job + f"      - run: {scalar}\n", encoding="utf-8")
         result = run(ROOT / "scripts/lint-ci-shell.sh", str(workflow), env=env)
         expect(result.returncode != 0 and "SC2154" in result.stdout, result)
-        expect(f"In {workflow} line {line}:" in result.stdout, result)
+        expect(f"In {workflow} line {line + header.count(chr(10)) + 2}:" in result.stdout, result)
     for ref, passed in (
         ("'owner/action@" + "a" * 40 + "' # v7.0.1", True),
         ("./.github/actions/local", True),
@@ -293,8 +303,7 @@ def check_workflows(directory: Path, env: dict[str, str]) -> None:
         ("owner/action@" + "a" * 40 + " # v", False),
     ):
         workflow.write_text(
-            "jobs:\n  lint:\n    steps:\n"
-            f"      - uses: {ref}\n"
+            header + "jobs:\n" + job + f"      - uses: {ref}\n"
             "      - run: |\n          cat <<EOF\n          - uses: fake/action@v1\n          EOF\n",
             encoding="utf-8",
         )
@@ -302,8 +311,8 @@ def check_workflows(directory: Path, env: dict[str, str]) -> None:
         expect((result.returncode == 0) == passed, result)
     pin = "owner/action@" + "a" * 40
     for prefix, indent in (
-        ("jobs:\n  lint:\n    steps:\n      - uses: ", "          "),
-        ("jobs:\n  lint:\n    uses: ", "      "),
+        (header + "jobs:\n" + job + "      - uses: ", "          "),
+        (header + "jobs:\n  lint:\n    timeout-minutes: 5\n    uses: ", "      "),
         ("runs:\n  using: composite\n  steps:\n    - uses: ", "        "),
     ):
         for ref, passed in (
@@ -318,7 +327,7 @@ def check_workflows(directory: Path, env: dict[str, str]) -> None:
             expect((result.returncode == 0) == passed, result)
             expect("Traceback" not in result.stderr, result)
     workflow.write_text(
-        f"jobs:\n  lint:\n    steps:\n      - uses: >-\n          {pin}\n      - run: echo ok # v\n",
+        header + "jobs:\n" + job + f"      - uses: >-\n          {pin}\n      - run: echo ok # v\n",
         encoding="utf-8",
     )
     result = run(ROOT / "scripts/lint-actions.sh", str(workflow), env=env)
@@ -326,6 +335,73 @@ def check_workflows(directory: Path, env: dict[str, str]) -> None:
     workflow.write_text("jobs: [\n", encoding="utf-8")
     result = run(ROOT / "scripts/lint-ci-shell.sh", str(workflow), env=env)
     expect(result.returncode != 0 and str(workflow) in result.stderr, result)
+
+    # The runner semantics lint-ci-shell.sh cannot see, one at a time: each
+    # fixture below is the whole invariants-carrying workflow with exactly one
+    # of them taken out, and each is refused for the reason it names.
+    for name, body, said in (
+        (
+            "no concurrency group",
+            "permissions:\n  contents: read\njobs:\n" + job + "      - run: echo ok\n",
+            "concurrency:",
+        ),
+        (
+            "no permissions",
+            "jobs:\n" + job + "      - run: echo ok\n",
+            "permissions:",
+        ),
+        (
+            "no ceiling",
+            "jobs:\n  lint:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo ok\n",
+            "timeout-minutes",
+        ),
+        (
+            "write-all at the workflow",
+            "permissions: write-all\nconcurrency:\n  group: g\n" + "jobs:\n" + job + "      - run: echo ok\n",
+            "write-all",
+        ),
+        (
+            "write-all in a job",
+            (
+                "permissions:\n  contents: read\nconcurrency:\n  group: g\n"
+                "jobs:\n  lint:\n    runs-on: ubuntu-24.04\n    timeout-minutes: 5\n"
+                "    permissions: write-all\n    steps:\n      - run: echo ok\n"
+            ),
+            "write-all",
+        ),
+        (
+            "a checkout that keeps its credentials",
+            header + "jobs:\n" + job + "      - uses: actions/checkout@" + "a" * 40 + " # v7.0.1\n",
+            "persist-credentials",
+        ),
+        (
+            "a composite step with no shell",
+            "runs:\n  using: composite\n  steps:\n    - run: echo ok\n",
+            "no shell:",
+        ),
+    ):
+        workflow.write_text(body, encoding="utf-8")
+        result = run(ROOT / "scripts/lint-actions.sh", str(workflow), env=env)
+        expect(result.returncode != 0 and said in result.stderr, f"{name}: {result}")
+        expect("Traceback" not in result.stderr, f"{name}: {result}")
+
+    # The workflow the gate accepts is the one the tree ships: every file
+    # `make lint-ci` hands the checker passes, and a rule that fired on one of
+    # them would be a rule the gate itself cannot satisfy.
+    for name in ("ci.yml", "release.yml"):
+        result = run(
+            ROOT / "scripts/lint-actions.sh",
+            str(ROOT / ".github/workflows" / name),
+            env=env,
+        )
+        expect(result.returncode == 0, f"{name}: {result}")
+    for name in ("setup-zig", "setup-linters"):
+        result = run(
+            ROOT / "scripts/lint-actions.sh",
+            str(ROOT / ".github/actions" / name / "action.yml"),
+            env=env,
+        )
+        expect(result.returncode == 0, f"{name}: {result}")
 
 
 def check_instructions(directory: Path, env: dict[str, str]) -> None:

@@ -170,7 +170,7 @@ help:
 	  'check                 preflight, zig-version, check-unreleased, check-changelog-history, check-readme, check-help, check-man, fmt-check, the linters, the tests, an optimized build' \
 	  'lint                  the version and lock checks, the release inventory, then shellcheck, ruff and yamllint' \
 	  'lint-shell            shellcheck over every tracked .sh file' \
-	  'lint-ci               shellcheck over the run: steps in the workflows and composite actions' \
+	  'lint-ci               shellcheck over the run: steps, and the action pins and runner semantics, in the workflows and composite actions' \
 	  'lint-python           ruff check and ruff format --check over every tracked .py file' \
 	  'lint-yaml             yamllint over every tracked .yml and .yaml file' \
 	  'lint-md               the Markdown checks over every tracked .md file, which no other linter reads' \
@@ -575,6 +575,17 @@ lint-shell:
 # this extracts the `run:` bodies and runs the same shellcheck over them. The
 # option list is the one above rather than a second spelling, so the two gates
 # cannot drift into checking different things.
+#
+# lint-actions.sh reads the same documents for what they mean to the runner,
+# which no `run:` body can express: an external action pinned to a full commit
+# sha, a composite step naming the shell Actions runs no default for, a
+# timeout on every job, a permissions block rather than the repository's
+# default scope, a concurrency group, and a checkout that does not leave the
+# job's token in .git/config. Each is a value whose wrong setting leaves a run
+# green, so each is asked of every workflow and composite action the gate
+# reads. The self-test that follows exercises both, over synthetic documents
+# and over the workflows this gate itself reads, so a rule that fired on one
+# of them fails here rather than on a push.
 lint-ci:
 	@test -n "$(CI_SOURCES)" || { echo "no tracked workflow to read the run: steps from" >&2; exit 1; }
 	SHELLCHECK_OPTS='$(SHELLCHECK_OPTS)' sh scripts/lint-ci-shell.sh $(CI_SOURCES)

@@ -10,7 +10,7 @@
 | `docs/` | reference and design docs: [usage](docs/usage.md), [benchmark](docs/benchmark.md), [performance](docs/performance.md), [threat model](docs/threat-model.md), the [to-do list](docs/todo.md), and the logo |
 | `reviews/` | this project's own [gauntlet](https://github.com/maci0/gauntlet) review prompts; run them with `gauntlet --prompt-dir reviews`, which replaces gauntlet's embedded set |
 | `.github/` | the `ci` and `release` workflows, the shared `setup-zig` and `setup-linters` actions, and the Dependabot config |
-| `scripts/` | the gate's own checks: the linter version pins (`lint-versions.sh`), each dependency set's lock against the manifest it was compiled from (`lint-lock.sh`), the `run:` steps in the workflows (`lint-ci-shell.sh`), the Markdown checks (`lint-md.sh`), the `src/path:line` citations (`check-refs.sh`), and the release inventory (`sbom.sh`). The linters' hashed install is compiled from `lint-requirements.in` |
+| `scripts/` | the gate's own checks: the linter version pins (`lint-versions.sh`), each dependency set's lock against the manifest it was compiled from (`lint-lock.sh`), the `run:` steps in the workflows (`lint-ci-shell.sh`), their action pins and runner semantics (`lint-actions.sh`), the Markdown checks (`lint-md.sh`), the `src/path:line` citations (`check-refs.sh`), and the release inventory (`sbom.sh`). The linters' hashed install is compiled from `lint-requirements.in` |
 
 At the root: `build.zig` and `build.zig.zon` (the build and the version), the
 [Makefile](Makefile) (every command below), `README.md`, `CHANGELOG.md`, this
@@ -98,7 +98,7 @@ make test-sanitize          # the same suite optimized with Zig runtime safety c
 make watch [FILTER="..."]   # the suite again on every source change, until Ctrl-C
 make preflight              # name any tool check and lint need that is not on PATH
 make lint                   # the pin checks, shellcheck, ruff, yamllint and Markdown on their own
-make lint-ci                # shellcheck over the run: steps in the workflows, on their own
+make lint-ci                # shellcheck over the run: steps, and the workflow refs and runner semantics, on their own
 make check-asset-run        # the published asset for this host, cross-built and started
 make instructions CHECK=--check   # retired instructions per unit, and a band it must stay inside
 make check-unreleased       # the [Unreleased] entry has the five sections, once each, in order
@@ -158,6 +158,20 @@ Markdown file added anywhere is linted too, and one written but not yet
 `git add`ed is linted before it is committed rather than after. Both workflows call `make lint`
 rather than repeating its targets, so a linter added to the Makefile gates a
 push and a tag as well as a laptop.
+
+`lint-ci` reaches past the shape yamllint reads, into what a workflow means to
+the runner. Its checker asks of every external `uses:` that it is a full commit
+sha with the release it stands for named beside it, of a composite action's
+`run:` step that it names the `shell:` Actions runs no default for, of every job
+that it carries a `timeout-minutes` so a hung step cannot sit there until the
+workflow's ceiling, of every workflow that it declares `permissions:` rather than
+inheriting the repository's default scope, of the workflow and of each job that
+neither asks for `write-all`, of every workflow that it declares a
+`concurrency` group, and of every checkout that it sets
+`persist-credentials: false`, so the job's token is not left in
+`.git/config` where a later build or test step can reach it. Each is one
+whose wrong setting turns a run green rather than red, which is why nothing a
+check on a `run:` body can reach will catch it.
 
 `check-refs`, in the same target, is the one gate about what a document claims
 rather than how it is written. Every `src/path:line` citation in a Markdown
