@@ -554,9 +554,15 @@ pub const Server = struct {
         var no_redirect: [0]u8 = .{};
         var response = try req.receiveHead(&no_redirect);
 
+        var error_transfer: [http_transfer_bytes]u8 = undefined;
         const status = response.head.status;
-        if ((id != null and status != .ok) or (id == null and status.class() != .success)) {
-            self.last_error = try std.fmt.allocPrint(self.run_arena, "HTTP {d}", .{@intFromEnum(status)});
+        // Only the refusing classes are refusals. A `202` to a request is the
+        // transport saying it has accepted the request and will answer it out
+        // of band, and the answer is the frame in the body like any other, so
+        // treating it as a fault refuses a call the server did answer. A `1xx`
+        // is answered by the client itself and never reaches here.
+        if (status.class() != .success) {
+            try self.noteRefusal(scratch, response.reader(&error_transfer), status);
             connection.closing = true;
             return error.HttpStatus;
         }
@@ -676,6 +682,44 @@ pub const Server = struct {
             seen.* = false;
         }
         return self.answerFor(scratch, event.items, id);
+    }
+
+    /// Why a refusing status happened, written to `last_error` the way a
+    /// `200` carrying an error frame is: the server's own JSON-RPC `error`
+    /// says why, and a bare "HTTP 400" throws that away and leaves the model
+    /// with nothing it can act on but a number. A server that answers a refusal
+    /// with an HTML error page, or with no body at all, has said no such thing,
+    /// so the status stands alone for it. The status is kept on the end either
+    /// way, because it is the part this client knows and the server's own code
+    /// is the part it cannot check.
+    ///
+    /// The body is read once and held to the frame ceiling a whole answer is
+    /// held to, and the connection is closed by the caller either way, so an
+    /// error page larger than any answer this client would have read is
+    /// refused rather than walked. A body that will not parse is not the
+    /// server's reason either way, so it falls back with everything else.
+    fn noteRefusal(self: *Server, scratch: std.mem.Allocator, reader: *Io.Reader, status: std.http.Status) !void {
+        const prefix = try std.fmt.allocPrint(self.run_arena, "HTTP {d}", .{@intFromEnum(status)});
+        const body = reader.allocRemaining(scratch, .limited(max_frame_bytes)) catch {
+            self.last_error = prefix;
+            return;
+        };
+        const value = std.json.parseFromSliceLeaky(std.json.Value, scratch, body, .{}) catch {
+            self.last_error = prefix;
+            return;
+        };
+        const object = switch (value) {
+            .object => |o| o,
+            else => {
+                self.last_error = prefix;
+                return;
+            },
+        };
+        const err_value = object.get("error") orelse {
+            self.last_error = prefix;
+            return;
+        };
+        self.last_error = try std.fmt.allocPrint(self.run_arena, "{s} ({s})", .{ try describeError(self.run_arena, err_value), prefix });
     }
 };
 
@@ -3194,6 +3238,13 @@ const FakeMcp = struct {
         unsupported_version,
         invalid_version,
         missing_version,
+        /// A `202 Accepted` to the call, which the streamable-HTTP transport
+        /// allows for a request it answers out of band. The body is the frame,
+        /// so this is also the case a client that insists on `200` refuses.
+        call_accepted,
+        /// A `400` to the call carrying a JSON-RPC error object, which is how a
+        /// server reports a bad request while the status is also a refusal.
+        call_error_status,
     };
 
     const init_frame = "{\"result\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"fake\",\"version\":\"1\"}},\"jsonrpc\":\"2.0\",\"id\":1}";
@@ -3304,6 +3355,8 @@ const FakeMcp = struct {
             },
             .hang => return false,
             .call_error => try self.reply(out, "200 OK", "Content-Type: application/json\r\n", "{\"jsonrpc\":\"2.0\",\"id\":3,\"error\":{\"code\":-32602,\"message\":\"bad args\"}}"),
+            .call_accepted => try self.reply(out, "202 Accepted", "Content-Type: application/json\r\n", call_frame),
+            .call_error_status => try self.reply(out, "400 Bad Request", "Content-Type: application/json\r\n", "{\"jsonrpc\":\"2.0\",\"id\":3,\"error\":{\"code\":-32602,\"message\":\"bad args\"}}"),
             .unauthorized => unreachable,
         }
         return true;
@@ -3597,6 +3650,45 @@ test "a remote server that refuses the handshake is skipped, and one that fails 
     defer erroring.shutdown(io);
     const errored = erroring.resolve("mcp__err__echo") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("error: MCP server err refused mcp__err__echo: bad args (code -32602)", try Servers.call(io, arena, errored, "{}", net.durationMs(10_000)));
+}
+
+// Two statuses the request path used to refuse, both of which the transport
+// allows and neither of which says the request was wrong.
+//
+// A request answered `202` is not an error: the streamable-HTTP transport lets
+// a server accept a request and answer it out of band, and the frame in the
+// body is the answer. Only the 4xx and 5xx classes are refusals, so this
+// succeeds the way the `200` path does.
+//
+// A refusal whose body is a JSON-RPC error carries the server's own reason, and
+// that reason is what the model needs to act on. Reading the body is the same
+// parse a `200` carrying an error frame already goes through, so the two agree
+// on the sentence, and a body that is not JSON still says the status.
+test "a request answered 202 succeeds, and a refusal carries the server's reason" {
+    const gpa = std.testing.allocator;
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const arena = state.allocator();
+    const io = std.testing.io;
+    var client: std.http.Client = .{ .allocator = gpa, .io = io };
+    defer client.deinit();
+
+    const accepted = try FakeMcp.start(gpa, io, .call_accepted);
+    defer accepted.finish();
+    var ok_servers = try connectFake(io, arena, &client, accepted, .{ .name = "ok" });
+    defer ok_servers.shutdown(io);
+    const ok_call = ok_servers.resolve("mcp__ok__echo") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("pong", try Servers.call(io, arena, ok_call, "{}", net.durationMs(10_000)));
+
+    const bad = try FakeMcp.start(gpa, io, .call_error_status);
+    defer bad.finish();
+    var bad_servers = try connectFake(io, arena, &client, bad, .{ .name = "bad" });
+    defer bad_servers.shutdown(io);
+    const bad_call = bad_servers.resolve("mcp__bad__echo") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(
+        "error: MCP server bad refused mcp__bad__echo: bad args (code -32602) (HTTP 400)",
+        try Servers.call(io, arena, bad_call, "{}", net.durationMs(10_000)),
+    );
 }
 
 test "remote servers connect together, keep the config order, and one that fails is skipped" {

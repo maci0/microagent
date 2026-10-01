@@ -270,12 +270,30 @@ fn giveUp(io: std.Io, what: []const u8, err: anyerror) Outcome {
 /// what is not there rather than the release, which the caller already named:
 /// a release that does not exist, an asset a release forgot, and a sidecar an
 /// asset came without are three different mistakes.
-fn statusHint(status: std.http.Status) []const u8 {
+///
+/// A `429` is the API saying it is out of quota, so the token is what fixes it.
+/// A `403` is not one thing: it is also the answer to a token without the
+/// scope, or to a repository nobody may read, and telling a reader to set a
+/// token there sends them after a fix that changes nothing. GitHub says which
+/// of the two it is in the body, so `body` is read and the sentence is only
+/// added when the refusal really is the rate limit.
+fn statusHint(status: std.http.Status, body: []const u8) []const u8 {
     return switch (status) {
         .not_found => " (nothing published at that url)",
-        .forbidden, .too_many_requests => " (rate limited; set GITHUB_TOKEN)",
+        .too_many_requests => " (rate limited; set GITHUB_TOKEN)",
+        .forbidden => if (isRateLimited(body)) " (rate limited; set GITHUB_TOKEN)" else "",
         else => "",
     };
+}
+
+/// Whether a refusal body is the API's rate limit rather than a permission
+/// refusal. GitHub words the first one "rate limit" in every spelling it uses,
+/// and a body too short to hold a word or an empty one is not it: an empty
+/// refusal is a server that said no, and a reader told to set a token they
+/// already have set is worse than one told nothing.
+fn isRateLimited(body: []const u8) bool {
+    if (body.len == 0) return false;
+    return std.ascii.indexOfIgnoreCase(body, "rate limit") != null;
 }
 
 /// How many times one download is attempted before it is given up on, and the
@@ -406,7 +424,7 @@ fn fetchOnce(
                 return .{ .body = null, .retry = net.transientTransportError(err) };
             };
             if (@intFromEnum(received.status) >= 400) {
-                _ = fail(io, "GitHub returned HTTP {d} for {s}{s}", .{ @intFromEnum(received.status), what, statusHint(received.status) });
+                _ = fail(io, "GitHub returned HTTP {d} for {s}{s}", .{ @intFromEnum(received.status), what, statusHint(received.status, capped.body.written()) });
                 return .{ .body = null, .retry = net.retryableStatus(received.status) };
             }
         },
@@ -1153,14 +1171,44 @@ test "update: a download's deadline is its floor until the body needs more" {
 // The sentence a status is read with. Three statuses carry one and the rest
 // carry none, and the two that share a sentence are the two a token fixes, so
 // a hint that moved between them sends a reader after the wrong thing.
+//
+// The 403 is read out of the body rather than taken from the status, because a
+// 403 is also a permission refusal and one told to set a token goes after a fix
+// that changes nothing. A 429 needs no body to say which of the two it is.
 test "update: a status names what a person has to do about it" {
-    try std.testing.expectEqualStrings(" (nothing published at that url)", statusHint(.not_found));
-    try std.testing.expectEqualStrings(" (rate limited; set GITHUB_TOKEN)", statusHint(.forbidden));
-    try std.testing.expectEqualStrings(" (rate limited; set GITHUB_TOKEN)", statusHint(.too_many_requests));
+    try std.testing.expectEqualStrings(" (nothing published at that url)", statusHint(.not_found, ""));
+    try std.testing.expectEqualStrings(" (rate limited; set GITHUB_TOKEN)", statusHint(.too_many_requests, ""));
+    try std.testing.expectEqualStrings(" (rate limited; set GITHUB_TOKEN)", statusHint(.forbidden, rate_limit_body));
+    // The two 403s that are not the rate limit, so the number is all there is.
+    try std.testing.expectEqualStrings("", statusHint(.forbidden, ""));
+    try std.testing.expectEqualStrings("", statusHint(.forbidden, permission_body));
     // Nothing to do about these, so nothing is said past the number.
     for ([_]std.http.Status{ .ok, .internal_server_error, .bad_gateway, .unauthorized }) |status| {
-        try std.testing.expectEqualStrings("", statusHint(status));
+        try std.testing.expectEqualStrings("", statusHint(status, rate_limit_body));
     }
+}
+
+// The two bodies the 403 is told apart by, spelled the way GitHub writes them.
+const rate_limit_body =
+    \\{"message":"API rate limit exceeded for 1.2.3.4. (But here's the good news: Authenticated requests get a higher rate limit.)","documentation_url":"https://docs.github.com/rest/overview/resources-in-the-rest-api#rate-limiting"}
+;
+const permission_body =
+    \\{"message":"Resource not accessible by personal access token","documentation_url":"https://docs.github.com/rest"}
+;
+
+// Which of the two a refusal body is, which is the whole of what separates the
+// 403 that a token fixes from the 403 that no token fixes.
+test "update: a 403 is a rate limit only when the body says so" {
+    try std.testing.expect(isRateLimited(rate_limit_body));
+    // Either spelling, because the limit is announced as both across the
+    // endpoints that answer with one.
+    try std.testing.expect(isRateLimited("secondary rate limit; please wait"));
+    try std.testing.expect(!isRateLimited(permission_body));
+    // A body too short to carry a word is not the rate limit, and neither is
+    // one that never arrived: a reader told to set a token they already set is
+    // worse off than one told nothing.
+    try std.testing.expect(!isRateLimited(""));
+    try std.testing.expect(!isRateLimited("denied"));
 }
 
 // The two waits the loop can take are the shared schedule under this path's

@@ -85,6 +85,21 @@ release, and `microagent update` moves you to it.
   current buffer instead of leaking it or freeing an earlier allocation twice.
 - Provider stream errors are parsed as JSON, including whitespace and escaped field names;
   a null error field does not turn a successful response into a failure.
+- An MCP server that answers a request with `202 Accepted` is no longer reported as a
+  failure. Only the `4xx` and `5xx` classes are refusals; a `202` to a request is the
+  streamable-HTTP transport accepting it and answering out of band, and the frame in the
+  body is the answer, so the call now succeeds the way a `200` does.
+
+- An MCP refusal that carries a JSON-RPC error object now reports the server's own reason
+  instead of a bare status. A `400` with `{"error":{"code":-32602,"message":"bad args"}}`
+  said `HTTP 400` and threw the reason away; it now reads `bad args (code -32602) (HTTP 400)`,
+  the same sentence a `200` carrying an error frame already produced. A refusal with an HTML
+  page or no body still falls back to the status alone.
+
+- `microagent update` tells a reader to set `GITHUB_TOKEN` on a `403` only when the body
+  is actually the API's rate limit. A `403` is also a token without the scope, or a
+  repository nobody may read, and sending someone after a token that changes nothing was
+  the wrong answer to those. A `429` still needs no body to be told apart.
 
 - A turn whose request body was completely on the wire is not sent a second time when the
   flush of it stalls past the stall timeout. The timeout was reported as a failure to send,
