@@ -548,7 +548,10 @@ skipped: one broken entry costs that entry, not the run. An `env` key is a varia
 digits and underscores, quoted or not. A key outside that form, or a value containing a NUL,
 is rejected, so that server is skipped and the line named rather
 than spawned. The server's stderr is inherited, since
-that is where MCP servers write diagnostics. Its environment is the scrubbed one tool subprocesses
+that is where MCP servers write diagnostics, so what a server writes reaches the terminal
+unescaped and uncapped: unlike every other untrusted byte this program prints, it is not
+scrubbed, so a server that emits terminal escape sequences can repaint the terminal. Its
+environment is the scrubbed one tool subprocesses
 get plus the entry's `env`, so it never sees a provider key. Nor does it see the conversation: a
 call carries the tool name and the model's arguments for it and nothing else. [What leaves the
 machine](#what-leaves-the-machine) has the whole list.
