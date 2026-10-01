@@ -568,8 +568,13 @@ stream, whichever the server sends; notifications and server requests in a strea
 stream that ends without the answer is an error. After `initialize` the client sends
 `MCP-Protocol-Version` with the supported revision selected by the server (`2025-03-26` or
 `2025-06-18`), and echoes an `Mcp-Session-Id` the server assigned. Unsupported revisions and
-missing version strings fail initialization; stdio also supports `2024-11-05`. Between
+missing version strings fail initialization; stdio also supports `2024-11-05` and `2025-11-25`. Between
 requests the client keeps the tool table and that session id, and no connection of its own.
+
+Tool discovery follows opaque `nextCursor` values through every page, using the same handshake
+deadline and a 4 MiB allowance for the complete catalog's JSON. A repeated or invalid cursor, an
+oversized catalog, or a failed page skips the server rather than offering a partial table. Duplicate
+tool names keep their first listing.
 
 | key | meaning |
 | --- | --- |

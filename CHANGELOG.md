@@ -35,6 +35,9 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- MCP discovery follows tool catalog pages with opaque cursor values, one
+  deadline and a shared byte allowance. Failed catalogs cannot advertise partial
+  tables, and duplicate detection no longer scans every earlier tool per entry.
 - Benchmark deadlines kill surviving process-group descendants before
   returning, including children that ignore termination after their parent exits.
 - MCP initialization checks the server's selected protocol revision and uses

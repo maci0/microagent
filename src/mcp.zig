@@ -68,8 +68,9 @@ const pending_allocator = std.heap.page_allocator;
 /// that starts and then says nothing is the ordinary way a server is broken,
 /// and a run that waits on it forever is worse than one that skips it.
 const handshake_timeout_ms: u64 = 20_000;
-/// The preferred stdio revision. The shared tool operations also support
-/// 2025-03-26 and legacy 2024-11-05 stdio servers; other revisions are refused.
+/// The preferred stdio revision. Shared tool operations also support
+/// 2025-03-26, and stdio supports 2024-11-05 and 2025-11-25. HTTP stays on the
+/// two revisions whose response streams do not require polling/resumption.
 const protocol_version = "2025-06-18";
 /// The revision spoken over HTTP, which is the one the public streamable-HTTP
 /// servers are known to accept, and the one named in `MCP-Protocol-Version`
@@ -1879,9 +1880,9 @@ fn handshake(io: Io, arena: std.mem.Allocator, server: *Server, client_version: 
     // Keep a constant, not the parsed string: the handshake's scratch arena
     // is freed before the next request. Unknown revisions cannot be assumed
     // to use this lifecycle, and a server value must never become a header.
-    const negotiated = for ([_][]const u8{ protocol_version, http_protocol_version, "2024-11-05" }) |supported| {
-        if (std.mem.eql(u8, selected, supported) and
-            !(server.transport == .http and std.mem.eql(u8, supported, "2024-11-05"))) break supported;
+    const negotiated = for ([_][]const u8{ protocol_version, http_protocol_version, "2024-11-05", "2025-11-25" }) |supported| {
+        const supported_http = std.mem.eql(u8, supported, protocol_version) or std.mem.eql(u8, supported, http_protocol_version);
+        if (std.mem.eql(u8, selected, supported) and (server.transport == .stdio or supported_http)) break supported;
     } else {
         server.last_error = "initialize selected an unsupported protocol version";
         return false;
@@ -1891,16 +1892,60 @@ fn handshake(io: Io, arena: std.mem.Allocator, server: *Server, client_version: 
         .stdio => {},
     }
     server.send(io, arena, null, "notifications/initialized", "", timeout) catch return false;
-    const listed = server.request(io, scratch, "tools/list", "", timeout) catch return false;
     // The tool table is read on every later turn and by every request's
     // schema, so it is built from the run's allocator rather than from the
     // arena this handshake was handed: on a preset that first call arrives
     // with a turn's arena, and that arena is reset at the top of the next turn.
-    server.tools = buildTools(io, server.run_arena, scratch, server, listed) orelse {
-        server.last_error = "tools/list answered with no result object";
+    server.tools = readTools(io, scratch, server, timeout) catch |err| {
+        switch (err) {
+            error.InvalidToolCatalog, error.InvalidToolCursor, error.RepeatedToolCursor, error.ToolCatalogTooLarge => server.last_error = @errorName(err),
+            else => if (server.last_error.len == 0) {
+                server.last_error = @errorName(err);
+            },
+        }
         return false;
     };
     return true;
+}
+
+/// Read every tools/list page under the handshake's original deadline and
+/// one catalog allowance. Only copied tool metadata and cursors survive a page.
+fn readTools(io: Io, scratch: std.mem.Allocator, server: *Server, timeout: Io.Timeout) ![]const Tool {
+    var page_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer page_state.deinit();
+    var found: std.ArrayList(Tool) = .empty;
+    var names: std.StringHashMap(void) = .init(scratch);
+    defer names.deinit();
+    var cursors: std.StringHashMap(void) = .init(scratch);
+    defer cursors.deinit();
+    var params: Io.Writer.Allocating = .init(scratch);
+    defer params.deinit();
+    var used: u64 = 0;
+    while (true) {
+        _ = page_state.reset(.retain_capacity);
+        const page = page_state.allocator();
+        const listed = try server.request(io, page, "tools/list", params.written(), timeout);
+        if (listed != .object or (listed.object.get("tools") orelse return error.InvalidToolCatalog) != .array)
+            return error.InvalidToolCatalog;
+        var count: Io.Writer.Discarding = .init(&.{});
+        try std.json.Stringify.value(listed, .{}, &count.writer);
+        if (count.fullCount() > max_frame_bytes - used) return error.ToolCatalogTooLarge;
+        used += count.fullCount();
+        const tools = buildTools(io, server.run_arena, page, server, listed) orelse return error.InvalidToolCatalog;
+        for (tools) |tool| {
+            if ((try names.getOrPut(tool.name)).found_existing) continue;
+            try found.append(server.run_arena, tool);
+        }
+        const next = listed.object.get("nextCursor") orelse return found.items;
+        const cursor = chat.str(next) orelse return error.InvalidToolCursor;
+        const seen = try cursors.getOrPut(cursor);
+        if (seen.found_existing) return error.RepeatedToolCursor;
+        seen.key_ptr.* = try scratch.dupe(u8, cursor);
+        params.clearRetainingCapacity();
+        try params.writer.writeAll("{\"cursor\":");
+        try chat.writeJsonString(&params.writer, cursor);
+        try params.writer.writeAll("}");
+    }
 }
 
 /// The tool table a `tools/list` result turns into, in the order the server
@@ -1921,6 +1966,8 @@ fn buildTools(io: Io, arena: std.mem.Allocator, scratch: std.mem.Allocator, serv
         else => &.{},
     } else &.{};
     var found: std.ArrayList(Tool) = .empty;
+    var names: std.StringHashMap(void) = .init(scratch);
+    defer names.deinit();
     for (tools) |item| {
         const entry = switch (item) {
             .object => |o| o,
@@ -1939,7 +1986,7 @@ fn buildTools(io: Io, arena: std.mem.Allocator, scratch: std.mem.Allocator, serv
         // tell apart, and `resolve` would answer only the first for the whole
         // run. The first listing wins, as it does for a name the server
         // spells twice under different schemas.
-        if (indexOfToolName(found.items, name) != null) continue;
+        if ((names.getOrPut(name) catch return null).found_existing) continue;
         const kept_name = arena.dupe(u8, name) catch return null;
         const exposed = exposedToolName(io, arena, server.name, kept_name) catch |err| switch (err) {
             error.NameTooLong => continue,
@@ -3178,6 +3225,12 @@ const FakeMcp = struct {
         unsupported_version,
         invalid_version,
         missing_version,
+        paged,
+        repeated_cursor,
+        catalog_oversize,
+        catalog_exact,
+        invalid_cursor,
+        failed_page,
     };
 
     const init_frame = "{\"result\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"fake\",\"version\":\"1\"}},\"jsonrpc\":\"2.0\",\"id\":1}";
@@ -3276,7 +3329,45 @@ const FakeMcp = struct {
         } else if (has(request, "\"method\":\"notifications/initialized\"")) {
             try self.reply(out, "202 Accepted", "", "");
         } else if (has(request, "\"method\":\"tools/list\"")) {
-            try self.reply(out, "200 OK", "Content-Type: application/json\r\n", list_frame);
+            if (self.flavor == .paged or self.flavor == .repeated_cursor or self.flavor == .catalog_oversize or
+                self.flavor == .catalog_exact or self.flavor == .invalid_cursor or self.flavor == .failed_page)
+            {
+                const first = self.seen.items.len == 3;
+                if (self.flavor == .failed_page and !first) {
+                    try self.reply(out, "503 Service Unavailable", "", "failed second page");
+                    return true;
+                }
+                var page = chat.JsonBuf.init(self.gpa);
+                defer page.deinit();
+                const w = page.writer();
+                try w.print("{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":{{\"tools\":[{{\"name\":\"{s}\",\"description\":", .{ @as(u64, if (first) 2 else 3), if (first) "echo" else "extra" });
+                if (self.flavor == .catalog_oversize or self.flavor == .catalog_exact) {
+                    var cursor_bytes: Io.Writer.Discarding = .init(&.{});
+                    if (first) {
+                        try cursor_bytes.writer.writeAll(",\"nextCursor\":");
+                        try chat.writeJsonString(&cursor_bytes.writer, page_cursor);
+                    }
+                    const structure = if (first) "{\"tools\":[{\"name\":\"echo\",\"description\":\"\"}]}".len else "{\"tools\":[{\"name\":\"extra\",\"description\":\"\"}]}".len;
+                    const size = if (self.flavor == .catalog_exact)
+                        max_frame_bytes / 2 - structure - @as(usize, @intCast(cursor_bytes.fullCount()))
+                    else
+                        max_frame_bytes * 3 / 5;
+                    const padding = try self.gpa.alloc(u8, size);
+                    defer self.gpa.free(padding);
+                    @memset(padding, 'x');
+                    try chat.writeJsonString(w, padding);
+                } else try chat.writeJsonString(w, if (first) "first page" else "second page");
+                try w.writeAll("}");
+                if (!first and self.flavor == .paged)
+                    try w.writeAll(",{\"name\":\"echo\",\"description\":\"replacement\"}");
+                try w.writeAll("]");
+                if (first or self.flavor == .repeated_cursor) {
+                    try w.writeAll(",\"nextCursor\":");
+                    if (self.flavor == .invalid_cursor) try w.writeAll("123") else try chat.writeJsonString(w, page_cursor);
+                }
+                try w.writeAll("}}");
+                try self.reply(out, "200 OK", "Content-Type: application/json\r\n", page.items());
+            } else try self.reply(out, "200 OK", "Content-Type: application/json\r\n", list_frame);
         } else switch (self.flavor) {
             .normal, .alternate_version, .unsupported_version, .invalid_version, .missing_version => try self.reply(out, "200 OK", "Content-Type: text/event-stream\r\n", note_event ++ "event: message\ndata: " ++ call_frame ++ "\n\n"),
             .call_status => try self.reply(out, "500 Internal Server Error", "", "boom"),
@@ -3288,6 +3379,8 @@ const FakeMcp = struct {
             },
             .hang => return false,
             .call_error => try self.reply(out, "200 OK", "Content-Type: application/json\r\n", "{\"jsonrpc\":\"2.0\",\"id\":3,\"error\":{\"code\":-32602,\"message\":\"bad args\"}}"),
+            .paged, .catalog_exact => try self.reply(out, "200 OK", "Content-Type: application/json\r\n", "{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"pong\"}]}}"),
+            .repeated_cursor, .catalog_oversize, .invalid_cursor, .failed_page => unreachable,
             .unauthorized => unreachable,
         }
         return true;
@@ -3298,6 +3391,8 @@ const FakeMcp = struct {
         try out.appendSlice(self.gpa, body);
     }
 };
+
+const page_cursor = "page\"\\?\nopaque";
 
 /// One connected fake server: the handshake done over loopback HTTP.
 fn connectFake(io: Io, arena: std.mem.Allocator, client: *std.http.Client, fake: *FakeMcp, entry: Entry) !Servers {
@@ -3372,7 +3467,7 @@ test "MCP initialization uses a supported selected revision before sending more 
             try std.testing.expectEqual(@as(usize, 1), fake.seen.items.len);
         }
     }
-    for ([_][]const u8{ "2025-06-18", "2025-03-26", "2024-11-05", "2099-01-01" }) |selected| {
+    for ([_][]const u8{ "2025-06-18", "2025-03-26", "2024-11-05", "2025-11-25", "2099-01-01" }) |selected| {
         var state = std.heap.ArenaAllocator.init(gpa);
         defer state.deinit();
         const arena = state.allocator();
@@ -3384,6 +3479,56 @@ test "MCP initialization uses a supported selected revision before sending more 
         defer servers.shutdown(io);
         try std.testing.expectEqual(@as(usize, if (std.mem.eql(u8, selected, "2099-01-01")) 0 else 1), servers.items.len);
     }
+}
+
+test "MCP discovery reads opaque catalog cursors and bounds the complete list" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    for ([_]FakeMcp.Flavor{ .paged, .catalog_exact, .repeated_cursor, .catalog_oversize, .invalid_cursor, .failed_page }) |flavor| {
+        var state = std.heap.ArenaAllocator.init(gpa);
+        defer state.deinit();
+        const arena = state.allocator();
+        const fake = try FakeMcp.start(gpa, io, flavor);
+        defer fake.finish();
+        var client: std.http.Client = .{ .allocator = gpa, .io = io };
+        defer client.deinit();
+        var servers = try connectFake(io, arena, &client, fake, .{ .name = "fake" });
+        defer servers.shutdown(io);
+        if (flavor == .paged or flavor == .catalog_exact) {
+            try std.testing.expectEqual(@as(usize, 2), servers.items[0].tools.len);
+            if (flavor == .paged) try std.testing.expectEqualStrings("first page", servers.resolve("mcp__fake__echo").?.tool.description);
+            const resolved = servers.resolve("mcp__fake__extra") orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqualStrings("pong", try Servers.call(io, arena, resolved, "{}", net.durationMs(10_000)));
+            const second = fake.seen.items[3];
+            const body_at = std.mem.indexOf(u8, second, "\r\n\r\n").? + 4;
+            var parsed = try std.json.parseFromSlice(std.json.Value, gpa, second[body_at..], .{});
+            defer parsed.deinit();
+            try std.testing.expectEqualStrings(page_cursor, parsed.value.object.get("params").?.object.get("cursor").?.string);
+        } else {
+            try std.testing.expectEqual(@as(usize, 0), servers.items.len);
+            try std.testing.expectEqual(@as(usize, if (flavor == .invalid_cursor) 3 else 4), fake.seen.items.len);
+        }
+    }
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const arena = state.allocator();
+    var env: std.process.Environ.Map = .init(arena);
+    var client: std.http.Client = .{ .allocator = gpa, .io = io };
+    defer client.deinit();
+    const script =
+        \\while IFS= read -r line; do
+        \\  case "$line" in
+        \\    *'"method":"initialize"'*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18"}}' ;;
+        \\    *'"method":"tools/list"'*'"cursor"'*) printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"tools":[{"name":"extra"}]}}' ;;
+        \\    *'"method":"tools/list"'*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo"}],"nextCursor":"stdio-page"}}' ;;
+        \\    *'"method":"tools/call"'*) printf '%s\n' '{"jsonrpc":"2.0","id":4,"result":{"content":[{"type":"text","text":"pong"}]}}' ;;
+        \\  esac
+        \\done
+    ;
+    var servers = connect(io, arena, &env, &client, &.{.{ .name = "fake", .command = "/bin/sh", .args = &.{ "-c", script } }}, "test");
+    defer servers.shutdown(io);
+    const resolved = servers.resolve("mcp__fake__extra") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("pong", try Servers.call(io, arena, resolved, "{}", net.durationMs(10_000)));
 }
 
 // A preset's shape against a real socket: the tool table exists before
