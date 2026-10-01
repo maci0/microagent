@@ -2970,7 +2970,9 @@ pub const truncation_note_room: usize = 128;
 /// that reads the two figures out of a result — `mcp`'s own tests do — reads
 /// whichever spelling this one is, so the two paths cannot drift apart.
 pub fn truncationNote(arena: std.mem.Allocator, kept: []const u8, cap: usize, total: usize) ![]const u8 {
-    return std.fmt.allocPrint(arena, "{s}\n... [tool output truncated at {d} of {d} bytes]", .{ kept, cap, total });
+    const fmt = "{s}\n... [tool output truncated at {d} of {d} bytes]";
+    const args = .{ kept, cap, total };
+    return std.fmt.bufPrint(try arena.alloc(u8, std.fmt.count(fmt, args)), fmt, args);
 }
 
 /// A tool call through the argument text the model sends, on the test io, with
