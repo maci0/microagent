@@ -566,7 +566,9 @@ Every request is a `POST` to the url with `Content-Type: application/json` and
 `Accept: application/json, text/event-stream`, and the answer is read as a JSON body or as an event
 stream, whichever the server sends; notifications and server requests in a stream are ignored, and a
 stream that ends without the answer is an error. After `initialize` the client sends
-`MCP-Protocol-Version: 2025-03-26`, and echoes an `Mcp-Session-Id` the server assigned. Between
+`MCP-Protocol-Version` with the supported revision selected by the server (`2025-03-26` or
+`2025-06-18`), and echoes an `Mcp-Session-Id` the server assigned. Unsupported revisions and
+missing version strings fail initialization; stdio also supports `2024-11-05`. Between
 requests the client keeps the tool table and that session id, and no connection of its own.
 
 | key | meaning |

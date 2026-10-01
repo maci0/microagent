@@ -35,6 +35,8 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- MCP initialization checks the server's selected protocol revision and uses
+  it in later HTTP headers, rejecting unsupported or malformed selections.
 - Completion requests append to the base URL's path while preserving its
   query and percent encoding, rather than appending inside a query or fragment.
 - URL credentials stay redacted in configuration errors, malformed endpoint

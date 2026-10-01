@@ -68,8 +68,8 @@ const pending_allocator = std.heap.page_allocator;
 /// that starts and then says nothing is the ordinary way a server is broken,
 /// and a run that waits on it forever is worse than one that skips it.
 const handshake_timeout_ms: u64 = 20_000;
-/// The protocol revision this client speaks. A server that answers with its
-/// own is taken at its word: the revision is negotiated, not asserted.
+/// The preferred stdio revision. The shared tool operations also support
+/// 2025-03-26 and legacy 2024-11-05 stdio servers; other revisions are refused.
 const protocol_version = "2025-06-18";
 /// The revision spoken over HTTP, which is the one the public streamable-HTTP
 /// servers are known to accept, and the one named in `MCP-Protocol-Version`
@@ -192,7 +192,7 @@ pub const Server = struct {
         session_id: []const u8 = "",
         /// Set once `initialize` is answered: from then on every request
         /// names the protocol revision in use.
-        negotiated: bool = false,
+        negotiated_version: ?[]const u8 = null,
     };
 
     fn reap(self: *Server, io: Io) void {
@@ -488,8 +488,8 @@ pub const Server = struct {
         extra_len += 1;
         extra[extra_len] = .{ .name = "accept", .value = "application/json, text/event-stream" };
         extra_len += 1;
-        if (http.negotiated) {
-            extra[extra_len] = .{ .name = "mcp-protocol-version", .value = http_protocol_version };
+        if (http.negotiated_version) |selected| {
+            extra[extra_len] = .{ .name = "mcp-protocol-version", .value = selected };
             extra_len += 1;
         }
         if (http.session_id.len != 0) {
@@ -1872,8 +1872,22 @@ fn handshake(io: Io, arena: std.mem.Allocator, server: *Server, client_version: 
         server.last_error = "initialize answered with no result object";
         return false;
     }
+    const selected = chat.str(initialized.object.get("protocolVersion")) orelse {
+        server.last_error = "initialize answered without a protocol version string";
+        return false;
+    };
+    // Keep a constant, not the parsed string: the handshake's scratch arena
+    // is freed before the next request. Unknown revisions cannot be assumed
+    // to use this lifecycle, and a server value must never become a header.
+    const negotiated = for ([_][]const u8{ protocol_version, http_protocol_version, "2024-11-05" }) |supported| {
+        if (std.mem.eql(u8, selected, supported) and
+            !(server.transport == .http and std.mem.eql(u8, supported, "2024-11-05"))) break supported;
+    } else {
+        server.last_error = "initialize selected an unsupported protocol version";
+        return false;
+    };
     switch (server.transport) {
-        .http => |*http| http.negotiated = true,
+        .http => |*http| http.negotiated_version = negotiated,
         .stdio => {},
     }
     server.send(io, arena, null, "notifications/initialized", "", timeout) catch return false;
@@ -3160,6 +3174,10 @@ const FakeMcp = struct {
         hang,
         /// A JSON-RPC error for the call.
         call_error,
+        alternate_version,
+        unsupported_version,
+        invalid_version,
+        missing_version,
     };
 
     const init_frame = "{\"result\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"fake\",\"version\":\"1\"}},\"jsonrpc\":\"2.0\",\"id\":1}";
@@ -3245,13 +3263,22 @@ const FakeMcp = struct {
             return true;
         }
         if (has(request, "\"method\":\"initialize\"")) {
-            try self.reply(out, "200 OK", "Content-Type: text/event-stream\r\nMcp-Session-Id: " ++ session_id ++ "\r\n", note_event ++ "event: message\ndata: " ++ init_frame ++ "\n\n");
+            const frame = switch (self.flavor) {
+                .alternate_version => "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-06-18\"}}",
+                .unsupported_version => "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2099-01-01\"}}",
+                .invalid_version => "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-03-26\\r\\nInjected: value\"}}",
+                .missing_version => "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}",
+                else => init_frame,
+            };
+            const event = try std.fmt.allocPrint(self.gpa, "{s}event: message\ndata: {s}\n\n", .{ note_event, frame });
+            defer self.gpa.free(event);
+            try self.reply(out, "200 OK", "Content-Type: text/event-stream\r\nMcp-Session-Id: " ++ session_id ++ "\r\n", event);
         } else if (has(request, "\"method\":\"notifications/initialized\"")) {
             try self.reply(out, "202 Accepted", "", "");
         } else if (has(request, "\"method\":\"tools/list\"")) {
             try self.reply(out, "200 OK", "Content-Type: application/json\r\n", list_frame);
         } else switch (self.flavor) {
-            .normal => try self.reply(out, "200 OK", "Content-Type: text/event-stream\r\n", note_event ++ "event: message\ndata: " ++ call_frame ++ "\n\n"),
+            .normal, .alternate_version, .unsupported_version, .invalid_version, .missing_version => try self.reply(out, "200 OK", "Content-Type: text/event-stream\r\n", note_event ++ "event: message\ndata: " ++ call_frame ++ "\n\n"),
             .call_status => try self.reply(out, "500 Internal Server Error", "", "boom"),
             .no_answer => try self.reply(out, "200 OK", "Content-Type: text/event-stream\r\n", note_event),
             .oversize => {
@@ -3320,6 +3347,43 @@ test "a streamable-HTTP server is connected, listed and called over loopback" {
     }
     try std.testing.expect(std.mem.indexOf(u8, fake.seen.items[1], "\"method\":\"notifications/initialized\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, fake.seen.items[1], "\"id\"") == null);
+}
+
+test "MCP initialization uses a supported selected revision before sending more requests" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    for ([_]FakeMcp.Flavor{ .alternate_version, .unsupported_version, .invalid_version, .missing_version }) |flavor| {
+        var state = std.heap.ArenaAllocator.init(gpa);
+        defer state.deinit();
+        const arena = state.allocator();
+        const fake = try FakeMcp.start(gpa, io, flavor);
+        defer fake.finish();
+        var client: std.http.Client = .{ .allocator = gpa, .io = io };
+        defer client.deinit();
+        var servers = try connectFake(io, arena, &client, fake, .{ .name = "fake" });
+        defer servers.shutdown(io);
+        if (flavor == .alternate_version) {
+            const resolved = servers.resolve("mcp__fake__echo") orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqualStrings("pong", try Servers.call(io, arena, resolved, "{}", net.durationMs(10_000)));
+            for (fake.seen.items[1..]) |request|
+                try std.testing.expect(std.ascii.indexOfIgnoreCase(request, "mcp-protocol-version: 2025-06-18\r\n") != null);
+        } else {
+            try std.testing.expectEqual(@as(usize, 0), servers.items.len);
+            try std.testing.expectEqual(@as(usize, 1), fake.seen.items.len);
+        }
+    }
+    for ([_][]const u8{ "2025-06-18", "2025-03-26", "2024-11-05", "2099-01-01" }) |selected| {
+        var state = std.heap.ArenaAllocator.init(gpa);
+        defer state.deinit();
+        const arena = state.allocator();
+        const script = try std.mem.replaceOwned(u8, arena, fake_server, protocol_version, selected);
+        var env: std.process.Environ.Map = .init(arena);
+        var client: std.http.Client = .{ .allocator = gpa, .io = io };
+        defer client.deinit();
+        var servers = connect(io, arena, &env, &client, &.{.{ .name = "fake", .command = "/bin/sh", .args = &.{ "-c", script } }}, "test");
+        defer servers.shutdown(io);
+        try std.testing.expectEqual(@as(usize, if (std.mem.eql(u8, selected, "2099-01-01")) 0 else 1), servers.items.len);
+    }
 }
 
 // A preset's shape against a real socket: the tool table exists before
