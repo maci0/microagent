@@ -7,17 +7,31 @@
 //!
 //! This file is the loop and the wiring around it: the command line, the config
 //! it resolves, the provider request and the frames that come back. The parts it
-//! leans on are named modules, imported in one direction: `chat` (the value types
-//! a turn is made of and its JSON writer) is the leaf, `net` (sinks, deadlines,
-//! the CA bundle, which urls may carry a credential) sits on it, `tool` and
-//! `session` sit on
-//! `net` (every tool call is reached by model-supplied text, and the per-run log
-//! is written from a finished response), `mcp` (the MCP servers, over a child's
-//! pipes or over HTTP) sits on `tool` and `net`, `config` (the one config file:
-//! the prompt addendum, skills, MCP servers, the tool set) on `mcp`, `stream`
-//! (folding one provider frame into the response) and `conversation` (the system
-//! prompt, the message array and its compaction) sit on `chat` and `net`, and
-//! `update` (the one subcommand, `microagent update`) sits on `net` and `chat`.
+//! leans on are named modules, imported in one direction, so the import graph is
+//! the layer map and no edge runs upward:
+//!
+//! ```text
+//! chat                      the value types a turn is made of, its JSON writer
+//! net       <- chat         sinks, deadlines, the CA bundle, which urls may carry a credential
+//! sandbox   <- net, chat    which directories a run may write under, and the kernel rules
+//! session   <- net, chat    the per-run JSONL log: naming, pruning, appending
+//! tool      <- net, chat, sandbox   every tool and the process runner they share
+//! skill     <- net, chat    named instruction documents and the tool that loads one
+//! mcp       <- tool, net, chat      the MCP servers, over a child's pipes or over HTTP
+//! config    <- mcp, chat    the one config file: the prompt addendum, skills, MCP servers, the tool set
+//! stream    <- chat         folding one provider frame into the response
+//! conversation <- skill, net, chat  the system prompt, the message array and its compaction
+//! update    <- net, chat    the one subcommand, `microagent update`
+//! main      <- all of the above
+//! ```
+//!
+//! The three arrows that are not obvious from a file name: `sandbox` sits over
+//! `session` because the session directory is a writable root the store creates
+//! on a different schedule than the sandbox resolves them, and the mode that
+//! directory is created with belongs to the store rather than to the sandbox;
+//! `mcp` sits over `tool` because an MCP server's answer is a tool result under
+//! the same cap and the same note; and `conversation` sits over `skill` because
+//! the system prompt names the skills this run found.
 
 const std = @import("std");
 const builtin = @import("builtin");

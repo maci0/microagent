@@ -2951,9 +2951,26 @@ fn waitBounded(
 pub fn toolResult(arena: std.mem.Allocator, output: []const u8) ![]const u8 {
     const kept = chat.clamp(output, max_tool_output);
     if (kept.len == output.len) return kept;
-    return std.fmt.allocPrint(arena, "{s}\n... [tool output truncated at {d} of {d} bytes]", .{
-        kept, max_tool_output, output.len,
-    });
+    return truncationNote(arena, kept, max_tool_output, output.len);
+}
+
+/// The room the note below is held back from the cap before the cut rather
+/// than measured after it, so the note survives the caller's own `clamp` with
+/// the cap and the true size it names. It is a cap on the text `kept` is cut
+/// to, not a bound on the note, which is at most a few dozen bytes of digits
+/// at any size a run can reach.
+pub const truncation_note_room: usize = 128;
+
+/// The note a tool result past the cap carries: the cap and the size the whole
+/// text would have had, after what the cut kept.
+///
+/// `pub` because an MCP result is a tool result the model reads the same way,
+/// and `mcp` builds one under the cap above rather than after it, so it needs
+/// the note spelled here and not a second time beside the other one. A parser
+/// that reads the two figures out of a result — `mcp`'s own tests do — reads
+/// whichever spelling this one is, so the two paths cannot drift apart.
+pub fn truncationNote(arena: std.mem.Allocator, kept: []const u8, cap: usize, total: usize) ![]const u8 {
+    return std.fmt.allocPrint(arena, "{s}\n... [tool output truncated at {d} of {d} bytes]", .{ kept, cap, total });
 }
 
 /// A tool call through the argument text the model sends, on the test io, with
@@ -3693,6 +3710,27 @@ test "a capped tool result says how much was dropped" {
     const cut = try toolResult(arena, big);
     try std.testing.expect(std.mem.startsWith(u8, cut, "x" ** max_tool_output));
     try std.testing.expect(std.mem.endsWith(u8, cut, "truncated at 24576 of 25076 bytes]"));
+}
+
+test "the note an MCP result carries is this one, and it survives its own cut" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // `mcp` builds a result under the same cap with the same note rather than
+    // a second format string beside this one, so a change to either moves both
+    // paths. The room the note is held back from is what keeps the note intact
+    // when the text beside it was cut first, which is the order `mcp` uses and
+    // the order `toolResult` does not, so the note is checked both ways here.
+    const big = "y" ** (max_tool_output + 500);
+    const note = "... [tool output truncated at 24576 of 25076 bytes]";
+    const capped = try truncationNote(arena, chat.clamp(big, max_tool_output - truncation_note_room), max_tool_output, big.len);
+    try std.testing.expect(std.mem.startsWith(u8, capped, "y" ** (max_tool_output - truncation_note_room)));
+    try std.testing.expect(std.mem.endsWith(u8, capped, note));
+    // The path `toolResult` takes: the text clamped to the cap, then the note
+    // appended past it, so the two spellings are read off the same two results.
+    const whole = try toolResult(arena, big);
+    try std.testing.expect(std.mem.endsWith(u8, whole, note));
 }
 
 test "a cut inside a character still names the cap it was cut at" {

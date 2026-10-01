@@ -901,8 +901,9 @@ fn resultText(arena: std.mem.Allocator, server_name: []const u8, result: std.jso
     // it is built rather than after it: a server that answers with a megabyte
     // was otherwise copied into the turn whole and clamped a moment later, so
     // the copy, the clamp and the bytes in between were all work over text
-    // nobody keeps. The note below is the caller's own wording, written here
-    // because this is the side that knows the size the whole text would have.
+    // nobody keeps. The note the cut below carries is `tool`'s own wording,
+    // because that is the one a parser reads; this side is where the size the
+    // whole text would have had is known.
     var total: usize = buf.items.len;
     var started = false;
     for (items) |item| {
@@ -929,8 +930,8 @@ fn resultText(arena: std.mem.Allocator, server_name: []const u8, result: std.jso
     }
     if (total == 0) return "(the MCP server returned no text)";
     if (total > cap) {
-        const kept = chat.clamp(buf.items, cap - truncation_note_room);
-        return truncationNote(arena, kept, cap, total);
+        const kept = chat.clamp(buf.items, cap - tool_mod.truncation_note_room);
+        return tool_mod.truncationNote(arena, kept, cap, total);
     }
     return buf.items;
 }
@@ -957,23 +958,8 @@ fn cappedJson(arena: std.mem.Allocator, value: std.json.Value, cap: usize) ![]co
     };
     const text = writer.buffered();
     if (total <= cap) return text;
-    const kept = chat.clamp(text, cap - truncation_note_room);
-    return truncationNote(arena, kept, cap, total);
-}
-
-/// The room a truncation note is written into, held back from the cap before
-/// the cut rather than measured after it, so the note survives the caller's own
-/// clamp with the cap and the true size it names. Two paths cut a server's
-/// answer, so this is the one number both of them holds back.
-const truncation_note_room: usize = 128;
-
-/// The note both cut paths append, spelled once because a parser reads it: a
-/// tool result that was cut says how much of it is here, and a test parses
-/// that sentence to learn the sizes rather than the bytes.
-fn truncationNote(arena: std.mem.Allocator, kept: []const u8, cap: usize, total: usize) ![]const u8 {
-    const fmt = "{s}\n... [tool output truncated at {d} of {d} bytes]";
-    const args = .{ kept, cap, total };
-    return std.fmt.bufPrint(try arena.alloc(u8, std.fmt.count(fmt, args)), fmt, args);
+    const kept = chat.clamp(text, cap - tool_mod.truncation_note_room);
+    return tool_mod.truncationNote(arena, kept, cap, total);
 }
 
 /// A JSON-RPC error value as a line: its message, with the code when there is

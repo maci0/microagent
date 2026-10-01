@@ -1,3 +1,20 @@
+//! The filesystem confinement a run puts itself in before a tool call reaches the machine:
+//! which directories it may write under, and the kernel mechanism that says so.
+//!
+//! Two backends, one interface: `applySandbox` is Landlock on Linux and a
+//! Seatbelt profile on macOS, and `isPathWritable` is the check a tool makes
+//! before a write on either. A run whose kernel grants nothing is confined by
+//! nothing, which is said rather than assumed: a writable root is a grant, not
+//! the confinement, and one the kernel refuses leaves the run read-only rather
+//! than handing back a run with no sandbox at all.
+//!
+//! It sits above `net` and `chat`, below `tool` -- every tool call is reached
+//! by model-supplied text, so the check is one place rather than one per tool --
+//! and above `session`, because the session directory is a writable root the
+//! store creates on a different schedule than the sandbox resolves them, and the
+//! mode that store directory is created with is that store's constant rather
+//! than one spelled here beside it.
+
 const std = @import("std");
 const builtin = @import("builtin");
 const net = @import("net.zig");
