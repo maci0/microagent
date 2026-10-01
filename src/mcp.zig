@@ -818,6 +818,13 @@ pub const Servers = struct {
         if (server.lazy) {
             if (!handshake(io, arena, server, server.client_version, deadline)) {
                 server.dead = true;
+                // A handshake that failed before the first request never passed
+                // through `request`, which is where every other death is
+                // followed by the retirement that stops the child. Without it a
+                // stdio server whose `initialize` answer was refused keeps its
+                // process-group slot and its read buffer for the rest of the
+                // run, and `reap` is idempotent so shutdown still lands.
+                server.retireIfDead(io);
                 return std.fmt.allocPrint(arena, "error: MCP server {s} did not answer ({s})", .{
                     server.name,
                     if (server.last_error.len != 0) server.last_error else "no answer",
@@ -2629,6 +2636,39 @@ test "a lazy MCP handshake shares the tool call deadline and a dead server is no
     try std.testing.expect(std.mem.indexOf(u8, slow_answer, "Timeout") != null);
     // initialize and tools/list may be attempted; tools/call must not start.
     try std.testing.expect(slow.items[0].next_id <= 3);
+}
+
+// A handshake that fails after `initialize` was answered is the one path that
+// marks a lazy server dead without going through `request`, and `request` is
+// where the child is retired. The stdio child would then hold its process-group
+// slot and its read buffer for the rest of the run: Ctrl+C cannot reach it,
+// `shutdown` only reaps it at the end, and a long run pays for a server that
+// is already known to be gone. A protocol version the handshake has no arm for
+// is the cheapest way to fail there, because the answer arrives and the
+// failure is this run's own judgement about it rather than a socket that went
+// quiet.
+test "a lazy server that fails its handshake stops holding its child process" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    const io = std.testing.io;
+    var env: std.process.Environ.Map = .init(arena);
+    const script = try std.mem.replaceOwned(u8, arena, fake_server, protocol_version, "2099-01-01");
+    var list: std.ArrayList(Server) = .empty;
+    spawnOne(io, arena, &env, .{ .name = "odd", .command = "/bin/sh", .args = &.{ "-c", script } }, &list);
+    defer for (list.items) |*server| server.reap(io);
+    try std.testing.expectEqual(@as(usize, 1), list.items.len);
+    const server = &list.items[0];
+    server.lazy = true;
+    server.client_version = "test";
+    const tool: Tool = .{ .name = "echo", .exposed = "mcp__odd__echo", .description = "echo", .schema = "{}" };
+
+    const answer = try Servers.call(io, arena, .{ .server = server, .tool = &tool }, "{}", net.durationMs(10_000));
+    try std.testing.expect(std.mem.indexOf(u8, answer, "did not answer") != null);
+    try std.testing.expect(server.dead);
+    // The child is gone: no process group left for Ctrl+C to miss, and the
+    // read buffer `reap` frees is handed back.
+    try std.testing.expectEqual(@as(usize, 0), tool_mod.liveChildGroups());
 }
 
 test "a server that cannot be started, or that exits, is skipped" {

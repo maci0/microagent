@@ -18,6 +18,16 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- A lazy MCP preset whose `initialize` answer is refused no longer keeps its
+  child running. The one handshake failure that is this run's own judgement
+  rather than a request that never came back -- a protocol version, a result
+  that is not an object, a `tools/list` that would not parse -- set the `dead`
+  flag without the retirement every other death is followed by, so the stdio
+  server held its process-group slot, its read buffer and an unreachable child
+  for the rest of the run. The slot is one of 64, and the interrupt table is
+  what makes a `bash` child stoppable by Ctrl+C, so a run that refused several
+  lazy servers could crowd the table out of serving the tools.
+
 - `make check-changelog-history` no longer sorts versions with `sort -V`, a GNU
   extension BSD `sort` has no spelling of. On the two macOS runners the target
   reads the released sections with, `sort` refused the flag, the version list
