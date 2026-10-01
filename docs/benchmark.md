@@ -7,8 +7,12 @@ dominates wall time in any loop, so the harness numbers are the ones worth compa
 Machine: x86_64 Linux, Zig 0.16.0 (the streaming profile names its CPU, an AMD Ryzen 9 9950X). Each
 section names the script, test or tool its numbers came from; none was produced by hand. The startup
 and task numbers come from `bench/overhead.sh` and `bench/run.sh` as committed. Those scripts also run
-on macOS: elapsed time there is monotonic too, read from `perl`'s `Time::HiRes` instead of
-`/proc/uptime`, a host with neither reports no-clock instead of a wall-clock figure, and the run
+on macOS: elapsed time is read from `perl`'s `Time::HiRes` `CLOCK_MONOTONIC` wherever perl is
+installed, on both platforms, and only a Linux host without perl falls back to `/proc/uptime`. The two
+are not the same quantity — `/proc/uptime` counts time spent in suspend and `CLOCK_MONOTONIC` does
+not — so a number read from the fallback on a laptop that suspended mid-run includes the suspend,
+and it is not comparable with one read from `CLOCK_MONOTONIC`. A host with neither source reports
+no-clock rather than a wall-clock figure, and the run
 ceiling, process-group cleanup and JSON result records require Python 3. Cleanup uses the same
 standard-library runner on both
 platforms. An interrupted command receives the signal and has up to five seconds to flush its logs

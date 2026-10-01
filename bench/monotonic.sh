@@ -14,20 +14,26 @@
 # source that fails has to fall through rather than poison the difference with a
 # wrong unit.
 #
-#   /proc/uptime      Linux, 10 ms resolution
-#   perl Time::HiRes  CLOCK_MONOTONIC (macOS ships perl)
+# Both sources answer the same question, and the order is what makes that so.
+# `/proc/uptime` is not a monotonic clock in the CLOCK_MONOTONIC sense: its man
+# page says it is "the uptime of the system (including time spent in suspend)",
+# which is CLOCK_BOOTTIME. perl's CLOCK_MONOTONIC stops while the machine is
+# suspended. Asking two sources for one function name and letting the order pick
+# meant a Linux laptop that suspended in the middle of a benchmark booked the
+# suspend as harness time, and a macOS laptop on the same workload did not, so
+# the two hosts' numbers answered different questions and `docs/benchmark.md`
+# compared them anyway. perl answers CLOCK_MONOTONIC on Linux as well, so it is
+# asked first and the suspend-free clock wins wherever perl is installed; the
+# /proc/uptime reading is the fallback for a Linux host without it, and is
+# labelled below as the quantity it is rather than passed off as the other one.
+#
+#   perl Time::HiRes  CLOCK_MONOTONIC, stops during suspend (macOS ships perl)
+#   /proc/uptime      Linux, 10 ms resolution, includes suspend
 #
 # There is no third source. `date` was one and is gone: a wall clock is not a
 # fallback for a measurement, it is a different quantity, so a host with neither
 # source above is told no duration was measured rather than handed one.
 monotonic_ns() {
-	if [ -r /proc/uptime ]; then
-		value=$(awk '{ printf "%.0f\n", $1 * 1000000000 }' /proc/uptime 2>/dev/null)
-		case "$value" in
-		'' | *[!0-9]*) ;;
-		*) printf '%s\n' "$value"; return 0 ;;
-		esac
-	fi
 	if command -v perl >/dev/null 2>&1; then
 		# The constant has to be Time::HiRes's own: a bare CLOCK_MONOTONIC in
 		# the main package is not defined and reads CLOCK_REALTIME instead.
@@ -39,11 +45,22 @@ monotonic_ns() {
 		*) printf '%s\n' "$value"; return 0 ;;
 		esac
 	fi
+	if [ -r /proc/uptime ]; then
+		# $1 is system uptime in seconds, suspend included. See the header:
+		# this is the same quantity on every run that reaches it, but not the
+		# same quantity as the perl reading above, and the difference is every
+		# second the machine spent asleep inside the measured window.
+		value=$(awk '{ printf "%.0f\n", $1 * 1000000000 }' /proc/uptime 2>/dev/null)
+		case "$value" in
+		'' | *[!0-9]*) ;;
+		*) printf '%s\n' "$value"; return 0 ;;
+		esac
+	fi
 	# A wall clock is not a fallback for a measurement, it is a different
 	# quantity: an NTP step inside a run makes the difference negative or an
 	# hour long, and one-second resolution records a 17.7 s task as 17.0. So
 	# rather than answer and let the number be recorded as if it were measured,
 	# this refuses, and says which machines get here.
-	printf 'bench/monotonic.sh: no monotonic clock: /proc/uptime is unreadable and perl is not installed, so no duration measured here can be trusted\n' >&2
+	printf 'bench/monotonic.sh: no monotonic clock: perl is not installed and /proc/uptime is unreadable, so no duration measured here can be trusted\n' >&2
 	return 1
 }
