@@ -1,16 +1,20 @@
 #!/bin/sh
 # The linter versions the gate runs are pinned in the Makefile, and this checks
 # that every other record of a pin agrees with them: the installed tools, the
-# manifest CI compiles its hashed install from, the version ruff itself reads, and the interpreter the
-# Harbor lock resolves for. A disagreement here is a green run CI disagrees
-# with, or a pin that names one version in one file and another in the next.
+# manifest CI compiles its hashed install from, the version ruff itself reads,
+# and the interpreter each lock is compiled to resolve for. A disagreement here
+# is a green run CI disagrees with, or a pin that names one version in one file
+# and another in the next.
 #
 # The versions are passed in rather than read from the Makefile, so the Makefile
 # stays the one place a version is written down. The Harbor manifest arrives as
 # an argument for the same reason scripts/lint-lock.sh takes one: the directory
 # is written down in the Makefile, and a second spelling of it in a script is a
-# path that goes on disagreeing with the one the rest of the gate passes. A
-# version mismatch is reported by name rather than surfacing later as a
+# path that goes on disagreeing with the one the rest of the gate passes. The
+# linter manifest is read by bare name, as lint-requirements.in and
+# lint-requirements.txt already are below, since it lives at the root rather than
+# in a directory and the Makefile passes the same bare name to lint-lock.sh.
+# A version mismatch is reported by name rather than surfacing later as a
 # formatting diff no one can explain, so the message says what to install.
 set -eu
 
@@ -49,10 +53,21 @@ ruff_required="$(sed -n 's/^required-version = "\(.*\)"/\1/p' ruff.toml)"
 [ "$ruff_required" = "$RUFF_VERSION" ] || {
   echo "ruff.toml requires ruff $ruff_required, not $RUFF_VERSION: a contributor running 'ruff check --config ruff.toml' directly is told nothing by the gate, and 'required-version' is the one pin ruff reads there" >&2;
   echo "a bump to RUFF_VERSION has to bump required-version, and lint-requirements.txt, in the same change" >&2; bad=1; }
+# The interpreter each lock resolves for, against the target-version ruff
+# checks against. There are two manifests here, and both are checked: ruff
+# lints the Python in this tree, and the pin that lints it is ruff in
+# lint-requirements.txt, compiled from lint-requirements.in. Reading the floor
+# out of the Harbor manifest alone left a bump to the linter manifest's
+# --python-version unobserved, so the two locks could resolve for different
+# interpreters and the gate stayed green, which is the drift this whole script
+# exists to catch. A manifest with no --python-version line is reported rather
+# than skipped, so a reworded comment cannot silently turn the check off.
 ruff_target="$(sed -n 's/^target-version = "\(py[0-9]*\)"/\1/p' ruff.toml)"
-lock_target="$(sed -n 's/.*uv pip compile.*--python-version \([0-9][0-9.]*\).*/\1/p' "$manifest")"
-lock_py="$(printf '%s' "$lock_target" | tr -d .)"
-{ [ -n "$ruff_target" ] && [ -n "$lock_target" ] && [ "$ruff_target" = "py$lock_py" ]; } || {
-  echo "ruff.toml checks against $ruff_target and $manifest resolves its lock for $lock_target: a py target raised here without the floor raised there lints against an interpreter the lock does not resolve for" >&2;
-  echo "a bump to either has to bump the other, and the 'uv pip compile' at the top of that manifest with it" >&2; bad=1; }
+for source in lint-requirements.in "$manifest"; do
+  lock_target="$(sed -n 's/.*uv pip compile.*--python-version \([0-9][0-9.]*\).*/\1/p' "$source")"
+  lock_py="$(printf '%s' "$lock_target" | tr -d .)"
+  { [ -n "$ruff_target" ] && [ -n "$lock_target" ] && [ "$ruff_target" = "py$lock_py" ]; } || {
+    echo "ruff.toml checks against $ruff_target and $source resolves its lock for $lock_target: a py target raised here without the floor raised there lints against an interpreter the lock does not resolve for" >&2;
+    echo "a bump to either has to bump the other, and the 'uv pip compile' at the top of that manifest with it" >&2; bad=1; }
+done
 test "$bad" -eq 0
