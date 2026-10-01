@@ -5,9 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -53,49 +55,7 @@ def check() -> None:
         result = run(ROOT / "bench/overhead.sh", "broken-bench-agent", env=env)
         expect(result.returncode == 1 and "fail(7)" in result.stdout, result)
 
-        # Isolate the instruction script's cached build options; its fake
-        # compiler emits the same test-count/status interface as a Zig test.
-        fixture = directory / "checkout"
-        (fixture / "bench").mkdir(parents=True)
-        (fixture / ".zig-cache/c/options").mkdir(parents=True)
-        (fixture / ".zig-cache/c/options/options.zig").touch()
-        instructions = fixture / "bench/instructions.sh"
-        instructions.write_bytes((ROOT / "bench/instructions.sh").read_bytes())
-        (fixture / "bench/instructions.baseline").write_bytes((ROOT / "bench/instructions.baseline").read_bytes())
-        executable(
-            commands / "zig",
-            "import os,pathlib,sys\n"
-            f"if sys.argv[1] == 'env': print('.lib_dir = \"{fixture}\",'); sys.exit(0)\n"
-            "args = sys.argv[1:]\n"
-            "output = pathlib.Path(next(a.split('=', 1)[1] for a in args if a.startswith('-femit-bin=')))\n"
-            "count = 1 if args[args.index('--test-filter') + 1] == 'zzzz_no_such_test' else 2\n"
-            "code = os.environ.get('TEST_EXIT', '0') if count == 2 else '0'\n"
-            "line = '' if os.environ.get('NO_COUNT') else f'All {count} tests passed.'\n"
-            'output.write_text(f\'#!/bin/sh\\nprintf \\"%s\\\\n\\" \\"{line}\\"\\nexit {code}\\n\')\n'
-            "output.chmod(0o700)\n",
-        )
-        executable(
-            commands / "perf",
-            "import os,pathlib,sys\n"
-            "count = 20000 if 'All 2' in pathlib.Path(sys.argv[-1]).read_text() else 10000\n"
-            "print(f'{count} instructions', file=sys.stderr)\n"
-            "sys.exit(int(os.environ.get('PERF_EXIT', '0')))\n",
-        )
-        env.update(ZIG=str(commands / "zig"), RUNS="2", TOLERANCE="10")
-        result = run(instructions, env=env)
-        expect(result.returncode == 0, result)
-        for changes in (
-            {"TEST_EXIT": "7"},
-            {"PERF_EXIT": "7"},
-            {"NO_COUNT": "1"},
-            {"RUNS": "0"},
-            {"RUNS": "invalid"},
-            {"TOLERANCE": "-1"},
-        ):
-            result = run(instructions, env=env, **changes)
-            expect(result.returncode == 2, result)
-        result = run(instructions, "--check", env=env, TOLERANCE=str(sys.maxsize))
-        expect(result.returncode == 0, result)
+        check_instructions(directory, env)
 
         record = directory / "harbor.json"
         executable(
@@ -152,6 +112,65 @@ def check() -> None:
         expect(not list((directory / "jobs").glob(".harbor-log-*")), "Harbor output logs were left behind")
 
         check_sbom(directory, env)
+        check_rows(directory, env)
+
+
+def check_instructions(directory: Path, env: dict[str, str]) -> None:
+    commands = directory / "bin"
+    # Isolate the instruction script's cached build options; its fake
+    # compiler emits the same test-count/status interface as a Zig test.
+    fixture = directory / "checkout"
+    (fixture / "bench").mkdir(parents=True)
+    (fixture / ".zig-cache/c/options").mkdir(parents=True)
+    (fixture / ".zig-cache/c/options/options.zig").touch()
+    instructions = fixture / "bench/instructions.sh"
+    instructions.write_bytes((ROOT / "bench/instructions.sh").read_bytes())
+    (fixture / "bench/instructions.baseline").write_bytes((ROOT / "bench/instructions.baseline").read_bytes())
+    executable(
+        commands / "zig",
+        "import os,pathlib,sys\n"
+        f"if sys.argv[1] == 'env': print('.lib_dir = \"{fixture}\",'); sys.exit(0)\n"
+        "args = sys.argv[1:]\n"
+        "output = pathlib.Path(next(a.split('=', 1)[1] for a in args if a.startswith('-femit-bin=')))\n"
+        "count = 1 if args[args.index('--test-filter') + 1] == 'zzzz_no_such_test' else 2\n"
+        "code = os.environ.get('TEST_EXIT', '0') if count == 2 else '0'\n"
+        "line = '' if os.environ.get('NO_COUNT') else f'All {count} tests passed.'\n"
+        'output.write_text(f\'#!/bin/sh\\nprintf \\"%s\\\\n\\" \\"{line}\\"\\nexit {code}\\n\')\n'
+        "output.chmod(0o700)\n",
+    )
+    executable(
+        commands / "perf",
+        "import os,pathlib,sys\n"
+        "count = 20000 if 'All 2' in pathlib.Path(sys.argv[-1]).read_text() else 10000\n"
+        "if count == 20000 and os.environ.get('LOW_COUNT'): count = 9999\n"
+        "print(f'{count} instructions', file=sys.stderr)\n"
+        "sys.exit(int(os.environ.get('PERF_EXIT', '0')))\n",
+    )
+    env.update(ZIG=str(commands / "zig"), RUNS="2", TOLERANCE="10")
+    result = run(instructions, env=env)
+    expect(result.returncode == 0, result)
+    for changes in (
+        {"TEST_EXIT": "7"},
+        {"PERF_EXIT": "7"},
+        {"NO_COUNT": "1"},
+        {"RUNS": "0"},
+        {"RUNS": "invalid"},
+        {"TOLERANCE": "-1"},
+    ):
+        result = run(instructions, env=env, **changes)
+        expect(result.returncode == 2, result)
+    result = run(instructions, "--check", env=env, TOLERANCE=str(sys.maxsize))
+    expect(result.returncode == 0, result)
+    result = run(instructions, "--check", env=env, LOW_COUNT="1")
+    expect(result.returncode == 2, result)
+    baseline = fixture / "bench/instructions.baseline"
+    original_baseline = baseline.read_bytes()
+    try:
+        baseline.unlink()
+        result = run(instructions, "--check", env=env)
+        expect(result.returncode == 2, result)
+    finally:
+        baseline.write_bytes(original_baseline)
 
 
 def check_sbom(directory: Path, env: dict[str, str]) -> None:
@@ -189,6 +208,111 @@ def check_sbom(directory: Path, env: dict[str, str]) -> None:
                 ROOT / "scripts/sbom.sh", str(dist), "lint-requirements.txt", env=env, HASH_NAME=name, HASH_MODE=mode
             )
             expect(result.returncode != 0 and report.read_bytes() == original, result)
+
+
+def check_rows(directory: Path, env: dict[str, str]) -> None:
+    fixture = directory / "rows"
+    bench = fixture / "bench"
+    task = bench / "tasks/fixture"
+    task.mkdir(parents=True)
+    for name in ("run.sh", "gauntlet.sh", "monotonic.sh", "portable.sh", "limit.py"):
+        (bench / name).write_bytes((ROOT / "bench" / name).read_bytes())
+    (task / "setup.sh").write_text("printf '%s\\n' fixture > answer.txt\n")
+    (task / "check.sh").write_text("exit 0\n")
+    (task / "prompt.txt").write_text("Synthetic fixture\n")
+    git = shutil.which("git")
+    expect(git is not None, "Git is required for the benchmark fixture")
+    # because: initialize only this private temporary checkout for the real benchmark clone
+    subprocess.run([git, "init", "-q", str(fixture)], check=True)  # noqa: S603
+    # because: stage the synthetic checkout, without touching this project's index
+    subprocess.run([git, "-C", str(fixture), "add", "-A"], check=True)  # noqa: S603
+    # because: record the fixture commit that gauntlet.sh checks out
+    subprocess.run(  # noqa: S603
+        [
+            git,
+            "-C",
+            str(fixture),
+            "-c",
+            "user.email=fixture@example.test",
+            "-c",
+            "user.name=fixture",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        check=True,
+    )
+    body = (
+        "import os,shutil\n"
+        "if os.environ.get('GIT_FAIL'): shutil.rmtree('.git')\n"
+        "print('  Passed: 1')\nprint('  Failed: 0')\nprint('Tokens: 12,345')\n"
+        "print('{\"total_tokens\":123}')\n"
+    )
+    for name in ("row-agent", "gauntlet"):
+        executable(directory / "bin" / name, body)
+    run_id = 'fixture"\\\nrun'
+    env = dict(env, BENCH_RUN_ID=run_id, GAUNTLET_RUN_ID=run_id, GAUNTLET_WORK=str(directory / "reviews"))
+    for name, results, agent in (
+        ("run.sh", "results.jsonl", "row-agent"),
+        ("gauntlet.sh", "gauntlet-results.jsonl", 'row-agent:model"\\tag'),
+    ):
+        for fail in ("", "1"):
+            result = run(bench / name, agent, env=env, GIT_FAIL=fail)
+            expect(result.returncode == 0, result)
+            row = json.loads((bench / results).read_text().splitlines()[-1])
+            expect(row["run"] == run_id and row["agent"] == agent, row)
+            if fail:
+                expect(row.get("lines") == "n/a" if name == "run.sh" else row["changed_files"] is None, row)
+    check_parallel(fixture, env)
+
+
+def check_parallel(fixture: Path, env: dict[str, str]) -> None:
+    commands = Path(env["PATH"].split(os.pathsep)[0])
+    body = (
+        "import os,pathlib,time\n"
+        "fd = os.open(os.environ['CALLS'], os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)\n"
+        "os.write(fd, (str(pathlib.Path.cwd()) + '\\n').encode()); os.close(fd)\n"
+        "while not pathlib.Path(os.environ['RELEASE']).exists(): time.sleep(0.01)\n"
+        "print('  Passed: 1')\nprint('  Failed: 0')\nprint('Tokens: 123')\n"
+    )
+    for name in ("row-agent", "gauntlet"):
+        executable(commands / name, body)
+    for name in ("run.sh", "gauntlet.sh"):
+        calls = fixture / "calls"
+        release = fixture / "release"
+        calls.unlink(missing_ok=True)
+        release.unlink(missing_ok=True)
+        processes = []
+        try:
+            for count in (1, 2):
+                processes.append(
+                    # because: overlapping actual scripts run only the local waiting fixture
+                    subprocess.Popen(  # noqa: S603
+                        ["/bin/sh", str(fixture / "bench" / name), "row-agent"],
+                        env=dict(env, CALLS=str(calls), RELEASE=str(release)),
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                    )
+                )
+                deadline = time.monotonic() + 5
+                while (
+                    not calls.exists() or len(calls.read_text().splitlines()) < count
+                ) and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                expect(
+                    calls.exists() and len(calls.read_text().splitlines()) == count,
+                    "a parallel benchmark did not start",
+                )
+            directories = calls.read_text().splitlines()
+            release.touch()
+            for process in processes:
+                _, errors = process.communicate(timeout=15)
+                expect(process.returncode == 0, errors)
+            expect(len(set(directories)) == 2, f"{name} reused a live work directory: {directories}")
+        finally:
+            release.touch()
+            for process in processes:
+                process.communicate(timeout=15)
 
 
 if __name__ == "__main__":

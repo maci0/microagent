@@ -43,6 +43,20 @@ work_root="${GAUNTLET_WORK:-$root/.scratch/gauntlet}"
 # already there: a reader cannot otherwise tell a re-measurement of an agent
 # from a row this run wrote twice. A row with no `run` predates the field.
 run_id="${GAUNTLET_RUN_ID:-$(date +%Y%m%dT%H%M%S)-$$}"
+command -v python3 >/dev/null 2>&1 || {
+	printf '%s\n' 'bench/gauntlet.sh: python3 is required to record JSON rows' >&2
+	exit 2
+}
+record_row() {
+	python3 -c '
+import json, sys
+run, agent, passed, failed, changed, wall, tokens, verify, rc = sys.argv[1:]
+def number(value):
+    return None if value in ("null", "-") else int(value)
+print(json.dumps({"run": run, "agent": agent, "passed": number(passed), "failed": number(failed), "changed_files": number(changed), "wall_s": number(wall), "tokens": number(tokens), "verify": None if verify == "null" else verify, "rc": number(rc)}))
+' "$run_id" "$@" >>"$root/bench/gauntlet-results.jsonl"
+}
+
 agents=${*:-microagent}
 
 # The tool that runs the review is named here rather than left to the shell: a
@@ -55,6 +69,10 @@ if ! command -v gauntlet >/dev/null 2>&1; then
 	printf '%s: gauntlet is not on PATH, so no review below can run and no row is written\n' "$0" >&2
 	exit 2
 fi
+
+mkdir -p "$work_root" || exit 2
+work_root=$(mktemp -d "$work_root/run-XXXXXX") || exit 2
+printf '%s: work saved in %s\n' "$0" "$work_root" >&2
 
 printf '%-40s %6s %6s %7s %8s %8s %8s  %s\n' agent passed failed files wall_s tokens verify rc
 printf '%s\n' "-------------------------------------------------------------------------------------------------------"
@@ -93,8 +111,7 @@ for agent in $agents; do
 	# review that finished instantly.
 	if ! start=$(monotonic_ns); then
 		printf '%-40s %6s %6s %7s %8s %8s %8s  %s\n' "$agent" - - - no-clock - - -
-		printf '{"run":"%s","agent":"%s","passed":null,"failed":null,"changed_files":null,"wall_s":null,"tokens":null,"verify":null,"rc":null}\n' \
-			"$run_id" "$agent" >>"$root/bench/gauntlet-results.jsonl"
+		record_row "$agent" null null null null null null null || exit 2
 		continue
 	fi
 
@@ -107,8 +124,7 @@ for agent in $agents; do
 	# the start reading alone rather than one that was refused.
 	if ! end=$(monotonic_ns); then
 		printf '%-40s %6s %6s %7s %8s %8s %8s  %s\n' "$agent" - - - no-clock - - -
-		printf '{"run":"%s","agent":"%s","passed":null,"failed":null,"changed_files":null,"wall_s":null,"tokens":null,"verify":null,"rc":null}\n' \
-			"$run_id" "$agent" >>"$root/bench/gauntlet-results.jsonl"
+		record_row "$agent" null null null null null null null || exit 2
 		continue
 	fi
 	# Subtracted in awk rather than in `$(( ))`, which is what bench/run.sh and
@@ -127,12 +143,14 @@ for agent in $agents; do
 	# `git diff HEAD` leaves an untracked file out of the diff entirely: a
 	# review whose whole fix is a new file reported zero files changed, and
 	# this column is the one that says a review landed something at all.
-	changed=$(git -C "$dir" add -A -- . ':!.gauntlet.log' ':!.verify.log' &&
-		git -C "$dir" diff --cached --numstat | wc -l)
-	[ -z "${passed:-}" ] && passed=0
-	[ -z "${failed:-}" ] && failed=0
-	[ -z "${changed:-}" ] && changed=0
-	[ -z "${tokens:-}" ] && tokens=-
+	if numstat=$(git -C "$dir" add -A -- . ':!.gauntlet.log' ':!.verify.log' && git -C "$dir" diff --cached --numstat); then
+		changed=$(printf '%s\n' "$numstat" | awk 'NF { n += 1 } END { print n + 0 }')
+	else
+		changed=-
+	fi
+	case "$passed" in '' | *[!0-9]*) passed=- ;; esac
+	case "$failed" in '' | *[!0-9]*) failed=- ;; esac
+	case "$tokens" in '' | *[!0-9]*) tokens=- ;; esac
 	# The JSONL column is a number or null, and `-` is this script's spelling
 	# of a harness that reported none. Deciding it here rather than inside a
 	# command substitution on the printf line is what makes a substitution that
@@ -146,7 +164,5 @@ for agent in $agents; do
 	fi
 
 	printf '%-40s %6s %6s %7s %8s %8s %8s  %s\n' "$agent" "$passed" "$failed" "$changed" "$elapsed" "$tokens" "$verify" "$rc"
-	printf '{"run":"%s","agent":"%s","passed":%s,"failed":%s,"changed_files":%s,"wall_s":%s,"tokens":%s,"verify":"%s","rc":%s}\n' \
-		"$run_id" "$agent" "$passed" "$failed" "$changed" "$elapsed" "$tokens_json" "$verify" "$rc" \
-		>>"$root/bench/gauntlet-results.jsonl"
+	record_row "$agent" "$passed" "$failed" "$changed" "$elapsed" "$tokens_json" "$verify" "$rc" || exit 2
 done

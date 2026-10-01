@@ -220,25 +220,32 @@ while IFS='|' read -r name filter units; do
 	fi
 	printf '%-32s %14s %14s\n' "$name" "$value" "$per"
 
-	if [ "${1:-}" = --check ] && [ "$per" != - ]; then
-		want=$(awk -F'\t' -v n="$name" '$1 == n { print $2 }' "$root/bench/instructions.baseline" 2>/dev/null)
-		if [ -n "$want" ] && [ "$want" -gt 0 ]; then
-			# Keep ratios and tolerance arithmetic in awk so a large count
-			# or percentage cannot wrap a shell integer.
-			direction=$(awk -v per="$per" -v want="$want" -v tol="$tolerance" 'BEGIN {
-				ratio = per * 100 / want
-				if (ratio > 100 + tol) print "regressed"
-				else if (ratio < 100 - tol) print "improved"
-			}')
-			if [ "$direction" = regressed ]; then
-				printf '  REGRESSION: %s is %s per unit, baseline %s (band +/-%s%%): fix the code that retired more\n' \
-					"$name" "$per" "$want" "$tolerance"
-				regressed=1
-			elif [ "$direction" = improved ]; then
-				printf '  IMPROVED: %s is %s per unit, baseline %s (band +/-%s%%): re-record bench/instructions.baseline\n' \
-					"$name" "$per" "$want" "$tolerance"
-				improved=1
-			fi
+	if [ "${1:-}" = --check ]; then
+		[ "$per" != - ] || {
+			printf 'bench/instructions.sh: no measurement for %s, so its band cannot be checked\n' "$name" >&2
+			exit 2
+		}
+		want=$(awk -F'\t' -v n="$name" '$1 == n { print $2 }' "$root/bench/instructions.baseline") || exit 2
+		[ "$want" -gt 0 ] 2>/dev/null || {
+			printf 'bench/instructions.sh: no positive baseline for %s\n' "$name" >&2
+			exit 2
+		}
+
+		# Keep ratios and tolerance arithmetic in awk so a large count
+		# or percentage cannot wrap a shell integer.
+		direction=$(awk -v per="$per" -v want="$want" -v tol="$tolerance" 'BEGIN {
+			ratio = per * 100 / want
+			if (ratio > 100 + tol) print "regressed"
+			else if (ratio < 100 - tol) print "improved"
+		}') || exit 2
+		if [ "$direction" = regressed ]; then
+			printf '  REGRESSION: %s is %s per unit, baseline %s (band +/-%s%%): fix the code that retired more\n' \
+				"$name" "$per" "$want" "$tolerance"
+			regressed=1
+		elif [ "$direction" = improved ]; then
+			printf '  IMPROVED: %s is %s per unit, baseline %s (band +/-%s%%): re-record bench/instructions.baseline\n' \
+				"$name" "$per" "$want" "$tolerance"
+			improved=1
 		fi
 	fi
 done <"$rows"

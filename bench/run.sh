@@ -36,6 +36,9 @@ tasks_dir="$root/bench/tasks"
 # it is still the tree's, not a path two accounts on a shared machine share.
 # BENCH_WORK overrides it for a contributor who names a scratch disk.
 work_root="${BENCH_WORK:-$root/.scratch/bench}"
+mkdir -p "$work_root" || exit 2
+work_root=$(mktemp -d "$work_root/run-XXXXXX") || exit 2
+printf '%s: work saved in %s\n' "$0" "$work_root" >&2
 results="$root/bench/results.jsonl"
 timeout_s="${BENCH_TIMEOUT:-600}"
 # Every row of this invocation carries the same `run`, because the file is
@@ -45,6 +48,15 @@ timeout_s="${BENCH_TIMEOUT:-600}"
 # takes the rows of one invocation; a row with no `run` is from before this
 # field existed and reads as a run of its own.
 run_id="${BENCH_RUN_ID:-$(date +%Y%m%dT%H%M%S)-$$}"
+
+# Keep row strings escaped and numeric columns typed, including error rows.
+record_row() {
+	python3 -c '
+import json, sys
+run, agent, task, wall, tokens, lines, result = sys.argv[1:]
+print(json.dumps({"run": run, "agent": agent, "task": task, "wall_s": None if wall == "null" else float(wall), "tokens": None if tokens == "null" else int(tokens), "lines": lines, "result": result}, allow_nan=False))
+' "$run_id" "$@" >>"$results"
+}
 
 agents=${*:-microagent}
 
@@ -81,14 +93,12 @@ for agent in $agents; do
 		# the row is written as an error instead.
 		if ! ( cd "$work" && sh "$task_dir/setup.sh" ) >"$work_root/$task.setup.log" 2>&1; then
 			printf '%-10s %-14s %8s %10s %8s  %s\n' "$agent" "$task" - - - setup-error
-			printf '{"run":"%s","agent":"%s","task":"%s","wall_s":null,"tokens":null,"lines":"n/a","result":"setup-error"}\n' \
-				"$run_id" "$agent" "$task" >>"$results"
+			record_row "$agent" "$task" null null "n/a" "setup-error" || exit 2
 			continue
 		fi
 		if ! ( cd "$work" && git init -q && git add -A && git -c user.email=b@b -c user.name=b commit -qm base ) >/dev/null 2>&1; then
 			printf '%-10s %-14s %8s %10s %8s  %s\n' "$agent" "$task" - - - commit-error
-			printf '{"run":"%s","agent":"%s","task":"%s","wall_s":null,"tokens":null,"lines":"n/a","result":"commit-error"}\n' \
-				"$run_id" "$agent" "$task" >>"$results"
+			record_row "$agent" "$task" null null "n/a" "commit-error" || exit 2
 			continue
 		fi
 
@@ -105,8 +115,7 @@ for agent in $agents; do
 		# empty tree.
 		if ! cmd=$(argv_for "$agent"); then
 			printf '%-10s %-14s %8s %10s %8s  %s\n' "$agent" "$task" - - - argv-error
-			printf '{"run":"%s","agent":"%s","task":"%s","wall_s":null,"tokens":null,"lines":"n/a","result":"argv-error"}\n' \
-				"$run_id" "$agent" "$task" >>"$results"
+			record_row "$agent" "$task" null null "n/a" "argv-error" || exit 2
 			continue
 		fi
 		# No clock, no number. A duration measured off a wall clock is
@@ -114,8 +123,7 @@ for agent in $agents; do
 		# downstream can tell them apart.
 		if ! start=$(monotonic_ns); then
 			printf '%-10s %-14s %8s %10s %8s  %s\n' "$agent" "$task" - - - no-clock
-			printf '{"run":"%s","agent":"%s","task":"%s","wall_s":null,"tokens":null,"lines":"n/a","result":"no-clock"}\n' \
-				"$run_id" "$agent" "$task" >>"$results"
+			record_row "$agent" "$task" null null "n/a" "no-clock" || exit 2
 			continue
 		fi
 		run_limited "$timeout_s" "$work" sh -c "$cmd" >"$work/.out" 2>"$work/.err"
@@ -127,8 +135,7 @@ for agent in $agents; do
 		# billion and appended a wall_s nobody measured.
 		if ! end=$(monotonic_ns); then
 			printf '%-10s %-14s %8s %10s %8s  %s\n' "$agent" "$task" - - - no-clock
-			printf '{"run":"%s","agent":"%s","task":"%s","wall_s":null,"tokens":null,"lines":"n/a","result":"no-clock"}\n' \
-				"$run_id" "$agent" "$task" >>"$results"
+			record_row "$agent" "$task" null null "n/a" "no-clock" || exit 2
 			continue
 		fi
 		wall=$(echo "$end $start" | awk '{printf "%.1f", ($1-$2)/1000000000}')
@@ -146,10 +153,12 @@ for agent in $agents; do
 		# image or archive reported +0/-0: the same false zero the untracked
 		# file above caused, reached through a file git did see. They are
 		# counted as files instead, which is the number git can still answer.
-		lines=$(cd "$work" && git add -A && git diff --cached --numstat |
-			awk '$1 == "-" { b += 1; next } { a += $1; d += $2 }
+		if numstat=$(cd "$work" && git add -A && git diff --cached --numstat); then
+			lines=$(printf '%s\n' "$numstat" | awk '$1 == "-" { b += 1; next } { a += $1; d += $2 }
 			    END { printf "+%d/-%d", a, d; if (b > 0) printf " (%d binary)", b }')
-		[ -z "$lines" ] && lines=+0/-0
+		else
+			lines=n/a
+		fi
 		# microagent prints cumulative usage per response; the last line is the run total.
 		tokens=$(grep -o '"total_tokens":[0-9]*' "$work/.out" 2>/dev/null | tail -1 | cut -d: -f2)
 		[ -z "$tokens" ] && tokens=-
@@ -173,7 +182,6 @@ for agent in $agents; do
 		fi
 
 		printf '%-10s %-14s %8s %10s %8s  %s\n' "$agent" "$task" "$wall" "$tokens" "$lines" "$result"
-		printf '{"run":"%s","agent":"%s","task":"%s","wall_s":%s,"tokens":%s,"lines":"%s","result":"%s"}\n' \
-			"$run_id" "$agent" "$task" "$wall" "$tokens_json" "$lines" "$result" >>"$results"
+		record_row "$agent" "$task" "$wall" "$tokens_json" "$lines" "$result" || exit 2
 	done
 done

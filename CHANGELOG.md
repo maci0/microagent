@@ -37,6 +37,11 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- Benchmark rows escape run IDs and agent specifications as JSON. Missing Git
+  statistics are reported as unavailable instead of zero changes. Simultaneous runs
+  use separate work directories and retain their own logs. An instruction gate with
+  a missing baseline or an unmeasured row fails instead of silently skipping it.
+
 - Benchmark interruptions give commands time to flush before process-group cleanup.
   Missing deadline support, failed overhead prompts, failed instruction samples, Harbor
   runs and summaries are reported as failures. Custom Harbor endpoints supply their
