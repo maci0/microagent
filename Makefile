@@ -311,6 +311,7 @@ test:
 # Exercise the actual CLI over loopback, without a provider account.
 test-cli: build
 	python3 scripts/test_cli.py $(BIN)
+	python3 bench/test_stub_provider.py
 	python3 bench/test_maxrss.py
 	python3 bench/test_limit.py
 	python3 bench/test_scripts.py

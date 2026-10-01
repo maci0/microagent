@@ -14,9 +14,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 DEFAULT_FRAMES = 5000
+
+# ThreadingHTTPServer serves every request on its own thread, and this counter
+# is the only mutable state here, so the read-modify-write that spends a
+# failure takes a lock. CPython's GIL happens not to switch inside this
+# sequence, so no run was observed going short; the lock is here because the
+# flag promises the first K requests are refused and that promise should hold
+# by construction rather than by accident of a language implementation.
+_failure_lock = threading.Lock()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -26,8 +35,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         self.rfile.read(int(self.headers.get("content-length", "0")))
-        if Handler.failures_left > 0:
-            Handler.failures_left -= 1
+        # Spend a failure under the lock and carry the answer out of it, so the
+        # check and the decrement are one step: a request is refused exactly
+        # while a failure is still owed, no matter how many arrive at once.
+        with _failure_lock:
+            refuse = Handler.failures_left > 0
+            if refuse:
+                Handler.failures_left -= 1
+        if refuse:
             body = json.dumps({"error": "busy"}).encode()
             self.send_response(503)
             self.send_header("content-type", "application/json")
