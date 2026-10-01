@@ -26,6 +26,8 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bench/monotonic.sh"
 # shellcheck source=bench/portable.sh
 . "$root/bench/portable.sh"
+# shellcheck source=bench/rows.sh
+. "$root/bench/rows.sh"
 tasks_dir="$root/bench/tasks"
 # The tree's own gitignored .scratch/, for the reason the Makefile builds
 # `check-reproducible` there rather than under ${TMPDIR:-/tmp}: /tmp is a
@@ -47,15 +49,22 @@ timeout_s="${BENCH_TIMEOUT:-600}"
 # can tell from a row this run wrote twice. The reader groups by `run` and
 # takes the rows of one invocation; a row with no `run` is from before this
 # field existed and reads as a run of its own.
+#
+# Naming the run is half of that; `record_run_row` is the other half, and it
+# keeps one run to one row per (agent, task), so the group a reader takes is a
+# set of measurements rather than a count of how many times each was taken.
 run_id="${BENCH_RUN_ID:-$(date +%Y%m%dT%H%M%S)-$$}"
 
-# Keep row strings escaped and numeric columns typed, including error rows.
+# Keep row strings escaped and numeric columns typed, including error rows, and
+# write the row once per (run, agent, task): `bench/rows.sh` says why a repeat
+# is skipped rather than appended.
 record_row() {
-	python3 -c '
+	row=$(python3 -c '
 import json, sys
 run, agent, task, wall, tokens, lines, result = sys.argv[1:]
 print(json.dumps({"run": run, "agent": agent, "task": task, "wall_s": None if wall == "null" else float(wall), "tokens": None if tokens == "null" else int(tokens), "lines": lines, "result": result}, allow_nan=False))
-' "$run_id" "$@" >>"$results"
+' "$run_id" "$@") || return 1
+	record_run_row "$results" "$row" agent task
 }
 
 agents=${*:-microagent}

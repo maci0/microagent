@@ -16,6 +16,15 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+### Fixed
+
+- A benchmark script run twice writes one row per measurement, not two. Both
+  `bench/run.sh` and `bench/gauntlet.sh` named each invocation's `run` so a
+  reader could group its rows, but a retry, a crash and restart, a second shell
+  or a caller setting `BENCH_RUN_ID` appended a second row under that same `run`,
+  and any mean over the group was then a mean over more samples than were taken.
+  The row is now written once per (run, measurement), through `bench/rows.sh`.
+
 ## [0.12.0] - 2026-10-01
 
 ### Changed
