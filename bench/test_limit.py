@@ -20,7 +20,11 @@ def expect(condition: object, detail: object) -> None:
 def cleanup_descendant(marker: Path) -> None:
     if marker.exists():
         with suppress(ProcessLookupError):
-            pid = int(marker.read_text())
+            # The marker holds an ASCII pid the script wrote itself. The encoding
+            # is named rather than left to the locale: a run under a locale whose
+            # default codec is not UTF-8 would raise UnicodeDecodeError here and
+            # skip the kill, leaving the process this is cleaning up alive.
+            pid = int(marker.read_text(encoding="utf-8"))
             group = os.getpgid(pid)
             if group != os.getpgrp():
                 os.killpg(group, signal.SIGKILL)

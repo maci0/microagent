@@ -104,11 +104,15 @@ for file in "$@"; do
     # and bracket of the citation rather than a value from the environment
     # shellcheck disable=SC2016
     if printf '%s' "$ref" | grep -q '`, `'; then
-      sym="$(printf '%s' "$ref" | sed 's/^`\([^`]*\)`, `.*/\1/')"
+      # The name as the prose wrote it, qualifier and all: that is the text a
+      # rewrite has to match, so it is kept whole here rather than dropped for
+      # the lookup.
+      written="$(printf '%s' "$ref" | sed 's/^`\([^`]*\)`, `.*/\1/')"
       # The module qualifier is prose; the source defines the name after the dot.
-      sym="${sym##*.}"
+      sym="${written##*.}"
       loc="$(printf '%s' "$ref" | sed 's/^.*`, `\([^`]*\)`$/\1/')"
     else
+      written=""
       sym=""
       loc="$(printf '%s' "$ref" | sed 's/^.*`\([^`]*\)`$/\1/')"
     fi
@@ -133,17 +137,65 @@ for file in "$@"; do
       if [ "$got" != "$want" ]; then
         if [ "$fix" = 1 ]; then
           # The citation keeps whatever the prose put in front of the name: the
-          # lookup dropped the module, the rewrite matches the name as it is
-          # written, qualified or not, so a rewrite leaves `config.parse` alone.
-          # Write and rename: portable to GNU and BSD sed.
+          # name is matched as it is written, qualified or not, so a rewrite
+          # leaves `config.parse` alone. Write and rename, portable to both seds.
           #
-          # The rewrite matches the path span on its own rather than the name
-          # beside it, because a citation the Markdown wrapped puts `sym`, at the
-          # end of one line and `src/foo.zig:N` on the next: sed matches inside a
-          # line, so a pattern that reached across the break never matched and the
-          # repair reported the move without writing one. The span is unique in
-          # the document, so matching only it repairs the wrapped shape too.
-          sed "s|\`$path:$span\`|\`$path:$got\`|" \
+          # The rewrite matches the pair rather than the path span alone, which
+          # is what makes a shared span safe, and it is not a nicety. A span is
+          # not unique in a document: the threat model cites `optionalCeiling`
+          # at one line in five table rows and three prose paragraphs, and a
+          # rewrite that matched the span on its own replaced every one of them
+          # with the line of whichever symbol the reader reached first. The pairs
+          # then traded places between runs and `make check-refs FIX=1` never
+          # converged: each pass moved one pair onto another's line and the next
+          # pass moved it back, so the repair could not reach a clean run no
+          # matter how many times it was asked. Only the citation naming this
+          # symbol is rewritten, and the ones sharing its line keep what they had.
+          #
+          # The pair is matched across a line break as well as on one line. A
+          # citation the Markdown wrapped puts `sym`, at the end of one line and
+          # `src/foo.zig:N` on the next, which the reader above flattens before
+          # it matches anything; a line-oriented rewrite never sees that shape
+          # and reported the move without writing one.
+          #
+          # awk rather than sed, because the two shapes are one rewrite and sed
+          # matches inside a line, so the shape spanning a break would need every
+          # line of the file folded into the pattern space first.
+          #
+          # The name is passed as a literal and matched with index/substr rather
+          # than as a regexp, so the `.` in a qualified `config.parse` is the
+          # character it is rather than a wildcard that also matches the name of
+          # some other symbol.
+          awk -v sym="$written" -v path="$path" -v span="$span" -v got="$got" \
+              'function replace(text, pattern, value,   pos) {
+                 while ((pos = index(text, pattern)) > 0)
+                   text = substr(text, 1, pos - 1) value substr(text, pos + length(pattern))
+                 return text
+               }
+               function ends_with(text, tail) {
+                 return length(text) >= length(tail) && substr(text, length(text) - length(tail) + 1) == tail
+               }
+               # A pair the Markdown broke after the name has a line ending
+               # between the comma and the path, so a line ending with the name
+               # and its comma is held over and joined onto the next line before
+               # the pair is matched, and written back out as the one line it was
+               # read as. Only a break the prose wrote inside this citation is
+               # taken; every other line ending is left where it is.
+               {
+                 trimmed = $0
+                 sub(/[ 	]+$/, "", trimmed)
+                 if (ends_with(trimmed, "`" sym "`,")) {
+                   if (pending != "") print pending
+                   pending = trimmed
+                   next
+                 }
+                 rest = $0
+                 sub(/^[ 	]+/, "", rest)
+                 line = (pending == "" ? $0 : pending " " rest)
+                 pending = ""
+                 print replace(line, "`" sym "`, `" path ":" span "`", "`" sym "`, `" path ":" got "`")
+               }
+               END { if (pending != "") print pending }' \
             "$file" > "$tmp.rewritten"
           mv "$tmp.rewritten" "$file"
           printf '%s: moved %s from %s:%s to %s:%s\n' "$file" "$sym" "$path" "$want" "$path" "$got" >> "$tmp"

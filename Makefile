@@ -488,20 +488,29 @@ zig-version:
 # list, which is what a rename upstream turns this into otherwise.
 #
 # Every name here is one shellcheck 0.9, the version the ubuntu-24.04 image
-# carries, already has, so this runs on the runner as it runs here. That is
-# also the ceiling: avoid-negated-conditions and useless-use-of-cat are
-# optional checks a later shellcheck adds and the tree passes, and they are
-# left off until the runner carries a shellcheck that has them, because a name
-# the installed shellcheck does not know now fails this target rather than
-# quietly enabling nothing. require-variable-braces (SC2250) stays off for a
-# different reason: it is a spelling rule, and asking thirteen benchmark
-# scripts to write `${root}` where `$root` is the same word is a change the
-# gate should not ask for. add-default-case (SC2249) stays off for the same
-# reason: it wants a `*)` arm on a `case` that is already exhaustive, and the
-# one finding it raises is on a `case` in portable.sh that matches every value
-# it is given. Enable either per file with a `# shellcheck disable=`, preceded
-# by the `# because:` line lint-shell below asks for.
-SHELLCHECK_CHECKS := check-set-e-suppressed,check-unassigned-uppercase,deprecate-which,avoid-nullary-conditions,check-extra-masked-returns,quote-safe-variables
+# carries, already has, so this runs on the runner as it runs here. The list
+# below ends at the checks the runner's shellcheck has: a name it does not
+# know fails `lint-shell` rather than enabling nothing, which is what the
+# `shellcheck --list-optional` lookup below is for, so adding a check a later
+# shellcheck introduces is a line here and a red gate rather than a silent
+# no-op.
+#
+# require-variable-braces (SC2250) stays off: it is a spelling rule, and asking
+# thirteen benchmark scripts to write `${root}` where `$root` is the same word
+# is a change the gate should not ask for. It raises 752 findings here. The
+# other two stay off for the reason they name below, not because the tree
+# would pass or fail: add-default-case (SC2249) wants a `*)` arm on a `case`
+# that is already exhaustive, and avoid-negated-conditions wants the other
+# shape of a condition the tree spells the readable way.
+#
+# useless-use-of-cat is on rather than deferred alongside those two: the tree
+# passes it, and a `cat file | command` runs the command on a pipe whose
+# failure `cat` swallows, so a script passes on a command that never ran. It
+# is a defect class rather than a spelling, and the check has been in
+# shellcheck since 0.7, before the 0.9 the rest of this list is written
+# against. The other three are enabled per file with a `# shellcheck
+# disable=`, preceded by the `# because:` line lint-shell below asks for.
+SHELLCHECK_CHECKS := check-set-e-suppressed,check-unassigned-uppercase,deprecate-which,avoid-nullary-conditions,check-extra-masked-returns,quote-safe-variables,useless-use-of-cat
 SHELLCHECK_OPTS := -x --enable=$(SHELLCHECK_CHECKS)
 
 # A `# because:` line is what stands between a suppression and a finding nobody

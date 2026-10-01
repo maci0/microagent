@@ -55,11 +55,36 @@ release, and `microagent update` moves you to it.
   step of the gate.
 - The citation self-test writes its fixtures to a temporary directory instead
   of the checkout root. A run cut short between creating the directory and the
-  trap that removes it left a `.check-refs-self-test.<pid>` of deliberately
-  stale Markdown behind; the directory is not in `.gitignore`, and the next
+  trap that removes it left a `.check-refs-self-test.<pid>` of stale Markdown behind; the directory is not in `.gitignore`, and the next
   `make check-refs` picked its files up through the same
   `git ls-files --cached --others --exclude-standard` list the tracked files
   come from, then reported fixes to a file nobody was editing.
+- `make check-refs FIX=1` repairs a citation without touching the others on the
+  same line. The rewrite matched the `path:line` span on its own, which is not
+  unique in a document: the threat model cited `optionalCeiling` at one line in
+  five table rows and three prose paragraphs, so a pass stamped every one of
+  them with the line of whichever symbol it reached first, and the pairs traded
+  places on the next pass. The repair never reached a clean run however many
+  times it was asked, which left the 55 citations that had drifted off
+  `src/main.zig` unrepairable by the repair the gate prints for them. The name
+  is matched beside the span now, and the self-test holds a document where two
+  citations share a line and asks for two passes, because the second is the one
+  that never converged. All 55 are repaired and the five bare citations, which
+  no rewrite can name a symbol for, are paired by hand so the gate can check
+  them from then on.
+- `scripts/lint-versions-selftest.sh` carries one `edit_in_place`, not two. The
+  second was shadowed by the one below it, so shellcheck read the first as a
+  function nothing calls (SC2329) and `make lint-shell` failed: the gate had
+  been red on this file since the BSD `sed` fix added it.
+- The shellcheck option list enables `useless-use-of-cat`, a check the tree
+  passes and the list deferred as if a later shellcheck had to add it first. A
+  `cat file | command` runs the command on a pipe whose failure `cat` swallows,
+  so the script passes on a command that never ran; the check has been in
+  shellcheck since 0.7, before the 0.9 the rest of the list is written against.
+- `bench/test_limit.py` reads the pid marker with an explicit encoding. It
+  held a bare `read_text()`, so a run under a locale whose default codec is not
+  UTF-8 raised `UnicodeDecodeError` inside the cleanup and skipped the kill,
+  leaving the descendant process this exists to reap alive.
 
 ## [0.12.0] - 2026-10-01
 

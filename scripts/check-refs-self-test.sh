@@ -118,4 +118,37 @@ moved="$(cat "$tmp/wrapped.md")"
 grep -q "\`src/chat.zig:$alpha_at\`" "$tmp/wrapped.md" ||
   fail "the repair did not move a wrapped pair onto its definition: $moved"
 
-echo "check-refs-self-test: 7 cases passed"
+# 8. a line two citations share is repaired one symbol at a time, and the repair
+#    converges. The rewrite used to match the path span on its own, which is not
+#    unique in a document: the threat model cites `optionalCeiling` at one line
+#    in five table rows and three prose paragraphs, so a single pass stamped
+#    every one of them with the line of whichever symbol it reached first and
+#    the pairs traded places on the next pass. `make check-refs FIX=1` never
+#    reached a clean run, so the 59 stale citations could not be repaired by the
+#    repair the gate prints for them.
+cat > "$tmp/shared.md" <<EOF
+The ceiling is \`optionalCeiling\`, \`src/main.zig:1\`, as is \`displayUrl\`,
+\`src/main.zig:1\`, and the budget one too (\`displayUrl\`, \`src/main.zig:1\`).
+EOF
+# Two passes, because the second is the one that never converged: it is asked
+# to move a pair off a line the other pair is still on.
+sh "$gate" -f "$tmp/shared.md" >/dev/null 2>&1 || true
+sh "$gate" -f "$tmp/shared.md" >/dev/null 2>&1 || true
+# The opening parenthesis is in both patterns, so `optionalCeiling` does not
+# match the definition of `optionalCeilingFromEnv` above it: the same definitions
+# stream the gate reads has one definition per name, and a prefix match would
+# pin the test to a different symbol than the one it repairs.
+ceiling_at="$(line_of '^fn optionalCeiling(' src/main.zig)"
+url_at="$(line_of '^fn displayUrl(' src/main.zig)"
+test -n "$ceiling_at" && test -n "$url_at" ||
+  fail "could not find the symbols this test pins; a rename means these lines need updating"
+moved="$(cat "$tmp/shared.md")"
+grep -q "\`optionalCeiling\`, \`src/main.zig:$ceiling_at\`" "$tmp/shared.md" ||
+  fail "the repair did not move the first of two citations sharing a line onto its own definition: $moved"
+grep -q "\`displayUrl\`, \`src/main.zig:$url_at\`" "$tmp/shared.md" ||
+  fail "the repair stamped both citations sharing a line with one symbol's line, so the pairs trade places between runs: $moved"
+out="$(run "$tmp/shared.md")"
+printf '%s' "$out" | grep -q "$tmp/shared.md: cites" &&
+  fail "a converged repair still reads as a finding, so FIX=1 has to be run twice: $out"
+
+echo "check-refs-self-test: 8 cases passed"

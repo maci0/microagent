@@ -185,6 +185,7 @@ def check_changelog_order(directory: Path, env: dict[str, str]) -> None:
     expect(result.returncode == 0, result)
     # The empty list is a finding, not a green run over nothing.
     (fixture / "CHANGELOG.md").write_text("## [Unreleased]\n\n### Added\n\n- nothing yet\n", encoding="utf-8")
+    # because: this repository's own target, over a changelog the empty-list case wrote
     result = subprocess.run(  # noqa: S603
         [make, "--no-print-directory", "check-changelog-history"],
         cwd=fixture,
