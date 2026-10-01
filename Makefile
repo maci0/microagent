@@ -572,6 +572,7 @@ lint-shell:
 lint-ci:
 	@test -n "$(CI_SOURCES)" || { echo "no tracked workflow to read the run: steps from" >&2; exit 1; }
 	SHELLCHECK_OPTS='$(SHELLCHECK_OPTS)' sh scripts/lint-ci-shell.sh $(CI_SOURCES)
+	sh scripts/lint-actions.sh $(CI_SOURCES)
 	python3 bench/test_scripts.py --workflows
 
 lint-python:

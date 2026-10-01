@@ -207,6 +207,20 @@ def check_workflows(directory: Path, env: dict[str, str]) -> None:
         result = run(ROOT / "scripts/lint-ci-shell.sh", str(workflow), env=env)
         expect(result.returncode != 0 and "SC2154" in result.stdout, result)
         expect(f"In {workflow} line {line}:" in result.stdout, result)
+    for ref, passed in (
+        ("'owner/action@" + "a" * 40 + "' # v7.0.1", True),
+        ("./.github/actions/local", True),
+        ("owner/action@v7", False),
+        ("owner/action@" + "a" * 40 + " # v", False),
+    ):
+        workflow.write_text(
+            "jobs:\n  lint:\n    steps:\n"
+            f"      - uses: {ref}\n"
+            "      - run: |\n          cat <<EOF\n          - uses: fake/action@v1\n          EOF\n",
+            encoding="utf-8",
+        )
+        result = run(ROOT / "scripts/lint-actions.sh", str(workflow), env=env)
+        expect((result.returncode == 0) == passed, result)
     workflow.write_text("jobs: [\n", encoding="utf-8")
     result = run(ROOT / "scripts/lint-ci-shell.sh", str(workflow), env=env)
     expect(result.returncode != 0 and str(workflow) in result.stderr, result)

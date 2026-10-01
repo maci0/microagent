@@ -16,8 +16,11 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-01
+
 ### Added
 
+- Workflow checks require full commit pins for external actions and reusable workflows, while correctly ignoring references printed inside shell bodies.
 - Two more fuzz harnesses over untrusted input: the output of `git blame`, which
   a repository, its attributes file and the user's pager choose, and a
   repository's instructions file, which goes into the system role of every run
@@ -2680,7 +2683,8 @@ First release.
   `aarch64-macos` with a checksum sidecar each, and refuses a tag that does not name the version in
   `build.zig.zon`.
 
-[Unreleased]: https://github.com/maci0/microagent/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/maci0/microagent/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/maci0/microagent/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/maci0/microagent/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/maci0/microagent/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/maci0/microagent/compare/v0.8.0...v0.9.0
