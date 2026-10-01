@@ -15,7 +15,11 @@
 # inventory that agrees with the sidecars it sits beside.
 #
 # The dist directory arrives as an argument so the Makefile stays the one place
-# a release path is written down.
+# a release path is written down. The compiler arrives as ZIG_VERSION, for the
+# same reason it is pinned once: a second `zig version` here would be a second
+# answer to a question build.zig.zon already answers, and a host on a different
+# compiler would then record itself rather than the toolchain that produced the
+# assets.
 #
 # The locale and timezone are pinned here rather than left to the caller, because
 # two `sort`s below decide the order the pins and the files are written in: under
@@ -32,6 +36,22 @@ set -eu
 : "${1:?usage: sbom.sh <dist directory>}"
 : "${SHA256_CMD:?SHA256_CMD is required}"
 : "${SHA1_CMD:?SHA1_CMD is required}"
+# The compiler that produced the assets. It is required rather than defaulted:
+# an inventory naming no toolchain describes binaries a consumer cannot rebuild,
+# because the compiler decides the bytes and no checksum, no asset name and no
+# pin in either manifest records it. A version that is not one fails the release
+# rather than being written into the document, since a Tool creator a scanner
+# cannot read is no record of anything. The Makefile reads this out of
+# build.zig.zon, the same pin setup-zig installs on every runner and
+# `zig-version` gates `release-assets` against, so the document names the
+# toolchain that produced the files beside it rather than whatever compiler was
+# on the machine that generated it.
+case "${ZIG_VERSION:-}" in
+'' | *[!0-9.]* | .* | *. | *..*)
+	echo "ZIG_VERSION is '${ZIG_VERSION:-unset}', so the inventory would name no toolchain or one a scanner cannot read" >&2
+	exit 1
+	;;
+esac
 
 dist="$1"
 # The two manifests the pins are read from, in the order they are listed in the
@@ -252,6 +272,7 @@ out="$dist/microagent-$tag.spdx.json"
 	printf '    "created": "%s",\n' "$created"
 	printf '    "creators": [\n'
 	printf '      "Tool: scripts/sbom.sh",\n'
+	printf '      "Tool: zig %s",\n' "$ZIG_VERSION"
 	printf '      "Organization: microagent (https://github.com/maci0/microagent)"\n'
 	printf '    ]\n'
 	printf '  },\n'
@@ -269,7 +290,7 @@ out="$dist/microagent-$tag.spdx.json"
 	printf '      "licenseDeclared": "%s",\n' "$license"
 	printf '      "copyrightText": "%s",\n' "$copyright"
 	printf '      "primaryPackagePurpose": "APPLICATION",\n'
-	printf '      "comment": "The published assets. The binaries link no libc and carry no third-party code: build.zig.zon declares no dependency, and the files listed below are the whole of what a release is."\n'
+	printf '      "comment": "The published assets. The binaries link no libc and carry no third-party code: build.zig.zon declares no dependency, and the files listed below are the whole of what a release is. They were built with the Zig version named in creationInfo.creators, the pin build.zig.zon declares and CI installs."\n'
 	printf '    }'
 	# A here-document rather than a pipe: a pipe would run the loop in a
 	# subshell, and the separator each entry after the first needs is state.

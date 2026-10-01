@@ -1295,12 +1295,25 @@ release-assets: zig-version
 # sets it, `SOURCE_DATE_EPOCH=... make sbom`, still decides, and an epoch the
 # generator cannot convert fails the release rather than falling back to a
 # clock.
+#
+# The compiler that produced the assets is recorded too, as a Tool creator and
+# in the closing annotation, read out of build.zig.zon through
+# `required-zig-version` rather than by asking the zig on PATH. An inventory
+# naming no toolchain describes binaries a consumer cannot rebuild: the
+# compiler decides the bytes, and it is the one input to these assets that no
+# checksum, no asset name and no pin in either manifest records. The pin is the
+# same one setup-zig installs on every runner and `zig-version` gates
+# `release-assets` against, so the document names the toolchain that produced
+# the files beside it rather than whatever compiler was on the machine that
+# generated it.
 sbom:
 	@test -d dist || { echo "no dist/, run 'make release-assets TAG=v0.2.0' first" >&2; exit 2; }; \
 	: "$${SOURCE_DATE_EPOCH:=$$(git log -1 --format=%at)}"; \
 	test -n "$$SOURCE_DATE_EPOCH" || { \
 	  echo "this tree has no commit, so there is no date to stamp the inventory with" >&2; exit 1; }; \
-	SOURCE_DATE_EPOCH="$$SOURCE_DATE_EPOCH" \
+	zig="$$($(MAKE) --no-print-directory required-zig-version)"; \
+	test -n "$$zig" || { echo "build.zig.zon has no .minimum_zig_version to record" >&2; exit 1; }; \
+	SOURCE_DATE_EPOCH="$$SOURCE_DATE_EPOCH" ZIG_VERSION="$$zig" \
 	SHA256_CMD="$$($(SHA256_CMD))" SHA1_CMD="$$($(SHA1_CMD))" \
 	sh scripts/sbom.sh dist lint-requirements.txt $(HARBOR_DIR)/requirements.lock
 
@@ -1547,6 +1560,10 @@ check-reproducible: zig-version
 # assets that are there with the digest of each, and that it carries a package
 # for every pin the two manifests declare, so a manifest a release adds is an
 # inventory that has to be regenerated rather than one that quietly omits it.
+# The toolchain is asserted for the same reason: the compiler decides the bytes
+# and no other field records it, so a generator that stopped writing it would
+# publish an inventory a consumer cannot rebuild one of the assets beside it
+# from, and nothing else in the tree would say so.
 #
 # The assets are two files named as a tagged build names them, written into a
 # scratch directory the recipe removes, so the real dist/ and the toolchain a
@@ -1571,6 +1588,7 @@ check-sbom:
 	  printf 'a stand-in for %s\n' "$$name" > "$$dir/$$name"; \
 	done; \
 	SHA256_CMD="$$($(SHA256_CMD))" SHA1_CMD="$$($(SHA1_CMD))" \
+	  ZIG_VERSION="$$($(MAKE) --no-print-directory required-zig-version)" \
 	  sh scripts/sbom.sh "$$dir" lint-requirements.txt $(HARBOR_DIR)/requirements.lock >/dev/null; \
 	doc="$$dir/microagent-v0.0.0.spdx.json"; \
 	test -f "$$doc" || { echo "the generator wrote no $doc" >&2; exit 1; }; \
@@ -1605,7 +1623,12 @@ check-sbom:
 	  echo "$$doc records $$declared_pins pins as declared where the manifests record $$roots as their roots: the role each pin carries is read out of the manifests, so a pin described as a direct dependency is one the manifest does not name" >&2; \
 	  exit 1; \
 	}; \
-	echo "$$doc names both stand-in assets with their digests and all $$pins declared pins"
+	toolchain="$$($(MAKE) --no-print-directory required-zig-version)"; \
+	grep -qF "\"Tool: zig $$toolchain\"," "$$doc" || { \
+	  echo "$$doc names no Tool creator for zig $$toolchain, so the inventory records the assets without the compiler that produced them and a consumer cannot rebuild one" >&2; \
+	  exit 1; \
+	}; \
+	echo "$$doc names both stand-in assets with their digests, all $$pins declared pins and the zig $$toolchain toolchain"
 
 clean:
 	rm -rf zig-out .zig-cache dist $(CROSS_PREFIX) $(HARBOR_DIR)/microagent-*-linux-musl $(HARBOR_DIR)/microagent-*-linux-musl.tmp

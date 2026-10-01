@@ -2,9 +2,10 @@
 # The linter versions the gate runs are pinned in the Makefile, and this checks
 # that every other record of a pin agrees with them: the installed tools, the
 # manifest CI compiles its hashed install from, the version ruff itself reads,
-# and the interpreter each lock is compiled to resolve for. A disagreement here
-# is a green run CI disagrees with, or a pin that names one version in one file
-# and another in the next.
+# the interpreter each lock is compiled to resolve for, and the interpreter CI
+# builds the venv the gate runs in. A disagreement here is a green run CI
+# disagrees with, or a pin that names one version in one file and another in the
+# next.
 #
 # The versions are passed in rather than read from the Makefile, so the Makefile
 # stays the one place a version is written down. The Harbor manifest arrives as
@@ -70,4 +71,18 @@ for source in lint-requirements.in "$manifest"; do
     echo "ruff.toml checks against $ruff_target and $source resolves its lock for $lock_target: a py target raised here without the floor raised there lints against an interpreter the lock does not resolve for" >&2;
     echo "a bump to either has to bump the other, and the 'uv pip compile' at the top of that manifest with it" >&2; bad=1; }
 done
+# The interpreter CI builds the venv the gate runs in, which is a fourth record
+# of the same floor and the only one a local run cannot see. setup-linters
+# creates it with `uv venv --python <version>` and then installs the lock the
+# manifests above are compiled for, so a bump to ruff.toml and both manifests
+# that missed this line left `lint-versions` green on a runner building a venv
+# an interpreter older than the one the linters are checked against: the
+# checkout passes and CI runs the gate on something nobody declared. It is read
+# by the same `sed` shape as the two manifests, so a reworded line is reported
+# rather than skipped.
+venv_target="$(sed -n 's/.*uv venv --python \([0-9][0-9.]*\).*/\1/p' .github/actions/setup-linters/action.yml)"
+venv_py="$(printf '%s' "$venv_target" | tr -d .)"
+{ [ -n "$ruff_target" ] && [ -n "$venv_target" ] && [ "$ruff_target" = "py$venv_py" ]; } || {
+  echo "ruff.toml checks against $ruff_target and .github/actions/setup-linters/action.yml builds its venv for $venv_target: the gate runs on an interpreter nobody declared, so a bump to the floor has to bump this venv with it" >&2;
+  echo "a bump to any of the three has to bump the other three: ruff.toml, the 'uv pip compile' at the top of each manifest, and the 'uv venv --python' in setup-linters" >&2; bad=1; }
 test "$bad" -eq 0

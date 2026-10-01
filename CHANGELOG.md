@@ -150,6 +150,30 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- The interpreter floor is now held across all four places it is recorded, not
+  three. `lint-versions` checked `ruff.toml`'s `target-version` against the
+  `--python-version` each of the two manifests compiles its lock for, and left
+  the fourth alone: the `--python` setup-linters builds the venv the gate runs
+  in. A bump to `ruff.toml` and both manifests that missed that line left the
+  gate green on a runner creating its venv for an older interpreter than the one
+  the linters are checked against -- a check nobody had declared. All four are
+  read now, and the self-test perturbs the venv line alongside the other three,
+  so the check is asked rather than assumed.
+
+- The release inventory names the compiler that produced the assets. The SPDX
+  document recorded the commit, the version, the digests and every declared
+  pin, and no toolchain: the compiler decides the bytes, and it was the one
+  input to a published asset that no checksum, no asset name and no pin in
+  either manifest recorded. A consumer handed the document therefore could not
+  rebuild one of the files beside it, which is the whole of what an inventory
+  naming a toolchain is for. It is now a `Tool: zig <version>` creator and is
+  named in the package comment, read out of `build.zig.zon` through
+  `required-zig-version` rather than by asking the zig on PATH -- so it is the
+  pin CI installs and `zig-version` gates the asset builds against, rather than
+  whatever compiler happened to be on the machine that generated it. A missing
+  or unreadable version fails the release rather than writing a document that
+  names no toolchain, and `check-sbom` asserts the creator is there.
+
 - A refused `--temperature`, `--reasoning-effort` or base url is now reported
   against the source it came from. The ceilings already named theirs
   (`MICROAGENT_MAX_TURNS must be a number`), and these three spelled the flag

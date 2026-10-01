@@ -9,7 +9,10 @@
 # manifest alone, so ruff.toml's target-version was checked against a lock the
 # linters never come from and a floor raised in lint-requirements.in went
 # unobserved, and lint-versions was green on it. Nothing failed, because a check
-# that never runs cannot fail.
+# that never runs cannot fail. The same shape has one more record now: the
+# interpreter setup-linters builds the venv the gate runs in, which a local run
+# never sees and which every one of the other three would have to be bumped
+# with.
 #
 # So this asks the question the other targets cannot: for each input the script
 # reads, does moving it make the gate red? Every file is copied before it is
@@ -38,7 +41,12 @@ manifest="$1"
 linter_manifest="lint-requirements.in"
 linter_lock="lint-requirements.txt"
 ruff_config="ruff.toml"
-files="$linter_manifest $linter_lock $ruff_config $manifest"
+# The interpreter floor CI builds the lint venv for, a fourth file
+# lint-versions.sh reads and this list did not name. It is backed up and
+# restored like the rest, because a case that edits it and leaves it behind is
+# the defect the list above records having had once already.
+linter_action=".github/actions/setup-linters/action.yml"
+files="$linter_manifest $linter_lock $ruff_config $manifest $linter_action"
 for file in $files; do
   test -f "$file" || { echo "no $file, so there is nothing to perturb" >&2; exit 1; }
 done
@@ -138,9 +146,15 @@ edit_in_place() {
 drop_linter_floor() { edit_in_place "$linter_manifest" 's/--python-version 3\.12/--python-version 3.11/'; }
 drop_harbor_floor() { edit_in_place "$manifest" 's/--python-version 3\.12/--python-version 3.11/'; }
 drop_ruff_target() { edit_in_place "$ruff_config" 's/^target-version = "py312"/target-version = "py311"/'; }
+# The fourth record of the same floor: the interpreter setup-linters builds the
+# venv the gate runs in. Nothing else in the tree names it, so a bump to the
+# three above that missed this line left the gate green on a runner running it
+# on an interpreter the linter was not checked against.
+drop_venv_floor() { edit_in_place "$linter_action" 's/uv venv --python 3\.12/uv venv --python 3.11/'; }
 expect "the linter manifest's interpreter floor" "$linter_manifest" drop_linter_floor
 expect "the Harbor manifest's interpreter floor" "$manifest" drop_harbor_floor
 expect "ruff.toml's target-version" "$ruff_config" drop_ruff_target
+expect "the lint venv's interpreter" "$linter_action" drop_venv_floor
 
 # The version pins, the other thing the script refuses. RUFF_VERSION names the
 # version the gate runs and the four places that have to agree with it are the

@@ -481,7 +481,12 @@ def check_sbom(directory: Path, env: dict[str, str]) -> None:
     dist.mkdir()
     content = b"synthetic release asset"
     (dist / "microagent-v0.10.1-x86_64-linux-musl").write_bytes(content)
-    env.update(SHA1_CMD=str(commands / "sha1"), SHA256_CMD=str(commands / "sha256"), SOURCE_DATE_EPOCH="1720000000")
+    env.update(
+        SHA1_CMD=str(commands / "sha1"),
+        SHA256_CMD=str(commands / "sha256"),
+        SOURCE_DATE_EPOCH="1720000000",
+        ZIG_VERSION="0.16.0",
+    )
     result = run(ROOT / "scripts/sbom.sh", str(dist), "lint-requirements.txt", env=env)
     expect(result.returncode == 0, result)
     report = dist / "microagent-v0.10.1.spdx.json"
@@ -491,6 +496,14 @@ def check_sbom(directory: Path, env: dict[str, str]) -> None:
     expected = hashlib.sha1(hashlib.sha1(content).hexdigest().encode()).hexdigest()  # noqa: S324
     expect(parsed["packages"][0]["packageVerificationCode"]["packageVerificationCodeValue"] == expected, parsed)
     expect(parsed["files"][0]["checksums"][0]["checksumValue"] == hashlib.sha256(content).hexdigest(), parsed)
+    # The compiler is the one input to these assets that nothing else records,
+    # so an inventory that dropped it describes binaries nobody can rebuild.
+    expect("Tool: zig 0.16.0" in parsed["creationInfo"]["creators"], parsed)
+    # An empty or unreadable toolchain fails rather than writing a document that
+    # names none: a Creator list with no compiler in it is no record of anything.
+    for bad in ("", "not-a-version"):
+        result = run(ROOT / "scripts/sbom.sh", str(dist), "lint-requirements.txt", env=env, ZIG_VERSION=bad)
+        expect(result.returncode != 0 and report.read_bytes() == original, result)
     for name in ("sha1", "sha256"):
         for mode in ("fail", "empty", "invalid"):
             result = run(
