@@ -23,6 +23,15 @@ release, and `microagent update` moves you to it.
   reads that no check held, so a name added to it could reach two documents out
   of three; the suite that already holds the list to `--help` and the usage
   reference now holds it to the page as well.
+- The `git` tool's credential exclusions actually exclude. The pathspecs handed to
+  `git diff` and `git show` kept the ripgrep glob's leading `!`, which git reads as
+  an ordinary character of a pattern rather than the gitignore negation prefix, so
+  every entry named a file called `!.env` and matched nothing: a committed `.env`,
+  `.pem` or key came back whole as a tool result, and a tool result is re-sent to the
+  provider on every later turn. A credential *directory* is now also excluded with
+  its contents rather than with the directory entry alone, which left every file
+  under `.secrets/` in the diff. `search` and `ast` were not affected: ripgrep reads
+  `!` in a glob the way the set was written for.
 
 ## [0.12.0] - 2026-10-01
 

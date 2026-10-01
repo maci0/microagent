@@ -1702,9 +1702,34 @@ const search_max_matches_per_file: usize = 200;
 /// rest is rewritten, and the result is the same on every call: formatting
 /// them per `git diff` and per `git show` was one allocation per name, on
 /// the turn arena, for strings the compiler already knows.
+///
+/// The `!` that comes off is a gitignore-style negation prefix, and git reads it
+/// that way only in a `.gitignore`; inside a pathspec it is an ordinary
+/// character of the pattern. `:(exclude,icase)!.env` therefore asked git to
+/// exclude a file named literally `!.env`, which matched nothing, so the
+/// exclusion set excluded nothing: every credential a commit carried came back
+/// whole from `git show` and `git diff`, and a tool result is re-sent to the
+/// provider on every later turn of the run. This set was the whole of that
+/// protection.
+///
+/// A directory is excluded with a trailing `/**` so its contents go with it. A
+/// pathspec naming `.secrets` matched the directory entry and left every file
+/// under it in the diff, which is the same leak one level down.
 const credential_pathspecs = blk: {
     var list: [credential_globs_capacity][]const u8 = undefined;
-    for (credential_globs, 0..) |glob, i| list[i] = ":(exclude,icase)" ++ glob[1..];
+    var i: usize = 0;
+    for (credential_globs) |glob| {
+        const pattern = glob[1..];
+        var is_dir = false;
+        for (credential_dirs) |dir| {
+            if (std.mem.eql(u8, pattern, dir)) is_dir = true;
+        }
+        list[i] = if (is_dir)
+            ":(exclude,icase)" ++ pattern ++ "/**"
+        else
+            ":(exclude,icase)" ++ pattern;
+        i += 1;
+    }
     break :blk list;
 };
 
@@ -1735,6 +1760,53 @@ test "every credential the name rule refuses is in the exclusion set git carries
         };
     }
     try std.testing.expect(@min(credential_globs.len, credential_dirs.len) > 0);
+}
+
+test "every git pathspec exclusion is spelled the way git reads it" {
+    // The exclusion set was built by taking the ripgrep glob apart and putting
+    // the rest back behind `:(exclude,icase)`, which kept a leading `!`. git
+    // reads `!` as a negation prefix only in a `.gitignore`; in a pathspec it is
+    // an ordinary character, so every entry named a file called `!.env` and
+    // matched nothing, and `git show` printed every committed credential whole.
+    // This asserts the two properties git actually applies, per entry, so a
+    // pathspec that cannot exclude anything is a failure here rather than a
+    // secret leaving in a tool result.
+    //
+    // The second is the directory case: a pathspec naming `.secrets` matches
+    // the directory entry and leaves the files under it in the diff, so a
+    // directory carries the `/**` that takes its contents with it.
+    try std.testing.expectEqual(credential_globs.len, credential_pathspecs.len);
+    for (credential_pathspecs, credential_globs) |spec, glob| {
+        try std.testing.expect(std.mem.startsWith(u8, spec, ":(exclude,icase)"));
+        const pattern = spec[":(exclude,icase)".len..];
+        // No `!` survives: it is the negation prefix ripgrep wants and the
+        // character that made the git pathspec a literal that never matched.
+        try std.testing.expect(std.mem.indexOfScalar(u8, pattern, '!') == null);
+        try std.testing.expect(pattern.len > 0);
+        // The path is the glob's own pattern, so the two sets cannot drift.
+        try std.testing.expect(std.mem.startsWith(u8, pattern, glob[1..]));
+        var is_dir = false;
+        for (credential_dirs) |dir| {
+            if (std.mem.eql(u8, glob[1..], dir)) is_dir = true;
+        }
+        try std.testing.expectEqual(is_dir, std.mem.endsWith(u8, pattern, "/**"));
+        if (is_dir) {
+            // `pattern` is the glob's own pattern plus `/**` and nothing else.
+            try std.testing.expectEqual(@as(usize, glob.len - 1 + 3), pattern.len);
+        } else {
+            try std.testing.expectEqualStrings(glob[1..], pattern);
+        }
+    }
+    // The two spellings the set exists for, spelled out rather than derived, so
+    // a change to the tables that drops one of them is visible here.
+    var saw_env = false;
+    var saw_dir = false;
+    for (credential_pathspecs) |spec| {
+        if (std.mem.eql(u8, spec, ":(exclude,icase).env")) saw_env = true;
+        if (std.mem.eql(u8, spec, ":(exclude,icase).secrets/**")) saw_dir = true;
+    }
+    try std.testing.expect(saw_env);
+    try std.testing.expect(saw_dir);
 }
 
 /// The target's own path separator, as `std.mem.trimEnd` wants it. The walk
@@ -5027,8 +5099,14 @@ test "a scoped git call still leaves the committed credentials out" {
     const edited = try std.fmt.allocPrint(arena, "API_KEY={s}\nROTATED=1\n", .{marker});
     try tmp.dir.createDirPath(io, "src");
     try tmp.dir.createDirPath(io, "deploy");
+    // A credential directory as well as a file and an extension. A pathspec
+    // naming the directory alone matches the directory entry and leaves every
+    // file under it in the diff, which is the same leak one level down, and the
+    // other two entries here could not see it.
+    try tmp.dir.createDirPath(io, ".secrets");
     try tmp.dir.writeFile(io, .{ .sub_path = ".env", .data = committed });
     try tmp.dir.writeFile(io, .{ .sub_path = "deploy/server.pem", .data = try std.fmt.allocPrint(arena, "KEY={s}\n", .{marker}) });
+    try tmp.dir.writeFile(io, .{ .sub_path = ".secrets/openrouter", .data = try std.fmt.allocPrint(arena, "TOKEN={s}\n", .{marker}) });
     try tmp.dir.writeFile(io, .{ .sub_path = "src/main.zig", .data = "pub const x = 1;\n" });
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
