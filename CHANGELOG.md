@@ -114,6 +114,20 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- A `multi_edit` batch that failed part way can now be sent again and finishes.
+  The files are written one at a time, so a write that failed on the third left
+  the first two carrying their edits and the rest untouched, and nothing
+  recorded which. The retry that a model or a transport would then issue got
+  `old_string not found` on the *first* file -- because that file was the one
+  that landed -- and gave up, so the edits that never landed could never be
+  applied by re-sending the call. An edit whose `old_string` is gone and whose
+  `new_string` is in the file is now counted as already applied and skipped, and
+  the batch carries on to the files that need it; a file whose every edit was
+  already applied is not rewritten at all. The summary says how much of the
+  batch an earlier run had done, so a re-issued call is visible as one rather
+  than as a batch that applied nothing. A typo'd `old_string` is still refused:
+  it names text that is in neither half of the pair, so nothing claims it.
+
 - A refused `--temperature`, `--reasoning-effort` or base url is now reported
   against the source it came from. The ceilings already named theirs
   (`MICROAGENT_MAX_TURNS must be a number`), and these three spelled the flag
