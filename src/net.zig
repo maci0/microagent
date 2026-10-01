@@ -31,7 +31,7 @@ pub const env_surrounding = " \t\r\n";
 /// caller did not ask for. A credential is the value that matters, and there
 /// are now three places a run reads one: the provider key, and a remote MCP
 /// server's `api_key_env` name and its value.
-pub const header_control_bytes = blk: {
+const header_control_bytes = blk: {
     var b: [0x21]u8 = undefined;
     for (b[0..0x20], 0..) |*x, c| x.* = @intCast(c);
     b[0x20] = 0x7f;

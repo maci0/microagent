@@ -234,7 +234,7 @@ pub const ChatResult = struct {
 /// is kept. A caller that replaces one field mid-stream releases it through
 /// this before writing the new value over it; the frame the old copy was read
 /// from is gone by then, so the copy is what has to be released.
-pub fn release(gpa: std.mem.Allocator, field: *[]u8) void {
+fn release(gpa: std.mem.Allocator, field: *[]u8) void {
     if (field.*.len != 0) gpa.free(field.*);
     field.* = &.{};
 }

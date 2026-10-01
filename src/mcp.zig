@@ -112,7 +112,7 @@ const omitted_schema_json =
 ;
 
 /// One tool a server offers.
-pub const Tool = struct {
+const Tool = struct {
     /// The server's own name for it, which is what a `tools/call` sends.
     name: []const u8,
     /// What the model calls: `mcp__<server>__<tool>`.

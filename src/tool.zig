@@ -29,7 +29,11 @@ pub const max_tool_output = 24 * 1024;
 /// Spelled once because it is a policy about what is worth keeping, not a
 /// per-tool decision: a tool that captured at a different multiple would hold
 /// a different amount of the same output for the same reason.
-pub const capture_limit_factor = 4;
+///
+/// Private beside `max_tool_output`, which the module does export: the capture
+/// multiple is an internal budget, and a caller naming it would be reaching
+/// past the cap the tool actually answers with.
+const capture_limit_factor = 4;
 
 /// Ceiling on a file `read` returns whole. A source file is kilobytes, so the
 /// cap is what keeps one `read` of a multi-gigabyte artifact out of the
@@ -619,6 +623,8 @@ fn lineCount(v: ?std.json.Value, default: usize) usize {
 /// a count past it costs nothing to lose.
 const git_log_line_ceiling: usize = 1 << 20;
 
+// --- One tool: read-only git --------------------------------------------
+
 /// Read-only git, with the subcommands fixed here rather than assembled by the
 /// model. Deterministic, no shell quoting, and the output is capped.
 fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map) ![]const u8 {
@@ -907,6 +913,8 @@ fn firstLines(arena: std.mem.Allocator, text: []const u8, limit: usize) ![]const
     if (end == text.len) return text;
     return std.fmt.allocPrint(arena, "{s}... [output truncated at {d} lines]", .{ text[0..end], limit });
 }
+
+// --- Dispatch: the model's name and arguments, checked then matched ------
 
 /// The one way into the tools below: the name and the arguments are the
 /// model's, so the payload is parsed and checked for an object before any name
@@ -1399,7 +1407,11 @@ fn equalsUnquoted(word: []const u8, entry: []const u8) bool {
 /// Checks whether a command contains or executes a command in `deny_list`. An
 /// entry of one word is matched against each word of the command, and one of
 /// several against the command as a substring or as a run of its words.
-pub fn deniedInCommand(command: []const u8, deny_list: []const []const u8) ?[]const u8 {
+///
+/// Private because `toolBash` is where the answer is used; a caller that
+/// wanted the verdict rather than the refusal would have to re-implement the
+/// refusal line beside it.
+fn deniedInCommand(command: []const u8, deny_list: []const []const u8) ?[]const u8 {
     if (deny_list.len == 0) return null;
     const trimmed_cmd = std.mem.trim(u8, command, " \t\r\n");
     if (trimmed_cmd.len == 0) return null;
@@ -1456,6 +1468,8 @@ pub fn deniedInCommand(command: []const u8, deny_list: []const []const u8) ?[]co
     }
     return null;
 }
+
+// --- The tools: one per capability, each ending at a line cap ------------
 
 fn toolBash(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_ms: ?u64, environ_map: ?*const std.process.Environ.Map, deny_commands: []const []const u8) ![]const u8 {
     const command = chat.str(args.get("command")) orelse return "error: missing command";
@@ -3116,14 +3130,21 @@ pub fn truncationNote(arena: std.mem.Allocator, kept: []const u8, cap: usize, to
 
 /// A tool call through the argument text the model sends, on the test io, with
 /// no run budget and this process's environment. It is the entry point the
-/// tests drive, so a tool's real dispatch path is the one under test.
+/// tests drive, so a tool's real dispatch path is the one under test. The
+/// `main` module's own tests reach it too, to assert on a refusal without
+/// standing up a `chat.ToolCall` and an `Io`, so it is exported.
 pub fn dispatch(arena: std.mem.Allocator, name: []const u8, args: []const u8) ![]const u8 {
     return dispatchWith(arena, name, args, &.{}, &.{});
 }
 
 /// `dispatch` with a command filter and sandbox roots, for the tests that
 /// exercise them.
-pub fn dispatchWith(arena: std.mem.Allocator, name: []const u8, args: []const u8, deny_commands: []const []const u8, writable_roots: []const []const u8) ![]const u8 {
+///
+/// Private for the reason `runTool` is the public face: a caller outside this
+/// module has a `chat.ToolCall` and an `Io`, so it goes through the real path
+/// rather than the argument-text one this takes. `dispatch` above stays
+/// exported because the `main` module's tests reach it.
+fn dispatchWith(arena: std.mem.Allocator, name: []const u8, args: []const u8, deny_commands: []const []const u8, writable_roots: []const []const u8) ![]const u8 {
     var call: chat.ToolCall = .{
         .id = try arena.dupe(u8, ""),
         .name = try arena.dupe(u8, name),

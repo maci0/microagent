@@ -60,7 +60,7 @@ const mcp_mod = @import("mcp.zig");
 
 /// The largest `system_prompt_extra` the reader takes. The text rides on every
 /// request, so a value past this is a pasted file and not an addendum.
-pub const max_system_prompt_extra_bytes: usize = 16 * 1024;
+const max_system_prompt_extra_bytes: usize = 16 * 1024;
 
 /// The file the run reads repository instructions from when the config named
 /// none. Every other coding agent reads this name, so a repository that carries
@@ -68,7 +68,7 @@ pub const max_system_prompt_extra_bytes: usize = 16 * 1024;
 pub const agents_files_default = [_][]const u8{"AGENTS.md"};
 
 /// The longest path `agents_files` may name. A path past this is not a path.
-pub const max_agents_path_bytes: usize = 1024;
+const max_agents_path_bytes: usize = 1024;
 
 /// The longest a value running over several lines may be, joined. A list is a
 /// handful of names, and one longer than this is a file pasted where a list was

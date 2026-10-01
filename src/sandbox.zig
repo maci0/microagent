@@ -268,7 +268,10 @@ fn allowBeneath(ruleset_fd: i32, path: [*:0]const u8, access: u64) ?std.posix.E 
 /// A writable root is a grant the run is promised, not the confinement itself. One the kernel
 /// will not grant leaves the run unable to write there, which is the safe side and no reason to
 /// hand back a run with no confinement at all, so the root is named and the rest are applied.
-pub fn applyLandlock(io: Io, arena: std.mem.Allocator, writable_roots: []const []const u8) bool {
+///
+/// Private because `applySandbox` is the interface: nothing outside this module
+/// names a backend, so a third one is added here and not by a caller.
+fn applyLandlock(io: Io, arena: std.mem.Allocator, writable_roots: []const []const u8) bool {
     if (builtin.os.tag != .linux) return false;
 
     const abi = checked(linux.syscall3(.landlock_create_ruleset, 0, 0, create_ruleset_version)) orelse return false;
@@ -352,7 +355,10 @@ const seatbelt_devices = [_][]const u8{ "/dev/null", "/dev/tty", "/dev/dtracehel
 /// Later rules win in SBPL, so the allow follows the deny. A `subpath` names a resolved path, so
 /// the roots must already be canonical. A root with a control byte in it is left out, which is the
 /// safe side: no grant, and no way to end the string early.
-pub fn seatbeltProfile(arena: std.mem.Allocator, roots: []const []const u8) std.mem.Allocator.Error![]const u8 {
+///
+/// Private for the reason `applyLandlock` is: `applySandbox` is the interface,
+/// and a caller that read the profile itself would bind to this backend's shape.
+fn seatbeltProfile(arena: std.mem.Allocator, roots: []const []const u8) std.mem.Allocator.Error![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     try out.appendSlice(arena, "(version 1)\n(allow default)\n(deny file-write*)\n(allow file-write*\n");
     for (seatbelt_devices) |device| {

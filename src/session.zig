@@ -111,13 +111,14 @@ const max_session_suffix_bytes = std.fmt.count("{d}", .{session_name_attempts - 
 /// to a directory that already exists, so an operator who pointed
 /// MICROAGENT_SESSION_DIR at a shared store keeps the mode they gave it.
 ///
+const log_file_mode: Io.File.Permissions = @enumFromInt(@as(std.posix.mode_t, 0o600));
 /// `pub` because the sandbox module makes the same directory earlier than this
 /// one does, on a run with `enabled = true`: the store is opened after the
 /// writable roots are resolved, and a mode applied to a directory that already
 /// exists is not applied at all. A second creator that spelled its own mode
 /// therefore decided this one, and the default directory mode is a 0o755 the
-/// first paragraph above is written against.
-pub const log_file_mode: Io.File.Permissions = @enumFromInt(@as(std.posix.mode_t, 0o600));
+/// first paragraph above is written against. The file mode beside it is
+/// private: nothing outside this module creates a session log file.
 pub const log_dir_mode: Io.File.Permissions = @enumFromInt(@as(std.posix.mode_t, 0o700));
 
 /// This run's log, under a name nothing already holds.
@@ -639,7 +640,7 @@ pub fn writeFailure(io: Io, arena: std.mem.Allocator, session: *?Session, elapse
 /// response; a turn it did not carries the reason and no response. One shape
 /// rather than two, so a reader does not have to know which of the two a line
 /// is before it can read the line.
-pub const Record = struct {
+const Record = struct {
     /// The turn's model time, on the run's own clock and taken the same way
     /// `writeRecord`'s caller takes it, so a failed turn's time and a
     /// successful one's are the same measure.

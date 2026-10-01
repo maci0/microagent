@@ -13,7 +13,7 @@
 //! ```text
 //! chat                      the value types a turn is made of, its JSON writer
 //! net       <- chat         sinks, deadlines, the CA bundle, which urls may carry a credential
-//! sandbox   <- net, chat    which directories a run may write under, and the kernel rules
+//! sandbox   <- session, net, chat   which directories a run may write under, and the kernel rules
 //! session   <- net, chat    the per-run JSONL log: naming, pruning, appending
 //! tool      <- net, chat, sandbox   every tool and the process runner they share
 //! skill     <- net, chat    named instruction documents and the tool that loads one
@@ -408,6 +408,8 @@ fn environMap(arena: std.mem.Allocator, environ: std.process.Environ) !std.proce
     return map;
 }
 
+// --- Entry point: the process, the Io, and the exit status -------------
+
 pub fn main(minimal: std.process.Init.Minimal) !void {
     const status = status: {
         defer if (builtin.mode == .Debug) {
@@ -661,6 +663,8 @@ fn runMain(init: std.process.Init) !u8 {
         opts.prompt = "";
     }
 }
+
+// --- The REPL: one session, one prompt per line -------------------------
 
 const max_repl_prompt_bytes = 64 * 1024;
 
@@ -991,6 +995,8 @@ fn toolConfigError(arena: std.mem.Allocator, loaded: LoadedConfig) ?[]const u8 {
         return std.fmt.allocPrint(arena, "config {s}: every built-in tool is disabled; remove `enabled = false` from at least one [tools.<name>] table", .{path}) catch "config: every built-in tool is disabled";
     return null;
 }
+
+// --- Help text and the pushes the loop injects ---------------------------
 
 /// Injected once when a run that already edited the tree stops without having
 /// run any test runner. The measured failure mode: a SWE-bench instance that
@@ -2202,6 +2208,8 @@ fn scrubSecrets(env: *std.process.Environ.Map, remote: []const mcp_mod.Entry) vo
     for (remote) |entry| _ = env.swapRemove(entry.api_key_env);
 }
 
+// --- Config resolution: the file, the environment, the command line -----
+
 /// What the config file said for this run, and the path it was read from, the
 /// latter for the trace.
 const LoadedConfig = struct {
@@ -2749,6 +2757,9 @@ const TurnEnd = enum { answered, wants_tools, cut_off };
 /// reached an answer on its own. A loop that leaves through `--max-turns` or
 /// through the spend ceiling is `.cut_off`: the model was still working when
 /// the ceiling took the turn away, so what is on stdout is a prefix.
+
+// --- The turn loop: one request, its frames, and the tools it asks for ---
+
 fn run(
     client: *std.http.Client,
     io: Io,
@@ -4154,6 +4165,8 @@ fn logUsage(io: Io, arena: std.mem.Allocator, usage: *chat_mod.Usage, result: *c
         return err;
     };
 }
+
+// --- Retries: which refusals are asked again, and how long to wait -------
 
 const max_attempts: u32 = 3;
 /// The ceiling on the wait between attempts. The base and the doubling count
