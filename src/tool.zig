@@ -883,7 +883,7 @@ fn gitArgv(
 fn gitPathspecs(arena: std.mem.Allocator, argv: *std.ArrayList([]const u8), cmd: []const u8, path: ?[]const u8) !void {
     try argv.append(arena, "--");
     if (std.mem.eql(u8, cmd, "diff") or std.mem.eql(u8, cmd, "show")) {
-        try argv.appendSlice(arena, &credential_pathspecs);
+        try argv.appendSlice(arena, credential_pathspecs);
     }
     if (path) |p| try argv.append(arena, p);
 }
@@ -1715,8 +1715,28 @@ const search_max_matches_per_file: usize = 200;
 /// A directory is excluded with a trailing `/**` so its contents go with it. A
 /// pathspec naming `.secrets` matched the directory entry and left every file
 /// under it in the diff, which is the same leak one level down.
-const credential_pathspecs = blk: {
-    var list: [credential_globs_capacity][]const u8 = undefined;
+///
+/// Every entry comes in two spellings, and the second is the one that was
+/// missing. A pathspec that holds no `/` and no wildcard is anchored at the
+/// repository root: `:(exclude,icase)credentials` excluded `./credentials` and
+/// left `sub/credentials` and `deep/credentials` in the patch, which is the
+/// shape the name rule refuses at any depth, and `:(exclude,icase).secrets/**`
+/// left `sub/.secrets/openrouter` the same way. The ripgrep glob beside it
+/// (`!credentials`, `!.secrets`) has no such anchor, so the two spellings of one
+/// exclusion set were answering different questions and only one of them was
+/// the rule. `**/` is git's own "at any depth" prefix; it does not match a name
+/// at the root, so the anchored form is kept beside it rather than replaced.
+///
+/// A pattern that already carries a wildcard (`!**` + `.pem`) is left alone: it
+/// matches at any depth on its own, and prefixing `**/` to it would exclude
+/// nothing at all. `git ls-files` is what proves that, and the test below is
+/// driven by the same question.
+const credential_pathspec_table: [2 * credential_globs_capacity][]const u8 = blk: {
+    // Filled with an empty slice rather than `undefined`: the array is larger
+    // than the loop writes, and the slice below trims it by length, which is
+    // reading a value `undefined` does not have. An empty pathspec is not a
+    // harmless placeholder, so nothing may reach the argv holding one.
+    var list: [2 * credential_globs_capacity][]const u8 = @splat(&.{});
     var i: usize = 0;
     for (credential_globs) |glob| {
         const pattern = glob[1..];
@@ -1724,13 +1744,32 @@ const credential_pathspecs = blk: {
         for (credential_dirs) |dir| {
             if (std.mem.eql(u8, pattern, dir)) is_dir = true;
         }
-        list[i] = if (is_dir)
-            ":(exclude,icase)" ++ pattern ++ "/**"
-        else
-            ":(exclude,icase)" ++ pattern;
+        const anchored = if (is_dir) pattern ++ "/**" else pattern;
+        list[i] = ":(exclude,icase)" ++ anchored;
         i += 1;
+        // Tested on `pattern`, not on `anchored`: a directory's `anchored` ends
+        // in the `/**` just appended, so asking that one whether it carries a
+        // wildcard answers yes for every directory and drops the whole `**/`
+        // half of the set for them. A pattern that does carry one needs no
+        // second spelling: it already matches at any depth, and `**/` in front
+        // of it is a pattern for a directory that does not exist.
+        if (std.mem.indexOfAny(u8, pattern, "*?") == null) {
+            list[i] = ":(exclude,icase)**/" ++ anchored;
+            i += 1;
+        }
     }
     break :blk list;
+};
+
+/// The exclusion set as the slice `gitPathspecs` appends, trimmed to the
+/// entries the loop above wrote: a wildcard glob contributes one pathspec and a
+/// bare name two, so the count is not the capacity.
+const credential_pathspecs: []const []const u8 = blk: {
+    var n: usize = 0;
+    for (credential_pathspec_table) |spec| {
+        if (spec.len != 0) n += 1;
+    }
+    break :blk credential_pathspec_table[0..n];
 };
 
 test "every credential the name rule refuses is in the exclusion set git carries" {
@@ -1775,38 +1814,66 @@ test "every git pathspec exclusion is spelled the way git reads it" {
     // The second is the directory case: a pathspec naming `.secrets` matches
     // the directory entry and leaves the files under it in the diff, so a
     // directory carries the `/**` that takes its contents with it.
-    try std.testing.expectEqual(credential_globs.len, credential_pathspecs.len);
-    for (credential_pathspecs, credential_globs) |spec, glob| {
+    //
+    // The third is depth. A pathspec holding neither a `/` nor a wildcard is
+    // anchored at the repository root, so every such entry also carries the
+    // `**/` spelling beside it: `:(exclude,icase)credentials` alone left
+    // `sub/credentials` in `git show`, and a name the rule refuses at any depth
+    // is the name the git tool has to keep out at any depth too.
+    for (credential_pathspecs) |spec| {
         try std.testing.expect(std.mem.startsWith(u8, spec, ":(exclude,icase)"));
         const pattern = spec[":(exclude,icase)".len..];
         // No `!` survives: it is the negation prefix ripgrep wants and the
         // character that made the git pathspec a literal that never matched.
         try std.testing.expect(std.mem.indexOfScalar(u8, pattern, '!') == null);
         try std.testing.expect(pattern.len > 0);
-        // The path is the glob's own pattern, so the two sets cannot drift.
-        try std.testing.expect(std.mem.startsWith(u8, pattern, glob[1..]));
+    }
+    for (credential_globs) |glob| {
         var is_dir = false;
         for (credential_dirs) |dir| {
             if (std.mem.eql(u8, glob[1..], dir)) is_dir = true;
         }
-        try std.testing.expectEqual(is_dir, std.mem.endsWith(u8, pattern, "/**"));
-        if (is_dir) {
-            // `pattern` is the glob's own pattern plus `/**` and nothing else.
-            try std.testing.expectEqual(@as(usize, glob.len - 1 + 3), pattern.len);
+        // The path is the glob's own pattern, so the two sets cannot drift.
+        // The pattern is compared where it is rather than built into a string
+        // here: `credential_globs` is a comptime table read as a runtime
+        // slice, so a `++` with it is not a comptime concat.
+        try std.testing.expect(hasPathspec(":(exclude,icase)", "", glob[1..], is_dir));
+        // A wildcard pattern is depth-agnostic on its own, and `**/` in front
+        // of one excludes nothing at all, so that one entry is spelled once.
+        if (std.mem.indexOfAny(u8, glob[1..], "*?") != null) {
+            try std.testing.expect(!hasPathspec(":(exclude,icase)", "**/", glob[1..], is_dir));
         } else {
-            try std.testing.expectEqualStrings(glob[1..], pattern);
+            try std.testing.expect(hasPathspec(":(exclude,icase)", "**/", glob[1..], is_dir));
         }
     }
-    // The two spellings the set exists for, spelled out rather than derived, so
-    // a change to the tables that drops one of them is visible here.
-    var saw_env = false;
-    var saw_dir = false;
+    // The spellings the set exists for, spelled out rather than derived, so a
+    // change to the tables that drops one of them is visible here.
+    try std.testing.expect(hasPathspec(":(exclude,icase)", "", ".env", false));
+    try std.testing.expect(hasPathspec(":(exclude,icase)", "**/", ".env", false));
+    try std.testing.expect(hasPathspec(":(exclude,icase)", "", ".secrets", true));
+    try std.testing.expect(hasPathspec(":(exclude,icase)", "**/", ".secrets", true));
+}
+
+/// Whether the set holds the pathspec `prefix` ++ `depth` ++ `pattern` ++ the
+/// trailing `/**` a directory's carries and a bare name's does not. Compared
+/// in pieces rather than concatenated, so a pattern read from a runtime slice
+/// does not need a buffer, and exactly: a `**/`-prefixed spec does not answer
+/// for the anchored one, which is the distinction the whole set is about.
+fn hasPathspec(prefix: []const u8, depth: []const u8, pattern: []const u8, is_dir: bool) bool {
     for (credential_pathspecs) |spec| {
-        if (std.mem.eql(u8, spec, ":(exclude,icase).env")) saw_env = true;
-        if (std.mem.eql(u8, spec, ":(exclude,icase).secrets/**")) saw_dir = true;
+        var rest = spec;
+        if (!std.mem.startsWith(u8, rest, prefix)) continue;
+        rest = rest[prefix.len..];
+        if (!std.mem.startsWith(u8, rest, depth)) continue;
+        rest = rest[depth.len..];
+        if (!std.mem.startsWith(u8, rest, pattern)) continue;
+        rest = rest[pattern.len..];
+        if (is_dir) {
+            if (!std.mem.eql(u8, rest, "/**")) continue;
+        } else if (rest.len != 0) continue;
+        return true;
     }
-    try std.testing.expect(saw_env);
-    try std.testing.expect(saw_dir);
+    return false;
 }
 
 /// The target's own path separator, as `std.mem.trimEnd` wants it. The walk
@@ -5104,9 +5171,17 @@ test "a scoped git call still leaves the committed credentials out" {
     // file under it in the diff, which is the same leak one level down, and the
     // other two entries here could not see it.
     try tmp.dir.createDirPath(io, ".secrets");
+    // The same three shapes one directory down, which is where they were not
+    // caught: a git pathspec holding neither a `/` nor a wildcard is anchored
+    // at the repository root, so the set that excluded `credentials` and
+    // `.secrets/` at the top left `deploy/credentials` and `deploy/.secrets/`
+    // in the patch. A credential is the rule at any depth, so the test is.
+    try tmp.dir.createDirPath(io, "deploy/.secrets");
     try tmp.dir.writeFile(io, .{ .sub_path = ".env", .data = committed });
     try tmp.dir.writeFile(io, .{ .sub_path = "deploy/server.pem", .data = try std.fmt.allocPrint(arena, "KEY={s}\n", .{marker}) });
+    try tmp.dir.writeFile(io, .{ .sub_path = "deploy/credentials", .data = try std.fmt.allocPrint(arena, "USER={s}\n", .{marker}) });
     try tmp.dir.writeFile(io, .{ .sub_path = ".secrets/openrouter", .data = try std.fmt.allocPrint(arena, "TOKEN={s}\n", .{marker}) });
+    try tmp.dir.writeFile(io, .{ .sub_path = "deploy/.secrets/openrouter", .data = try std.fmt.allocPrint(arena, "TOKEN={s}\n", .{marker}) });
     try tmp.dir.writeFile(io, .{ .sub_path = "src/main.zig", .data = "pub const x = 1;\n" });
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
@@ -5885,7 +5960,7 @@ fn fuzzGitArgv(_: void, smith: *std.testing.Smith) !void {
     try std.testing.expect(at_sep >= 3);
     var want_tail: std.ArrayList([]const u8) = .empty;
     if (std.mem.eql(u8, cmd, "diff") or std.mem.eql(u8, cmd, "show")) {
-        try want_tail.appendSlice(arena, &credential_pathspecs);
+        try want_tail.appendSlice(arena, credential_pathspecs);
     }
     if (path_text) |p| try want_tail.append(arena, p);
     const got_tail = argv[at_sep + 1 ..];
