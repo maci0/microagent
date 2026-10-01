@@ -854,6 +854,69 @@ test "the prompt lists every skill and is empty when there is none" {
     try std.testing.expect(std.mem.indexOf(u8, block, tool_name) != null);
 }
 
+// The listing is what every later turn re-sends, so past `max_prompt_bytes`
+// the remaining skills are counted rather than named. Both sides of the cap
+// are checked here, and so is the number in the overflow line: it is the only
+// thing that tells a run looking at a short listing why it is short, and a
+// count one off, or zero, names the same shortage for two different numbers of
+// installed skills, so a model told "and 0 more not listed" reads that every
+// skill it can see is every skill there is and asks for one by a name the
+// listing never gave.
+//
+// The fixture sizes the descriptions rather than the skill count, so the cap
+// falls inside the list at a place the test controls: a cap that moved, or one
+// compared with the preamble alone, still overflows here but leaves a
+// different remainder.
+test "a listing past the prompt cap names the skills it left out" {
+    const gpa = std.testing.allocator;
+    var scratch_state = std.heap.ArenaAllocator.init(gpa);
+    defer scratch_state.deinit();
+    const scratch = scratch_state.allocator();
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    // Enough skills, each with a description the cap cannot hold whole, that
+    // the listing is certain to run out partway rather than at the last one.
+    const count = 40;
+    const items = try scratch.alloc(Skill, count);
+    for (items, 0..) |*item, i| {
+        item.* = .{
+            .name = try std.fmt.allocPrint(scratch, "s{d}", .{i}),
+            .description = "d" ** max_skill_description_bytes,
+            .path = "/p",
+        };
+    }
+
+    const block = try (Skills{ .items = items }).prompt(arena);
+    // The cap holds: the block the prompt carries is bounded, or the whole
+    // reason this branch exists is gone.
+    try std.testing.expect(block.len <= max_prompt_bytes + 64);
+    // And it overflowed, rather than the test passing on a list that fit.
+    try std.testing.expect(block.len > max_prompt_bytes / 2);
+
+    // How many lines the listing actually named, read back from the block
+    // rather than from the code that wrote it: the cut falls where the cap
+    // falls, and this is the number the overflow line has to account for.
+    const listed = std.mem.count(u8, block, "\n- s");
+    try std.testing.expect(listed > 0 and listed < count);
+
+    // The overflow line names exactly the skills the listing did not, and they
+    // are the ones named and the ones omitted: a remainder that counted the
+    // whole list would tell a model the operator installed more than the roots
+    // hold, one that counted nothing would tell it none were dropped, and one
+    // that ran ahead of the cut would point it at a name it can already see.
+    const note = try std.fmt.allocPrint(scratch, "- and {d} more not listed\n", .{count - listed});
+    try std.testing.expectEqualStrings(note, block[block.len - note.len ..]);
+
+    for (items[0..listed]) |item| {
+        try std.testing.expect(std.mem.indexOf(u8, block, item.name) != null);
+    }
+    for (items[listed..count]) |item| {
+        try std.testing.expect(std.mem.indexOf(u8, block, item.name) == null);
+    }
+}
+
 test "a description cannot rewrite the prompt around it" {
     const gpa = std.testing.allocator;
     var state = std.heap.ArenaAllocator.init(gpa);
