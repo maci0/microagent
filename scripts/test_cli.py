@@ -16,6 +16,14 @@ from typing import Any, ClassVar
 
 
 class Provider(BaseHTTPRequestHandler):
+    """The loopback provider. Every switch is a class attribute a case sets
+    before the `invoke` that reads it and clears again before the next one: a
+    switch left on is shared mutable state the case after it silently inherits,
+    so an added or reordered case is a different run with no diff saying so.
+    `reset` runs once per check function, so a check starts from the ordinary
+    response whatever the one before it left behind.
+    """
+
     seen: ClassVar[list[dict[str, Any]]] = []
     empty = False
     trailing_newline = True
@@ -24,6 +32,19 @@ class Provider(BaseHTTPRequestHandler):
     hang_body = False
     billed_error = False
     invalid_usage = False
+
+    @classmethod
+    def reset(cls) -> None:
+        """Put every switch back to the ordinary response, so a check starts
+        from the one shape every case falls back to.
+        """
+        cls.empty = False
+        cls.trailing_newline = True
+        cls.bad_call = False
+        cls.hang = False
+        cls.hang_body = False
+        cls.billed_error = False
+        cls.invalid_usage = False
 
     def do_POST(self) -> None:
         Provider.seen.append(json.loads(self.rfile.read(int(self.headers["content-length"]))))
@@ -145,6 +166,7 @@ def check_refs(root: Path) -> None:
 
 
 def check(binary: Path, root: Path, url: str) -> None:
+    Provider.reset()
     result = invoke(
         binary,
         root,
@@ -177,6 +199,12 @@ def check(binary: Path, root: Path, url: str) -> None:
 
     result = invoke(binary, root, url, ["one task"], "ignored\n")
     expect(result.returncode == 0 and len(Provider.seen) == 1 and "> " not in result.stderr, result.stderr)
+    # Each switch below is set immediately before the one `invoke` that reads it
+    # and cleared immediately after its assertions, so no case inherits the
+    # shape of the one above it. The billed-error pair at the end of this
+    # function is the reason the clears have to exist at all: those two are the
+    # last cases, and a switch left on there is a provider that answers every
+    # turn `check_timeouts` runs with a failure instead of an answer.
     Provider.trailing_newline = False
     result = invoke(binary, root, url, ["unterminated DONE"], "")
     expect(result.returncode == 0, result.stderr)
@@ -188,13 +216,12 @@ def check(binary: Path, root: Path, url: str) -> None:
     Provider.empty = True
     result = invoke(binary, root, url, ["--repl"], "first\nsecond\n")
     expect(result.returncode == 3 and len(Provider.seen) == 1, result.stderr)
+    Provider.empty = False
     Provider.billed_error = True
     for invalid in (False, True):
         Provider.invalid_usage = invalid
         result = invoke(binary, root, url, ["billed stream failure"], "")
         expect(result.returncode == 1 and len(Provider.seen) == 1 and "not retried" in result.stderr, result.stderr)
-    Provider.billed_error = False
-    Provider.invalid_usage = False
 
 
 class SilentTLS(BaseRequestHandler):
@@ -205,6 +232,12 @@ class SilentTLS(BaseRequestHandler):
 
 
 def check_timeouts(binary: Path, root: Path, url: str) -> None:
+    Provider.reset()
+    # `hang` stays on across the three cases here because all three need a
+    # provider that never answers; `hang_body` is what tells a response with no
+    # body from a response with one, and is set per case. The reset above is
+    # also what puts both back, because the last case below hangs on `hang`
+    # alone and the function returns with the provider still silent.
     Provider.hang = True
     result = invoke(binary, root, url, ["--budget", "1", "--stall-timeout", "120", "silent response"], "")
     expect(result.returncode == 3 and len(Provider.seen) == 1 and "budget" in result.stderr, result.stderr)

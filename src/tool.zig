@@ -6316,12 +6316,36 @@ fn expectNoProcessSurvived() !void {
 
     const raw = tmp.dir.readFileAlloc(io, pid_name, arena, .limited(64)) catch return error.GrandchildNotReported;
     const pid = try std.fmt.parseInt(std.posix.pid_t, std.mem.trim(u8, raw, " \t\r\n"), 10);
+    // The grandchild has to have been running for the check below to mean
+    // anything, and the poll cannot tell "the group signal took it down" from
+    // "no such process was ever there": a `kill` on a pid that was never alive
+    // fails the same way a `kill` on a pid that died under it does, so the
+    // first probe is taken before the loop and required to succeed. The timeout
+    // assertion above is not a substitute for it — that one proves the pipe was
+    // held open until the deadline, which a grandchild started and then gone
+    // satisfies just as well as one that outlived its group.
+    std.posix.kill(pid, .CONT) catch |err| {
+        std.debug.print("grandchild {d} was not running when the call timed out: {s}\n", .{ pid, @errorName(err) });
+        return error.GrandchildNotRunning;
+    };
     // The kill is delivered asynchronously and the orphan is reaped by init
-    // afterwards, so "gone" is a short poll rather than an instant check.
+    // afterwards, so "gone" is a short poll rather than an instant check. Only
+    // `ProcessNotFound` ends it in a pass, because only that one is the kernel
+    // reporting the pid is gone; any other error is the probe itself failing
+    // and says nothing about the process, so it must not be read as a kill that
+    // landed. A grandchild left running, or one this user may not signal, fails
+    // this test rather than passing it.
     var attempt: usize = 0;
     while (attempt < 150) : (attempt += 1) {
-        std.posix.kill(pid, .CONT) catch return;
-        try io.sleep(.{ .nanoseconds = 20 * std.time.ns_per_ms }, .awake);
+        if (std.posix.kill(pid, .CONT)) |_| {
+            try io.sleep(.{ .nanoseconds = 20 * std.time.ns_per_ms }, .awake);
+        } else |err| switch (err) {
+            error.ProcessNotFound => return,
+            else => {
+                std.debug.print("grandchild {d} could not be probed: {s}\n", .{ pid, @errorName(err) });
+                return error.GrandchildProbeFailed;
+            },
+        }
     }
     std.debug.print("grandchild {d} survived the timed-out call\n", .{pid});
     return error.GrandchildSurvived;
