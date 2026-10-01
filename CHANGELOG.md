@@ -26,6 +26,13 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- Every source citation in the threat model names the line its function is defined on
+  again, so `make lint`, and the push workflow's lint job that runs it, is green on a
+  tree the gates otherwise pass. Forty of the drifted citations were moved to the line
+  the source has them on, and five that cited a line inside a function's body now name
+  the function beside them, which is what lets the check verify the pair rather than a
+  bare line that goes stale on the next insertion above it.
+
 - A turn whose request body was completely on the wire is not sent a second time when the
   flush of it stalls past the stall timeout. The timeout was reported as a failure to send,
   which the retry schedule answered by re-POSTing a request the provider may already have

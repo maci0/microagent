@@ -72,6 +72,20 @@ lint.select = [
     "FURB",  # ruff's own rewrites of the same code
     "TD",    # a TODO or FIXME in a comment, which the tree carries none of
     "YTT",   # sys.version and py.version branches, every one of them wrong now
+
+    # The rest of the defect classes ruff ships builtins for, which the
+    # adapter and the harness above do not trip: a deprecated NumPy alias or a
+    # seeded `np.random` call in a benchmark that reports a wrong number, a
+    # pandas `inplace=` or `Series.values` whose chained result is discarded,
+    # a `Literal[...]` that says nothing a checker could not infer, and a
+    # FastAPI `response_model` that is already the declared return type. Every
+    # one is a rule the tree passes today, so enabling them costs nothing and
+    # closes a class the default set leaves open rather than each new import
+    # being the first thing to trip it.
+    "NPY",   # numpy: deprecated aliases, legacy np.random
+    "PD",    # pandas: inplace writes, chained assignment, .values
+    "PYI",   # flake8-pyi: stub conventions, which include a redundant union
+    "FAST",  # fastapi: a response_model the return annotation already says
 ]
 
 lint.ignore = [
