@@ -198,6 +198,23 @@ def max_tokens() -> str | None:
     return optional_ceiling("MICROAGENT_MAX_TOKENS")
 
 
+def spend_ceiling() -> str | None:
+    """The token-spend ceiling the container is handed.
+
+    Checked by the same reader the other ceilings are, so a mistyped value
+    stops the run at the command line rather than after a container start and a
+    binary upload. Forwarded rather than passed as a flag because the binary
+    reads this one from the environment.
+
+    A benchmark run is where this is worth setting. `--max-turns` and
+    `--budget` both bound a run, but they bound it in the model's favour: a
+    model that answers slowly and briefly can stay inside either one for hours
+    of provider time, and a trial set is many such runs against one account.
+    This is the only ceiling here counted in what the provider bills, so it is
+    the one that stops a sweep rather than a single run."""
+    return optional_ceiling("MICROAGENT_MAX_SPEND_TOKENS")
+
+
 def reasoning_effort() -> str | None:
     """The provider's reasoning.effort, checked here for the reason the numeric
     knobs are: the binary refuses a level it does not have, and refusing it
@@ -296,6 +313,7 @@ def validate_env() -> None:
         )
     reasoning_effort()
     max_tokens()
+    spend_ceiling()
     base_url()
     stall_timeout()
 
@@ -412,6 +430,31 @@ class Microagent(BaseAgent):
             raise RuntimeError(f"microagent did not run in the container: {result.stdout or ''}{result.stderr or ''}")
         self.logger.info("microagent ready: %s", (result.stdout or "").strip())
 
+    def add_optional_env(self, env: dict[str, str]) -> None:
+        """The knobs the operator set, added to the container's environment.
+
+        A knob nobody set is left out rather than exported empty, because an
+        empty value is not a value to the binary and a variable it reads as a
+        ceiling refuses rather than falling back to its own default. Each is
+        read through the same reader `validate_env` checked, so the value
+        refused at the command line is the one this run is given.
+
+        Its own method because `run` reads five of these and the branches
+        belong to the environment rather than to the run: past the complexity
+        ceiling the checker applies, the last one added here would have had to
+        be left out to keep the run readable, and the knob it left out is a
+        ceiling on what the provider bills."""
+        if self._ca_uploaded:
+            env["MICROAGENT_CA_BUNDLE"] = REMOTE_CA_PATH
+        if reasoning := reasoning_effort():
+            env["MICROAGENT_REASONING_EFFORT"] = reasoning
+        if token_ceiling := max_tokens():
+            env["MICROAGENT_MAX_TOKENS"] = token_ceiling
+        if spend := spend_ceiling():
+            env["MICROAGENT_MAX_SPEND_TOKENS"] = spend
+        if stall := stall_timeout():
+            env["MICROAGENT_STALL_TIMEOUT"] = stall
+
     def write_log(self, path: Path, text: str) -> None:
         """One of the run's own logs, written without letting the write end a run.
 
@@ -478,7 +521,6 @@ class Microagent(BaseAgent):
                 FINAL_TURN_ROOM_S,
                 budget,
             )
-        reasoning = reasoning_effort()
         command = " ".join(
             shlex.quote(part)
             for part in (
@@ -498,16 +540,7 @@ class Microagent(BaseAgent):
             "MICROAGENT_BASE_URL": base_url(),
             "MICROAGENT_CONFIG": REMOTE_CONFIG_PATH,
         }
-        if self._ca_uploaded:
-            env["MICROAGENT_CA_BUNDLE"] = REMOTE_CA_PATH
-        if reasoning:
-            env["MICROAGENT_REASONING_EFFORT"] = reasoning
-        # Read through the same reader `validate_env` checked, so the value
-        # refused at the command line is the one this run is given.
-        if token_ceiling := max_tokens():
-            env["MICROAGENT_MAX_TOKENS"] = token_ceiling
-        if stall := stall_timeout():
-            env["MICROAGENT_STALL_TIMEOUT"] = stall
+        self.add_optional_env(env)
 
         started = self.logs_dir / "microagent-stdout.txt"
         try:

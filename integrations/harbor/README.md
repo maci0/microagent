@@ -74,6 +74,7 @@ command that regenerates the lock is in the comment at the top of
 | `MICROAGENT_MAX_TURNS` | `--max-turns` passed to the binary (default 1200, above the binary's own 1000) |
 | `MICROAGENT_REASONING_EFFORT` | `minimal`, `low`, `medium`, `high` or `none`; reasoning models otherwise spend the whole budget thinking. A level the binary does not have stops the run here |
 | `MICROAGENT_MAX_TOKENS` | generation ceiling passed to the binary (its own default when unset); a low account balance is answered with `402 ... you can only afford N`, and asking for less is the only lever |
+| `MICROAGENT_MAX_SPEND_TOKENS` | billed-token ceiling passed to the binary (no ceiling when unset), which warns on stderr once 80% of it is spent. The only ceiling here counted in what the provider bills, so it is the one that bounds a whole trial set rather than a single run |
 | `MICROAGENT_STALL_TIMEOUT` | seconds the response socket may stay silent before the read fails, passed to the binary (its own 120 s default when unset). Raise it for a provider slow to a first token on a large prompt: NVIDIA NIM took over two minutes on one, and the run died of the default rather than of its own answer |
 | `MICROAGENT_CA_BUNDLE` | PEM file to upload as the container's trust store, else `SSL_CERT_FILE`, else the host's system store |
 | `MICROAGENT_AGENT_TIMEOUT_SEC` | hard cap on the in-container process (default 1500), and the ceiling the budget is derived from |
@@ -86,8 +87,8 @@ newline on a path or a key. These stop the run before the container starts,
 naming the variable:
 
 - a non-numeric or zero `MICROAGENT_MAX_TURNS`, `MICROAGENT_BUDGET_SECONDS`,
-  `MICROAGENT_AGENT_TIMEOUT_SEC`, `MICROAGENT_MAX_TOKENS` or
-  `MICROAGENT_STALL_TIMEOUT`;
+  `MICROAGENT_AGENT_TIMEOUT_SEC`, `MICROAGENT_MAX_TOKENS`,
+  `MICROAGENT_MAX_SPEND_TOKENS` or `MICROAGENT_STALL_TIMEOUT`;
 - a `MICROAGENT_REASONING_EFFORT` that is not one of `minimal`, `low`,
   `medium`, `high`, `none`;
 - a `MICROAGENT_BASE_URL` the binary would refuse (no scheme, or http to
