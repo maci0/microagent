@@ -476,7 +476,13 @@ fn runMain(init: std.process.Init) !u8 {
         } else if (rest.len == 1)
             return usageError(io, "help takes no argument '{s}'; the only subcommand is update", .{clip(rest[0])})
         else
-            return usageError(io, "help takes at most one argument, the subcommand it documents, and got {d}", .{rest.len});
+            // The word that names no subcommand is named, the way the
+            // single-argument case above names it: a count sends the reader
+            // back to the command line to work out which of the words is
+            // wrong, and a flag is the usual one. The count is kept because
+            // "help a b c" is a reader who passed a whole phrase and the
+            // number is what tells them so.
+            return usageError(io, "help takes at most one argument, the subcommand it documents; '{s}' names none, and {d} were given", .{ clip(helpOffender(rest)), rest.len });
     }
 
     // `--help` and `--version` before the environment is read, so a variable
@@ -1331,6 +1337,21 @@ test "help names a subcommand's own text, and a word that names none is a usage 
     try std.testing.expect(std.mem.indexOf(u8, help_text, "\"help update\" is that") != null);
 }
 
+test "a help invocation with too many arguments names the one that is wrong" {
+    // A count alone sent the reader back to the command line to work out which
+    // of the words was the mistake, and a flag is the usual one: `help update
+    // --check` is a reader who expected `--check` to do something. The word is
+    // named, and the count is kept because a reader who passed a whole phrase
+    // is told by the number that they did.
+    try std.testing.expectEqualStrings("--check", helpOffender(&.{ "update", "--check" }));
+    try std.testing.expectEqualStrings("foo", helpOffender(&.{ "foo", "bar" }));
+    try std.testing.expectEqualStrings("update", helpOffender(&.{ "update", "-h" }));
+    // Every word names something, which only a repetition reaches; there is no
+    // wrong one to point at, so the first stands in.
+    try std.testing.expectEqualStrings("update", helpOffender(&.{ "update", "update" }));
+    try std.testing.expectEqualStrings(help_word, helpOffender(&.{}));
+}
+
 test "the help text names the spend alarm the run prints" {
     // `--max-spend-tokens` warns on stderr once the share is spent, and the
     // usage reference says so. A flag documented without the warning is a flag whose
@@ -2004,6 +2025,19 @@ fn helpTarget(rest: []const []const u8) ?HelpFor {
     if (subcommandArg(rest[0])) return .update;
     if (isFlag(rest[0], "-h", "--help")) return .self_text;
     return null;
+}
+
+/// The word a `help` invocation named that no subcommand answers to, so the
+/// message points at the word that is wrong rather than only counting what
+/// arrived. The first word that names neither a subcommand nor the help flag
+/// is the one: `help update --check` names `--check`, and `help foo bar` names
+/// `foo`. When every word is a subcommand or the help flag, which only a
+/// repeated one reaches, the first word is as good a name as any.
+fn helpOffender(rest: []const []const u8) []const u8 {
+    for (rest) |arg| {
+        if (!subcommandArg(arg) and !isFlag(arg, "-h", "--help")) return arg;
+    }
+    return if (rest.len == 0) help_word else rest[0];
 }
 
 fn isFlag(name: []const u8, short: []const u8, long: []const u8) bool {
