@@ -79,8 +79,24 @@ for file in "$@"; do
   status=0
   # because: the backticks are literal Markdown code spans, not command substitution
   # shellcheck disable=SC2016
-  grep -oE '`[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?`, `src/[a-z_]+\.zig:[0-9]+(-[0-9]+)?`|`src/[a-z_]+\.zig:[0-9]+(-[0-9]+)?`' \
-    "$file" > "$tmp.refs" || status=$?
+  # A wrapped pair is read by flattening the line breaks first. Without that the
+  # adjacency the pattern asks for was never met by a citation in a long table row
+  # that breaks between `sym`, and the path naming its line: ten of the threat
+  # model's citations were in that shape and every one had drifted onto unrelated
+  # code, because a citation the gate cannot read is one it agrees with whatever it
+  # happens to say. The rewrite below matches the path span on its own, so the
+  # wrapped shape is repaired the same way as one written on a single line.
+  # The status guard covers the read as well as the grep: `tr` is a producer in a
+  # pipeline under `set -e`, so a missing file aborts the script before the
+  # `|| status` can record it, and the gate's own fixture checks that a missing
+  # input is refused rather than read as an empty citation list.
+  { tr '\n' ' ' < "$file" || true; } |
+    grep -oE '`[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?`, `src/[a-z_]+\.zig:[0-9]+(-[0-9]+)?`|`src/[a-z_]+\.zig:[0-9]+(-[0-9]+)?`' \
+    > "$tmp.refs" || status=$?
+  [ -f "$file" ] || {
+    printf '%s: is not in the tree\n' "$file" >&2
+    exit 1
+  }
   [ "$status" -le 1 ] || exit 1
   while read -r ref; do
     [ -n "$ref" ] || continue
@@ -120,7 +136,14 @@ for file in "$@"; do
           # lookup dropped the module, the rewrite matches the name as it is
           # written, qualified or not, so a rewrite leaves `config.parse` alone.
           # Write and rename: portable to GNU and BSD sed.
-          sed "s|\`\([A-Za-z_][A-Za-z0-9_]*\.\)\?$sym\`, \`$path:$span\`|\`\1$sym\`, \`$path:$got\`|" \
+          #
+          # The rewrite matches the path span on its own rather than the name
+          # beside it, because a citation the Markdown wrapped puts `sym`, at the
+          # end of one line and `src/foo.zig:N` on the next: sed matches inside a
+          # line, so a pattern that reached across the break never matched and the
+          # repair reported the move without writing one. The span is unique in
+          # the document, so matching only it repairs the wrapped shape too.
+          sed "s|\`$path:$span\`|\`$path:$got\`|" \
             "$file" > "$tmp.rewritten"
           mv "$tmp.rewritten" "$file"
           printf '%s: moved %s from %s:%s to %s:%s\n' "$file" "$sym" "$path" "$want" "$path" "$got" >> "$tmp"
@@ -173,6 +196,9 @@ if [ -s "$tmp" ]; then
     echo "citations rewritten; run the check again to see what is left" >&2
     exit 0
   fi
+  # The list above is the whole report. A hint naming one fixed citation sent a
+  # reader to a line that was not wrong, which made the gate read as disagreeing
+  # with itself, so there is none past the repair command.
   echo "source citations are stale or invalid" >&2
   echo "  'make check-refs FIX=1' rewrites each to the line its symbol is on" >&2
   exit 1

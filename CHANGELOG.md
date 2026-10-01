@@ -101,6 +101,25 @@ release, and `microagent update` moves you to it.
   repository nobody may read, and sending someone after a token that changes nothing was
   the wrong answer to those. A `429` still needs no body to be told apart.
 
+- `make check-refs` reads a citation pair that the Markdown wrapped across a line break.
+  The pattern asked for the name and the path adjacent, so a pair broken between them was
+  never read, never checked and never repaired: a citation the gate cannot see is one it
+  agrees with whatever it happens to say. Ten of the threat model's citations were in that
+  shape and every one had drifted onto unrelated code, by as much as a thousand lines.
+  Ten are now on the line their symbol is defined on, one naming a function that no longer
+  exists, which is the control's own key resolution and now reads as it.
+
+- `make check-refs` no longer prints a fixed citation as the summary of what it found. It
+  named `toolCallLine` at a line that was not wrong whatever the run had found, so a reader
+  of a red gate was walked to a citation that was fine and the gate read as disagreeing
+  with itself. The list above is the report.
+
+- `make check-refs FIX=1` repairs a wrapped pair. The rewrite matched the name beside its
+  path and `sed` matches inside one line, so a citation broken across a break was reported
+  as moved and never was: the gate stayed red with the fix flag on and nothing explained
+  why. The path span is unique in a document and is now what the rewrite matches, which
+  repairs the wrapped shape as well as one written on a single line.
+
 - A turn whose request body was completely on the wire is not sent a second time when the
   flush of it stalls past the stall timeout. The timeout was reported as a failure to send,
   which the retry schedule answered by re-POSTing a request the provider may already have
@@ -110,6 +129,43 @@ release, and `microagent update` moves you to it.
 - MCP tool names are checked against the provider's 64-character limit including their
   server prefix and its allowed letters, digits, dashes and underscores; unusable names
   are reported and omitted from remote and preset schemas.
+
+- A clock set before 1970 no longer reads as a negative number of seconds where a
+  `Retry-After` date is subtracted from it. A container with no RTC, a host restored
+  from a snapshot and a machine with a flat RTC battery all boot into one, and the
+  negative reading made every wait longer than it is: a deadline that had already
+  passed was read as still in the future, so the run sat out the 120-second cap
+  waiting on a rate limit it was not under. Both ends of the range saturate rather
+  than trapping a checked build, which is what a clock set far enough ahead did to
+  the first request of a run.
+
+- An HTTP date outside the years a four-digit IMF-fixdate field can spell is refused
+  with `error.OutOfRange` rather than walked to or narrowed. Past 9999 the year was
+  reached one year at a time from 1970, so a value at the top of an `i64` was a walk
+  of billions of iterations; before 1970 the standard library's calendar counts days
+  from the epoch and has no day before it to name, so a release build wrapped into a
+  date at the far end of the calendar and a checked build trapped. A session record's
+  own stamp saturates at the same two ends, so a clock set far ahead writes the
+  largest stamp a monitor can still order rather than none at all.
+
+- A child process group that two tool calls claim at the same moment is no longer
+  lost. The writers are every `bash` command and every MCP server, on whichever
+  worker the io hands them, and the table's claim was a load followed by a store: two
+  of them could read the same free slot and the second store overwrote the first, so
+  one group sat outside the table and was exactly the child Ctrl+C left running.
+  Claiming a slot is a compare-and-swap now, and retiring one swaps against the pid
+  it is given, so a caller can never clear a slot another child has since taken.
+
+- The Harbor adapter forwards `MICROAGENT_MAX_SPEND_TOKENS` to the container. The
+  binary read the billed-token ceiling from the environment all along, the adapter
+  checked the variable and never passed it, so a benchmark operator setting it was
+  working from the source and the one ceiling here counted in what the provider bills
+  was the one that did not reach the run. A mistyped value is now refused at the
+  command line, beside the other ceilings, rather than after a container start.
+
+- `microagent update --help` names the spelling that reaches it, `microagent help
+  update`, the way the main `--help` already did. The two are the same text asked
+  two ways and only one of them said so.
 
 ## [0.10.1] - 2026-10-01
 
