@@ -16,6 +16,14 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+### Fixed
+
+- `docs/microagent.1` documents `HOME`, which the run reads for every default
+  path. The man page was the one reader of the list of variables this build
+  reads that no check held, so a name added to it could reach two documents out
+  of three; the suite that already holds the list to `--help` and the usage
+  reference now holds it to the page as well.
+
 ## [0.12.0] - 2026-10-01
 
 ### Changed

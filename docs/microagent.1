@@ -241,6 +241,22 @@ run only scrubs it: it is withheld from every tool subprocess a run starts.
 These three take an empty value as off: no config file, no session log, no
 skills.
 .TP
+.B HOME
+The root every default path is built under:
+.IR ~/.microagent/config.toml ,
+.IR ~/.microagent/sessions ,
+.IR ~/.microagent/skills .
+Trimmed like every other variable; a
+.B HOME
+that is unset or holds only whitespace is no home rather than a path off the
+root, so those three settings fall to the names a
+.B MICROAGENT_CONFIG
+,
+.B MICROAGENT_SESSION_DIR
+or
+.B MICROAGENT_SKILLS
+value gives, or to nothing at all.
+.TP
 .B MDEBUG
 Set to 1 to trace a stuck stream on stderr and print the configuration the run
 resolved: model, base url, ceilings, the config file read, the skill roots, and

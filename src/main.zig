@@ -7941,12 +7941,21 @@ fn fencedHelpBlock(doc: []const u8) ?[]const u8 {
 // value means. Both are prose about `empty_is_unset_vars` rather than a
 // rendering of it, since the help wraps its lines by hand; the test is what
 // holds the prose to the list.
-test "the help text and the usage reference name every variable the program reads" {
+test "the help text, the usage reference and the man page name every variable the program reads" {
     const gpa = std.testing.allocator;
     // The test runs with the build root as its working directory, which is
-    // where docs/usage.md is tracked.
+    // where docs/usage.md and docs/microagent.1 are tracked.
     const doc = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, usage_doc_path, gpa, .limited(max_usage_doc_bytes));
     defer gpa.free(doc);
+    // The man page is the third reader of this list and was the one nothing
+    // held: `make check-man` binds it to the flags `--help` lists, and this
+    // test bound it to no variable at all, so a name added to `env_vars` was
+    // documented in two places out of three and HOME sat absent from the
+    // page that is what `man microagent` prints. It is read here rather than
+    // from a Make target so the drift is a failing test in the suite that
+    // already owns the list.
+    const man = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, man_page_path, gpa, .limited(max_man_page_bytes));
+    defer gpa.free(man);
 
     for (env_vars) |name| {
         if (!namesWholeToken(help_text, name)) {
@@ -7955,6 +7964,10 @@ test "the help text and the usage reference name every variable the program read
         }
         if (!namesWholeToken(doc, name)) {
             std.debug.print("\n" ++ usage_doc_path ++ ": does not name {s}, so a user has to read the source to find it\n", .{name});
+            return error.TestUnexpectedResult;
+        }
+        if (!manPageNames(man, name)) {
+            std.debug.print("\n" ++ man_page_path ++ ": does not name {s}, which this build reads, so `man microagent` does not document it\n", .{name});
             return error.TestUnexpectedResult;
         }
     }
@@ -8068,6 +8081,44 @@ fn paragraphFrom(text: []const u8, anchor: []const u8) ?[]const u8 {
 const usage_doc_path = "docs/usage.md";
 /// The usage reference is prose; a bigger file is not the one tracked.
 const max_usage_doc_bytes: usize = 256 * 1024;
+
+const man_page_path = "docs/microagent.1";
+/// The man page is roff source; a bigger file is not the one tracked.
+const max_man_page_bytes: usize = 256 * 1024;
+
+/// Whether the man page spells `name` as a word of its own.
+///
+/// The page wraps a name in roff escapes, so the raw source reads
+/// `\fBMICROAGENT_MODEL\fR` and `\-` where the help text reads the name bare,
+/// and a plain search over it would pass for a name the page never documents.
+/// Dropping a backslash and keeping the byte after it turns both back into the
+/// spelling the reader sees; `s:SLASH:` is roff's own escape for a literal
+/// slash, so a value holding one is unescaped rather than skipped.
+fn manPageNames(man: []const u8, name: []const u8) bool {
+    const gpa = std.testing.allocator;
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(gpa);
+    var i: usize = 0;
+    while (i < man.len) {
+        if (man[i] == '\\' and i + 1 < man.len) {
+            if (man[i + 1] == '\\') {
+                text.append(gpa, '\\') catch return false;
+                i += 2;
+                continue;
+            }
+            if (std.mem.startsWith(u8, man[i..], "s:SLASH:")) {
+                text.append(gpa, '/') catch return false;
+                i += "s:SLASH:".len;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        text.append(gpa, man[i]) catch return false;
+        i += 1;
+    }
+    return namesWholeToken(text.items, name);
+}
 
 /// Whether `text` spells `name` as a word of its own, rather than as a part of
 /// a longer one: a plain substring search lets `MICROAGENT_MAX_TOKENS` be
