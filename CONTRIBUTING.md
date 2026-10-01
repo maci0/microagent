@@ -29,6 +29,11 @@ zig-version` runs that check alone. 0.16.0 is also the newest stable release;
 [docs/performance.md](docs/performance.md#the-toolchain) says why there is no
 compiler upgrade or build flag to take for speed.
 
+The build copies the Zig library into its cache and patches the POSIX spawn
+error path to close its pipes and reap the failed child. The installed toolchain
+is untouched. If a toolchain upgrade changes that implementation, the build
+stops for review; remove the workaround once upstream provides the cleanup.
+
 ```sh
 make                     # zig-out/bin/microagent, built ReleaseSmall: the smallest resident memory
 make OPT=ReleaseFast     # the build the CPU counters are read on

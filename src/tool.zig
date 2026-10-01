@@ -101,7 +101,6 @@ const ToolChild = struct {
         // POSIX argv is NUL-terminated; an interior NUL would execute a
         // different command from the model argument we checked.
         for (argv) |arg| if (std.mem.indexOfScalar(u8, arg, 0) != null) return error.InvalidArguments;
-        try requireInstalled(io, argv[0], environ_map);
         const child = try std.process.spawn(io, .{
             .argv = argv,
             .pgid = 0, // its own group leader, so the group signal stays ours
@@ -128,61 +127,6 @@ const ToolChild = struct {
         self.child.kill(io);
     }
 };
-
-/// The largest `PATH` entry a search will look under, which is the platform's
-/// own `PATH_MAX`. A longer entry cannot name a directory, so it is skipped
-/// rather than given a buffer of its own.
-const path_entry_max: usize = 4096;
-
-/// A delegated program this machine does not have, decided before the fork.
-///
-/// `std.process.spawn` reports a program that is not installed the only way it
-/// can: the forked child fails its own `execvpe` and writes the reason back
-/// over an error pipe. On that path the standard library returns the error and
-/// drops the `Spawned` value holding the child's two pipe read ends without
-/// closing them, and it returns before it ever waits, so the child that already
-/// exited stays in the process table. One missing binary therefore costs this
-/// process two descriptors and one process-table entry per tool call, for the
-/// rest of the run, and nothing in it is ever released. A stock macOS has git
-/// and neither ripgrep nor ast-grep, `missingProgram` is written for exactly
-/// that machine, and a model that keeps calling the tool it was told is missing
-/// reaches the default descriptor limit within a run.
-///
-/// Searching `PATH` first answers the same question with one `access` per
-/// entry and no fork, so the descriptors are never taken.
-///
-/// Only a bare name is resolved. An argv that names a path is left to the
-/// spawn, which is where its error is already reported, and so is a call that
-/// was handed no environment, because the search is then over a `PATH` this
-/// function has no way to read.
-fn requireInstalled(
-    io: Io,
-    name: []const u8,
-    environ_map: ?*const std.process.Environ.Map,
-) !void {
-    if (std.mem.indexOfScalar(u8, name, '/') != null) return;
-    const env = environ_map orelse return;
-    // The `PATH` the run hands its tools is the one it inherited: `scrubSecrets`
-    // removes credentials by name, and `PATH` is not a credential, so this is
-    // the same search the child performs for itself.
-    const path = env.get("PATH") orelse return;
-    try findOnPath(io, path, name);
-}
-
-/// Reports `error.FileNotFound` unless `name` is executable under one of the
-/// `PATH` entries, which is the search the forked child runs and the one whose
-/// failure costs it its pipes.
-fn findOnPath(io: Io, entries: []const u8, name: []const u8) !void {
-    var dirs = std.mem.splitScalar(u8, entries, ':');
-    while (dirs.next()) |dir| {
-        if (dir.len == 0) continue;
-        var buf: [path_entry_max]u8 = undefined;
-        const full = std.fmt.bufPrint(&buf, "{s}/{s}", .{ dir, name }) catch continue;
-        std.Io.Dir.cwd().access(io, full, .{ .execute = true }) catch continue;
-        return;
-    }
-    return error.FileNotFound;
-}
 
 /// How many calls the missing-program test makes, which is what turns a leak of
 /// two descriptors into a number the test can see rather than a number the
@@ -240,9 +184,67 @@ test "a delegated program that is not installed costs no descriptor and no proce
     for (0..missing_program_calls) |_| {
         try std.testing.expectError(error.FileNotFound, ToolChild.spawn(io, &argv, &env));
     }
-    // The spawn never happened, so nothing was taken: the count the loop would
-    // have grown by two each is the count the test pins.
+    // Failed spawns release their pipes as well as successful ones.
     try std.testing.expectEqual(before, try openDescriptors(io, arena));
+}
+
+test "failed tool and MCP spawns close pipes and reap children" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    const io = std.testing.io;
+    // Warm the cached /dev/null descriptor before measuring failed calls.
+    _ = try runCapped(io, arena, &.{ "/bin/sh", "-c", "exit 0" }, 1024, net.durationMs(5000), null, null);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+    try tmp.dir.writeFile(io, .{ .sub_path = "bad-interpreter", .data = "#!/microagent-no-such-interpreter\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "bad-format", .data = try std.fmt.allocPrint(arena, "printf unsafe > '{s}/marker'\n", .{base}) });
+    for ([_][]const u8{ "bad-interpreter", "bad-format" }) |name| {
+        const file = try tmp.dir.openFile(io, name, .{});
+        defer file.close(io);
+        try file.setPermissions(io, std.Io.File.Permissions.fromMode(0o755));
+    }
+    const before = if (builtin.os.tag == .linux) try openDescriptors(io, arena) else 0;
+    for ([_][]const u8{ "absent", "bad-interpreter", "bad-format" }) |name| {
+        const path = try std.fs.path.join(arena, &.{ base, name });
+        const expected: std.process.SpawnError = if (std.mem.eql(u8, name, "bad-format")) error.InvalidExe else error.FileNotFound;
+        for ([_]std.process.SpawnOptions.StdIo{ .ignore, .pipe }) |stdin| {
+            for (0..missing_program_calls) |_| {
+                try std.testing.expectError(expected, std.process.spawn(io, .{
+                    .argv = &.{path},
+                    .pgid = 0,
+                    .stdin = stdin,
+                    .stdout = .pipe,
+                    .stderr = .pipe,
+                }));
+            }
+        }
+        try std.testing.expectError(expected, ToolChild.spawn(io, &.{path}, null));
+    }
+    if (builtin.os.tag == .linux) {
+        // exec rejects an oversized single argument or environment value after
+        // fork, even when the executable itself exists.
+        const huge = try arena.alloc(u8, 4 * 1024 * 1024);
+        @memset(huge, 'x');
+        var env: std.process.Environ.Map = .init(arena);
+        try env.put("MICROAGENT_TEST_HUGE", huge);
+        for (0..missing_program_calls) |_| {
+            try std.testing.expectError(error.SystemResources, ToolChild.spawn(io, &.{ "/bin/sh", "-c", huge }, null));
+            try std.testing.expectError(error.SystemResources, std.process.spawn(io, .{
+                .argv = &.{"/bin/sh"},
+                .environ_map = &env,
+                .stdin = .pipe,
+                .stdout = .pipe,
+                .stderr = .pipe,
+            }));
+        }
+        try std.testing.expectEqual(before, try openDescriptors(io, arena));
+        var status: u32 = undefined;
+        try std.testing.expectEqual(std.os.linux.E.CHILD, std.os.linux.errno(std.os.linux.waitpid(-1, &status, std.os.linux.W.NOHANG)));
+    }
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "marker", .{}));
 }
 
 /// How many descriptors this process holds, counted by walking `/proc/self/fd`.

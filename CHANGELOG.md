@@ -35,6 +35,9 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- Failed POSIX subprocess launches close their pipes and reap their children,
+  including MCP startup failures, invalid executables and oversized arguments
+  or environments. The build patches its cached Zig library for this cleanup.
 - Arguments of rejected tool calls still spend the response byte allowance, so
   excessive indices cannot bypass the ceiling. Rejection diagnostics count
   streamed fragments without treating interleaved fragments as separate calls.
