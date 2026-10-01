@@ -35,6 +35,8 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- Benchmark deadlines kill surviving process-group descendants before
+  returning, including children that ignore termination after their parent exits.
 - MCP initialization checks the server's selected protocol revision and uses
   it in later HTTP headers, rejecting unsupported or malformed selections.
 - Completion requests append to the base URL's path while preserving its

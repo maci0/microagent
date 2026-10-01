@@ -9,7 +9,7 @@ section names the script, test or tool its numbers came from; none was produced 
 and task numbers come from `bench/overhead.sh` and `bench/run.sh` as committed. Those scripts also run
 on macOS: elapsed time there is monotonic too, read from `perl`'s `Time::HiRes` instead of
 `/proc/uptime`, a host with neither reports no-clock instead of a wall-clock figure, and the run
-ceiling is a watchdog where `timeout` is not installed.
+ceiling and process-group cleanup use the same Python standard-library runner on both platforms.
 
 ## Contents
 
