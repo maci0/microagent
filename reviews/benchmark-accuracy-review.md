@@ -117,9 +117,11 @@ reduced to a fragment with nothing measured left to check.
 10. **An instruction count `docs/performance.md` publishes that the committed
     baseline does not back.** `docs/performance.md` claims its per-frame, compaction,
     body and ranged-read rows are the rows `bench/instructions.baseline` gates. Read
-    the table against that file: the baseline carries a `path` and an
-    `instructions_per_unit` for each row, and `bench/instructions.sh` compares a
-    fresh measurement against it inside a 10% band. A figure the baseline does not
+    the table against that file: the baseline carries a `path` and a tab-separated
+    figure for each row (its header labels that column `instructions_per_unit`;
+    the figure itself is the net instruction count per unit the script measures,
+    and `bench/instructions.sh` compares a fresh measurement against column 2
+    inside a `TOLERANCE` band, default 10). A figure the baseline does not
     carry, or one that sits outside the band around the figure it does, is a finding
     even when the document is the newer of the two. Read which is which before
     editing: the baseline's header names the machine and toolchain it was recorded

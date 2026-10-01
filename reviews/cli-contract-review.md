@@ -97,8 +97,9 @@ a fragment with no invocation surface to hold a contract.
    the order of the five token counters, and it is one string in the two writers that
    print them: `logUsage` in `src/main.zig`, which writes the per-response usage line,
    and `sessionRecord` in `src/session.zig`, which writes it inside a record whose own
-   keys are `ts`, `cwd`, `model`, `finish_reason`, `served_model`, `fingerprint` and
-   `elapsed_ms`, beside the nested `usage` object. Compare both writers
+   keys are `ts`, `cwd`, `model`, `finish_reason`, `served_model`, `fingerprint`,
+   `elapsed_ms` and `usage`, plus the conditional `error` a record for a failed turn
+   carries and a record for a returned one omits. Compare both writers
    against docs/usage.md and the CHANGELOG claims about the log. A key renamed in a writer but
    not in the prose, or a counter emitted in a different order than promised, is a
    defect: a consumer parses this.
