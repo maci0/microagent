@@ -1,6 +1,12 @@
 //! The conversation a run sends: the system prompt it opens with, the message array it
 //! appends to (an open JSON array, closed only when the request body is built), and the
 //! compaction that keeps that array bounded.
+//!
+//! It sits over `skill` because the system prompt names the skills this run
+//! found, by name and by the one line each carries, and because a run with
+//! every built-in tool off still offers the one that loads a body. It sits
+//! over `net` and `chat` for the escaping and the value types every part of
+//! the body is written from.
 
 const std = @import("std");
 const Io = std.Io;

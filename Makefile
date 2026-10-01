@@ -17,7 +17,7 @@ export TZ := UTC
 
 .PHONY: test-cli
 
-.PHONY: default help preflight version build musl test watch test-sanitize fmt fmt-check fmt-python lint lint-versions lint-lock lint-ci check-sbom check-refs zig-version required-zig-version release-targets check-assets check-asset-run check-binary check-changelog check-changelog-links check-changelog-sections check-unreleased check-changelog-history check-readme check-help check-man check-release check-reproducible lint-shell lint-python lint-yaml lint-md check bench gauntlet instructions overhead install release-assets checksums check-checksums sbom sha256-of clean
+.PHONY: default help preflight version build musl test watch test-sanitize fmt fmt-check fmt-python lint lint-versions lint-versions-selftest lint-lock lint-ci check-sbom check-refs zig-version required-zig-version release-targets check-assets check-asset-run check-binary check-changelog check-changelog-links check-changelog-sections check-unreleased check-changelog-history check-readme check-help check-man check-release check-reproducible lint-shell lint-python lint-yaml lint-md check bench gauntlet instructions overhead install release-assets checksums check-checksums sbom sha256-of clean
 
 # The Harbor adapter's directory, the one place that path is written down.
 # lint-lock.sh and lint-versions.sh both take it as an argument rather than
@@ -173,6 +173,7 @@ help:
 	  'check-refs            every src/path:line citation in a .md file names the line its symbol is on, and a bare one names a line with code on it' \
 	  'check-refs FIX=1      rewrite each stale citation to the line its symbol is on' \
 	  'lint-versions         check ruff and yamllint against the versions the gate runs, and that lint-requirements.in names the same' \
+	  'lint-versions-selftest check lint-versions refuses each drift it exists to catch, restoring the tree' \
 	  'lint-lock             check each lock carries its manifest pins, a hash each, and nothing else' \
 	  'check-sbom            run the release inventory over stand-in assets and check what a scanner reads' \
 	  'zig-version           check the local zig against the version the release is built with' \
@@ -411,11 +412,25 @@ lint: lint-versions lint-lock check-sbom lint-shell lint-ci lint-python lint-yam
 # decides whether the linters are the versions the gate means. The versions and
 # the Harbor directory stay here, so this file is still the one place each is
 # written down; the scripts take them as arguments. lint-versions.sh is handed
-# the manifest as well as the two versions, because it reads the interpreter the
-# manifest resolves its lock for, and that path is written down in the one place
-# named above rather than a second time inside the script.
+# the Harbor manifest as well as the two versions, because that directory is
+# written down here and not a second time inside the script; the linter
+# manifest is read by bare name there, like it is below, because it lives at the
+# root rather than in a directory. Both are checked against the interpreter
+# ruff.toml targets, so a floor raised in one and not the other is a red gate
+# rather than two locks resolving for different interpreters.
 lint-versions:
 	@RUFF_VERSION='$(RUFF_VERSION)' YAMLLINT_VERSION='$(YAMLLINT_VERSION)' sh scripts/lint-versions.sh $(HARBOR_DIR)/requirements.txt
+
+# That lint-versions.sh refuses what it is there to refuse, asked by perturbing
+# each file it reads and requiring the gate to go red on it. It is not part of
+# lint, because it writes to files lint-versions.sh reads and puts them back,
+# and a gate that leaves the tree different from how it found it is one nobody
+# trusts. Run it when lint-versions.sh itself changes, which is the only time a
+# refusal it was carrying can quietly stop being one: the change that dropped
+# the interpreter-floor check left every other check passing, so the gate said
+# the same thing about a tree it should have refused.
+lint-versions-selftest:
+	@RUFF_VERSION='$(RUFF_VERSION)' YAMLLINT_VERSION='$(YAMLLINT_VERSION)' sh scripts/lint-versions-selftest.sh $(HARBOR_DIR)/requirements.txt
 
 # Each dependency set's lock is compared against the manifest it was compiled
 # from; what the three checks are is scripts/lint-lock.sh's to say. Both are

@@ -28,7 +28,8 @@ microagent -p "fix the failing test and run it"
 The prompt may also be the last bare argument, so `microagent "fix the failing test"` is the same run.
 
 `microagent --repl` reads one prompt per line, keeping conversation history. An optional argument
-runs as the first prompt. Blank lines are skipped; `/quit` or EOF exits. Each input line, including
+runs as the first prompt. Blank lines are skipped; `/quit`, `/exit` or EOF exits, and `/help`
+repeats the session's commands. Each input line, including
 its newline, must fit in 64 KiB. Turn, time and token spending ceilings reset for each prompt;
 stdout usage counters stay cumulative, and all responses share one session log. A failed or
 incomplete prompt ends the REPL with the usual exit status.
@@ -45,8 +46,9 @@ usage: microagent [options] "<prompt>"
        microagent update [-c | --check]
        microagent help [update]
 
-      --repl             read one prompt per line; /quit or EOF exits
-                         history is kept; ceilings reset per prompt
+      --repl             read one prompt per line; /quit or /exit or EOF
+                         exits, /help lists the session's commands.
+                         History is kept; ceilings reset per prompt
   -p, --print <prompt>   task to run (also accepted as a bare argument)
   -m, --model <model>    model id (env MICROAGENT_MODEL, config key
                          model, default deepseek/deepseek-v4-flash)

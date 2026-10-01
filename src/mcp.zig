@@ -172,6 +172,11 @@ pub const Server = struct {
         /// frames between one read and the next, and dropping the second would
         /// desynchronize every request after it.
         pending: std.ArrayList(u8) = .empty,
+        /// Set once `reap` has stopped the child and handed back the buffer
+        /// above. A server is reaped by whichever comes first, the request that
+        /// found it gone or the run's shutdown, and both can name the same
+        /// server.
+        reaped: bool = false,
     };
 
     /// A streamable-HTTP endpoint: one POST per frame, the answer in the
@@ -196,17 +201,38 @@ pub const Server = struct {
         negotiated_version: ?[]const u8 = null,
     };
 
+    /// Stops the child this server leads and hands back what it held, once.
+    ///
+    /// Idempotent, and it has to be. `shutdown` reaps every server the run
+    /// connected, and a server that stopped answering is reaped the moment it
+    /// stopped: a long run holds a dead server's process group, its slot in the
+    /// interrupt table and a pipe nobody reads for every remaining turn, and
+    /// the child itself keeps running until the run ends. A second reap would
+    /// free `pending` twice, which a debug build traps on, and signal a pid the
+    /// operating system has already handed to something else. So the flag is
+    /// set first and the rest of the function reads what is left to do.
     fn reap(self: *Server, io: Io) void {
         const stdio = switch (self.transport) {
             .stdio => |*s| s,
             .http => return,
         };
+        if (stdio.reaped) return;
+        stdio.reaped = true;
         tool_mod.retireChildGroup(stdio.pgid);
         std.posix.kill(-stdio.pgid, .KILL) catch {};
         stdio.child.kill(io);
         // The buffer is this allocator's, not the arena's, so it is handed
         // back here rather than with the run.
         stdio.pending.deinit(pending_allocator);
+    }
+
+    /// A server that is not answering any more stops holding its child
+    /// process, its process-group slot and its read buffer. Called where a
+    /// server is marked `dead`, so a run of many turns is not what pays for
+    /// the process a dead server left behind.
+    fn retireIfDead(self: *Server, io: Io) void {
+        if (!self.dead) return;
+        self.reap(io);
     }
 
     /// One JSON-RPC frame without its terminator: a request when `id` is set,
@@ -331,6 +357,11 @@ pub const Server = struct {
             const line = readLine(&self.transport.stdio, io, scratch, deadline) catch |err| {
                 self.last_error = @errorName(err);
                 self.dead = true;
+                // A server that stopped answering is not asked again, and its
+                // child process is not left running for the turns that are.
+                // Only the stdio transport holds one: a remote server has no
+                // child to stop, and the flag it set is all that it has.
+                self.retireIfDead(io);
                 return err;
             };
             // Notifications and unrelated replies consume the same response
@@ -431,8 +462,12 @@ pub const Server = struct {
                 else => self.last_error = @errorName(err),
             }
             // A server that did not answer in time is not asked again, as a
-            // stdio one that went quiet is not.
-            if (err == error.Timeout) self.dead = true;
+            // stdio one that went quiet is not. Neither keeps its process
+            // group for the rest of the run once it is known to be gone.
+            if (err == error.Timeout) {
+                self.dead = true;
+                self.retireIfDead(io);
+            }
             return err;
         };
     }
@@ -520,9 +555,15 @@ pub const Server = struct {
         var no_redirect: [0]u8 = .{};
         var response = try req.receiveHead(&no_redirect);
 
+        var error_transfer: [http_transfer_bytes]u8 = undefined;
         const status = response.head.status;
-        if ((id != null and status != .ok) or (id == null and status.class() != .success)) {
-            self.last_error = try std.fmt.allocPrint(self.run_arena, "HTTP {d}", .{@intFromEnum(status)});
+        // Only the refusing classes are refusals. A `202` to a request is the
+        // transport saying it has accepted the request and will answer it out
+        // of band, and the answer is the frame in the body like any other, so
+        // treating it as a fault refuses a call the server did answer. A `1xx`
+        // is answered by the client itself and never reaches here.
+        if (status.class() != .success) {
+            try self.noteRefusal(scratch, response.reader(&error_transfer), status);
             connection.closing = true;
             return error.HttpStatus;
         }
@@ -596,11 +637,7 @@ pub const Server = struct {
                     return result;
                 }
             }
-            if (start > 0) {
-                std.mem.copyForwards(u8, pending.items[0..], pending.items[start..]);
-                pending.items.len -= start;
-                scanned -|= start;
-            }
+            net.dropPending(&pending, &scanned, start);
         }
         if (!is_sse) {
             const value = self.parseFrame(scratch, pending.items) catch |err| {
@@ -646,6 +683,44 @@ pub const Server = struct {
             seen.* = false;
         }
         return self.answerFor(scratch, event.items, id);
+    }
+
+    /// Why a refusing status happened, written to `last_error` the way a
+    /// `200` carrying an error frame is: the server's own JSON-RPC `error`
+    /// says why, and a bare "HTTP 400" throws that away and leaves the model
+    /// with nothing it can act on but a number. A server that answers a refusal
+    /// with an HTML error page, or with no body at all, has said no such thing,
+    /// so the status stands alone for it. The status is kept on the end either
+    /// way, because it is the part this client knows and the server's own code
+    /// is the part it cannot check.
+    ///
+    /// The body is read once and held to the frame ceiling a whole answer is
+    /// held to, and the connection is closed by the caller either way, so an
+    /// error page larger than any answer this client would have read is
+    /// refused rather than walked. A body that will not parse is not the
+    /// server's reason either way, so it falls back with everything else.
+    fn noteRefusal(self: *Server, scratch: std.mem.Allocator, reader: *Io.Reader, status: std.http.Status) !void {
+        const prefix = try std.fmt.allocPrint(self.run_arena, "HTTP {d}", .{@intFromEnum(status)});
+        const body = reader.allocRemaining(scratch, .limited(max_frame_bytes)) catch {
+            self.last_error = prefix;
+            return;
+        };
+        const value = std.json.parseFromSliceLeaky(std.json.Value, scratch, body, .{}) catch {
+            self.last_error = prefix;
+            return;
+        };
+        const object = switch (value) {
+            .object => |o| o,
+            else => {
+                self.last_error = prefix;
+                return;
+            },
+        };
+        const err_value = object.get("error") orelse {
+            self.last_error = prefix;
+            return;
+        };
+        self.last_error = try std.fmt.allocPrint(self.run_arena, "{s} ({s})", .{ try describeError(self.run_arena, err_value), prefix });
     }
 };
 
@@ -871,9 +946,9 @@ fn resultText(arena: std.mem.Allocator, server_name: []const u8, result: std.jso
     // it is built rather than after it: a server that answers with a megabyte
     // was otherwise copied into the turn whole and clamped a moment later, so
     // the copy, the clamp and the bytes in between were all work over text
-    // nobody keeps. The note below is the caller's own wording, written here
-    // because this is the side that knows the size the whole text would have.
-    const note_room = truncation_note_room;
+    // nobody keeps. The note the cut below carries is `tool`'s own wording,
+    // because that is the one a parser reads; this side is where the size the
+    // whole text would have had is known.
     var total: usize = buf.items.len;
     var started = false;
     for (items) |item| {
@@ -900,8 +975,8 @@ fn resultText(arena: std.mem.Allocator, server_name: []const u8, result: std.jso
     }
     if (total == 0) return "(the MCP server returned no text)";
     if (total > cap) {
-        const kept = chat.clamp(buf.items, cap - note_room);
-        return truncationNote(arena, kept, cap, total);
+        const kept = chat.clamp(buf.items, cap - tool_mod.truncation_note_room);
+        return tool_mod.truncationNote(arena, kept, cap, total);
     }
     return buf.items;
 }
@@ -928,23 +1003,8 @@ fn cappedJson(arena: std.mem.Allocator, value: std.json.Value, cap: usize) ![]co
     };
     const text = writer.buffered();
     if (total <= cap) return text;
-    const kept = chat.clamp(text, cap - truncation_note_room);
-    return truncationNote(arena, kept, cap, total);
-}
-
-/// The room a truncation note is written into, held back from the cap before
-/// the cut rather than measured after it, so the note survives the caller's own
-/// clamp with the cap and the true size it names. Two paths cut a server's
-/// answer, so this is the one number both of them holds back.
-const truncation_note_room: usize = 128;
-
-/// The note both cut paths append, spelled once because a parser reads it: a
-/// tool result that was cut says how much of it is here, and a test parses
-/// that sentence to learn the sizes rather than the bytes.
-fn truncationNote(arena: std.mem.Allocator, kept: []const u8, cap: usize, total: usize) ![]const u8 {
-    const fmt = "{s}\n... [tool output truncated at {d} of {d} bytes]";
-    const args = .{ kept, cap, total };
-    return std.fmt.bufPrint(try arena.alloc(u8, std.fmt.count(fmt, args)), fmt, args);
+    const kept = chat.clamp(text, cap - tool_mod.truncation_note_room);
+    return tool_mod.truncationNote(arena, kept, cap, total);
 }
 
 /// A JSON-RPC error value as a line: its message, with the code when there is
@@ -3231,6 +3291,13 @@ const FakeMcp = struct {
         catalog_exact,
         invalid_cursor,
         failed_page,
+        /// A `202 Accepted` to the call, which the streamable-HTTP transport
+        /// allows for a request it answers out of band. The body is the frame,
+        /// so this is also the case a client that insists on `200` refuses.
+        call_accepted,
+        /// A `400` to the call carrying a JSON-RPC error object, which is how a
+        /// server reports a bad request while the status is also a refusal.
+        call_error_status,
     };
 
     const init_frame = "{\"result\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"fake\",\"version\":\"1\"}},\"jsonrpc\":\"2.0\",\"id\":1}";
@@ -3381,6 +3448,8 @@ const FakeMcp = struct {
             .call_error => try self.reply(out, "200 OK", "Content-Type: application/json\r\n", "{\"jsonrpc\":\"2.0\",\"id\":3,\"error\":{\"code\":-32602,\"message\":\"bad args\"}}"),
             .paged, .catalog_exact => try self.reply(out, "200 OK", "Content-Type: application/json\r\n", "{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"pong\"}]}}"),
             .repeated_cursor, .catalog_oversize, .invalid_cursor, .failed_page => unreachable,
+            .call_accepted => try self.reply(out, "202 Accepted", "Content-Type: application/json\r\n", call_frame),
+            .call_error_status => try self.reply(out, "400 Bad Request", "Content-Type: application/json\r\n", "{\"jsonrpc\":\"2.0\",\"id\":3,\"error\":{\"code\":-32602,\"message\":\"bad args\"}}"),
             .unauthorized => unreachable,
         }
         return true;
@@ -3728,6 +3797,45 @@ test "a remote server that refuses the handshake is skipped, and one that fails 
     try std.testing.expectEqualStrings("error: MCP server err refused mcp__err__echo: bad args (code -32602)", try Servers.call(io, arena, errored, "{}", net.durationMs(10_000)));
 }
 
+// Two statuses the request path used to refuse, both of which the transport
+// allows and neither of which says the request was wrong.
+//
+// A request answered `202` is not an error: the streamable-HTTP transport lets
+// a server accept a request and answer it out of band, and the frame in the
+// body is the answer. Only the 4xx and 5xx classes are refusals, so this
+// succeeds the way the `200` path does.
+//
+// A refusal whose body is a JSON-RPC error carries the server's own reason, and
+// that reason is what the model needs to act on. Reading the body is the same
+// parse a `200` carrying an error frame already goes through, so the two agree
+// on the sentence, and a body that is not JSON still says the status.
+test "a request answered 202 succeeds, and a refusal carries the server's reason" {
+    const gpa = std.testing.allocator;
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const arena = state.allocator();
+    const io = std.testing.io;
+    var client: std.http.Client = .{ .allocator = gpa, .io = io };
+    defer client.deinit();
+
+    const accepted = try FakeMcp.start(gpa, io, .call_accepted);
+    defer accepted.finish();
+    var ok_servers = try connectFake(io, arena, &client, accepted, .{ .name = "ok" });
+    defer ok_servers.shutdown(io);
+    const ok_call = ok_servers.resolve("mcp__ok__echo") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("pong", try Servers.call(io, arena, ok_call, "{}", net.durationMs(10_000)));
+
+    const bad = try FakeMcp.start(gpa, io, .call_error_status);
+    defer bad.finish();
+    var bad_servers = try connectFake(io, arena, &client, bad, .{ .name = "bad" });
+    defer bad_servers.shutdown(io);
+    const bad_call = bad_servers.resolve("mcp__bad__echo") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(
+        "error: MCP server bad refused mcp__bad__echo: bad args (code -32602) (HTTP 400)",
+        try Servers.call(io, arena, bad_call, "{}", net.durationMs(10_000)),
+    );
+}
+
 test "remote servers connect together, keep the config order, and one that fails is skipped" {
     const gpa = std.testing.allocator;
     var state = std.heap.ArenaAllocator.init(gpa);
@@ -3845,4 +3953,68 @@ fn fuzzBody(_: void, smith: *std.testing.Smith) !void {
         const answer = server.readAnswer(arena, &reader, is_sse, 1, &stopped_early) catch continue;
         if (answer == .object) _ = try resultText(arena, "fuzz", answer);
     }
+}
+
+// A stdio server that exits leaves a child process, a process-group slot in
+// the interrupt table and a read buffer behind it. Marking it dead stops the
+// next call from asking again, but the run can be long: a REPL, or a review
+// that spends three hundred turns. So the child is stopped where the server is
+// found gone, rather than at the end of a run that may be far off, and the
+// run's own shutdown is then a second reap of a server that is already stopped.
+// Both halves are here, because either one alone passes: without the release
+// the group is still published after the call, and without the second reap the
+// shutdown would free a buffer this call already freed.
+test "a stdio server that stopped answering gives its child back, and shutting down again is safe" {
+    const gpa = std.testing.allocator;
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const arena = state.allocator();
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // A server that answers the handshake and exits before the first call, so
+    // what the call finds is a pipe whose other end is gone rather than a
+    // server that is merely slow.
+    try tmp.dir.writeFile(io, .{ .sub_path = "quitter.sh", .data =
+        \\while IFS= read -r line; do
+        \\  case "$line" in
+        \\    *'"method":"initialize"'*)
+        \\      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"quitter","version":"1"}}}' ;;
+        \\    *'"method":"tools/list"'*)
+        \\      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"Echo text back","inputSchema":{"type":"object"}}]}}' ;;
+        \\  esac
+        \\done
+        \\exit 0
+    });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+    const script = try std.fs.path.join(arena, &.{ base, "quitter.sh" });
+
+    var env: std.process.Environ.Map = .init(arena);
+    const entries = [_]Entry{.{ .name = "quitter", .command = "/bin/sh", .args = &.{script} }};
+    var client: std.http.Client = .{ .allocator = gpa, .io = io };
+    defer client.deinit();
+    var servers = connect(io, arena, &env, &client, &entries, "test");
+    defer servers.shutdown(io);
+
+    try std.testing.expectEqual(@as(usize, 1), servers.items.len);
+    // The connected server holds one published process group: the one the
+    // interrupt handler has to be able to reach.
+    try std.testing.expectEqual(@as(usize, 1), tool_mod.liveChildGroups());
+
+    const resolved = servers.resolve("mcp__quitter__echo").?;
+    // The server is gone by the time the call asks, so the call says so and the
+    // answer is a sentence rather than a hang.
+    const said = try Servers.call(io, arena, resolved, "{\"text\":\"hi\"}", net.durationMs(10_000));
+    try std.testing.expect(std.mem.indexOf(u8, said, "did not answer") != null);
+    try std.testing.expect(servers.items[0].dead);
+
+    // The group is handed back by the call that found the server gone, not by
+    // the shutdown above: this is the whole point, and it is read before any
+    // later call could have released it.
+    try std.testing.expectEqual(@as(usize, 0), tool_mod.liveChildGroups());
+    // And the server is not asked again.
+    const again = try Servers.call(io, arena, resolved, "{\"text\":\"hi\"}", net.durationMs(10_000));
+    try std.testing.expect(std.mem.indexOf(u8, again, "no longer running") != null);
 }

@@ -118,8 +118,11 @@ provider, or if the tree has been reduced to a fragment with nothing to gate or 
    A group key missing a component, or `cancel-in-progress: true` on the release
    workflow, is a finding.
 
-10. **A cache whose key cannot separate what shares it.** Both composite caches are
-    keyed on `runner.os` and `runner.arch`; `macos-15-intel` and `macos-14` are the two
+10. **A cache whose key cannot separate what shares it.** The two `actions/cache`
+    steps in `setup-zig` are keyed on `runner.os` and `runner.arch`; the linter
+    action caches through `setup-uv`'s own cache, which this file cannot key, so
+    what it can be judged on is the `cache-dependency-glob` it declares.
+    `macos-15-intel` and `macos-14` are the two
     x86_64 and arm64 images that answer `runner.os` as `macOS` alike, so a key without
     the arch has two jobs racing to save one entry. A cache path that is this tree's own
     build products must hash the sources and the toolchain; a `restore-keys` prefix that

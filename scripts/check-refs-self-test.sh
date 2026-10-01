@@ -79,4 +79,32 @@ out="$(run "$tmp/good.md")"
 printf '%s' "$out" | grep -q "$tmp/good.md: cites" &&
   fail "a correct pair was reported as a finding: $out"
 
-echo "check-refs-self-test: 5 cases passed"
+# 6. the failure report names the finding it is reporting. It used to print one
+#    fixed citation whatever the run found, so a reader of a red gate was walked
+#    to a line that was not wrong and the gate read as disagreeing with itself.
+cat > "$tmp/drift.md" <<EOF
+The control lives in \`safeText\`, \`src/chat.zig:1\`, which is not its line.
+EOF
+out="$(run "$tmp/drift.md")"
+printf '%s' "$out" | grep -q "cites safeText at src/chat.zig:1" ||
+  fail "the report did not name the finding it reported, so the line to fix has to be found again by hand: $out"
+printf '%s' "$out" | grep -q 'toolCallLine' &&
+  fail "the report named a citation that was not a finding: $out"
+
+# 7. a pair the Markdown wraps across a line break is still a pair. The pattern
+#    asked for the name and the path adjacent, so a citation broken between them
+#    was never read, never checked and never repaired: ten of the threat model's
+#    were in that shape and every one had drifted onto unrelated code.
+cat > "$tmp/wrapped.md" <<EOF
+The control lives in \`safeText\`,
+\`src/chat.zig:1\`, and nowhere else.
+EOF
+out="$(run "$tmp/wrapped.md")"
+printf '%s' "$out" | grep -q 'cites safeText at src/chat.zig:1' ||
+  fail "a pair wrapped across a line break was not read, so a drifted one passed: $out"
+sh "$gate" -f "$tmp/wrapped.md" >/dev/null
+moved="$(cat "$tmp/wrapped.md")"
+grep -q "\`src/chat.zig:$alpha_at\`" "$tmp/wrapped.md" ||
+  fail "the repair did not move a wrapped pair onto its definition: $moved"
+
+echo "check-refs-self-test: 7 cases passed"

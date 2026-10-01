@@ -1,6 +1,14 @@
 //! The one config file: the provider settings, the system prompt addendum,
 //! skills, MCP servers, and the tool set.
 //!
+//! It sits over `mcp` and over nothing else but `chat`, because the one thing
+//! it reads out of that module is the shape a server entry has to have before
+//! this reader will accept one: the preset names a tool table may switch on, the
+//! limits a name, a url, a header name and a timeout are held to, and the
+//! defaults a table naming none inherits. This file is the parser; where a
+//! server comes from is the caller's question, and this document is the only
+//! place one is named.
+//!
 //! Each is a section of the same document, because a second file for the
 //! servers would be a second answer to "where is this run configured":
 //!

@@ -7,17 +7,31 @@
 //!
 //! This file is the loop and the wiring around it: the command line, the config
 //! it resolves, the provider request and the frames that come back. The parts it
-//! leans on are named modules, imported in one direction: `chat` (the value types
-//! a turn is made of and its JSON writer) is the leaf, `net` (sinks, deadlines,
-//! the CA bundle, which urls may carry a credential) sits on it, `tool` and
-//! `session` sit on
-//! `net` (every tool call is reached by model-supplied text, and the per-run log
-//! is written from a finished response), `mcp` (the MCP servers, over a child's
-//! pipes or over HTTP) sits on `tool` and `net`, `config` (the one config file:
-//! the prompt addendum, skills, MCP servers, the tool set) on `mcp`, `stream`
-//! (folding one provider frame into the response) and `conversation` (the system
-//! prompt, the message array and its compaction) sit on `chat` and `net`, and
-//! `update` (the one subcommand, `microagent update`) sits on `net` and `chat`.
+//! leans on are named modules, imported in one direction, so the import graph is
+//! the layer map and no edge runs upward:
+//!
+//! ```text
+//! chat                      the value types a turn is made of, its JSON writer
+//! net       <- chat         sinks, deadlines, the CA bundle, which urls may carry a credential
+//! sandbox   <- net, chat    which directories a run may write under, and the kernel rules
+//! session   <- net, chat    the per-run JSONL log: naming, pruning, appending
+//! tool      <- net, chat, sandbox   every tool and the process runner they share
+//! skill     <- net, chat    named instruction documents and the tool that loads one
+//! mcp       <- tool, net, chat      the MCP servers, over a child's pipes or over HTTP
+//! config    <- mcp, chat    the one config file: the prompt addendum, skills, MCP servers, the tool set
+//! stream    <- chat         folding one provider frame into the response
+//! conversation <- skill, net, chat  the system prompt, the message array and its compaction
+//! update    <- net, chat    the one subcommand, `microagent update`
+//! main      <- all of the above
+//! ```
+//!
+//! The three arrows that are not obvious from a file name: `sandbox` sits over
+//! `session` because the session directory is a writable root the store creates
+//! on a different schedule than the sandbox resolves them, and the mode that
+//! directory is created with belongs to the store rather than to the sandbox;
+//! `mcp` sits over `tool` because an MCP server's answer is a tool result under
+//! the same cap and the same note; and `conversation` sits over `skill` because
+//! the system prompt names the skills this run found.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -644,12 +658,33 @@ fn runMain(init: std.process.Init) !u8 {
 
 const max_repl_prompt_bytes = 64 * 1024;
 
+/// The one screen of REPL controls a user is given before the first prompt, and
+/// the same text `/help` repeats later.
+///
+/// `/quit` was the only command the session had and it was named nowhere a
+/// user could reach from inside the session: `--help` is a screen away, and a
+/// mistyped `/exit` or `/help` was sent to the provider as a task, so it cost a
+/// billed turn and, for `/help`, ran `bash` in the operator's repository before
+/// answering. Naming the commands at the prompt is the whole fix; the aliases
+/// are there so the two words a user actually types both stop the session.
+const repl_help =
+    "one prompt per line; /help lists these, /quit or /exit or EOF ends the session\n";
+
 fn replPrompt(io: Io, reader: *std.Io.Reader) !?[]const u8 {
+    var said = false;
     while (true) {
+        if (!said) {
+            said = true;
+            net.writeErr(io, repl_help);
+        }
         net.writeErr(io, "> ");
         const line = (try reader.takeDelimiter('\n')) orelse return null;
         const prompt = std.mem.trim(u8, line, " \t\r");
-        if (std.mem.eql(u8, prompt, "/quit")) return null;
+        if (std.mem.eql(u8, prompt, "/quit") or std.mem.eql(u8, prompt, "/exit")) return null;
+        if (std.mem.eql(u8, prompt, "/help")) {
+            net.writeErr(io, repl_help);
+            continue;
+        }
         if (prompt.len != 0) return prompt;
     }
 }
@@ -666,6 +701,18 @@ test "repl skips blank lines and exits on quit or EOF" {
     var buf: [512]u8 = undefined;
     try std.testing.expectEqual(@as(?[]const u8, null), parseArgs(&buf, &.{"--repl"}, &opts));
     try std.testing.expect(opts.repl);
+}
+
+test "repl answers /help and stops on /exit without spending a turn" {
+    // Both words a user types when they mean "end the session" stop it, and
+    // `/help` repeats the controls rather than going to the provider: a
+    // mistyped command that became a task billed a turn and, for `/help`,
+    // ran `bash` in the operator's repository first.
+    var quit_alias = std.Io.Reader.fixed("/exit\n");
+    try std.testing.expectEqual(@as(?[]const u8, null), try replPrompt(std.testing.io, &quit_alias));
+
+    var reader = std.Io.Reader.fixed("/help\nafter\n");
+    try std.testing.expectEqualStrings("after", (try replPrompt(std.testing.io, &reader)).?);
 }
 
 /// The repository's own instructions, read from `dir` when the run starts, or
@@ -963,8 +1010,9 @@ const help_text =
     \\       microagent update [-c | --check]
     \\       microagent help [update]
     \\
-    \\      --repl             read one prompt per line; /quit or EOF exits
-    \\                         history is kept; ceilings reset per prompt
+    \\      --repl             read one prompt per line; /quit or /exit or EOF
+    \\                         exits, /help lists the session's commands.
+    \\                         History is kept; ceilings reset per prompt
     \\  -p, --print <prompt>   task to run (also accepted as a bare argument)
     \\  -m, --model <model>    model id (env MICROAGENT_MODEL, config key
     \\                         model, default
@@ -3624,10 +3672,7 @@ fn streamChatOnce(
             if (result.dropped) break;
         }
         // Drop what was consumed, so a long stream does not keep every frame.
-        if (start > 0) {
-            dropWritten(&pending, start);
-            scanned -|= start;
-        }
+        net.dropPending(&pending, &scanned, start);
         // What is left above is the one line that has not ended, and a line
         // that has not ended by now is not one this turn can carry, so the run
         // says so and ends the turn rather than growing with the rest of the
@@ -3788,7 +3833,7 @@ test "a character split across two reads is written once it is whole" {
         taken += take;
         const held = chat_mod.partialTailLen(buf.items);
         try written.appendSlice(std.testing.allocator, buf.items[0 .. buf.items.len - held]);
-        dropWritten(&buf, buf.items.len - held);
+        net.dropPending(&buf, null, buf.items.len - held);
     }
     try written.appendSlice(std.testing.allocator, buf.items);
 
@@ -3875,17 +3920,7 @@ fn writeOutPrefix(
         net.note(io, arena, "microagent: the text streamed from {s} could not be written to stdout ({s}); the rest of this run's output is not on it either, and the run fails rather than finishing with a partial answer\n", .{ shown_url, @errorName(err) });
         return err;
     };
-    dropWritten(out_buf, len);
-}
-
-/// Drops the `len` bytes just consumed, whether they were written out or parsed
-/// as a line, and moves what is left to the front, so the bytes the next chunk
-/// has to complete are the ones the next call starts from. The buffer only ever
-/// holds one read's worth, so the move is over a few bytes.
-fn dropWritten(out_buf: *std.ArrayList(u8), len: usize) void {
-    const kept = out_buf.items.len - len;
-    std.mem.copyForwards(u8, out_buf.items[0..kept], out_buf.items[len..]);
-    out_buf.shrinkRetainingCapacity(kept);
+    net.dropPending(out_buf, null, len);
 }
 
 /// One tool call, to whichever half of the tool surface answers for its name:
@@ -5717,10 +5752,7 @@ test "a frame split across reads yields the same lines, and is searched once" {
             try seen.append(gpa, gpa.dupe(u8, pending.items[start..pos]) catch return error.OutOfMemory);
             start = pos + 1;
         }
-        if (start > 0) {
-            dropWritten(&pending, start);
-            scanned -|= start;
-        }
+        net.dropPending(&pending, &scanned, start);
     }
     try std.testing.expectEqual(lines.len, seen.items.len);
     for (lines, seen.items) |want, got| try std.testing.expectEqualStrings(want, got);

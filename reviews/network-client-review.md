@@ -53,15 +53,20 @@ fragment with no network surface to read.
    supplies a different URL is the defect this item looks for.
 
 2. **A redirect, or a scheme change, that carries the key to a new host.** Read
-   the client's `redirect_behavior` in each of the three callers: the chat
-   request sets it explicitly, and `client.fetch` in `src/update.zig` and in
-   `src/mcp.zig` takes the client's default. A redirect that is followed
-   re-sends the `Authorization` header to whatever host answers, so an
-   unhandled redirect that turns into a followed one, and any scheme
-   downgrade, is a finding. `trustedGithubUrl` and `hostTrusted` in
-   `src/update.zig` are the code's own statement of which hosts may carry the
-   token; a path that reaches a host they exclude is a finding whichever
-   direction it fails in.
+   the redirect handling in each of the three callers, which do not spell it the
+   same way: the chat request (`openChatRequest`) and the remote MCP request
+   (`exchange`) each set `.redirect_behavior = .unhandled` on their `request`,
+   while `client.fetch` in `src/update.zig` passes no `redirect_behavior`, so it
+   takes the client's default — for a payload-less GET that is a small nonzero
+   number of allowed redirects, not `.unhandled`. The download therefore relies
+   on `privileged_headers` instead: std strips those on a redirect that changes
+   scheme or leaves the host's parent domain, and keeps them on
+   `api.github.com` → `api.github.com`. A caller that passes the key as an
+   ordinary `headers` entry rather than a privileged one, a scheme downgrade,
+   or an unhandled redirect that turns into a followed one, is a finding.
+   `trustedGithubUrl` and `hostTrusted` in `src/update.zig` are the code's own
+   statement of which hosts may carry the token; a path that reaches a host
+   they exclude is a finding whichever direction it fails in.
 
 3. **A certificate trust decision that silently degrades.** `net.caBundlePath`
    resolves the path the operator named and `net.loadCaBundle` installs it. Read
