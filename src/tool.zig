@@ -555,6 +555,132 @@ fn noteCost(text: []const u8) usize {
     return if (text.len == 0) 0 else text.len + 1;
 }
 
+// The one assembly every subprocess's bytes pass through before the model reads
+// them, so what arrives here is whatever a child wrote: a `bash` command's two
+// streams, `git log`'s history, a `search`'s matches, `ast`'s rewritten lines.
+// Nothing bounds that on the way in, and this holds two streams, a separator, an
+// exit note, a failure reason and a truncation note inside one cap by
+// subtracting each of them from the cap in turn. That subtraction is the part a
+// hand-written example does not reach: the stream lengths are the fuzzer's, the
+// term is one of the four shapes a process reports, and a cap that came out
+// short leaves a note written past the cut rather than inside the result.
+//
+// So the properties are the ones a reader of the result depends on, and each is
+// decided by the arithmetic above: the result never exceeds the cap, every note
+// the parts asked for is in it whole, and what the child printed is what the
+// result opens with rather than something dropped behind a note. The result is
+// not asked to be valid UTF-8, because a child's bytes are copied here verbatim
+// and the escaper further up is what replaces a byte that is not text.
+//
+// The corpus is the shapes a real capture has: one stream and two, empty and
+// long, output that ends on a line and output that does not, escapes and bytes
+// that are not UTF-8, a character cut at the cap, and the cap edge itself on
+// both sides. `std.testing.fuzz` runs this corpus on every `zig build test`, and
+// through the fuzzer's mutations when the test binary is built in fuzz mode.
+const capture_corpus = [_][]const u8{
+    "",
+    "a",
+    "one line\n",
+    "one line",
+    "a\nb\nc\n",
+    "\n\n\n",
+    "\u{1b}[31mred\u{0}\n",
+    "caf\u{00e9} \u{65e5}\u{1f600}\n",
+    "\xff\xfe\xc3\x80",
+    "\xe6\x97",
+    "\xe6\x97\xa5",
+    "\"" ** 32,
+    "x" ** 1024,
+    "x" ** (max_tool_output - 1),
+    "x" ** max_tool_output,
+    "x" ** (max_tool_output + 1),
+    "x" ** (max_tool_output + 500),
+    "\u{65e5}" ** (max_tool_output / 3 + 8),
+    "a" ** 300 ++ "\u{1f600}",
+};
+
+test "a fuzzed subprocess capture stays under the cap with every note whole" {
+    try std.testing.fuzz({}, fuzzCaptureResult, .{ .corpus = &capture_corpus });
+}
+
+fn fuzzCaptureResult(_: void, smith: *std.testing.Smith) !void {
+    const gpa = std.testing.allocator;
+    var scratch: [8 * 1024]u8 = undefined;
+    const text: []const u8 = if (smith.in) |seed| seed else scratch[0..smith.slice(&scratch)];
+
+    // The two streams are cut out of one input rather than handed over whole,
+    // so the fuzzer reaches a split in the middle of a character and a body
+    // that is neither one stream nor the other. The empty halves on both sides
+    // are the shapes that decide the separator and the `body` the cap is taken
+    // against, and they are what a child that printed on one stream leaves.
+    var split_buf: [2]u8 = undefined;
+    const split = @min(@as(usize, smith.slice(&split_buf)), text.len);
+    const stdout = text[0..split];
+    const stderr = text[split..];
+
+    // The flags and the term the fuzzer picks, so every arm of the cap
+    // arithmetic is reached: a cut with no note, a reason beside it, a child
+    // that exited cleanly and one that did not, and each of the four shapes a
+    // `Term` takes. A reason long enough to eat most of the cap on its own is
+    // the case the subtraction has to survive: a note bigger than the room it is
+    // held back from is the one thing that would leave a result over the cap.
+    var flag_buf: [3]u8 = undefined;
+    const flags = @as(usize, smith.slice(&flag_buf));
+    const at_limit = flags & 1 != 0;
+    const want_term = flags & 2 != 0;
+    const reason: ?[]const u8 = switch (flags >> 3 & 3) {
+        0 => null,
+        1 => "error: the command could not be run",
+        else => "error: " ++ ("why " ** (max_tool_output / 2)),
+    };
+    const term: ?std.process.Child.Term = if (want_term) switch (flags >> 5 & 3) {
+        0 => .{ .exited = 0 },
+        1 => .{ .exited = 127 },
+        2 => .{ .signal = .KILL },
+        else => .{ .unknown = 1 },
+    } else null;
+
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    const parts: CaptureParts = .{
+        .stdout = stdout,
+        .stderr = stderr,
+        .at_limit = at_limit,
+        .term = term,
+        .reason = reason,
+    };
+    const result = try captureResult(arena, parts);
+
+    // The cap is the invariant every caller below this one relies on: a result
+    // over it is cut again by `toolResult`, and a note written past the cap is
+    // the first thing that cut takes, which is the failure this whole function
+    // exists to prevent.
+    try std.testing.expect(result.len <= max_tool_output);
+
+    // Every note the parts asked for is present and whole, so the model reads
+    // why a call failed and that output was cut. A note cut in half by the cap
+    // arithmetic is a result that names neither. The constants carry the
+    // newline `appendLine` writes itself, so the search is over their text.
+    if (at_limit) try std.testing.expect(std.mem.indexOf(u8, result, truncation_note[1..]) != null);
+    if (term) |t| if (t != .exited or t.exited != 0) {
+        try std.testing.expect(std.mem.indexOf(u8, result, bash_exit_note[1 .. bash_exit_note.len - 1]) != null);
+    };
+    if (reason) |r| {
+        // A reason past the cap is written whole or cut by the caller in front
+        // of it, and which of those it is belongs to `toolResult` rather than
+        // here, so a reason is held to being present only while it fits.
+        if (r.len < max_tool_output) try std.testing.expect(std.mem.indexOf(u8, result, r) != null);
+    }
+
+    // What the child printed is what the result opens with. A note is written
+    // under the output, never in front of it, so a stream is not lost behind a
+    // status line; and a cut keeps a prefix, never a middle, so nothing is
+    // invented into the gap between two halves of the same stream.
+    if (stdout.len != 0) try std.testing.expect(std.mem.startsWith(u8, result, stdout[0..@min(stdout.len, result.len)]));
+}
+
 /// One line under whatever is already written, and nothing at all when there is
 /// nothing to put it under. A note under an empty result is a line of its own
 /// rather than a leading blank one.
