@@ -82,6 +82,10 @@ const default_model = "deepseek/deepseek-v4-flash";
 /// The one variable the base url is read from. It is also the one the Harbor
 /// adapter sets, so a run it starts always names an endpoint.
 const base_url_var = "MICROAGENT_BASE_URL";
+/// The flag the base url also arrives on, named by a message about the value
+/// so a reader is sent to the source they wrote rather than to a variable the
+/// command line never carried.
+const base_url_flag = "--base-url";
 /// Room for one whole tool message: the capped result plus the keys, the id
 /// and the JSON punctuation around it. The result arrives unescaped, and a
 /// result at the cap also carries the truncation note `toolResult` appends, so
@@ -534,7 +538,12 @@ fn runMain(init: std.process.Init) !u8 {
     // The file is the weakest of the three sources, so it answers only where
     // neither the flag nor a variable did.
     if (!opts.from_flag.contains(.model) and env_model == null and loaded.model.len != 0) opts.model = loaded.model;
-    if (!opts.from_flag.contains(.base_url) and env_base_url == null and loaded.base_url.len != 0) opts.base_url = loaded.base_url;
+    // The base url records which of the three it was, because the refusals below
+    // are about the value and an operator who set it in a variable has to be
+    // sent to the variable rather than to a flag they never wrote.
+    const base_url = resolveBaseUrl(env_base_url, opts.base_url, opts.from_flag.contains(.base_url), loaded.base_url);
+    opts.base_url = base_url.value;
+    const base_url_source = base_url.source;
     var key = resolveKey(init.environ_map, opts.api_key, loaded.api_key);
     // The value can be a slice of the environment map, which loses the credentials below.
     key.value = try init.arena.allocator().dupe(u8, key.value);
@@ -549,17 +558,20 @@ fn runMain(init: std.process.Init) !u8 {
     // MCP key is already held to.
     if (net.hasHeaderControlBytes(opts.api_key))
         return configError(io, "the API key from {s} holds a control character, which cannot go in a header", .{key.source});
-    if (opts.base_url.len == 0) return configError(io, "no base url: pass --base-url, set MICROAGENT_BASE_URL, or set base_url in the config file", .{});
+    if (opts.base_url.len == 0) return configError(io, "no base url: pass {s}, set {s}, or set base_url in the config file", .{ base_url_flag, base_url_var });
     // Refused as a url before it is refused as a leak, because that is what it
     // is: a caller who left the scheme off is told their key was about to go
     // out in the clear, which is a security warning about a value that never
-    // reaches the network.
-    if (std.Uri.parse(opts.base_url)) |_| {} else |_| return configError(io, "{s} is not a url", .{clip(displayUrl(arena, opts.base_url))});
+    // reaches the network. Both messages name the source, the way the ceilings
+    // and the temperature name theirs, so an operator is sent to the variable
+    // or the config key they wrote rather than to a flag the command line never
+    // carried.
+    if (std.Uri.parse(opts.base_url)) |_| {} else |_| return configError(io, "{s} from {s} is not a url", .{ clip(displayUrl(arena, opts.base_url)), base_url_source });
     // The url is written into the request line as parsed, so a control byte in
     // one ends that line and everything after it is a request line of the
     // caller's own making. The key is held to the same rule above.
     if (net.hasHeaderControlBytes(opts.base_url))
-        return configError(io, "the base url holds a control character, which cannot go in a request line", .{});
+        return configError(io, "the base url from {s} holds a control character, which cannot go in a request line", .{base_url_source});
     if (!net.urlCarriesKey(opts.base_url))
         return configError(io, "the API key would go to {s} in the clear; use an https base url, or http on loopback", .{clip(displayUrl(arena, opts.base_url))});
 
@@ -1464,39 +1476,44 @@ const reasoning_effort_names = std.fmt.comptimePrint("{s}, {s}, {s}, {s}, {s}", 
 /// The level, written through `out`, or the message saying it is not one.
 /// The caller decides what a message does with it, because the flag path
 /// hands it back as a usage error while the environment path exits on it.
-fn reasoningEffort(buf: []u8, value: []const u8, out: *?[]const u8) ?[]const u8 {
+/// `from` names where the value came from, the way `ceiling` names it, so a
+/// value read from a variable is reported against the variable rather than
+/// against a flag the command line never carried.
+fn reasoningEffort(buf: []u8, from: []const u8, value: []const u8, out: *?[]const u8) ?[]const u8 {
     const v = std.mem.trim(u8, value, net.env_surrounding);
     for (reasoning_efforts) |level| if (std.mem.eql(u8, v, level)) {
         out.* = v;
         return null;
     };
-    return std.fmt.bufPrint(buf, "reasoning effort '{s}' is not one of: {s}", .{ clip(value), reasoning_effort_names }) catch
-        "reasoning effort is not one of: " ++ reasoning_effort_names;
+    return std.fmt.bufPrint(buf, "{s} wants a reasoning effort, got '{s}'; it is one of: {s}", .{ from, clip(value), reasoning_effort_names }) catch
+        "the reasoning effort is not one of: " ++ reasoning_effort_names;
 }
 
 /// The range a temperature is accepted in: 0 is the only setting under which
 /// two runs of one conversation answer alike, and 2 is the highest the
 /// OpenAI-compatible API documents. A number outside it, or one no provider
 /// accepts at all, is refused here rather than sent to find out with a turn.
-fn temperature(buf: []u8, value: []const u8, out: *?f64) ?[]const u8 {
+fn temperature(buf: []u8, from: []const u8, value: []const u8, out: *?f64) ?[]const u8 {
     const v = std.mem.trim(u8, value, net.env_surrounding);
     // The comparison rather than a range check, so `nan` fails it too: every
     // comparison with `nan` is false, so a value parseFloat accepts and no
     // provider does is refused on the same line as one out of range.
     const n = std.fmt.parseFloat(f64, v) catch
-        return temperatureMessage(buf, value);
-    if (!(n >= min_temperature and n <= max_temperature)) return temperatureMessage(buf, value);
+        return temperatureMessage(buf, from, value);
+    if (!(n >= min_temperature and n <= max_temperature)) return temperatureMessage(buf, from, value);
     out.* = n;
     return null;
 }
 
 /// The sentence one refused temperature is reported with, for the flag path and
 /// the environment path, so a value spelled on a command line and the same
-/// value spelled in a variable are answered the same way.
-fn temperatureMessage(buf: []u8, value: []const u8) []const u8 {
-    return std.fmt.bufPrint(buf, "--temperature wants a number between {d} and {d}, got '{s}'", .{
-        min_temperature, max_temperature, clip(value),
-    }) catch std.fmt.comptimePrint("--temperature wants a number between {d} and {d}", .{
+/// value spelled in a variable are answered the same way. `from` names the
+/// source, which is the flag on one path and the variable on the other: a
+/// value that arrived in a variable is reported against that variable.
+fn temperatureMessage(buf: []u8, from: []const u8, value: []const u8) []const u8 {
+    return std.fmt.bufPrint(buf, "{s} wants a number between {d} and {d}, got '{s}'", .{
+        from, min_temperature, max_temperature, clip(value),
+    }) catch std.fmt.comptimePrint("a temperature wants a number between {d} and {d}", .{
         min_temperature, max_temperature,
     });
 }
@@ -1510,7 +1527,7 @@ fn temperatureFromEnv(
     problem: *?EnvProblem,
 ) void {
     const v = envValue(env, name) orelse return;
-    if (temperature(&.{}, v, out) != null) {
+    if (temperature(&.{}, name, v, out) != null) {
         if (problem.* == null) problem.* = .{ .option = .temperature, .name = name, .value = v };
     }
 }
@@ -1591,7 +1608,7 @@ fn reasoningEffortFromEnv(
     problem: *?EnvProblem,
 ) void {
     const v = envValue(env, name) orelse return;
-    if (reasoningEffort(&.{}, v, out) != null) {
+    if (reasoningEffort(&.{}, name, v, out) != null) {
         if (problem.* == null) problem.* = .{ .option = .reasoning_effort, .name = name, .value = v };
     }
 }
@@ -1604,11 +1621,11 @@ fn envProblemMessage(buf: []u8, problem: EnvProblem) []const u8 {
     switch (problem.option) {
         .reasoning_effort => {
             var unused: ?[]const u8 = null;
-            return reasoningEffort(buf, problem.value, &unused) orelse reasoning_effort_names;
+            return reasoningEffort(buf, problem.name, problem.value, &unused) orelse reasoning_effort_names;
         },
         .temperature => {
             var unused: ?f64 = null;
-            return temperature(buf, problem.value, &unused) orelse problem.name;
+            return temperature(buf, problem.name, problem.value, &unused) orelse problem.name;
         },
         .budget, .max_spend_tokens => {
             var unused: ?u64 = null;
@@ -1791,8 +1808,8 @@ fn setValued(
         .api_key => opts.api_key = value,
         .ca_bundle => opts.ca_bundle = value,
         .config => opts.config = value,
-        .reasoning_effort => return reasoningEffort(buf, value, &opts.reasoning_effort),
-        .temperature => return temperature(buf, value, &opts.temperature),
+        .reasoning_effort => return reasoningEffort(buf, "--reasoning-effort", value, &opts.reasoning_effort),
+        .temperature => return temperature(buf, "--temperature", value, &opts.temperature),
         .budget => return optionalCeiling(buf, "--budget", value, &opts.budget_s),
         .max_spend_tokens => return optionalCeiling(buf, "--max-spend-tokens", value, &opts.max_spend_tokens),
         .max_turns => return ceiling(usize, buf, "--max-turns", value, &opts.max_turns),
@@ -6389,22 +6406,43 @@ test "a temperature is a number in range, or a message naming both" {
     var buf: [256]u8 = undefined;
     var out: ?f64 = null;
 
-    try std.testing.expect(temperature(&buf, "0", &out) == null);
+    try std.testing.expect(temperature(&buf, "--temperature", "0", &out) == null);
     try std.testing.expectEqual(@as(?f64, 0), out);
-    try std.testing.expect(temperature(&buf, " 1.5\r\n", &out) == null);
+    try std.testing.expect(temperature(&buf, "--temperature", " 1.5\r\n", &out) == null);
     try std.testing.expectEqual(@as(?f64, 1.5), out.?);
-    try std.testing.expect(temperature(&buf, "2", &out) == null);
+    try std.testing.expect(temperature(&buf, "--temperature", "2", &out) == null);
     try std.testing.expectEqual(@as(?f64, 2), out.?);
 
     // The two a provider would answer 400 for, and `nan`, which no comparison
     // is true of and so fails the same range check the out-of-range values do.
     for ([_][]const u8{ "2.1", "-0.1", "warm", "nan", "inf", "" }) |bad| {
         out = null;
-        const message = temperature(&buf, bad, &out);
+        const message = temperature(&buf, "--temperature", bad, &out);
         try std.testing.expect(message != null);
         try std.testing.expect(std.mem.indexOf(u8, message.?, "between 0 and 2") != null);
         try std.testing.expect(out == null);
     }
+}
+
+test "a refused value is reported against where it came from, flag or variable" {
+    // A ceiling already says so, and these two are read on both paths: a value
+    // that arrived in a variable and is reported against a flag the command
+    // line never carried sends the operator to edit the wrong line.
+    var buf: [256]u8 = undefined;
+    var out: ?f64 = null;
+    const from_env = temperature(&buf, "MICROAGENT_TEMPERATURE", "warm", &out).?;
+    try std.testing.expect(std.mem.indexOf(u8, from_env, "MICROAGENT_TEMPERATURE") != null);
+    try std.testing.expect(std.mem.indexOf(u8, from_env, "--temperature") == null);
+
+    var level: ?[]const u8 = null;
+    const bad_level = reasoningEffort(&buf, "MICROAGENT_REASONING_EFFORT", "loud", &level).?;
+    try std.testing.expect(std.mem.indexOf(u8, bad_level, "MICROAGENT_REASONING_EFFORT") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bad_level, "--reasoning-effort") == null);
+
+    // The flag path still names the flag, and both still list what is accepted.
+    try std.testing.expect(std.mem.indexOf(u8, temperature(&buf, "--temperature", "9", &out).?, "--temperature") != null);
+    try std.testing.expect(std.mem.indexOf(u8, reasoningEffort(&buf, "--reasoning-effort", "loud", &level).?, "--reasoning-effort") != null);
+    try std.testing.expect(std.mem.indexOf(u8, reasoningEffort(&buf, "--reasoning-effort", "loud", &level).?, reasoning_effort_names) != null);
 }
 
 test "only weather-shaped statuses are retried" {
@@ -8778,4 +8816,40 @@ test "the outcome line names the call, whether it worked, and how long it took" 
     const long = try toolOutcomeLine(arena, "mcp__x" ++ "y" ** 200, .failed, 5);
     try std.testing.expect(std.mem.endsWith(u8, long, " in 5ms\n"));
     try std.testing.expect(long.len < 80);
+}
+
+/// The base url this run will use, and where it came from. The flag wins, then
+/// the variable, then the `base_url` key of the config file, the same order
+/// `resolveKey` uses for the key.
+///
+/// The name travels with the value because a refused base url is a message
+/// about a line somewhere: `MICROAGENT_BASE_URL=:::` answered `:::` with the
+/// flag spelled in front of it, so an operator who exported the variable was
+/// sent to a flag their command line never carried. A name that cannot match
+/// the value is worse than no name at all.
+fn resolveBaseUrl(from_env: ?[]const u8, from_flag: []const u8, flag_set: bool, from_config: []const u8) Key {
+    if (flag_set and from_flag.len != 0) return .{ .value = from_flag, .source = base_url_flag };
+    if (from_env) |v| if (std.mem.trim(u8, v, net.env_surrounding).len != 0) return .{ .value = v, .source = base_url_var };
+    if (from_config.len != 0) return .{ .value = from_config, .source = "config file" };
+    return .{ .value = from_flag, .source = base_url_flag };
+}
+
+test "the base url and the name of where it came from never disagree" {
+    // The pair is what a refusal quotes, so the two have to come from the same
+    // branch: a value from the config file named after `--base-url` sends the
+    // reader to a flag that never carried it.
+    try std.testing.expectEqualStrings("config file", resolveBaseUrl(null, "", false, "https://a").source);
+    try std.testing.expectEqualStrings(base_url_var, resolveBaseUrl("https://b", "", false, "https://a").source);
+    try std.testing.expectEqualStrings(base_url_flag, resolveBaseUrl("https://b", "https://c", true, "https://a").source);
+
+    // The flag is empty because it was never given: the variable answers, and
+    // the name with it, rather than an empty flag name winning by default.
+    try std.testing.expectEqualStrings("https://b", resolveBaseUrl("https://b", "", false, "https://a").value);
+    try std.testing.expectEqualStrings(base_url_flag, resolveBaseUrl(null, "", false, "").source);
+
+    // An empty value is no value, the rule every other source follows: a
+    // variable set to nothing falls through to the config key rather than
+    // answering with an endpoint that is not there.
+    try std.testing.expectEqualStrings("config file", resolveBaseUrl("", "", false, "https://a").source);
+    try std.testing.expectEqualStrings("config file", resolveBaseUrl("  ", "", false, "https://a").source);
 }

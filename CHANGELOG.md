@@ -98,6 +98,19 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- A refused `--temperature`, `--reasoning-effort` or base url is now reported
+  against the source it came from. The ceilings already named theirs
+  (`MICROAGENT_MAX_TURNS must be a number`), and these three spelled the flag
+  on both paths, so `MICROAGENT_TEMPERATURE=hot microagent "..."` answered
+  `--temperature wants a number between 0 and 2, got 'hot'` -- sending an
+  operator to a flag their command line never carried while the variable that
+  was wrong sat a line above it. The base url was worse: it named no source at
+  all, so `:::` from a variable, from a config key and from the flag were the
+  same line. Each now says where the value came from (`MICROAGENT_BASE_URL`,
+  `config file`, `--base-url`), and the reasoning-effort message names the
+  levels it accepts the way the temperature message names its range. The flag
+  path is unchanged: `--temperature` still answers `--temperature`.
+
 - `bench/maxrss.py` reports a host without `ptrace` instead of a traceback.
   It asked libc for the symbol at import, and a libc that carries no such
   symbol raises `AttributeError` the moment the attribute is read -- so on
