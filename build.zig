@@ -83,7 +83,7 @@ pub fn build(b: *std.Build) void {
     // belongs here rather than only under `make`.
     //
     // Both test runs get it, and through this one function so they cannot drift:
-    // the sanitized run is the same suite, so a child it spawns is under the
+    // the optimized safety run is the same suite, so a child it spawns is under the
     // same host locale, and pinning only the plain run left
     // `zig build test-sanitize` failing a child-environment test that the plain
     // run passed.
@@ -110,34 +110,35 @@ pub fn build(b: *std.Build) void {
     // optimizing-less build of one file costs.
     test_step.dependOn(&exe.step);
 
-    // The same suite again, compiled with the undefined-behavior sanitizer, so
-    // an integer overflow, a misaligned load or a null dereference is a failed
-    // check rather than a miscompiled release asset. It is a second compile of
-    // the same sources and not a second way to run them: `test` and this share
-    // the module options, the filter and the test names, and a bug the
-    // instrumented run finds is a bug the plain run also has.
-    //
-    // It is a module of its own rather than `exe.root_module` with the flag set
-    // on it, because a sanitize option is inherited by every artifact built
-    // from the module: setting it on the executable would put instrumented code
-    // in the asset release.yml publishes. `-fsanitize=address` is not offered
-    // because Zig's address sanitizer needs a libc for its interceptors and
-    // nothing here links one; the undefined-behavior half needs none.
-    const sanitize_module = b.createModule(.{
+    // Keep the existing test-sanitize command, but use Zig's optimized safety
+    // checks: sanitize_c only instruments C, and this program has no C sources.
+    // Separate modules keep the executable's requested optimization mode intact.
+    const safe_copy_module = b.createModule(.{
+        .root_source_file = b.path("src/copy.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .no_builtin = true,
+    });
+    const safety_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
-        .optimize = optimize,
-        .sanitize_c = .full,
+        .optimize = .ReleaseSafe,
     });
-    sanitize_module.addImport("build_options", build_options_module);
-    sanitize_module.addImport("copy", copy_module);
-    const sanitize_tests = b.addTest(.{
-        .root_module = sanitize_module,
+    safety_module.addImport("build_options", build_options_module);
+    safety_module.addImport("copy", safe_copy_module);
+    const safety_tests = b.addTest(.{
+        .root_module = safety_module,
         .zig_lib_dir = zig_lib,
         .filters = test_filters,
     });
-    const run_sanitize = b.addRunArtifact(sanitize_tests);
-    pin_test_env(run_sanitize);
+    const run_safety = b.addRunArtifact(safety_tests);
+    pin_test_env(run_safety);
+    const run_safe_copy = b.addRunArtifact(b.addTest(.{
+        .root_module = safe_copy_module,
+        .filters = test_filters,
+        .zig_lib_dir = zig_lib,
+    }));
+    pin_test_env(run_safe_copy);
 
     // Three tracked files are read by the suite at run time, from the build
     // root, rather than through the module system: docs/usage.md, the config
@@ -152,15 +153,17 @@ pub fn build(b: *std.Build) void {
     // the dependency is wanted here.
     //
     // Both run steps get them, through the one `WriteFile`, for the reason
-    // `pin_test_env` is shared: the sanitized run is the same suite.
+    // `pin_test_env` is shared: the optimized safety run is the same suite.
     const tracked_data = b.addWriteFiles();
     for ([_][]const u8{ "docs/usage.md", "config.example.toml", "integrations/harbor/microagent_agent.py" }) |path| {
         _ = tracked_data.addCopyFile(b.path(path), path);
     }
     run_tests.step.dependOn(&tracked_data.step);
-    run_sanitize.step.dependOn(&tracked_data.step);
+    run_safety.step.dependOn(&tracked_data.step);
 
-    b.step("test-sanitize", "Run unit tests under the undefined-behavior sanitizer").dependOn(&run_sanitize.step);
+    const safety_step = b.step("test-sanitize", "Run unit tests optimized with runtime safety checks");
+    safety_step.dependOn(&run_safety.step);
+    safety_step.dependOn(&run_safe_copy.step);
 }
 
 /// Zig 0.16 loses the pipes and PID when a POSIX child reports an exec error.

@@ -82,7 +82,7 @@ jobs:
       - name: unit tests pass
         run: make test
 
-      - name: unit tests pass under the undefined-behavior sanitizer
+      - name: unit tests pass with optimized runtime safety checks
         run: make test-sanitize
 
       # The target list and the asset names come from the Makefile, so a

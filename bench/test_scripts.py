@@ -221,6 +221,29 @@ def check_workflows(directory: Path, env: dict[str, str]) -> None:
         )
         result = run(ROOT / "scripts/lint-actions.sh", str(workflow), env=env)
         expect((result.returncode == 0) == passed, result)
+    pin = "owner/action@" + "a" * 40
+    for prefix, indent in (
+        ("jobs:\n  lint:\n    steps:\n      - uses: ", "          "),
+        ("jobs:\n  lint:\n    uses: ", "      "),
+        ("runs:\n  using: composite\n  steps:\n    - uses: ", "        "),
+    ):
+        for ref, passed in (
+            (pin, True),
+            ("owner/action@v7", False),
+            (f">-\n{indent}{pin}", True),
+            (f"|-\n{indent}{pin}", True),
+            (f">- # v\n{indent}{pin}", False),
+        ):
+            workflow.write_text(prefix + ref + "\n", encoding="utf-8")
+            result = run(ROOT / "scripts/lint-actions.sh", str(workflow), env=env)
+            expect((result.returncode == 0) == passed, result)
+            expect("Traceback" not in result.stderr, result)
+    workflow.write_text(
+        f"jobs:\n  lint:\n    steps:\n      - uses: >-\n          {pin}\n      - run: echo ok # v\n",
+        encoding="utf-8",
+    )
+    result = run(ROOT / "scripts/lint-actions.sh", str(workflow), env=env)
+    expect(result.returncode == 0, result)
     workflow.write_text("jobs: [\n", encoding="utf-8")
     result = run(ROOT / "scripts/lint-ci-shell.sh", str(workflow), env=env)
     expect(result.returncode != 0 and str(workflow) in result.stderr, result)

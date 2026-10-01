@@ -162,7 +162,7 @@ help:
 	  'test [FILTER=...]     the whole unit test suite, or only the tests FILTER names' \
 	  'test-cli              built CLI against a loopback provider (also in unfiltered test)' \
 	  'watch [FILTER=...]    the same tests again on every source change, until Ctrl-C' \
-	  'test-sanitize         the same suite under the undefined-behavior sanitizer' \
+	  'test-sanitize         optimized tests with Zig runtime safety checks' \
 	  'preflight             name every tool check and lint need that is not on PATH, and every one whose absence skips tests' \
 	  'fmt                   rewrite every tracked .zig and .py file in format style' \
 	  'fmt-python            rewrite the tracked .py files, which zig fmt does not reach' \
@@ -322,12 +322,9 @@ watch:
 	@$(REFUSE_UNKNOWN_FILTER); \
 	$(ZIG) build test --watch $(if $(FILTER),-Dtest-filter="$(FILTER)") --summary all
 
-# The same tests, compiled with the undefined-behavior sanitizer. The suite
-# passing tells a reader the assertions hold, not that no load, store or
-# integer operation inside them is out of its bounds or overflows: those are
-# silent in a ReleaseSmall build and are what the release assets carry. This is
-# a second run of the same tests rather than a second set, so a failure names
-# the test the plain run already knows.
+# The same tests in ReleaseSafe, including the copy module: optimizations and
+# Zig runtime safety checks together. The command keeps its original name;
+# C sanitization alone adds no coverage to a program with no C sources.
 test-sanitize:
 	$(ZIG) build test-sanitize --summary all
 

@@ -121,11 +121,9 @@ jobs:
       - name: unit tests pass
         run: make test
 
-      # The same tests compiled with the undefined-behavior sanitizer. An
-      # out-of-bounds load, a misaligned access or an integer overflow is
-      # silent in the ReleaseSmall build above and is what the published assets
-      # are made of, so the suite is run instrumented as well as plain.
-      - name: unit tests pass under the undefined-behavior sanitizer
+      # The same suite optimized with Zig's runtime safety checks, including
+      # the copy module. The command keeps its original name.
+      - name: unit tests pass with optimized runtime safety checks
         run: make test-sanitize
 
       # `update` is the one subcommand that names the running executable, so

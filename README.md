@@ -81,7 +81,7 @@ pins for its linters and its benchmark adapter, none of which is in a release. P
 machine runs:
 
 ```sh
-v=v0.11.0 t=x86_64-linux-musl
+v=v0.12.0 t=x86_64-linux-musl
 curl -fLO https://github.com/maci0/microagent/releases/download/$v/microagent-$v-$t
 curl -fLO https://github.com/maci0/microagent/releases/download/$v/microagent-$v-$t.sha256
 # GNU coreutils spells it sha256sum, macOS ships shasum; both read the same
@@ -133,7 +133,7 @@ self-update.
 
 ## Status
 
-Version 0.11.0. What works: the tool loop against OpenRouter, DeepSeek, OpenAI and any other
+Version 0.12.0. What works: the tool loop against OpenRouter, DeepSeek, OpenAI and any other
 OpenAI-compatible endpoint; an interactive session with `--repl`; repository instructions read
 from `AGENTS.md`; skills; MCP servers over stdio and over HTTP; the session log; verified
 self-update; reproducible release builds for Linux and macOS.
@@ -167,7 +167,7 @@ make            # ReleaseSmall build, the smallest resident memory
 make test       # the whole suite
 make test FILTER="usage counters"  # one test, while you are mid-edit
 make watch      # the suite again on every source change, until Ctrl-C
-make check      # the CI gate: format, linters, tests, sanitizer run, ReleaseSmall build
+make check      # the CI gate: format, linters, Debug and ReleaseSafe tests, ReleaseSmall build
 make help       # every target
 ```
 

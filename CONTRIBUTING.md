@@ -94,7 +94,7 @@ say nothing about the interpreter the adapter is installed into.
 ```sh
 make check                  # the gate: zig fmt --check, the linters, the tests, an optimized build
 make test FILTER="..."      # one test, while you are mid-edit; a filter matching no test is refused
-make test-sanitize          # the same suite under the undefined-behavior sanitizer
+make test-sanitize          # the same suite optimized with Zig runtime safety checks
 make watch [FILTER="..."]   # the suite again on every source change, until Ctrl-C
 make preflight              # name any tool check and lint need that is not on PATH
 make lint                   # the pin checks, shellcheck, ruff, yamllint and Markdown on their own
@@ -126,10 +126,14 @@ assuming. The workflow calls the same targets
 rather than repeating their commands, so a step added to `check` is a step CI
 runs.
 
-The second test run compiles the same tests with the undefined-behavior
-sanitizer. The plain run says the assertions hold; only the instrumented one
-says nothing inside them goes out of bounds or overflows, which is silent in
-the `ReleaseSmall` binary the release assets are made of.
+The second test run compiles the same tests, including the copy module, in
+[ReleaseSafe](https://ziglang.org/documentation/0.16.0/#ReleaseSafe): optimizations
+and Zig's runtime safety checks are both enabled. The default Debug run also
+has safety checks, while the `ReleaseSmall` release binary disables them.
+`test-sanitize` keeps its original command name; it uses Zig's safety checks
+rather than a C sanitizer, since the program has no C sources. A passing run
+verifies the exercised paths, including bounds and overflow checks, and does
+not prove the absence of unchecked illegal behavior.
 
 `make test FILTER=...` checks the filter against the declared test names first, because a filter that
 matches nothing reports success while running no test. An unfiltered `make test` also runs

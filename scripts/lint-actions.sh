@@ -39,7 +39,8 @@ for filename in sys.argv[1:]:
         if not name or not separator or not re.fullmatch(r"[0-9a-f]{40}", pin):
             message = f"uses: must pin an external action or workflow to a full commit SHA: {ref}"
         else:
-            comment = text.splitlines()[node.end_mark.line][node.end_mark.column:]
+            mark = node.start_mark if node.style in ("|", ">") else node.end_mark
+            comment = text.splitlines()[mark.line][mark.column:]
             if re.search(r"#[ \t]*v[ \t]*$", comment):
                 message = "uses: version comment names no release"
         if message:

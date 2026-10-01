@@ -16,6 +16,19 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-01
+
+### Changed
+
+- `test-sanitize` runs the full Zig suite, including the copy module, in
+  ReleaseSafe mode. The previous C-only sanitizer flag added no coverage to
+  the Debug Zig tests; the command name remains available.
+
+### Fixed
+
+- Workflow action-pin checks accept YAML block scalars at end of file and read
+  their version comments from the scalar header rather than the following step.
+
 ## [0.11.0] - 2026-10-01
 
 ### Added
@@ -2686,7 +2699,8 @@ First release.
   `aarch64-macos` with a checksum sidecar each, and refuses a tag that does not name the version in
   `build.zig.zon`.
 
-[Unreleased]: https://github.com/maci0/microagent/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/maci0/microagent/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/maci0/microagent/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/maci0/microagent/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/maci0/microagent/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/maci0/microagent/compare/v0.9.0...v0.10.0
