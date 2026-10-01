@@ -2329,19 +2329,70 @@ fn loadConfig(io: Io, init: std.process.Init, arena: std.mem.Allocator, config: 
 /// filesystem that reports no mode answers with no line rather than with a
 /// false alarm, and a file whose mode cannot be read is silent for the same
 /// reason.
+///
+/// An `[[mcp]] env` value is the second place this file writes a secret in the
+/// clear, and the one a repository is likelier to commit by accident: a
+/// `command` server usually wants a token of its own, and
+/// `env = { GITHUB_TOKEN = "ghp_..." }` is the obvious way to hand it over.
+/// `config.example.toml` calls that entry "held to the same rule as `api_key`
+/// above" and the mode check fired only for `api_key`, so the second place was
+/// unchecked in exactly the way the file was the likelier one. The check reads
+/// the variable NAME, never the value: the value is the secret, and a line
+/// naming it is the disclosure this function exists to prevent.
 fn secretInReadableFile(io: Io, arena: std.mem.Allocator, source: ConfigSource, parsed: *const config_mod.Config) ?[]const u8 {
     const path = source.path orelse return null;
-    if (parsed.api_key.len == 0) return null;
+    if (!holdsConfigSecret(parsed)) return null;
     // The group and other bits are the question, and 0o077 is exactly them: a
     // file the owner alone can read is fine whatever else it carries, and a
     // group-readable one on a machine with one account is still a file a
     // repository can commit with the key in it.
     const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch return null;
     if (stat.permissions.toMode() & 0o077 == 0) return null;
-    return std.fmt.allocPrint(arena, "microagent: config {s}: holds an api key and is readable beyond its owner; run chmod 600 on it, or leave the key to {s}\n", .{
+    // The provider key names the variable that replaces it, because that is a
+    // remedy the operator can act on without reading the rest of the message.
+    // An `[[mcp]] env` value has no single variable to point at: the child is
+    // handed this value because it could not read it from the run's own
+    // environment, so the line names the server instead.
+    const remedy = if (parsed.api_key.len != 0)
+        key_var
+    else
+        "that server's own environment";
+    return std.fmt.allocPrint(arena, "microagent: config {s}: holds {s} and is readable beyond its owner; run chmod 600 on it, or leave the secret to {s}\n", .{
         configPathText(arena, source),
-        key_var,
+        configSecretName(arena, parsed),
+        remedy,
     }) catch null;
+}
+
+/// Whether this config writes a secret in the clear, wherever it does so. The
+/// two places are the provider `api_key` and an `[[mcp]] env` value; a
+/// `[tools.<preset>]` table holds only the NAME of the variable its key comes
+/// from (`api_key_env`), which is a name and not a secret, so it is not one of
+/// these.
+fn holdsConfigSecret(parsed: *const config_mod.Config) bool {
+    if (parsed.api_key.len != 0) return true;
+    for (parsed.mcp) |entry| {
+        for (entry.env) |pair| {
+            if (pair[1].len != 0) return true;
+        }
+    }
+    return false;
+}
+
+/// How the line names the secret, so an operator reading it knows which key to
+/// move into the environment. The variable name is quoted through `safeText`
+/// because it came out of a config file, which is a file a repository can
+/// commit with whatever bytes in it.
+fn configSecretName(arena: std.mem.Allocator, parsed: *const config_mod.Config) []const u8 {
+    if (parsed.api_key.len != 0) return "an api key";
+    for (parsed.mcp) |entry| {
+        for (entry.env) |pair| {
+            if (pair[1].len != 0) return std.fmt.allocPrint(arena, "a secret in the environment of the MCP server '{s}'", .{
+                chat_mod.safeTextAll(arena, entry.name),
+            }) catch "a secret in an MCP server's environment";
+        }
+    }
+    return "a secret";
 }
 
 /// The line for a `[sandbox]` list that names roots while the sandbox is off,
@@ -7297,6 +7348,9 @@ test "a config holding a key that other accounts can read is said out loud" {
     try handle.setPermissions(io, .fromMode(0o644));
     const loose = secretInReadableFile(io, arena, source, &with_key).?;
     try std.testing.expect(std.mem.indexOf(u8, loose, path) != null);
+    try std.testing.expect(std.mem.indexOf(u8, loose, "api key") != null);
+    // The remedy the operator can act on without reading the rest: the
+    // variable that replaces the key written in the file.
     try std.testing.expect(std.mem.indexOf(u8, loose, key_var) != null);
 
     // A group-readable file is the same answer, and the group bit is the whole
@@ -7318,6 +7372,28 @@ test "a config holding a key that other accounts can read is said out loud" {
 
     // A run with no file at all, which is most of them, has nothing to check.
     try std.testing.expect(secretInReadableFile(io, arena, .{ .path = null, .named = false }, &with_key) == null);
+
+    // The second place this file writes a secret in the clear: an `[[mcp]] env`
+    // value, which `config.example.toml` says is held to the same rule as
+    // `api_key` and which the mode check used to skip. The line names the
+    // server so an operator knows which entry to move, and never the value,
+    // which is the secret itself.
+    const with_env: config_mod.Config = .{ .mcp = &.{.{ .name = "git", .command = "mcp-server-git", .env = &.{.{ "GITHUB_TOKEN", "ghp_secret" }} }} };
+    const env_line = secretInReadableFile(io, arena, source, &with_env).?;
+    try std.testing.expect(std.mem.indexOf(u8, env_line, path) != null);
+    try std.testing.expect(std.mem.indexOf(u8, env_line, "git") != null);
+    try std.testing.expect(std.mem.indexOf(u8, env_line, "ghp_secret") == null);
+
+    // An `env` whose value is empty is a variable the child sets for itself,
+    // which is a name and not a secret, so a config that only names one is
+    // silent the way a config of `model` and `base_url` is.
+    const empty_env: config_mod.Config = .{ .mcp = &.{.{ .name = "fs", .command = "npx", .env = &.{.{ "LOG", "" }} }} };
+    try std.testing.expect(secretInReadableFile(io, arena, source, &empty_env) == null);
+
+    // Mode 600 is the same answer for the second place: nothing is said when
+    // the file is not readable beyond its owner.
+    try handle.setPermissions(io, .fromMode(0o600));
+    try std.testing.expect(secretInReadableFile(io, arena, source, &with_env) == null);
 }
 
 test "the trace switch is on only for a value that says so" {
