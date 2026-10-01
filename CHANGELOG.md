@@ -55,6 +55,26 @@ release, and `microagent update` moves you to it.
   self-test that exercises the checker now reads the workflows the gate itself
   reads, so a rule that fired on one of them fails here rather than on a push.
 
+- A config file that names a secret and is readable by another account is
+  said on stderr. Three documents already told an operator to keep such a file
+  mode 600, and nothing checked: a file written at the umask's default, or
+  committed with its bits, hands every other account on a shared machine the
+  provider key while the run says nothing at all. The line names the file and
+  the variable to leave the key to, and fires only for a config that really
+  holds an `api_key`, so a file of `model` and `base_url` is never held to a
+  rule about keys. It is a note and not a refusal, so a run whose operator
+  means to run it as another user still goes on. A file whose mode cannot be
+  read, or a platform that reports none, stays silent rather than crying wolf.
+
+- The `[[mcp]]` `env` inline table is named as the second place in a config a
+  secret is written in the clear, after the top-level `api_key`, and the two
+  documents that ship with the program now say so. A `command` server usually
+  wants a token of its own and `env = { GITHUB_TOKEN = "ghp_..." }` is the
+  obvious way to hand one over, so it is the easier of the two to commit by
+  accident: the `api_key` carries a `chmod 600` warning in three places and
+  this carried none. Naming the variable in the run's own environment keeps
+  only the name in the file.
+
 ### Fixed
 
 - `git blame` honours the `limit` the tool schema advertises. Every other

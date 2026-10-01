@@ -407,7 +407,10 @@ value that is not a url, or a plain `http://` url that is not loopback, is refus
 checked the same way from whichever of the three sources it came from: the key is written into an
 `Authorization` header, so one carrying a control character (a newline a wrapper exported from a file,
 a carriage return in a hand-edited config) is refused before the first request rather than splitting
-the header line.
+the header line. A config file that names one and is readable by any account beyond its owner is
+said on stderr by name: a file written at the umask's default, or committed with its bits, hands
+every other account on a shared machine the key, and the run otherwise says nothing about it. It is
+a note and not a refusal, so the run goes on with the key it read.
 `api_key` is a secret written in the clear, and the `read` tool can open the file: a variable or
 `--api-key` keeps it out of a file a model can read.
 
@@ -547,7 +550,13 @@ A server that cannot start, exits during the handshake, or refuses a call is rep
 skipped: one broken entry costs that entry, not the run. An `env` key is a variable name, letters,
 digits and underscores, quoted or not. A key outside that form, or a value containing a NUL,
 is rejected, so that server is skipped and the line named rather
-than spawned. The server's stderr is inherited, since
+than spawned. An `env` value is a secret written in the clear wherever it is a token, and it is the
+second place in the file that can happen, after the top-level `api_key`: a `command` server usually
+wants a token of its own, so `env = { GITHUB_TOKEN = "ghp_..." }` is the obvious way to hand one
+over, and it is committed to a repository by accident more easily than the provider key is. Keep the
+file mode 600 and out of any workspace the model is given, exactly as for `api_key`, or name the
+variable in the run's own environment and let the file carry only the name. The server's stderr is
+inherited, since
 that is where MCP servers write diagnostics, so what a server writes reaches the terminal
 unescaped and uncapped: unlike every other untrusted byte this program prints, it is not
 scrubbed, so a server that emits terminal escape sequences can repaint the terminal. Its

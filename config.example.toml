@@ -22,7 +22,8 @@
 #
 # api_key is a secret written in the clear, and the `read` tool can open this
 # file: keep it mode 600, out of any workspace the model is given, or leave the
-# key to MICROAGENT_API_KEY or --api-key instead.
+# key to MICROAGENT_API_KEY or --api-key instead. A file naming one and readable
+# by any account beyond its owner is said on stderr by name; the run goes on.
 #
 # model    = "deepseek/deepseek-v4-flash"
 # base_url = "https://api.openai.com/v1"
@@ -90,6 +91,21 @@ runnable check behind for non-trivial logic.
 # letters, digits and underscores, quoted or not, and a key or a value carrying
 # a `=`, a NUL or a control character is one the child's environment cannot
 # hold, so that server is skipped rather than spawned.
+#
+# An `env` value is the second place in this file a secret can be written in the
+# clear, after `api_key`, and it is the easier one to commit by accident: a
+# `command` server usually wants a token of its own, and `env = { GITHUB_TOKEN =
+# "ghp_..." }` is the obvious way to hand it over. Where a server can read a
+# variable from the run's own environment, name it there and keep only the name
+# here; where it cannot, the entry below is the same secret written in the
+# clear, held to the same rule as `api_key` above.
+#
+#   [[mcp]]
+#   name    = "git"
+#   command = "mcp-server-git"
+#   env     = { GITHUB_TOKEN = "ghp_..." }   # a secret in the clear: keep this
+#                                           # file mode 600, and out of any
+#                                           # workspace the model is given
 #
 # [[mcp]]
 # name = "fs"

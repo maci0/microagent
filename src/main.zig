@@ -2290,7 +2290,41 @@ fn loadConfig(io: Io, init: std.process.Init, arena: std.mem.Allocator, config: 
     }
     if (parsed.problem) |problem| reportConfigProblem(io, arena, source, problem);
     if (inertWritableMessage(arena, source, parsed.sandbox)) |msg| net.note(io, arena, "{s}", .{msg});
+    if (secretInReadableFile(io, arena, source, &parsed)) |msg| net.note(io, arena, "{s}", .{msg});
     return fromConfig(parsed, source.path);
+}
+
+/// The line for a config file holding a secret that any other account on the
+/// machine can read, or null when there is nothing to say.
+///
+/// A config is a file a repository can commit, and the one secret in it a
+/// repository is most likely to collect is the provider key. Three documents
+/// say to keep such a file mode 600, and nothing checks: a file written at the
+/// umask's default, or committed with its bits, hands every other account on
+/// a shared machine the key, and the run says nothing at all. The check is a
+/// note and not a refusal because a wrong guess about a filesystem is not a
+/// reason to stop a run -- an operator who means to run this as another user,
+/// or who holds the file on a mode the stat cannot be trusted through, is not
+/// stopped by a line they can read.
+///
+/// Only a file that really holds a secret is named, so a config of `model` and
+/// `base_url` alone is never held to a rule about keys. A Windows or a
+/// filesystem that reports no mode answers with no line rather than with a
+/// false alarm, and a file whose mode cannot be read is silent for the same
+/// reason.
+fn secretInReadableFile(io: Io, arena: std.mem.Allocator, source: ConfigSource, parsed: *const config_mod.Config) ?[]const u8 {
+    const path = source.path orelse return null;
+    if (parsed.api_key.len == 0) return null;
+    // The group and other bits are the question, and 0o077 is exactly them: a
+    // file the owner alone can read is fine whatever else it carries, and a
+    // group-readable one on a machine with one account is still a file a
+    // repository can commit with the key in it.
+    const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch return null;
+    if (stat.permissions.toMode() & 0o077 == 0) return null;
+    return std.fmt.allocPrint(arena, "microagent: config {s}: holds an api key and is readable beyond its owner; run chmod 600 on it, or leave the key to {s}\n", .{
+        configPathText(arena, source),
+        key_var,
+    }) catch null;
 }
 
 /// The line for a `[sandbox]` list that names roots while the sandbox is off,
@@ -7180,6 +7214,50 @@ test "a writable list the sandbox is not enforcing is said out loud" {
     // empty list is a key nobody wrote.
     try std.testing.expect(inertWritableMessage(arena, source, .{ .enabled = true, .writable = &.{"/srv"} }) == null);
     try std.testing.expect(inertWritableMessage(arena, source, .{}) == null);
+}
+
+test "a config holding a key that other accounts can read is said out loud" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const name = "config.toml";
+    try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "api_key = \"sk-test\"\n" });
+    const path = try tmp.dir.realPathFileAlloc(io, name, arena);
+    const source: ConfigSource = .{ .path = path, .named = true };
+    const with_key: config_mod.Config = .{ .api_key = "sk-test" };
+
+    // The default mode a file is written at, and the case the three documents
+    // say to `chmod 600` for without anything checking.
+    const handle = try tmp.dir.openFile(io, name, .{});
+    defer handle.close(io);
+    try handle.setPermissions(io, .fromMode(0o644));
+    const loose = secretInReadableFile(io, arena, source, &with_key).?;
+    try std.testing.expect(std.mem.indexOf(u8, loose, path) != null);
+    try std.testing.expect(std.mem.indexOf(u8, loose, key_var) != null);
+
+    // A group-readable file is the same answer, and the group bit is the whole
+    // question: it is another account's on a shared machine, whether or not the
+    // file is also group-writable.
+    try handle.setPermissions(io, .fromMode(0o640));
+    try std.testing.expect(secretInReadableFile(io, arena, source, &with_key) != null);
+
+    // Mode 600 is the rule the documents state, so a file meeting it says
+    // nothing.
+    try handle.setPermissions(io, .fromMode(0o600));
+    try std.testing.expect(secretInReadableFile(io, arena, source, &with_key) == null);
+
+    // A config of `model` and `base_url` alone is never held to a rule about
+    // keys, or every operator naming a model would be told about a secret they
+    // never wrote.
+    try handle.setPermissions(io, .fromMode(0o644));
+    try std.testing.expect(secretInReadableFile(io, arena, source, &.{}) == null);
+
+    // A run with no file at all, which is most of them, has nothing to check.
+    try std.testing.expect(secretInReadableFile(io, arena, .{ .path = null, .named = false }, &with_key) == null);
 }
 
 test "the trace switch is on only for a value that says so" {
