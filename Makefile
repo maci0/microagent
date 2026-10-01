@@ -407,7 +407,7 @@ fmt-python:
 # repeating the targets, so a linter added here reaches a push and a tag.
 # .github/dependabot.yml is the other thing to keep in step, since it decides
 # what opens a bump for these.
-lint: lint-versions lint-lock check-sbom lint-shell lint-ci lint-python lint-yaml lint-md check-refs
+lint: lint-versions lint-versions-selftest lint-lock check-sbom lint-shell lint-ci lint-python lint-yaml lint-md check-refs
 
 # The gate's own checks live in scripts/, not in recipes here, so shellcheck
 # reads them: a recipe is shell nothing lints, and these are the code that
@@ -424,13 +424,21 @@ lint-versions:
 	@RUFF_VERSION='$(RUFF_VERSION)' YAMLLINT_VERSION='$(YAMLLINT_VERSION)' sh scripts/lint-versions.sh $(HARBOR_DIR)/requirements.txt
 
 # That lint-versions.sh refuses what it is there to refuse, asked by perturbing
-# each file it reads and requiring the gate to go red on it. It is not part of
-# lint, because it writes to files lint-versions.sh reads and puts them back,
-# and a gate that leaves the tree different from how it found it is one nobody
-# trusts. Run it when lint-versions.sh itself changes, which is the only time a
-# refusal it was carrying can quietly stop being one: the change that dropped
-# the interpreter-floor check left every other check passing, so the gate said
-# the same thing about a tree it should have refused.
+# each file it reads and requiring the gate to go red on it.
+#
+# It is part of lint, and that is the whole point of running it. It perturbs
+# the four files lint-versions reads, so it was kept out on the reasoning that a
+# gate which leaves the tree different from how it found it is one nobody
+# trusts. It does not: every file is copied before it is touched and restored
+# from that copy after each case, on the exit path and on an interrupt too, and
+# a run that goes green leaves the tree byte-identical. The run that exposed
+# the gap is the reason it stays in: a change dropped the interpreter-floor
+# check from lint-versions.sh and left every other check passing, so the gate
+# said the same thing about a tree it should have refused, and nothing was left
+# to notice. The self-test is the only thing in the tree that asks, which is
+# why it belongs to the gate rather than to a contributor's memory of when
+# lint-versions.sh last changed. It runs in under two seconds. `check-refs`
+# runs check-refs-self-test.sh in `lint` for the same reason.
 lint-versions-selftest:
 	@RUFF_VERSION='$(RUFF_VERSION)' YAMLLINT_VERSION='$(YAMLLINT_VERSION)' sh scripts/lint-versions-selftest.sh $(HARBOR_DIR)/requirements.txt
 
@@ -497,20 +505,26 @@ zig-version:
 #
 # require-variable-braces (SC2250) stays off: it is a spelling rule, and asking
 # thirteen benchmark scripts to write `${root}` where `$root` is the same word
-# is a change the gate should not ask for. It raises 752 findings here. The
-# other two stay off for the reason they name below, not because the tree
-# would pass or fail: add-default-case (SC2249) wants a `*)` arm on a `case`
-# that is already exhaustive, and avoid-negated-conditions wants the other
-# shape of a condition the tree spells the readable way.
+# is a change the gate should not ask for. It raises 752 findings here.
+# add-default-case (SC2249) stays off for the reason it names rather than
+# because the tree would pass or fail: it wants a `*)` arm on a `case` that is
+# already exhaustive, and it raises ten findings here, in three scripts.
 #
-# useless-use-of-cat is on rather than deferred alongside those two: the tree
-# passes it, and a `cat file | command` runs the command on a pipe whose
-# failure `cat` swallows, so a script passes on a command that never ran. It
-# is a defect class rather than a spelling, and the check has been in
+# avoid-negated-conditions is on rather than deferred with them: the tree passes
+# it, over the twenty-two scripts and over the `run:` bodies lint-ci-shell
+# extracts from the workflows, so it cost nothing to turn on. What it catches is
+# a `if ! a; then b; else c; fi` that reads as one branch and runs the other,
+# which is the same defect class as check-set-e-suppressed above: a condition
+# whose meaning at the call site is the opposite of the branch under it.
+#
+# useless-use-of-cat is on for the same reason rather than a spelling:
+# the tree passes it, and a `cat file | command` runs the command on a pipe
+# whose failure `cat` swallows, so a script passes on a command that never ran.
+# It is a defect class rather than a spelling, and the check has been in
 # shellcheck since 0.7, before the 0.9 the rest of this list is written
-# against. The other three are enabled per file with a `# shellcheck
+# against. The three that stay off are enabled per file with a `# shellcheck
 # disable=`, preceded by the `# because:` line lint-shell below asks for.
-SHELLCHECK_CHECKS := check-set-e-suppressed,check-unassigned-uppercase,deprecate-which,avoid-nullary-conditions,check-extra-masked-returns,quote-safe-variables,useless-use-of-cat
+SHELLCHECK_CHECKS := check-set-e-suppressed,check-unassigned-uppercase,deprecate-which,avoid-nullary-conditions,check-extra-masked-returns,quote-safe-variables,useless-use-of-cat,avoid-negated-conditions
 SHELLCHECK_OPTS := -x --enable=$(SHELLCHECK_CHECKS)
 
 # A `# because:` line is what stands between a suppression and a finding nobody

@@ -41,6 +41,27 @@ release, and `microagent update` moves you to it.
 
 ### Changed
 
+- The gate runs the self-test for its own version check. `lint-versions.sh` is
+  the check that every record of a linter pin -- the Makefile, both manifests,
+  the compiled lock and `ruff.toml` -- names one version, and it is a set of
+  refusals, which is what rots: the change that dropped its interpreter-floor
+  check left every other one passing, so the gate said the same thing about a
+  tree it should have refused. Its self-test asks, by perturbing each input and
+  requiring a refusal, and nothing in the tree ran it. It is out of `lint` on
+  the reasoning that it writes to files the gate reads, which it does not: each
+  is copied before it is touched and restored after every case, on the exit
+  path and on an interrupt too, and a run leaves the tree byte-identical. It
+  costs under two seconds, and `check-refs` already runs its self-test from
+  `lint` for the same reason.
+
+- shellcheck now also reads for a negated condition. `avoid-negated-conditions`
+  was listed among the checks deliberately left off, on the reasoning that the
+  tree spells the readable shape; both the twenty-two scripts and the `run:`
+  bodies the workflow checker extracts pass it, so it was never a cost, and
+  what it catches is a condition whose meaning at the branch under it is the
+  opposite of what it reads as. The three checks still off are off for the
+  reasons they name rather than because the tree would fail them.
+
 - The gate reads the workflows for what they mean to the runner, not only for
   how they are spelled. `lint-actions.sh` asked of every external `uses:` that
   it was pinned to a full commit sha, and now asks the six things a wrong value
