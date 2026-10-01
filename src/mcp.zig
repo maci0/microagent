@@ -1486,17 +1486,6 @@ pub fn validName(name: []const u8) bool {
     return true;
 }
 
-/// Whether a tool table already holds `name`, which is what makes a second
-/// `tools/list` entry under a name already on the table the same tool. The
-/// scan is linear because a server's table is the length of its answer, and
-/// the table is built once per connection.
-fn indexOfToolName(table: []const Tool, name: []const u8) ?usize {
-    for (table, 0..) |tool, i| {
-        if (std.mem.eql(u8, tool.name, name)) return i;
-    }
-    return null;
-}
-
 // Parallel handshakes share the caller's run allocator, which may be an
 // ArenaAllocator. Lock its operations, not the network round trips. This
 // adapter lives until every handshake joins; retained servers then use the
