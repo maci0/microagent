@@ -720,7 +720,7 @@ them off ([tool set](#tool-set)).
 | --- | --- |
 | `bash` | `/bin/sh -c`, 120 s default timeout (the model may ask for up to 600 s), output capped at 24 KB. A command naming a credentials file or matching the command filter is refused, and the child inherits no provider credential. |
 | `read` | read a file, with optional line offset and limit. Refuses credentials (`.env`, key and keystore files, anything under `.secrets` or `.ssh`), including a symlink to one, and refuses `/proc/*/environ` and `/proc/*/cmdline`. |
-| `write` | create or overwrite a file, creating parents. Refuses a credentials path, a path outside sandbox roots when enabled, and a call with no `content`. |
+| `write` | create or overwrite a file, creating parents. Refuses a credentials path, a path outside sandbox roots when enabled, a call with no `content`, and `content` past the 64 MB ceiling `edit` holds the file it leaves behind to. |
 | `edit` | exact string replacement. Refuses a credentials path, a path outside sandbox roots when enabled, an ambiguous match unless `replace_all`, and an edit that would leave `old_string` matchable in the result, so a repeated call cannot apply the change twice. |
 | `multi_edit` | a list of `{path, old_string, new_string, replace_all}` replacements, in one file or across files, applied in order on the text the earlier ones left. Every edit is judged as `edit` judges it, and no file is written unless all are accepted, so a refusal names the edit and changes nothing; up to 64 edits per call. A file written part way says how many files had already landed. |
 | `search` | `rg --line-number --no-heading`, optional glob; credentials files excluded. |

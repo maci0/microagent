@@ -673,10 +673,26 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
     var got: Partial = .{ .stdout = &.{}, .stderr = &.{}, .dropped = .{ false, false } };
     var res = runCapped(io, arena, argv, max_tool_output * capture_limit_factor, net.durationMs(boundedMs(tool_timeout_ms, ceiling_ms)), environ_map, &got) catch |err|
         return failedOutput(arena, got, try missingProgram(arena, try std.fmt.allocPrint(arena, "git {s}", .{cmd}), git_install, err));
-    if (std.mem.eql(u8, cmd, "blame")) res.stdout = try redactBlameNames(arena, res.stdout);
+    if (std.mem.eql(u8, cmd, "blame")) res.stdout = try blameOutput(arena, res.stdout, limit);
     const text = if (res.stdout.len > 0) res.stdout else res.stderr;
     if (text.len == 0) return gitRanNothing(arena, cmd, res, limit);
     return gitResult(arena, res, limit);
+}
+
+/// What a `blame` gives the model: the first `limit` lines, then the name cut
+/// out of each of them.
+///
+/// The cap is taken here rather than left to `gitResult`, which applies it to
+/// the text it is handed: a blame of a generated file or a vendored tree is tens
+/// of thousands of lines, so the `limit` the schema advertises was honoured for
+/// every other subcommand and dropped for this one, and the whole history of
+/// the file was charged for again on each of the turns that re-sends the
+/// conversation. Cutting first also bounds the redaction walk. `firstLines` is
+/// the same cut `gitResult` makes and spells the same note, so a capped blame
+/// is not a different shape from a capped log.
+fn blameOutput(arena: std.mem.Allocator, stdout: []const u8, limit: usize) ![]u8 {
+    const capped = try firstLines(arena, stdout, limit);
+    return redactBlameNames(arena, capped);
 }
 
 /// The fixed-width fields git prints between a blame line's name and its line
@@ -2225,6 +2241,17 @@ fn toolWrite(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, writabl
     // so, as `"content": ""`.
     const content = chat.str(args.get("content")) orelse
         return "error: missing content";
+    // The ceiling `edit` holds the file it leaves behind to, and the same one,
+    // because a `write` replaces the file whole and is otherwise the one tool
+    // with no bound at all on what the model asks it to put on disk. Both
+    // factors `edit` names are the model's: here there is one, and it is the
+    // whole of the argument. A response is capped at `max_response_bytes` and
+    // `max_tokens` bounds generation, so a runaway write is a provider that
+    // ignored both, and the cost is then the operator's disk rather than the
+    // run's token ceiling. Refused with the size and the way out, the way
+    // `applyEdit` refuses a replacement that would grow the file.
+    if (content.len > max_edited_bytes)
+        return std.fmt.allocPrint(arena, "error: content is {d} bytes, over the {d}-byte limit; write it in pieces, or use `bash` if the file is a generated artifact", .{ content.len, max_edited_bytes });
     writeFileAtomic(io, std.Io.Dir.cwd(), path, content) catch |err|
         return writeFailed(arena, path, err);
     return std.fmt.allocPrint(arena, "wrote {d} bytes to {s}", .{ content.len, shownPath(arena, path) });
@@ -4157,6 +4184,48 @@ test "a write with no content is refused rather than emptying the file" {
     try std.testing.expectEqualStrings("", try tmp.dir.readFileAlloc(io, "a.txt", arena, .limited(64)));
 }
 
+test "a write over the ceiling is refused and leaves the file it named alone" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "keep me" });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &path_buf);
+    const path = try std.fmt.allocPrint(arena, "{s}/a.txt", .{path_buf[0..n]});
+
+    // One byte past the cap, so the bound is held to the exact edge rather than
+    // to a value far from it: a check written `<` rather than `<=` would pass
+    // this and refuse the write below.
+    var big_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer big_state.deinit();
+    const big = try big_state.allocator().alloc(u8, max_edited_bytes + 1);
+    @memset(big, 'x');
+
+    var args: std.json.ObjectMap = .empty;
+    try args.put(arena, "path", .{ .string = path });
+    try args.put(arena, "content", .{ .string = big });
+    const out = try toolWrite(io, arena, args, &.{});
+    try std.testing.expect(std.mem.startsWith(u8, out, "error: content is "));
+    try std.testing.expect(std.mem.indexOf(u8, out, "byte limit") != null);
+    // A refusal happens before anything is written, so the file a run cannot
+    // undo still holds what it held.
+    try std.testing.expectEqualStrings("keep me", try tmp.dir.readFileAlloc(io, "a.txt", arena, .limited(64)));
+
+    // Exactly at the cap is a write, not a refusal.
+    var at_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer at_state.deinit();
+    const at_cap = try at_state.allocator().alloc(u8, max_edited_bytes);
+    @memset(at_cap, 'y');
+    try args.put(arena, "content", .{ .string = at_cap });
+    try std.testing.expect(std.mem.startsWith(u8, try toolWrite(io, arena, args, &.{}), "wrote "));
+}
+
 test "a tool argument cannot repaint the operator's terminal" {
     var state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer state.deinit();
@@ -5604,6 +5673,35 @@ test "a blamed line does not carry the name of whoever wrote it" {
             return error.TestUnexpectedResult;
         }
     }
+}
+
+test "a blame is cut to the line limit the schema advertises" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Three lines of the shape git prints, and a limit of two. `toolGit` cuts a
+    // blame with `firstLines` before the redaction, so this is the pair it
+    // applies: a blame whose limit was dropped came back whole, and a blame of
+    // a vendored tree is the whole history of a file in one tool result.
+    const three =
+        "abc1234 (Rosa Fixture 2026-09-30 03:29:32 +0800 1) one\n" ++
+        "abc1234 (Rosa Fixture 2026-09-30 03:29:32 +0800 2) two\n" ++
+        "abc1234 (Rosa Fixture 2026-09-30 03:29:32 +0800 3) three\n";
+    const cut = try blameOutput(arena, three, 2);
+    try std.testing.expect(std.mem.indexOf(u8, cut, "two\n") != null);
+    // The third line is gone, and the note says so rather than letting a cut
+    // history read as the whole one.
+    try std.testing.expect(std.mem.indexOf(u8, cut, "three") == null);
+    try std.testing.expect(std.mem.indexOf(u8, cut, "truncated at 2 lines") != null);
+    // The names are still gone from what survived the cut.
+    try std.testing.expect(std.mem.indexOf(u8, cut, "Rosa Fixture") == null);
+
+    // A limit at or past what git printed is the whole thing, unmarked.
+    const whole = try blameOutput(arena, three, 3);
+    try std.testing.expect(std.mem.indexOf(u8, whole, "three") != null);
+    try std.testing.expect(std.mem.indexOf(u8, whole, "truncated") == null);
 }
 
 // The `YYYY-MM-DD` git printed on the first line it gave, which the cut has to

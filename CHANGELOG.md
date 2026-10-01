@@ -41,6 +41,15 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- `git blame` honours the `limit` the tool schema advertises. Every other
+  subcommand's line cap was applied by `gitResult` and this one was not: the
+  redaction pass sat where the cut would have gone, so a blame of a generated
+  file or a vendored tree came back whole, charged for every line on each of
+  the turns that re-sends the conversation. The cut is now the same
+  `firstLines` the other subcommands get, taken before the redaction so the
+  walk is bounded too, and a cut blame carries the same "truncated at N lines"
+  marker a capped log does.
+
 - Every HTTP request now carries `User-Agent: microagent/<version>`. The
   provider completions call and a remote MCP server were left to the client
   library's default, which names the toolchain the binary was built with
@@ -147,6 +156,15 @@ release, and `microagent update` moves you to it.
   leaving the descendant process this exists to reap alive.
 
 ### Security
+
+- `write` holds its `content` to the same 64 MB ceiling `edit` and
+  `multi_edit` hold the file they leave behind to. Neither arguments tool
+  bounded what it wrote, so a `write` was the one call in the set with no cap
+  at all on a payload the model chose: the bytes arrived off a provider
+  response, were written to the operator's disk whole, and `max_tokens` bounds
+  generation rather than what a provider sends. A run over a model that ignores
+  its own limit could fill a volume, and the refusal names the size and the way
+  out rather than reporting an error the model cannot act on.
 
 - The `git` tool's credential exclusions reach a credential at any path depth. A
   git pathspec holding neither a `/` nor a wildcard is anchored at the
