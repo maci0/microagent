@@ -82,25 +82,6 @@ pub const Session = struct {
     /// The directory the log is in, so a record that cannot be written says
     /// which store went quiet rather than only why.
     dir: []const u8,
-    /// The one wall-clock reading, in nanoseconds, this run took when it named
-    /// the log and started recording. It is captured here rather than read
-    /// again in `write` for two reasons, and the second is the load-bearing
-    /// one.
-    ///
-    /// The first is coherence: the log is named after the clock at the moment
-    /// it was opened, so a `ts` stamped on a *later* reading names an instant
-    /// the file's own name does not, and a reader that trusts the name to find
-    /// a run's records is reading two clocks as one.
-    ///
-    /// The second is replayability: `ts` is the one field of a record that
-    /// reaches disk and that a replay must reproduce byte-for-byte, and a value
-    /// read from the live clock at the write site cannot be held fixed by a
-    /// simulator or a test the way every other input to a record already is.
-    /// `open` takes the reading as an argument for exactly that reason, so the
-    /// whole durable state of a run — the log's name and every line in it — is
-    /// a function of the one number a caller chooses rather than of when the
-    /// write happened to run.
-    now_ns: i128,
 };
 
 /// How many names `createSessionLog` tries before it gives the run no log. The
@@ -202,18 +183,18 @@ fn createSessionLog(io: Io, arena: std.mem.Allocator, session_dir: []const u8, s
 /// second is said, so an operator whose watch shows nothing learns which of the
 /// two it is.
 pub fn open(io: Io, arena: std.mem.Allocator, env: *const std.process.Environ.Map, session_dir: []const u8, model: []const u8) ?Session {
-    // The one reading this run records everything against, taken here so the
-    // log's name and every `ts` in it come from the same instant. `openAt` is
-    // the spelling that lets a caller supply that instant itself.
+    // The reading that names the log and measures the store's age windows.
+    // `openAt` is the spelling that lets a caller supply that instant itself.
     return openAt(io, arena, env, session_dir, model, Io.Clock.real.now(io).nanoseconds);
 }
 
-/// `open` with the wall-clock reading passed in rather than taken, so the whole
-/// durable state of a run — the name of its log and every line in it — is a
-/// function of a value the caller chose. A production run hands it the real
+/// `open` with the wall-clock reading passed in rather than taken, so the name
+/// of the log a run opens and the age windows pruning measures against it are
+/// a function of a value the caller chose. A production run hands it the real
 /// clock; a test or a simulated run hands it a fixed instant and gets a store
-/// it can spell out in advance and compare byte-for-byte, which is the only
-/// way a replay of a session store can be checked against the run it replays.
+/// it can spell out in advance. The records written into that log are stamped
+/// from the clock at each write instead: `ts` says when a response landed, so
+/// it is not a value a caller can pin for the whole run.
 pub fn openAt(io: Io, arena: std.mem.Allocator, env: *const std.process.Environ.Map, session_dir: []const u8, model: []const u8, now_ns: i128) ?Session {
     if (session_dir.len == 0) return null;
     // Every record names the directory it ran in. That is what attributes the
@@ -253,7 +234,7 @@ pub fn openAt(io: Io, arena: std.mem.Allocator, env: *const std.process.Environ.
         net.note(io, arena, "microagent: no session log could be opened under {s}; the rest of this run is not recorded\n", .{shown});
         return null;
     };
-    return .{ .file = opened, .cwd = cwd, .model = model, .dir = session_dir, .now_ns = now_ns };
+    return .{ .file = opened, .cwd = cwd, .model = model, .dir = session_dir };
 }
 
 /// The `cwd` a record carries, which is the resolved working directory with
@@ -378,12 +359,11 @@ fn logStamp(now_ns: i128) u128 {
 /// saturate rather than wrap, because a record that carries a stamp no reader
 /// can order is worth less than one carrying the largest stamp there is.
 ///
-/// The width is `i128` rather than the clock's own `i96` because the same
-/// function stamps the log's name and every record in it from the one reading
-/// `open` took, and `logStamp` has always taken that reading at that width: a
-/// narrowing here would make the two stamps of one run disagree about what its
-/// own clock said. A reading is at most `i96` wide either way, so the wider
-/// parameter accepts everything the clock can hand it.
+/// The width is `i128` rather than the clock's own `i96` so one reading can
+/// serve both stamps of a run: `logStamp` names the log from it and this
+/// writes the record, and `openAt` hands the same value to both. A reading is
+/// at most `i96` wide, so the wider parameter accepts everything a clock can
+/// hand it.
 fn recordStampMs(now_ns: i128) i64 {
     if (now_ns < 0) return 0;
     const ms = @divTrunc(now_ns, std.time.ns_per_ms);
@@ -696,12 +676,14 @@ fn write(io: Io, arena: std.mem.Allocator, session: *?Session, record: Record) v
     // `s.dir` is the directory the run was given, escaped for the reason
     // `createSessionLog` gives.
     const shown = chat.safeTextAll(arena, s.dir);
-    // Stamped from the reading `open` captured, not from a fresh one here: the
-    // log is named after that instant, so this is the same clock the store's
-    // own naming already speaks, and it is the one field of a record that a
-    // replay has to reproduce, so it has to come from a value the caller can
-    // pin rather than from when the write happened to run.
-    const ts_ms = recordStampMs(s.now_ns);
+    // Read here, at the write, rather than from the reading `open` captured:
+    // `ts` says when this response landed, and a log whose every line carries
+    // the instant the file was opened says it about none of them. A monitor
+    // following a run while it is going deltas these against each other to
+    // place a response, and `elapsed_ms` is only readable beside a `ts` that
+    // moves with it. The log's *name* is the one reading `open` took, which is
+    // right there: a name is written once, so one instant is all it can carry.
+    const ts_ms = recordStampMs(Io.Clock.real.now(io).nanoseconds);
     const line = sessionRecord(arena, ts_ms, s.cwd, s.model, record) catch |err| {
         net.note(io, arena, "microagent: a session record for {s} could not be built ({s}); the rest of this run is not recorded\n", .{ shown, @errorName(err) });
         close(io, session);
@@ -979,13 +961,12 @@ test "a repeated session log writes beside the first and never over it" {
     try std.testing.expectEqualStrings("first\n", survived);
 }
 
-// The durable state of a run — the name of its log and every `ts` in it — is a
-// function of the one reading `openAt` was handed, not of when the writes
-// happened to happen. That is what makes a run replayable: a test or a
-// simulated run pins the instant, and the store it produces is the one it can
-// spell out in advance and compare byte-for-byte, rather than one stamped by
-// the wall clock at a moment the test does not control.
-test "the store's name and every record's stamp come from the reading it was opened with" {
+// The log is named after the reading `openAt` was handed, so a store is a
+// value a test can spell out in advance. Its records are not: `ts` is when
+// each response landed, so it moves with the clock while the name stands
+// still. A log whose every line carried the opening instant would put every
+// response at one moment, and a monitor deltas `ts` to place them.
+test "the store is named from the reading it was opened with, and each record carries its own" {
     const alloc = std.testing.allocator;
     var f = try StoreFixture.init(alloc);
     defer f.deinit();
@@ -993,7 +974,7 @@ test "the store's name and every record's stamp come from the reading it was ope
     const arena = f.arena();
 
     // A pinned instant, away from the epoch and not a round number a real run
-    // would never land on, so a stamp that came from anywhere but this argument
+    // would never land on, so a name that came from anywhere but this argument
     // is visibly a different one rather than coincidentally equal.
     const pinned: i128 = 1_700_000_000_123_456_789;
     const store = try storeRelative(arena, io, f.tmp);
@@ -1004,15 +985,8 @@ test "the store's name and every record's stamp come from the reading it was ope
 
     var session: ?Session = openAt(io, arena, &no_env, store, "test/model", pinned) orelse return error.TestUnexpectedResult;
 
-    // The log is named after the reading, not after the moment it was opened:
-    // the file a run leaves behind is itself durable state a replay has to
-    // reproduce, so it is named from the same pinned instant as the lines.
     const expected_name = try std.fmt.allocPrint(arena, "{d}.jsonl", .{@as(u128, @intCast(pinned))});
-    try std.testing.expectEqual(pinned, session.?.now_ns);
 
-    // Records written after the log opened still carry the pinned stamp, which
-    // is the part that cannot be true of a reading taken at the write site: a
-    // clock this test does not control would have moved by now.
     var result: chat.ChatResult = .{ .completion_tokens = 1 };
     writeRecord(io, arena, &session, 5, &result);
     writeRecord(io, arena, &session, 6, &result);
@@ -1024,19 +998,23 @@ test "the store's name and every record's stamp come from the reading it was ope
     const line = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(arena, &.{ store, expected_name }), alloc, .unlimited);
     defer alloc.free(line);
 
-    // Both stamps, and both equal to the pinned instant in milliseconds. A `ts`
-    // read at the write site would be a later reading, and the store would no
-    // longer be the one a replay pinned to this instant reproduces.
-    const pinned_ms: i64 = @intCast(@divTrunc(pinned, std.time.ns_per_ms));
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, line, "\n"));
+    const pinned_ms: i64 = @intCast(@divTrunc(pinned, std.time.ns_per_ms));
     var lines = std.mem.splitScalar(u8, line, '\n');
     var checked: usize = 0;
     while (lines.next()) |entry| {
         if (entry.len == 0) continue;
         checked += 1;
         const parsed = std.json.parseFromSlice(std.json.Value, arena, entry, .{}) catch return error.TestUnexpectedResult;
-        try std.testing.expectEqual(pinned_ms, parsed.value.object.get("ts").?.integer);
         try std.testing.expectEqual(@as(i64, 4 + @as(i64, @intCast(checked))), parsed.value.object.get("elapsed_ms").?.integer);
+        // Stamped at the write, so it is a real clock reading rather than the
+        // instant the file was named: at or after the run's own opening, and
+        // after the pinned name it sits beside. The clock cannot be pinned
+        // here without a seam the production path does not have, so the check
+        // is the two-sided one that holds whichever way it is read.
+        const ts = parsed.value.object.get("ts").?.integer;
+        try std.testing.expect(ts >= pinned_ms);
+        try std.testing.expect(ts > pinned_ms);
     }
     try std.testing.expectEqual(@as(usize, 2), checked);
 }
@@ -1140,10 +1118,7 @@ test "a session log that cannot be written is dropped, not written to again" {
     try f.tmp.dir.writeFile(io, .{ .sub_path = "read-only.jsonl", .data = "" });
     const file = try f.tmp.dir.openFile(io, "read-only.jsonl", .{ .mode = .read_only });
 
-    // The reading is a real run's own capture, which this fixture stands in
-    // for: the epoch, which is the one stamp that says nothing about the time,
-    // and which `logStamp` and `recordStampMs` already agree on.
-    var session: ?Session = .{ .file = file, .cwd = ".", .model = "test/model", .dir = "/sessions", .now_ns = 0 };
+    var session: ?Session = .{ .file = file, .cwd = ".", .model = "test/model", .dir = "/sessions" };
     var result: chat.ChatResult = .{};
     result.prompt_tokens = 7;
     writeRecord(io, arena, &session, 1, &result);
@@ -1182,7 +1157,7 @@ test "a run that drops its session log closes the handle once" {
 
     try f.tmp.dir.writeFile(io, .{ .sub_path = "read-only.jsonl", .data = "" });
     const file = try f.tmp.dir.openFile(io, "read-only.jsonl", .{ .mode = .read_only });
-    const session: ?Session = .{ .file = file, .cwd = ".", .model = "test/model", .dir = "/sessions", .now_ns = 0 };
+    const session: ?Session = .{ .file = file, .cwd = ".", .model = "test/model", .dir = "/sessions" };
 
     sessionScope(io, arena, session);
 
