@@ -150,6 +150,23 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- A capped string no longer ends on a bare emoji continuation. The cut kept a
+  UTF-8 boundary and the combining marks that attach to the character before
+  them, and nothing else, so a cut landing on a joiner, a variation selector, a
+  skin tone, a regional indicator, a tag character or a keycap mark kept a base
+  with the character that gives it its meaning stripped off: the model was
+  shown a family that had silently lost a child, a thumb that had lost its
+  tone, and a flag that was one half of itself. Every caller of the cut is
+  affected -- a tool result, a subprocess's two streams, an MCP reply, a
+  streamed response and a prompt built from an operator's own text -- because
+  they all go through the same clamp, and all of them put the result in a JSON
+  request body the provider parses. The cut now steps back over a run of
+  these as well and keeps the last whole base instead, so what the model reads
+  is text that renders as what it says rather than text with the picture
+  missing. The values themselves are unchanged where the cut did not land on
+  one: a string that already fit is returned as it was, and a cut that lands on
+  a base is still that base.
+
 - The interpreter floor is now held across all four places it is recorded, not
   three. `lint-versions` checked `ruff.toml`'s `target-version` against the
   `--python-version` each of the two manifests compiles its lock for, and left
