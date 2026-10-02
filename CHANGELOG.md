@@ -19,6 +19,20 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+### Fixed
+
+- Read a compressed answer from a remote HTTP MCP server. The client sends
+  `accept-encoding: gzip, deflate` and now reads a body its own `Content-Encoding`
+  header names, for a frame and for a refusal alike, rather than passing the
+  compressed bytes to the JSON parser. A `tools/list` catalog is the answer that
+  benefits most; the 4 MB response ceiling and the 256-level nesting guard
+  already count decoded bytes, so neither is widened by this.
+
+- `microagent update` spends the `Retry-After` a refusal names, where the agent
+  run already did. The wait is capped at 30 s, this command's own backoff cap, so
+  a person watching the command is not left waiting on a run that has given up on
+  their side. A refusal that names no wait keeps the previous backoff.
+
 ## [0.15.0] - 2026-10-02
 
 ### Added

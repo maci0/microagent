@@ -1082,6 +1082,11 @@ is never executed there. The download is checked
 against its sidecar, and the running binary is replaced atomically (following a symlink to the real
 file) only when the digest matches. A mismatch, a missing asset, or a release page that is not a
 GitHub https URL leaves the binary untouched. `GITHUB_TOKEN` lifts the anonymous API rate limit.
+A download that fails the way a later one could answer differently is tried again up to three times:
+a `408`, `409`, `425`, `429`, any `5xx`, or a connection that dies before the answer. A refusal
+that names a `Retry-After` is waited out for exactly the wait it names, capped at 30 s so a person
+watching the command is not left staring at a run that has given up on their side; a refusal that
+names none falls back to the same capped backoff the agent run uses.
 Exit 1 means the check or the install failed, 2 is a usage error; `microagent update --help`, or
 `microagent help update`, has the rest.
 

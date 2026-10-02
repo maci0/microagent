@@ -306,6 +306,19 @@ fn isRateLimited(body: []const u8) bool {
 /// still there.
 const max_attempts: u32 = 3;
 const max_backoff_ms: u64 = 30_000;
+/// The most head this path keeps from a response. A release page answers in a
+/// few kilobytes, and the part of a head a decision reads is the status line
+/// and the handful of headers beside it, so this is a ceiling rather than a
+/// budget: a head that does not fit is cut, and `net.retryAfterMs` still reads
+/// the status line and what follows it.
+const max_head_bytes: usize = 16 * 1024;
+/// The redirects one download is allowed to follow, which is the allowance
+/// `std.http.Client.fetch` gives a request that does not name another. An
+/// asset is answered by a `302` to the release CDN, so this is a requirement
+/// of the download rather than a choice about it; the key travels in a
+/// privileged header, which the client drops when a redirect names another
+/// host.
+const default_redirects: u16 = 3;
 
 /// The shortest a download may take, and the rate a body has to arrive at for
 /// the clock to be consulted at all.
@@ -336,8 +349,24 @@ fn fetchTimeoutMs(limit: usize) u64 {
 
 /// What one attempt made of a download: the body, or null with whether another
 /// attempt could answer differently. Every failure has already been said by
-/// the time this returns, so the loop above only decides and waits.
-const Outcome = struct { body: ?[]u8, retry: bool };
+/// the time this returns, so the loop above only decides and waits. A refusal
+/// that carries a `Retry-After` names the wait it wants, and the loop spends
+/// that wait in place of its own: the header is there to stop a caller asking
+/// again while the server is still refusing, and the release API spells a rate
+/// limit that way more than any other.
+const Outcome = struct { body: ?[]u8, retry: bool, wait_ms: ?u64 = null };
+
+/// The wait before the next attempt: the one the server named, or the shared
+/// schedule's. The reader in `net` bounds a header at the run's longer
+/// ceiling, and this path's own cap is shorter than that because nobody is
+/// waiting on a turn here: a person watching `microagent update` is asked
+/// again while they are still there. The cap applies either way, since a
+/// refusal that outlives the process is a refusal the operator restarts, and
+/// the schedule is only ever the fallback for a refusal that named no wait.
+fn waitMs(attempt: u32, asked: ?u64) u64 {
+    const wait = asked orelse return net.retryBackoffMs(attempt, max_backoff_ms);
+    return @min(wait, max_backoff_ms);
+}
 
 /// One GET of `url`, body capped at `limit`, owned by `allocator`. The attempt
 /// loop: a download whose failure is the network's rather than the request's
@@ -359,7 +388,7 @@ fn fetch(
         const outcome = fetchOnce(io, client, allocator, what, url, bearer, limit);
         if (outcome.body) |body| return body;
         if (!outcome.retry or attempt >= max_attempts) return null;
-        const wait = net.retryBackoffMs(attempt, max_backoff_ms);
+        const wait = waitMs(attempt, outcome.wait_ms);
         say(io, "could not download {s}, trying again in {d}ms (attempt {d}/{d})", .{
             what, wait, attempt + 1, max_attempts,
         });
@@ -403,11 +432,17 @@ fn fetchOnce(
         answered: anyerror!std.http.Client.FetchResult,
         expired: std.Io.Cancelable!void,
     };
+    // The head is kept whole rather than a `Retry-After` read out of it, so
+    // the reader is the one in `net` rather than a second spelling of it. A
+    // head past this is cut: the answer stops being text a reader can be
+    // trusted with, and the status is what the decision turns on.
+    var head: [max_head_bytes]u8 = undefined;
+    var head_len: usize = 0;
     var slots: [2]Timed = undefined;
     var select: std.Io.Select(Timed) = .init(io, &slots);
     defer select.cancelDiscard();
     const timeout_ms = fetchTimeoutMs(limit);
-    select.concurrent(.answered, exchange, .{ client, &capped, url, bearer }) catch |err| return giveUp(io, what, err);
+    select.concurrent(.answered, exchange, .{ client, &capped, &head, &head_len, url, bearer }) catch |err| return giveUp(io, what, err);
     select.concurrent(.expired, std.Io.Timeout.sleep, .{ net.durationMs(timeout_ms), io }) catch |err| return giveUp(io, what, err);
     const answer = select.await() catch |err| return giveUp(io, what, err);
     switch (answer) {
@@ -419,7 +454,16 @@ fn fetchOnce(
             };
             if (@intFromEnum(received.status) >= 400) {
                 _ = fail(io, "GitHub returned HTTP {d} for {s}{s}", .{ @intFromEnum(received.status), what, statusHint(received.status, capped.body.written()) });
-                return .{ .body = null, .retry = net.retryableStatus(received.status) };
+                return .{
+                    .body = null,
+                    .retry = net.retryableStatus(received.status),
+                    // The wait a rate limit names, read against this machine's
+                    // own clock: the agent run spends the same header this way,
+                    // and an update that ignored it would be the one caller of
+                    // the release API that keeps asking inside the window it
+                    // was told to stay out of.
+                    .wait_ms = net.retryAfterMs(head[0..head_len], net.nowSeconds(io)),
+                };
             }
         },
         .expired => {
@@ -436,6 +480,8 @@ fn fetchOnce(
 fn exchange(
     client: *std.http.Client,
     capped: *Capped,
+    head: *[max_head_bytes]u8,
+    head_len: *usize,
     url: []const u8,
     bearer: ?[]const u8,
 ) anyerror!std.http.Client.FetchResult {
@@ -444,12 +490,34 @@ fn exchange(
         auth[0] = .{ .name = "Authorization", .value = b };
         break :blk &auth;
     } else &.{};
-    return client.fetch(.{
-        .location = .{ .url = url },
+    // The request is opened here rather than through `Client.fetch`, which was
+    // the whole of this function until the retry policy wanted the response
+    // head: `fetch` hands back the status and not the head, and a
+    // `Retry-After` is header. A caller that has to ask for a second time what
+    // the first answer already said cannot read a rate limit. Redirects are
+    // followed with the same allowance `fetch` gave them, because an asset
+    // download is answered by a `302` to the release CDN; the key is a
+    // privileged header, so it is not replayed to whatever host that names.
+    var request = try client.request(.GET, try std.Uri.parse(url), .{
+        .redirect_behavior = @enumFromInt(default_redirects),
         .headers = .{ .user_agent = .{ .override = net.user_agent } },
         .privileged_headers = auth_headers,
-        .response_writer = &capped.writer,
     });
+    defer request.deinit();
+    var redirect_buffer: [8 * 1024]u8 = undefined;
+    var response = try request.receiveHead(&redirect_buffer);
+    head_len.* = @intCast(@min(response.head.bytes.len, head.len));
+    @memcpy(head[0..head_len.*], response.head.bytes[0..head_len.*]);
+
+    var transfer: [64 * 1024]u8 = undefined;
+    var decompress: std.http.Decompress = undefined;
+    var decompress_buffer: [std.compress.flate.max_window_len]u8 = undefined;
+    const reader = response.readerDecompressing(&transfer, &decompress, &decompress_buffer);
+    _ = reader.streamRemaining(&capped.writer) catch |err| switch (err) {
+        error.ReadFailed => return response.bodyErr().?,
+        else => |e| return e,
+    };
+    return .{ .status = response.head.status };
 }
 
 /// Replaces the file at `exe` with `bytes`, mode 0755, through an atomic
@@ -1218,6 +1286,17 @@ test "update: only the releases API carries the GitHub token" {
     try std.testing.expect(bearerFor("https://user@api.github.com/repos/o/r", bearer) == null);
     try std.testing.expect(bearerFor("https://api.github.com", bearer) == null);
     try std.testing.expect(bearerFor(release_api_url, null) == null);
+
+    // The download is answered by a redirect: GitHub hands an asset a `302` to
+    // the release CDN, so a path that stopped following one stopped updating.
+    // The allowance is the one `std.http.Client.fetch` gives a request that
+    // names none, pinned here because `exchange` now opens the request itself
+    // and could name any number without this failing. The key rides in a
+    // privileged header, which the client drops when the redirect names another
+    // host, so following one does not replay `GITHUB_TOKEN` to the CDN.
+    try std.testing.expectEqual(@as(u16, 3), default_redirects);
+    try std.testing.expect(bearerFor("https://release-assets.githubusercontent.com/x", "Bearer t") == null);
+    try std.testing.expect(bearerFor(release_api_url, "Bearer t") != null);
 }
 
 // The second half of the same trust chain, and the one that costs a secret
@@ -1477,6 +1556,29 @@ test "update: a retried download waits on the shared backoff under its own cap" 
     // The cap is this path's and not the run's, which is what `net` says the
     // two waits are not the same promise about.
     try std.testing.expect(max_backoff_ms < 60_000);
+}
+
+// A refusal that names its own wait is spent as it was named, and the only
+// thing this path's cap changes is how long a person is left watching. This is
+// the agent run's rule applied to the one caller that had none: the release
+// API spells a rate limit as a `Retry-After` far more often than anything else
+// does, and a caller that ignores it is the one asking again inside the window
+// it was told to stay out of.
+test "update: a refusal that names a wait is spent on that wait" {
+    const head = "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 7\r\nContent-Length: 0\r\n\r\n";
+    const asked = net.retryAfterMs(head, net.nowSeconds(std.testing.io));
+    try std.testing.expectEqual(@as(?u64, 7000), asked);
+    try std.testing.expectEqual(@as(u64, 7000), waitMs(1, asked));
+    // A header past this path's patience is the cap, not the run's ceiling,
+    // because a person watching this command is asked again while they are
+    // still there.
+    const long = "HTTP/1.1 429 Too Many Requests\r\nretry-after: 99999999999\r\n\r\n";
+    try std.testing.expectEqual(max_backoff_ms, waitMs(1, net.retryAfterMs(long, net.nowSeconds(std.testing.io))));
+    // A refusal that names no wait keeps the shared schedule, which is what
+    // the two waits above already answer for.
+    try std.testing.expectEqual(@as(?u64, null), net.retryAfterMs("HTTP/1.1 503 Service Unavailable\r\n\r\n", 0));
+    try std.testing.expectEqual(@as(u64, 1000), waitMs(1, null));
+    try std.testing.expectEqual(@as(u64, 2000), waitMs(2, null));
 }
 
 // Which failures another attempt could answer differently, and which could not.

@@ -92,6 +92,12 @@ const exposed_name_separator_bytes: usize = 2;
 /// The longest server description kept. A description is what the model picks
 /// a tool by, and every later turn pays for it.
 const max_mcp_description_bytes: usize = 1024;
+/// The window one compressed answer is inflated through. A server is asked
+/// for `gzip` and `deflate` on every request, so the window is a stack frame
+/// rather than something off the call's arena: an allocation failure is the
+/// one wrong answer to a frame the server did send, and the buffer is the one
+/// size that decides it.
+const decompress_window_bytes: usize = std.compress.flate.max_window_len;
 /// The most bytes one tool's `inputSchema` contributes to the request. A
 /// description is bounded because it is a sentence; a schema is whatever the
 /// server chose to serialize, and a server that embeds a large `description`,
@@ -553,9 +559,7 @@ pub const Server = struct {
             // A redirect is an error rather than a second request: this
             // request may carry a key, and the answer to it is not a page.
             .redirect_behavior = .unhandled,
-            // A body cannot be inflated without a window buffer, and a
-            // JSON-RPC answer is small text: ask for it as it is.
-            .headers = .{ .accept_encoding = .omit, .user_agent = .{ .override = net.user_agent } },
+            .headers = .{ .user_agent = .{ .override = net.user_agent } },
             .extra_headers = extra[0..extra_len],
         });
         defer req.deinit();
@@ -566,6 +570,8 @@ pub const Server = struct {
         var response = try req.receiveHead(&no_redirect);
 
         var error_transfer: [http_transfer_bytes]u8 = undefined;
+        var error_decompress: std.http.Decompress = undefined;
+        var error_decompress_buffer: [decompress_window_bytes]u8 = undefined;
         const status = response.head.status;
         // Only the refusing classes are refusals. A `202` to a request is the
         // transport saying it has accepted the request and will answer it out
@@ -573,7 +579,7 @@ pub const Server = struct {
         // treating it as a fault refuses a call the server did answer. A `1xx`
         // is answered by the client itself and never reaches here.
         if (status.class() != .success) {
-            try self.noteRefusal(scratch, response.reader(&error_transfer), status);
+            try self.noteRefusal(scratch, response.readerDecompressing(&error_transfer, &error_decompress, &error_decompress_buffer), status);
             connection.closing = true;
             return error.HttpStatus;
         }
@@ -597,7 +603,17 @@ pub const Server = struct {
         }
 
         var transfer: [http_transfer_bytes]u8 = undefined;
-        const reader = response.reader(&transfer);
+        var decompress: std.http.Decompress = undefined;
+        var decompress_buffer: [decompress_window_bytes]u8 = undefined;
+        // Every answer goes through the decompressing reader, so the one form
+        // an answer takes that this client cannot read never reaches a parser:
+        // a server that deflates a frame says the same thing the plain one
+        // does, and reading it as the encoding its own header names is not a
+        // change to the protocol. The window is paid for on every request this
+        // client makes, this one included, and the request is not compressed in
+        // return: a request is a small JSON object, and a window on the wire
+        // is bytes the server inflates on every single one.
+        const reader = response.readerDecompressing(&transfer, &decompress, &decompress_buffer);
         var stopped_early = false;
         defer connection.closing = connection.closing or stopped_early;
         return try self.readAnswer(scratch, reader, is_sse, want, &stopped_early);
@@ -3553,6 +3569,10 @@ const FakeMcp = struct {
         /// server reports a bad request while the status is also a refusal.
         call_error_status,
         call_deep_refusal,
+        /// A call and a refusal whose bodies are deflated, which is a legal
+        /// answer this client used to refuse to read.
+        call_compressed,
+        call_error_status_compressed,
     };
 
     const init_frame = "{\"result\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"fake\",\"version\":\"1\"}},\"jsonrpc\":\"2.0\",\"id\":1}";
@@ -3706,9 +3726,34 @@ const FakeMcp = struct {
             .call_accepted => try self.reply(out, "202 Accepted", "Content-Type: application/json\r\n", call_frame),
             .call_error_status => try self.reply(out, "400 Bad Request", "Content-Type: application/json\r\n", "{\"jsonrpc\":\"2.0\",\"id\":3,\"error\":{\"code\":-32602,\"message\":\"bad args\"}}"),
             .call_deep_refusal => try self.reply(out, "400 Bad Request", "Content-Type: application/json\r\n", "{\"error\":" ++ ("[" ** 300) ++ "0" ++ ("]" ** 300) ++ "}"),
+            .call_compressed => try self.replyDeflated(out, "200 OK", "application/json", call_frame),
+            .call_error_status_compressed => try self.replyDeflated(out, "400 Bad Request", "application/json", "{\"jsonrpc\":\"2.0\",\"id\":3,\"error\":{\"code\":-32602,\"message\":\"bad args\"}}"),
             .unauthorized => unreachable,
         }
         return true;
+    }
+
+    /// A reply whose body is deflated on the way out, which is the same answer
+    /// the plain one carries. `deflate` is the spelling this client asks for
+    /// and the one `std.compress.flate` writes as zlib, so a header that says
+    /// `deflate` and a reader that inflate is a pair a server and this client
+    /// agree on.
+    fn replyDeflated(self: *FakeMcp, out: *std.ArrayList(u8), status: []const u8, content_type: []const u8, body: []const u8) !void {
+        var window: [std.compress.flate.max_window_len]u8 = undefined;
+        // The compressor writes in bursts, so the buffer it drains into is a
+        // fixed chunk rather than the appending writer the plain replies use.
+        var chunk: [1024]u8 = undefined;
+        var sink: Io.Writer.Allocating = .init(self.gpa);
+        defer sink.deinit();
+        var buffer: Io.Writer = .fixed(&chunk);
+        var deflate = try std.compress.flate.Compress.init(&buffer, &window, .zlib, .default);
+        try deflate.writer.writeAll(body);
+        try deflate.finish();
+        try buffer.flush();
+        try sink.writer.writeAll(chunk[0..buffer.end]);
+        const headers = try std.fmt.allocPrint(self.gpa, "Content-Type: {s}\r\nContent-Encoding: deflate\r\n", .{content_type});
+        defer self.gpa.free(headers);
+        try self.reply(out, status, headers, sink.written());
     }
 
     fn reply(self: *FakeMcp, out: *std.ArrayList(u8), status: []const u8, headers: []const u8, body: []const u8) !void {
@@ -4093,6 +4138,39 @@ test "a request answered 202 succeeds, and a refusal carries the server's reason
     const bad_call = bad_servers.resolve("mcp__bad__echo") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings(
         "error: MCP server bad refused mcp__bad__echo: bad args (code -32602) (HTTP 400)",
+        try Servers.call(io, arena, bad_call, "{}", net.durationMs(10_000)),
+    );
+}
+
+// A server is free to deflate a frame, and the request asks it to: the client
+// sends `accept-encoding: gzip, deflate` on every request, so an answer
+// arriving that way is the ordinary case rather than a surprise. The answer and
+// the refusal are read the same way the plain ones are, and the reason a
+// refusal carries is the server's own rather than a parse fault.
+test "a deflated answer and a deflated refusal are read like the plain ones" {
+    const gpa = std.testing.allocator;
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const arena = state.allocator();
+    const io = std.testing.io;
+    var client: std.http.Client = .{ .allocator = gpa, .io = io };
+    defer client.deinit();
+
+    const fake = try FakeMcp.start(gpa, io, .call_compressed);
+    defer fake.finish();
+    var servers = try connectFake(io, arena, &client, fake, .{ .name = "zip" });
+    defer servers.shutdown(io);
+    const call = servers.resolve("mcp__zip__echo") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("pong", try Servers.call(io, arena, call, "{}", net.durationMs(10_000)));
+    try std.testing.expect(std.ascii.indexOfIgnoreCase(fake.seen.items[3], "accept-encoding: gzip, deflate\r\n") != null);
+
+    const bad = try FakeMcp.start(gpa, io, .call_error_status_compressed);
+    defer bad.finish();
+    var bad_servers = try connectFake(io, arena, &client, bad, .{ .name = "zipped" });
+    defer bad_servers.shutdown(io);
+    const bad_call = bad_servers.resolve("mcp__zipped__echo") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(
+        "error: MCP server zipped refused mcp__zipped__echo: bad args (code -32602) (HTTP 400)",
         try Servers.call(io, arena, bad_call, "{}", net.durationMs(10_000)),
     );
 }
