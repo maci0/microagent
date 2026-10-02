@@ -19,6 +19,17 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+### Changed
+
+- The `bash` tool tells the model which shell it runs. The name is `bash` and
+  the shell has always been `/bin/sh -c`, so a model writing `[[ ]]`, arrays,
+  `local`, `$'...'` or process substitution saw a tool called `bash` and wrote
+  bash into a `sh`. The description sent on every run now says POSIX sh and
+  names the syntax that fails, and the tool table in docs/usage.md says it
+  too. Nothing about how a call is executed changed: a command that failed
+  before fails the same way, and the only thing that changes is what the model
+  is told before it writes one.
+
 ### Fixed
 
 - A `write`, `edit`, `multi_edit` or `microagent setup` that reports success now
