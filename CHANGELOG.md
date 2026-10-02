@@ -19,6 +19,8 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-10-02
+
 ### Added
 
 - A run that asks the same question over and over now stops instead of
@@ -3163,7 +3165,8 @@ First release.
   `aarch64-macos` with a checksum sidecar each, and refuses a tag that does not name the version in
   `build.zig.zon`.
 
-[Unreleased]: https://github.com/maci0/microagent/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/maci0/microagent/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/maci0/microagent/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/maci0/microagent/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/maci0/microagent/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/maci0/microagent/compare/v0.10.0...v0.10.1
