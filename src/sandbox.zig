@@ -164,7 +164,7 @@ fn trimTrailingSep(path: []const u8) []const u8 {
 pub fn isPathWritable(io: Io, arena: std.mem.Allocator, path: []const u8, writable_roots: []const []const u8) bool {
     if (writable_roots.len == 0) return true;
     if (std.mem.trim(u8, path, " \t\r\n").len == 0) return false;
-    const absolute = if (std.fs.path.isAbsolute(path)) path else std.fmt.allocPrint(arena, "{s}/{s}", .{ writable_roots[0], path }) catch return false;
+    const absolute = if (std.fs.path.isAbsolute(path)) path else std.fs.path.join(arena, &.{ writable_roots[0], path }) catch return false;
     const abs_path = std.fs.path.resolve(arena, &.{absolute}) catch return false;
     var name_buf: [std.fs.max_path_bytes]u8 = undefined;
     var cur_buf: [2 * std.fs.max_path_bytes]u8 = undefined;

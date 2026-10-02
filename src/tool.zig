@@ -2132,7 +2132,7 @@ fn credentialPath(io: Io, arena: std.mem.Allocator, path: []const u8) ?[]const u
     var next_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
     const absolute = if (std.fs.path.isAbsolute(path)) path else blk: {
         const cwd = std.Io.Dir.cwd().realPathFileAlloc(io, ".", arena) catch return path;
-        break :blk std.fmt.allocPrint(arena, "{s}/{s}", .{ cwd, path }) catch return path;
+        break :blk std.fs.path.join(arena, &.{ cwd, path }) catch return path;
     };
     const target = net.resolveEveryComponent(io, std.Io.Dir.cwd(), absolute, &name_buf, &cur_buf, &next_buf) catch return path;
     if (!isCredentialPath(target) and !isProcfsCredential(target)) return null;
