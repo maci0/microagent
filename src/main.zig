@@ -4127,10 +4127,16 @@ fn toolOutcomeLine(arena: std.mem.Allocator, name: []const u8, outcome: ToolOutc
             .failed => "FAILED",
             .not_run => "not run",
         },
-        chat_mod.safeText(arena, name, 40),
+        chat_mod.safeText(arena, name, tool_outcome_name_bytes),
         elapsed_ms,
     });
 }
+
+/// How much of a call's name reaches the gutter. A name is the provider's own
+/// text and a model can spell it as long as it likes, so it is cut. The bound
+/// is shared by the announcement and the outcome because those two lines are
+/// read as a pair and have to name the call the same way.
+const tool_outcome_name_bytes: usize = 40;
 
 /// The line itself, on stderr. An allocation that fails writes nothing, which
 /// is what every other diagnostic here does: this line reports a call, and the
@@ -4138,6 +4144,41 @@ fn toolOutcomeLine(arena: std.mem.Allocator, name: []const u8, outcome: ToolOutc
 fn noteToolOutcome(io: Io, arena: std.mem.Allocator, name: []const u8, outcome: ToolOutcome, elapsed_ms: u64) void {
     const line = toolOutcomeLine(arena, name, outcome, elapsed_ms) catch return;
     net.writeErr(io, line);
+}
+
+/// The gutter line for a call the run refuses to dispatch, announced before
+/// its outcome so the pair is intact.
+///
+/// Every dispatched call announces itself before it runs -- `noteToolCall` in
+/// the tool module, a written line in `skill.call` and in the MCP call path --
+/// and the outcome line is written on the one below it. The one call that never
+/// reaches any of them is the one the budget refuses to pay for: it is caught
+/// in `finishTurn` before `dispatchCall`, so its outcome line was the only
+/// thing on stderr for it and a reader of the gutter saw `not run` with nothing
+/// above it to attribute to a call. That is the one outcome whose whole point
+/// is that a reader can tell it apart from a call that ran and succeeded, and
+/// it was the one call with no announcement to read beside.
+///
+/// The line carries the name alone, the way the MCP and skill paths write
+/// theirs: the call did not run, so no argument was validated or interpreted,
+/// and drawing a detail out of bytes nothing read would put the provider's
+/// bytes on the operator's screen for a call the run declined to make.
+fn noteCallNotRun(io: Io, arena: std.mem.Allocator, call: chat_mod.ToolCall) void {
+    const line = callNotRunLine(arena, call.name) catch return;
+    net.writeErr(io, line);
+}
+
+/// The line itself, as a value, so the shape is pinned without a stream.
+///
+/// The name is bounded by `tool_outcome_name_bytes`, the bound the outcome line
+/// below it uses, and that is what lets a reader pair the two: two lines naming
+/// one call have to spell it the same way, so a name cut for one is cut the
+/// same way for the other. The name is the provider's own text, so it is
+/// escaped the way every other diagnostic here escapes one. An allocation that
+/// fails writes nothing, which is what every other diagnostic here does: the
+/// call the budget refused is refused either way.
+fn callNotRunLine(arena: std.mem.Allocator, name: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(arena, "\u{23fa} {s}\n", .{chat_mod.safeText(arena, name, tool_outcome_name_bytes)});
 }
 
 /// One tool call, to whichever half of the tool surface answers for its name:
@@ -4207,6 +4248,10 @@ fn finishTurn(
         // the next request rejects, so the loop below would spend a turn on a
         // 400 instead of on the answer.
         const output = if (budget.expired(io)) blk: {
+            // Announced here rather than by the half that would have run it:
+            // no half is reached on this path, and this outcome is the only
+            // record a reader has of a call the budget refused to pay for.
+            noteCallNotRun(io, arena, call);
             noteToolOutcome(io, arena, call.name, .not_run, 0);
             break :blk "error: not run, the run's time budget is exhausted";
         } else blk: {
@@ -8914,6 +8959,53 @@ test "the outcome line names the call, whether it worked, and how long it took" 
     const long = try toolOutcomeLine(arena, "mcp__x" ++ "y" ** 200, .failed, 5);
     try std.testing.expect(std.mem.endsWith(u8, long, " in 5ms\n"));
     try std.testing.expect(long.len < 80);
+}
+
+// A call the budget refuses to pay for never reaches the half that announces
+// it: `finishTurn` catches it before `dispatchCall`, so `noteToolCall` and the
+// skill and MCP lines are all downstream of a call that did not happen. Its
+// outcome line was therefore the only thing on stderr for it, which is the one
+// outcome that most needs an announcement to read beside -- the whole reason
+// the line exists is that a refused call and a call that ran are otherwise the
+// same absence. The pair is asserted together here, because either half alone
+// is silent: an announcement with no outcome, or an outcome with nothing naming
+// the call it belongs to.
+test "a call the budget refuses announces itself before its outcome" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    // The name alone, the way the MCP and skill paths write their lines: a
+    // refused call validated no argument, so there is no detail to draw.
+    try std.testing.expectEqualStrings("\u{23fa} search\n", try callNotRunLine(arena, "search"));
+    try std.testing.expectEqualStrings("\u{23fa} skill\n", try callNotRunLine(arena, "skill"));
+    try std.testing.expectEqualStrings("\u{23fa} mcp__srv__do_thing\n", try callNotRunLine(arena, "mcp__srv__do_thing"));
+
+    // The name is the provider's own bytes, so a control byte in it is escaped
+    // rather than drawn: the line reaches a terminal, not a log.
+    try std.testing.expectEqualStrings("\u{23fa} ba\\x1b[31msh\n", try callNotRunLine(arena, "ba\x1b[31msh"));
+
+    // A model can name a tool as long as it likes, and the name is cut by
+    // `tool_outcome_name_bytes`, the bound the outcome line uses too, so the
+    // announcement stays a line and the two still name one call: both cut the
+    // same name at the same place, which is what a reader pairing them needs.
+    const spelled = "mcp__x" ++ "y" ** 200;
+    const long = try callNotRunLine(arena, spelled);
+    const long_outcome = try toolOutcomeLine(arena, spelled, .not_run, 0);
+    try std.testing.expect(std.mem.endsWith(u8, long, "\n"));
+    try std.testing.expect(long.len < 80);
+    try std.testing.expect(std.mem.indexOf(u8, long, "mcp__x") != null);
+    try std.testing.expect(std.mem.indexOf(u8, long_outcome, "mcp__x") != null);
+
+    // The pair, as the gutter reads it: the announcement on one line and the
+    // outcome on the one below it, both naming the same call.
+    const announcement = try callNotRunLine(arena, "search");
+    const outcome = try toolOutcomeLine(arena, "search", .not_run, 0);
+    var pair = std.ArrayList(u8).empty;
+    defer pair.deinit(std.testing.allocator);
+    try pair.appendSlice(std.testing.allocator, announcement);
+    try pair.appendSlice(std.testing.allocator, outcome);
+    try std.testing.expectEqualStrings("\u{23fa} search\n  not run search in 0ms\n", pair.items);
 }
 
 /// The base url this run will use, and where it came from. The flag wins, then

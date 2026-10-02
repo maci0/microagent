@@ -150,6 +150,26 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- A call the run's time budget refused now draws its gutter line before its
+  outcome, like every other call. The announcement belongs to the half that
+  dispatches a call -- `noteToolCall` in the tool module, a written line in the
+  skill and MCP paths -- and a call the budget would not pay for is caught in
+  `finishTurn` before `dispatchCall`, so none of the three was reached and the
+  `not run` outcome stood alone with nothing above it naming the call it was
+  about. That is the one outcome whose whole reason for existing is that a
+  reader of stderr can tell a refused call from one that ran, and it was the
+  one call with no announcement to read beside, which is the same absence in a
+  new place. The line carries the name alone, the way the MCP and skill gutters
+  write theirs: a call that did not run validated no argument, so there is no
+  detail to draw from it.
+
+- The tool gutter's two lines now cut a long call name at the same place. The
+  announcement and the outcome name one call, so a reader pairs them, and they
+  did not: the outcome bounded the name at 40 bytes and the announcement bounded
+  it at 120, so a name over 40 was written two ways and the pair no longer
+  matched. The bound is one named constant both lines use, which is what keeps
+  the shapes from drifting apart again.
+
 - A session store opened from a chosen instant now stamps its records from
   that instant too. `openAt` takes the reading it names the log from and
   measures the retention window against, and every record in the file read the
