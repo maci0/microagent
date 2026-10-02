@@ -21,6 +21,16 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- A `write`, `edit`, `multi_edit` or `microagent setup` that reports success now
+  survives the machine stopping. `writeFileAtomic` renamed the temporary file
+  over the destination without first flushing it, so a power loss between the
+  rename and the disk taking the bytes came back with the name in place and
+  nothing behind it: a source file the tool said it wrote, read back empty or
+  half-written. The flush is before the rename and costs one disk round trip per
+  file written, and a flush that fails leaves the destination exactly as it was.
+  `microagent update` and the first-run config write already did this; this was
+  the one writer that did not.
+
 - Read a compressed answer from a remote HTTP MCP server. The client sends
   `accept-encoding: gzip, deflate` and now reads a body its own `Content-Encoding`
   header names, for a frame and for a refusal alike, rather than passing the

@@ -2428,6 +2428,23 @@ pub const permission_bits: std.posix.mode_t = 0o777;
 /// same resolver `update` uses. The mode the destination already has is carried
 /// over, because the rename brings the temporary file's mode with it and a
 /// 0o600 file that comes back 0o644 is a change the run was never asked to make.
+///
+/// The bytes are flushed before the rename, not after it, and that is the last
+/// thing this function does that a plain write would not. The rename is the
+/// moment the tool's answer ("wrote N bytes to P") becomes a claim about the
+/// destination, and a machine that loses power between the rename and the disk
+/// taking the bytes comes back with the name in place and nothing behind it: a
+/// source file the model is told it wrote, read back as an empty or a partial
+/// one. That is the same window `update.replaceBinary` closes for the binary and
+/// `writeDefaultConfig` closes for the config, for the same reason; this is the
+/// one writer in the program that did not.
+///
+/// The flush costs one disk round trip per file written and nothing at all in a
+/// run that writes nothing, which is why it sits here and not on the path every
+/// tool call takes. It is the temporary file that is flushed, not the
+/// destination: before the rename the destination holds whatever it held before,
+/// so syncing it would promise durability for bytes this write is not
+/// responsible for.
 pub fn writeFileAtomic(io: Io, dir: std.Io.Dir, path: []const u8, bytes: []const u8) !void {
     var link_buf: [std.fs.max_path_bytes]u8 = undefined;
     var cur_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
@@ -2448,6 +2465,12 @@ pub fn writeFileAtomic(io: Io, dir: std.Io.Dir, path: []const u8, bytes: []const
     });
     defer af.deinit(io);
     try af.file.writeStreamingAll(io, bytes);
+    // Before the rename, so the name the rename puts these bytes under cannot
+    // outlive them. A flush that fails leaves the destination exactly as it was,
+    // because the rename never happens: the caller's failure is one it can
+    // report and the model can act on, rather than a file that is half a
+    // source file.
+    try af.file.sync(io);
     try af.replace(io);
 }
 
@@ -4415,6 +4438,59 @@ test "a read of a secret file returns the refusal, not the key" {
     const out = try toolRead(io, arena, args);
     try std.testing.expect(std.mem.indexOf(u8, out, "sk-do-not-send") == null);
     try std.testing.expect(std.mem.indexOf(u8, out, "credentials file") != null);
+}
+
+// The atomic write every editing tool goes through, including the one the
+// setup wizard writes the config with. The rename is what makes the tool's
+// answer true, and a rename whose bytes are still only in the page cache
+// outlives them on a machine that stops: the name is in place and nothing is
+// behind it. `update.replaceBinary` and `writeDefaultConfig` both flush before
+// they claim; this test holds this one to the same, and to the mode a rewrite
+// carries over, which is the other thing `writeFileAtomic` promises and the one
+// a fix for the first would be free to break.
+test "an atomic write replaces the file whole, keeps its mode, and leaves no temporary behind" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "before" });
+    try tmp.dir.setFilePermissions(io, "a.txt", .fromMode(0o600), .{});
+
+    writeFileAtomic(io, tmp.dir, "a.txt", "after") catch |err| {
+        std.debug.print("writeFileAtomic failed: {s}\n", .{@errorName(err)});
+        return err;
+    };
+
+    try std.testing.expectEqualStrings("after", try tmp.dir.readFileAlloc(io, "a.txt", arena, .limited(64)));
+    // The rename brings the temporary file's mode with it, so the mode the
+    // destination already had is what has to be asked for and passed on: a
+    // 0o600 file that comes back 0o644 is a change no run was asked for.
+    const stat = try tmp.dir.statFile(io, "a.txt", .{});
+    try std.testing.expectEqual(@as(u16, 0o600), stat.permissions.toMode() & permission_bits);
+
+    // Running the same write again reaches the same state: this is what the
+    // second execution of a duplicated tool call has to find, and it is why the
+    // flush above costs one round trip rather than a per-call guard.
+    writeFileAtomic(io, tmp.dir, "a.txt", "after") catch |err| return err;
+    try std.testing.expectEqualStrings("after", try tmp.dir.readFileAlloc(io, "a.txt", arena, .limited(64)));
+
+    // The temporary the rename consumes is not left in the directory: a run
+    // that wrote many files would otherwise leave one beside each of them for
+    // a reader of the tree to find.
+    var listing = try tmp.dir.openDir(io, ".", .{ .iterate = true });
+    defer listing.close(io);
+    var it = listing.iterate();
+    var names: usize = 0;
+    while (try it.next(io)) |entry| {
+        try std.testing.expectEqualStrings("a.txt", entry.name);
+        names += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), names);
 }
 
 test "a write with no content is refused rather than emptying the file" {
