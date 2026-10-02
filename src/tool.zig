@@ -1262,8 +1262,8 @@ fn requestedTimeoutMs(v: ?std.json.Value) ?u64 {
     return if (n > 0) n else null;
 }
 
-/// The characters a command is split on, spelled once so the walk it feeds and
-/// the harness that fuzzes it walk the same words.
+/// The characters the credential walk below cuts a command on, which are the
+/// separators of a word with the glob characters removed.
 ///
 /// `:` and `=` are here because a shell command reaches a file through both
 /// without a separator in front of the name: `git show HEAD:.env` and
@@ -1272,18 +1272,14 @@ fn requestedTimeoutMs(v: ?std.json.Value) ?u64 {
 /// They are separators of a word, not of a path, so nothing about a
 /// directory or an extension changes: the rule still asks whether a component
 /// names a credential.
-const command_word_separators = " \t\n\"'`$&;<>|()[]{}*?!#\\:=";
-
-/// The same set without the glob characters, which is what the credential walk
-/// below cuts on.
 ///
-/// A glob is part of the word a shell expands, so cutting there asks the name
-/// rule about fragments of a file that never existed: `cat ./*nv` is one file
-/// to the shell and the unrelated words `.`, `/` and `nv` to a tokenizer that
-/// splits at `*`, and a key read that way is a key the model sends to the
-/// provider. The deny walk keeps the full set, because a denied command is not
-/// a pattern: a `*` inside one is a character the walk steps over to reach the
-/// word around it.
+/// A glob is left out of this set, and a glob is part of the word a shell
+/// expands: cutting there asks the name rule about fragments of a file that
+/// never existed. `cat ./*nv` is one file to the shell and the unrelated words
+/// `.`, `/` and `nv` to a tokenizer that splits at `*`, and a key read that way
+/// is a key the model sends to the provider. The deny walk below keeps the glob
+/// characters, because a denied command is not a pattern: a `*` inside one is a
+/// character the walk steps over to reach the word around it.
 const credential_word_separators = " \t\n\"'`$&;<>|(){}#\\:=";
 
 /// True when one component of `path` is refused by the name rules above, which
@@ -1334,7 +1330,7 @@ fn componentIsCredential(name: []const u8) bool {
 /// because each of those words is a path.
 ///
 /// A word that reaches the file through a `:` or an `=` is refused for the same
-/// reason, since `command_word_separators` splits on both: `git show HEAD:.env`
+/// reason, since `credential_word_separators` splits on both: `git show HEAD:.env`
 /// prints a committed key as a patch and `curl --data=@.env` would send one
 /// off the machine, and neither spells the file as a word of its own.
 ///
@@ -1422,7 +1418,7 @@ fn globsIntersect(pattern: []const u8, glob: []const u8) bool {
 
 /// Whether a word a shell will expand could name a credential file.
 ///
-/// `command_word_separators` treats `*`, `?` and the bracket characters as
+/// The deny walk's set treats `*`, `?` and the bracket characters as
 /// separators, which is right for finding the words of a command and wrong for
 /// asking this of one: `cat ./*nv`, `head -1 .e*` and `grep . credentials*`
 /// all name a credential and arrive as fragments that match nothing. A word
@@ -1482,14 +1478,11 @@ fn wordMatches(word: []const u8, entry: []const u8) bool {
     return false;
 }
 
-/// The characters a shell reads as quoting rather than as part of a word. They
-/// are separators of a word in `command_word_separators`, which the credential
-/// walk needs so that `cat".env"` is one word the name rule can be asked about,
-/// and the deny walk above inherits them from the same set.
-/// The characters the deny walk splits a command on, which is
-/// `command_word_separators` without the three quote characters.
+/// The characters the deny walk splits a command on, which is the credential
+/// walk's set without the glob characters and without the three quote
+/// characters.
 ///
-/// The credential walk needs the quotes in that set so that `cat".env"` is one
+/// The credential walk needs the quotes in its set so that `cat".env"` is one
 /// word for the name rule to be asked about. The deny walk is asking a
 /// different question, of a different thing, and splitting on the quotes is
 /// what made the question unanswerable: `s'udo'`, `su\do` and `su"do"` are the
@@ -7746,9 +7739,9 @@ const deny_corpus = [_][]const u8{
 };
 
 test "a quote inside a denied word does not put it past the check" {
-    // The characters `command_word_separators` splits on are the credential
-    // walk's separators, and the deny walk inherited them from that set, so a
-    // single quote turned `sudo` into three words and none of them matched.
+    // The characters the credential walk splits on are separators of a word,
+    // and the deny walk inherited its set from that one, so a single quote
+    // turned `sudo` into three words and none of them matched.
     // The shell reads all of these as the denied word, so the check does too.
     const list = [_][]const u8{"sudo"};
     const refused = [_][]const u8{
