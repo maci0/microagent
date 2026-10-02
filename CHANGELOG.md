@@ -150,6 +150,13 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- A benchmark script run twice writes one row per measurement, not two. Both
+  `bench/run.sh` and `bench/gauntlet.sh` named each invocation's `run` so a
+  reader could group its rows, but a retry, a crash and restart, a second shell
+  or a caller setting `BENCH_RUN_ID` appended a second row under that same `run`,
+  and any mean over the group was then a mean over more samples than were taken.
+  The row is now written once per (run, measurement), through `bench/rows.sh`.
+
 - A call the run's time budget refused now draws its gutter line before its
   outcome, like every other call. The announcement belongs to the half that
   dispatches a call -- `noteToolCall` in the tool module, a written line in the

@@ -42,13 +42,21 @@ work_root="${GAUNTLET_WORK:-$root/.scratch/gauntlet}"
 # appended to and a second run of this script writes its rows beside the ones
 # already there: a reader cannot otherwise tell a re-measurement of an agent
 # from a row this run wrote twice. A row with no `run` predates the field.
+#
+# Naming the run is half of that; `record_run_row` is the other half, and it
+# keeps one run to one row per agent, so the group a reader takes is a set of
+# measurements rather than a count of how many times each was taken.
 run_id="${GAUNTLET_RUN_ID:-$(date +%Y%m%dT%H%M%S)-$$}"
 command -v python3 >/dev/null 2>&1 || {
 	printf '%s\n' 'bench/gauntlet.sh: python3 is required to record JSON rows' >&2
 	exit 2
 }
+# Sourced after the interpreter is confirmed, because `record_run_row` uses it.
+# shellcheck source=bench/rows.sh
+. "$root/bench/rows.sh"
 record_row() {
-	python3 "$(dirname "$0")/review_row.py" "$run_id" "$@" >>"$root/bench/gauntlet-results.jsonl"
+	row=$(python3 "$(dirname "$0")/review_row.py" "$run_id" "$@") || return 1
+	record_run_row "$root/bench/gauntlet-results.jsonl" "$row" agent
 }
 
 agents=${*:-microagent}

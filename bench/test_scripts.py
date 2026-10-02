@@ -543,10 +543,7 @@ def check_rows(directory: Path, env: dict[str, str]) -> None:
     bench = fixture / "bench"
     task = bench / "tasks/fixture"
     task.mkdir(parents=True)
-    # The row writers beside the scripts that call them: `record_row` reaches
-    # for one through `dirname $0`, so a staged tree without it is a tree the
-    # scripts cannot run in rather than a smaller fixture.
-    for name in ("run.sh", "gauntlet.sh", "monotonic.sh", "portable.sh", "limit.py", "row.py", "review_row.py"):
+    for name in ("run.sh", "gauntlet.sh", "monotonic.sh", "portable.sh", "rows.sh", "limit.py", "row.py", "review_row.py"):
         (bench / name).write_bytes((ROOT / "bench" / name).read_bytes())
     (task / "setup.sh").write_text("printf '%s\\n' fixture > answer.txt\n")
     (task / "check.sh").write_text("exit 0\n")
@@ -587,14 +584,56 @@ def check_rows(directory: Path, env: dict[str, str]) -> None:
         ("run.sh", "results.jsonl", "row-agent"),
         ("gauntlet.sh", "gauntlet-results.jsonl", 'row-agent:model"\\tag'),
     ):
+        # One run id per variant, because a run records each measurement once: the
+        # error row below is a second measurement of the same (agent, task) under
+        # the same run as the success row above, so sharing one run id would have
+        # the success suppress it rather than the file carrying both.
         for fail in ("", "1"):
-            result = run(bench / name, agent, env=env, GIT_FAIL=fail)
+            variant = f"{run_id}-{fail or 'ok'}"
+            variant_env = dict(env, BENCH_RUN_ID=variant, GAUNTLET_RUN_ID=variant)
+            result = run(bench / name, agent, env=variant_env, GIT_FAIL=fail)
             expect(result.returncode == 0, result)
             row = json.loads((bench / results).read_text().splitlines()[-1])
-            expect(row["run"] == run_id and row["agent"] == agent, row)
+            expect(row["run"] == variant and row["agent"] == agent, row)
             if fail:
                 expect(row.get("lines") == "n/a" if name == "run.sh" else row["changed_files"] is None, row)
+        check_rows_rewritten_once(bench / name, bench / results, env, variant, agent)
+    for name, results, agent in (
+        ("run.sh", "results.jsonl", "row-agent"),
+        ("gauntlet.sh", "gauntlet-results.jsonl", 'row-agent:model"\\tag'),
+    ):
+        check_rows_distinct_runs_kept(bench / name, bench / results, env, agent)
     check_parallel(fixture, env)
+
+
+def check_rows_rewritten_once(bench_script: Path, results: Path, env: dict[str, str], run_id: str, agent: str) -> None:
+    """A second run of one measurement under one run id leaves the file alone.
+
+    The results files are append-only and every row of an invocation carries the
+    same `run` so a reader can take that invocation's rows as a group. That group
+    is a set of measurements only while a run contributes one row each: a retry,
+    a crash and a restart, or a second shell running the same script, each
+    appended a second row under that run, so a mean over the group was a mean
+    over a number of samples nobody chose. The row already in the file is this
+    run's answer, so a repeat is skipped rather than appended or overwritten.
+    """
+    before = results.read_text().splitlines()
+    variable = "BENCH_RUN_ID" if bench_script.name == "run.sh" else "GAUNTLET_RUN_ID"
+    result = run(bench_script, agent, env=dict(env, **{variable: run_id}))
+    expect(result.returncode == 0, result)
+    expect(results.read_text().splitlines() == before, f"{bench_script.name} appended a duplicate row on a re-run")
+
+
+def check_rows_distinct_runs_kept(bench_script: Path, results: Path, env: dict[str, str], agent: str) -> None:
+    """Two runs of one measurement are two rows: the dedup is per run, not global."""
+    variable = "BENCH_RUN_ID" if bench_script.name == "run.sh" else "GAUNTLET_RUN_ID"
+    for run_id in ("rows-first", "rows-second"):
+        result = run(bench_script, agent, env=dict(env, **{variable: run_id}))
+        expect(result.returncode == 0, result)
+    rows = [json.loads(line) for line in results.read_text().splitlines() if line.strip()]
+    for run_id in ("rows-first", "rows-second"):
+        matching = [row for row in rows if row.get("run") == run_id and row.get("agent") == agent]
+        expect(len(matching) == 1, f"{run_id} recorded {agent} {len(matching)} times: {matching}")
 
 
 def check_parallel(fixture: Path, env: dict[str, str]) -> None:
