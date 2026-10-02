@@ -150,10 +150,13 @@ and inventing one would put a name against a document nobody signed.
 | 14 | A skill body is prompt text the model is told to follow | operator config → model | low: needs a write to a skills directory, the config file, or `MICROAGENT_SKILLS` | the run follows instructions the operator did not write, and the conversation is re-sent to the provider | skills are read only from the roots the config file or the variable names, else `$HOME/.microagent/skills`, never from the working tree (`roots`, `src/skill.zig:142`; `discover`, `src/skill.zig:216`), so a repository under review cannot install one; the listing escapes control bytes (`Skills.prompt`, `src/skill.zig:95`); a body reaches the conversation only when the model calls the tool, as a tool result under the same cap as any other |
 | 15 | `--repl` resets the money ceiling on every prompt, and one process serves them all | stdin → agent, model → provider | low: needs an operator who left the REPL open on a session nobody is watching | the spend ceiling the operator set bounds one prompt rather than the session, so a long session bills what a short one would have stopped | ceilings are read into `Options`, which `run` takes by value, so turn, time and spend all start again at each prompt (`run`, `src/main.zig:2941`); a prompt over 64 KB ends the run rather than being truncated (`max_repl_prompt_bytes`, `src/main.zig:704`); a prompt past a ceiling ends the session with that run's own exit status (gap 14) |
 | 16 | A Harbor task container holds the provider key | task container → host credentials | medium: needs a task image written by a third party, which is the ordinary case for a benchmark run | the provider key read out of the container environment, a bill on the operator's account | the endpoint is checked on the host before a container starts (`base_url`, [microagent_agent.py:254](../integrations/harbor/microagent_agent.py)); nothing else about the task is, because executing a third-party task is what the adapter is for (boundary 12, and the abuse case "a poisoned task container") |
+| 17 | `setup` writes the config the next run trusts | stdin → config file | low: needs the operator piping a hostile line to the wizard, or a key answer read out of a shell history or a screen recording | a `base_url` pointed at a machine in the middle, which row 3 then makes the key theft; the key itself already on disk, as row 8 says | the answer is refused if it carries a control byte or is not UTF-8 (`answer`, `src/setup.zig:37`); a url answer is held to `https`-or-loopback and an `api_key_env` to a name a spawn can carry (`validUrl`, `src/mcp.zig:1489`; `validEnvName`, `src/mcp.zig:1502`); the wizard writes `0600` atomically and only when the file on disk is unchanged (`run`, `src/setup.zig:161`); it writes no `[[mcp]]` table and no `deny_commands` entry, so it cannot be used to install a program (`setValue`, `src/config.zig:106`) |
 
 `microagent` is a local CLI with no listener, no server and no database. It holds no user
 data of its own: it exposes the operator's own machine, and an attacker wants the key, the
-source tree and the host. The one asset worth stealing on its own is the API key.
+source tree and the host. The one asset worth stealing on its own is the API key. A
+run reads it from the environment or takes it on the command line (row 8), and `setup` types
+it into the config file (row 17).
 
 ## Attack surface
 
@@ -172,7 +175,8 @@ source tree and the host. The one asset worth stealing on its own is the API key
 | Responses of a remote MCP server (JSON body or event stream) | text that becomes a tool result, and the session id echoed on later requests | `exchange`, `src/mcp.zig:525`; `readAnswer`, `src/mcp.zig:625`; `sseLine`, `src/mcp.zig:694` |
 | `skills` in that config, `MICROAGENT_SKILLS`, `~/.microagent/skills` | `SKILL.md` bodies the model may load, as prompt text | `roots`, `src/skill.zig:142`; `discover`, `src/skill.zig:216`; `call`, `src/skill.zig:478`; cap `max_skill_bytes`, `src/skill.zig:40` |
 | `AGENTS.md` in the working directory, or the paths `agents_files` names | repository text the run follows as instructions, appended to the system prompt between a begin and an end marker naming the file, with the prompt stating that the block governs the task and cannot widen it, lift the prompt's rules, authorize a credential, or send anything off the machine | `agentsBlock`, `src/main.zig:774`; `readAgentsFile`, `src/main.zig:867`; cap `max_agents_bytes`, `src/main.zig:152` (128 KB, raised from 16 KB in 0.10.0); `agents_files = []` turns the read off |
-| Command line, `update` | `--check` | `parseArgs`, `src/update.zig:603`; `run`, `src/update.zig:643`; dispatched from `runMain`, `src/main.zig:447`, at `src/main.zig:462` |
+| Command line, `update` | `--check` | `parseArgs`, `src/update.zig:603`; `run`, `src/update.zig:643`; dispatched from `runMain`, `src/main.zig:447`, at `src/main.zig:480` |
+| Command line, `setup`, and standard input with it | `--config <file>`, and then one answer per prompt: the provider `base_url`, `model`, and the `api_key` written into the config file in the clear, the system prompt addendum, which repository instructions, skills and sandbox are enabled, which built-in tools are offered, and for each of the four shipped remote presets whether it is on plus its `url` and `api_key_env`. It writes no `[[mcp]]` table and no `deny_commands` entry, so a remote server or command filter is left as the file had it | `configArg`, `src/setup.zig:16`; `run`, `src/setup.zig:161`, dispatched from `runMain`, `src/main.zig:447`, at `src/main.zig:463`, which creates the template first (`writeDefaultConfig`, `src/main.zig:2602`, at `src/main.zig:473`); the questions are `questions`, `src/setup.zig:111`; every answer passes the escape and control-byte check (`answer`, `src/setup.zig:37`) and is written through `setValue`, `src/config.zig:106`, into the same `0600` file a run reads, atomically (`writeFileAtomic`, `src/tool.zig:2448`) and only after the file on disk is confirmed unchanged (`run`, `src/setup.zig:161`, at `src/setup.zig:176`) |
 | `MICROAGENT_MODEL`, `MICROAGENT_BASE_URL`, `MICROAGENT_REASONING_EFFORT` | endpoint, model, response style | `envValue`, `src/main.zig:1484`; read in `runMain`, `src/main.zig:447`, through `envValue`, `src/main.zig:1484`; a run left with no endpoint is refused there too, `runMain`, `src/main.zig:447` |
 | `MICROAGENT_MAX_TURNS`, `MICROAGENT_MAX_TOKENS` | loop and response ceilings | `max_turns_default`, `src/main.zig:118` (1000 turns); `default_max_tokens`, `src/main.zig:133`; both through `ceiling`, `src/main.zig:1580` |
 | `--temperature <n>`, `MICROAGENT_TEMPERATURE` | the sampling the provider draws from, 0 to 2, sent in the request body when one is set | `temperature`, `src/main.zig:1533`; `temperatureFromEnv`, `src/main.zig:1560`; range `min_temperature`, `src/main.zig:141`; written by `bodyPrefix`, `src/main.zig:3557` |
@@ -206,12 +210,23 @@ the config entry is the operator's statement that the program is trusted. The tr
 server is this binary's, and the sandbox does not confine it.
 
 The one input channel that arrived after 0.10.0 is standard input, and it is the only one whose
-sender a caller does not already own. An `argv` prompt is read once, before anything else runs;
-`--repl` reads lines for the life of the process and keeps one conversation across all of them.
-A prompt arriving that way is appended to a conversation the model has already been answering
-from, so it arrives with every earlier turn's tool output still in the request body. The line cap
-(`max_repl_prompt_bytes`, `src/main.zig:704`, 64 KB) is the only bound on it, and a line over it
-ends the run rather than being truncated, so nothing partial is sent.
+sender a caller does not already own. Two subcommands read it. `setup` reads one answer per
+question and writes them into the config file rather than into a conversation. For the key answer
+it turns terminal echo off, reports the current value as `set; hidden` rather than printing it,
+and installs a SIGINT/SIGTERM handler for the duration of the prompt, so a key cannot be
+repainted or recorded by the terminal or captured in a shell history the way an ordinary typed
+line is (`answer`, `src/setup.zig:37`). Every answer is then trimmed, validated as UTF-8, and
+refused if it carries a control byte, and the current value of a non-secret answer is echoed back
+through `safeTextAll` rather than raw, so a config value cannot repaint the terminal through the
+prompt (`answer`, `src/setup.zig:37`). A url answer is held to the same rule a remote MCP endpoint
+is (`validUrl`, `src/mcp.zig:1489`), and an `api_key_env` to a name a spawn can carry
+(`validEnvName`, `src/mcp.zig:1502`) — so `setup` cannot write the one config value a hostile
+keystroke would otherwise reach. `--repl` reads lines for the life of the process and keeps one
+conversation across all of them. A prompt arriving that way is appended to a conversation the
+model has already been answering from, so it arrives with every earlier turn's tool output still
+in the request body. The line cap (`max_repl_prompt_bytes`, `src/main.zig:704`, 64 KB) is the only
+bound on it, and a line over it ends the run rather than being truncated, so nothing partial is
+sent.
 
 ### Surface added by deployment
 
@@ -299,6 +314,25 @@ ends the run rather than being truncated, so nothing partial is sent.
     (`base_url`, [microagent_agent.py:254](../integrations/harbor/microagent_agent.py)); nothing
     else about the task is checked, because a task is third-party code by design and the run
     exists to execute it.
+13. **Standard input → config file (`setup`).** Every other boundary ends in the conversation or
+    in a header. This one ends on disk: an answer becomes a `base_url`, a `model`, an `api_key`,
+    a `[sandbox] enabled` flag or a `[tools.<name>]` entry in the file the next run reads, and that
+    file is the trust root for boundaries 8, 9 and 12 as well as for the endpoint and the key
+    (`questions`, `src/setup.zig:111`; `run`, `src/setup.zig:161`). The wizard never writes an
+    `[[mcp]]` table or a `deny_commands` list — it asks about the four presets the tree ships and
+    about the built-in tools, so a remote server or a command filter stays whatever the file
+    already said, and an existing `[[mcp]]` table is preserved rather than rewritten
+    (`setValue`, `src/config.zig:106`). Validation point: each answer
+    is trimmed, checked as UTF-8 and refused if it carries a control byte (`answer`,
+    `src/setup.zig:37`); a url is held to the same `https`-or-loopback rule a remote MCP endpoint
+    is (`validUrl`, `src/mcp.zig:1489`) and an `api_key_env` to a name a spawn can carry
+    (`validEnvName`, `src/mcp.zig:1502`); the edited text is re-parsed and refused if it does not
+    parse or has outgrown the 64 KB cap, and the file is written `0600` through the same atomic
+    write every editing tool uses, and only when the bytes on disk still match what was read, so a
+    second process editing the same file is refused rather than overwritten (`run`,
+    `src/setup.zig:161`; `writeFileAtomic`, `src/tool.zig:2448`). What the answers cannot be
+    validated into is trust: a key typed here is as much a key as one read from the environment,
+    and a `base_url` typed here points the next run's credential wherever the operator named.
 
 Privilege transitions are total, not gradual: once the model calls `bash`, the run has the
 operator's full authority. No user confirmation sits between a model decision and a
@@ -312,7 +346,8 @@ rather than gradual.
 | --- | --- | --- |
 | Provider API key | bills, model access, provider account | `argv`, the environment or the config file, then process memory; through the Harbor adapter, also the environment of every third-party task container (`api_key`, [microagent_agent.py:143](../integrations/harbor/microagent_agent.py), placed into the container environment at `:556`) |
 | `GITHUB_TOKEN` | releases API access, and repository scope beyond it | environment, then an `Authorization` header on `api.github.com` only (`bearerFor`, `src/update.zig:155`); absent from every tool subprocess (`secret_env_vars`, `src/main.zig:2234`) |
-| `api_key` in the config file | the same key, on disk and in the clear | read in `resolveKey`, `src/main.zig:2126`; the file is not a credentials path, so the `read` tool can open it: keep it out of a workspace the model is given; a config holding one whose group or other bits are set is named on stderr (`secretInReadableFile`, `src/main.zig:2383`) |
+| `api_key` in the config file | the same key, on disk and in the clear | read in `resolveKey`, `src/main.zig:2126`; the file is not a credentials path, so the `read` tool can open it: keep it out of a workspace the model is given; a config holding one whose group or other bits are set is named on stderr (`secretInReadableFile`, `src/main.zig:2383`). `setup` types it there: the wizard turns terminal echo off, prints the current value as `set; hidden`, and blocks SIGINT/SIGTERM for the prompt, so the key is not echoed, painted or captured the way an ordinary typed line is (`answer`, `src/setup.zig:37`); it then writes the file `0600` through the same atomic write as an editing tool (`run`, `src/setup.zig:161`) |
+| The config file itself | it decides the endpoint, the key, the system prompt, which programs the run starts and which tools it is offered | `--config`, `MICROAGENT_CONFIG` or `$HOME/.microagent/config.toml` (`configSource`, `src/main.zig:2689`), parsed at `config.parse`, `src/config.zig:354`; the trust root for boundaries 8, 9, 12 and 13; a run never reads one out of the working tree, and neither does `setup` |
 | A secret in an `[[mcp]]` `env` table | the server's own token, written in the clear beside a `command` the same file names | the config file, parsed at `src/config.zig:679`; the value is copied onto the scrubbed environment the child inherits (`spawnOne`, `src/mcp.zig:1862`), so it is a secret on disk and never in the model's context. `chmod 600` is the same rule `api_key` is held to, and the file-mode note covers this one too: `holdsConfigSecret`, `src/main.zig:2413`, asks whether the config writes a secret anywhere rather than only at the top level, and the line names the server rather than the value (`configSecretName`, `src/main.zig:2427`). It is a note, not a refusal, and it stays silent on a mode it cannot read |
 | Source tree and everything in it | `.env`, keys, unreleased work | read by (`toolRead`, `src/tool.zig:2181`), credentials refused by `isCredentialPath`, `src/tool.zig:2043`, sent to the provider in the request body |
 | A remote MCP server's key | access to the operator's account at that service | the environment, named by `api_key_env`; copied once by (`withKeys`, `src/mcp.zig:1522`), sent in one request header, removed from every child's environment (`scrubSecrets`, `src/main.zig:2257`); never in the config file or a log line |
@@ -336,6 +371,29 @@ rather than gradual.
   earlier turns' file contents and command output still in the request body (`replPrompt`, `src/main.zig:718`). A line typed after a run that read a credential the name rules missed
   carries that credential's bytes to the provider again, on a run the operator is watching and
   believes has already ended.
+
+### Standard input → config file (`setup`) (tampering, information disclosure)
+
+- **Tampering.** Every answer becomes a config value the next run trusts, and the file is written
+  without a question afterwards. A `base_url` answer is the one that costs: it survives as the
+  endpoint every later turn's `api_key` is sent to, so the answer that matters most is the one
+  the wizard validates least, since `https` is the whole rule
+  (`string`, `src/setup.zig:84`, at `src/setup.zig:89`; written by `setValue`, `src/config.zig:106`).
+- **Tampering, second process.** Two editors of one config, which `setup` handles: the file is
+  re-read and compared before the write, and a mismatch is refused rather than overwritten
+  (`run`, `src/setup.zig:161`, at `src/setup.zig:173`).
+- **Information disclosure.** The key answer turns terminal echo off and reports the current
+  value as `set; hidden` (`answer`, `src/setup.zig:37`), so it is not left in the terminal
+  scrollback, a screen recording or a copied transcript the way a typed line usually is. It is
+  still a line typed into a terminal: shell history recording, an `expect` wrapper, or a
+  process that already replaced the terminal all see it, and the key is then on disk in a file
+  that is a credential path only by convention (`run`, `src/setup.zig:161`).
+- **Denial of service.** A wizard left open holds a process, a terminal in no-echo mode and a
+  lock on the config path, and nothing times it out. The SIGINT and SIGTERM handler installed for
+  the key prompt restores the terminal before the process ends, so an interrupt at a secret
+  prompt does not leave the shell without an echo; at every other prompt the process ends on the
+  signal the way any other would, and end-of-input is refused as `error.SetupCancelled` rather
+  than written out as a half-configured file (`answer`, `src/setup.zig:37`).
 
 ### Repository content → model → host (elevation of privilege, information disclosure)
 
@@ -639,6 +697,8 @@ the code made in a message and never made true on disk.
 | Fuzz corpora for the parsers that take untrusted bytes: the release body, the sidecar, the release URL trust gate and the token routing behind it, the completion stream and the fold that reads it, the config file, both command lines, a base URL, a JSON string, a tool call, an edit, a credentials path, a deny-list command, a quoted value, a provider error body, the session store's names and its record, the request body a turn assembles from model text and tool output, a `SKILL.md` body, the fences an `AGENTS.md` may try to close, the Seatbelt profile a writable root is rendered into, the `tools/call` argument frame the model's own bytes are spliced into, the server, tool, environment and header names an MCP entry is built from, and the assembly a subprocess's two streams and their notes are capped into | malformed provider, release, config, command-line, tool-call, session-store, conversation or terminal-facing input, and a name that passes the entry checks but cannot be used afterwards | `fuzzRelease`, `src/update.zig:1790`; `fuzzSidecar`, `src/update.zig:1849`; `fuzzTrustedUrl`, `src/update.zig:938`; `fuzzBearerFor`, `src/update.zig:1373`; `fuzzArgs`, `src/update.zig:1104`; `fuzzStream`, `src/main.zig:7599`; `fuzzFrame`, `src/stream.zig:1926`; `fuzzFrameSequence`, `src/stream.zig:2215`; `fuzzArgs`, `src/main.zig:5822`; `fuzzBaseUrl`, `src/main.zig:4981`; `fuzzConfig`, `src/config.zig:2098`; `fuzzJsonString`, `src/chat.zig:1527`; `fuzzToolCall`, `src/tool.zig:4025`; `fuzzEdit`, `src/tool.zig:4114`; `fuzzCredentialPath`, `src/tool.zig:4925`; `fuzzDenyList`, `src/tool.zig:7775`; `fuzzAstRewrite`, `src/tool.zig:6912`; `fuzzSafeText`, `src/chat.zig:1300`; `fuzzTerminalSafe`, `src/tool.zig:4646`; `fuzzStoreNames`, `src/session.zig:1966`; `fuzzSessionRecord`, `src/session.zig:2094`; `fuzzBody`, `src/conversation.zig:888`; `fuzzSkillFile`, `src/skill.zig:573`; `fuzzDefuseFences`, `src/main.zig:8310`; `fuzzSeatbeltProfile`, `src/sandbox.zig:827`; `fuzzCallParams`, `src/mcp.zig:2971`; `fuzzEntryNames`, `src/mcp.zig:3360`; `fuzzCaptureResult`, `src/tool.zig:594` |
 | The interrupt table is 64 fixed slots, so a run already tracking a full table is refused the next child rather than starting one the handler cannot reach: a tool call fails with the stdlib's "no system resources left" (`runCapped`, `src/tool.zig:3121`, at `src/tool.zig:2871`) and a stdio MCP server is named on stderr and skipped (`spawnOne`, `src/mcp.zig:1862`, at `src/mcp.zig:1878`) | an untracked child that Ctrl+C would leave running | `max_child_groups`, `src/tool.zig:278`; `publishChildGroup`, `src/tool.zig:285` |
 | A stdio MCP server that stops answering, or whose `initialize` answer is refused, is reaped on the spot: the child is stopped, its process group SIGKILLed, its interrupt slot retired and its read buffer handed back, and the reap is idempotent so shutdown still lands. Every death is followed by it, including a lazy preset's first handshake, which never passed through `request` | a dead server holding a process group, one of the 64 interrupt slots and a pipe nobody reads for every remaining turn of a long run; the slot it holds is one `onInterrupt` needs to stop a child | `reap`, `src/mcp.zig:220`; `retireIfDead`, `src/mcp.zig:239`; deferred in `request`, `src/mcp.zig:336`, at `src/mcp.zig:338`, and called from `Servers.call`, `src/mcp.zig:856`, whose first statement is that call |
+| `setup` writes the config it is editing `0600` through the same atomic write an editing tool uses, and only when the bytes on disk still match what the wizard read, so an `api_key` typed at the prompt lands on disk the way a hand-edited one does and never wider, and a concurrent hand-edit is refused rather than overwritten | a config the wizard saves holding `api_key` coming back at the umask's default mode, and a second editor's changes replaced | `run`, `src/setup.zig:161`; `writeFileAtomic`, `src/tool.zig:2448`, reached from `src/setup.zig:176`; the reread-and-compare that guards it is at `src/setup.zig:173` |
+| `setup` refuses a control byte or invalid UTF-8 in every answer, holds a url answer to the same `https`-or-loopback rule a remote MCP endpoint is and an `api_key_env` answer to a name a spawn can carry, and re-parses the whole file before writing it | an escape sequence typed at the wizard reaching the terminal through the echoed current value, and a hostile line becoming a TOML key the reader takes | `answer`, `src/setup.zig:37`; `string`, `src/setup.zig:84`, at `src/setup.zig:89` and `src/setup.zig:93`; `validUrl`, `src/mcp.zig:1489`; `validEnvName`, `src/mcp.zig:1502`; the re-parse is at `src/setup.zig:171` |
 
 ## Gaps, ranked by exploitability and impact
 
@@ -797,6 +857,13 @@ Each is a scenario, evidenced by the code path that enables it. None has been at
 - **A symlink on the update path, or in the tree.** A link named `microagent` earlier on
   `PATH` is followed at install time (`replaceBinary`, `src/update.zig:535`). A link beside a source file
   redirects a `write` or an `edit` (`resolveSymlinkTarget` call in `writeFileAtomic`, `src/tool.zig:2448`), so the run changes a file the operator never named.
+- **A wizard answer pasted from somewhere untrusted.** The operator runs `microagent setup` and
+  pastes an answer out of a setup instruction in an issue, a chat log, or a CI transcript. A
+  `base_url` answer is accepted as long as it is `https` (`string`, `src/setup.zig:84`, at
+  `src/setup.zig:89`) and written to the config (`setValue`, `src/config.zig:106`), so the next
+  run's `api_key` goes there: row 17 is row 3 with the hostile host typed a week earlier. The
+  wizard writes no `[[mcp]]` table, so it cannot install a program the way a hand-edited config
+  can, and every other value it writes is one the operator would have typed themselves.
 - **Scraping through the harness.** `read` has no path restriction, so a run over a
   directory holding credentials under names the tables do not carry reads them and,
   through the model, can send them off the machine. There is no per-run file budget
