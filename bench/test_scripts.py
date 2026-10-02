@@ -201,6 +201,32 @@ def check_changelog_order(directory: Path, env: dict[str, str]) -> None:
 def check_locks(directory: Path, env: dict[str, str]) -> None:
     manifest = directory / "manifest.txt"
     lock = directory / "lock.txt"
+    # A requirement the manifest does not pin to one exact version, and the
+    # lock that resolves it, which is what the range's install-time resolution
+    # writes. A range reads the same three answers as an exact pin from the
+    # checks already here, so only the exactness rule can refuse it: `>=`
+    # resolves to the newest release the index offers at install time, so the
+    # hash the lock carries and the version the gate checked are the pair a run
+    # installs on the next machine that no reviewed artifact describes.
+    lock.write_text(f"ruff==0.16.4 \\\n    --hash=sha256:{'a' * 64}\n    # via -r {manifest}\n", encoding="utf-8")
+    for requirement in (
+        "ruff>=0.16.4",
+        "ruff~=0.16.4",
+        "ruff!=0.16.4",
+        "ruff==0.16.*",
+        "ruff",
+        "ruff==0.16.4 ; sys_platform == 'linux' ",
+    ):
+        manifest.write_text(requirement + "\n", encoding="utf-8")
+        result = run(ROOT / "scripts/lint-lock.sh", str(manifest), str(lock), env=env)
+        expect(result.returncode != 0 and "does not pin every requirement" in result.stderr, result)
+    # The comment header is not a requirement, so a manifest that names a pin in
+    # its prose and pins one package exactly is accepted: the rule asks what the
+    # manifest requires, not what it says.
+    manifest.write_text("# ruff>=0.16.4 is what an earlier tree asked for\nruff==0.16.4\n", encoding="utf-8")
+    result = run(ROOT / "scripts/lint-lock.sh", str(manifest), str(lock), env=env)
+    expect(result.returncode == 0, result)
+
     manifest.write_text("ruff==0.16.4\n", encoding="utf-8")
     for version, hashes, passed in (
         ("0.16.4", ["a" * 64], True),

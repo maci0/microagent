@@ -270,11 +270,16 @@ lockfiles are inputs to the Python around the Zig, refreshed by hand:
 `integrations/harbor/requirements.lock` is uv's output for the Harbor adapter,
 with the command that produces it in the comment at the top of
 `integrations/harbor/requirements.txt`. `make lint-lock` asks each of the two
-the same three questions, and refuses a lock that no longer carries the
-manifest's exact pin, has a missing or malformed 64-digit `sha256` digest, or carries a package no pin in
+the same four questions: that every requirement is pinned to one exact version
+rather than a range or a wildcard, that the lock carries the
+manifest's exact pin, that it has no missing or malformed 64-digit `sha256` digest, and that it
+carries no package no pin in
 the manifest needs. A lock left behind by an earlier pin therefore fails the
 gate instead of benchmarking a Harbor release the manifest no longer names, and
-a package nothing asks for never reaches the venv a score is measured in.
+a package nothing asks for never reaches the venv a score is measured in. A
+range fails it too: uv resolves a range against the index at install time, so
+the version behind the lock's digest is one the gate never chose, and the hash
+that verifies the artifact stops describing the pair a run installs.
 
 The linter lock was the one of the two nothing asked the questions of, and it
 is the one a contributor can hand-edit: it sits at the root rather than in a

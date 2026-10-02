@@ -1,15 +1,20 @@
 #!/bin/sh
 # Both dependency sets here are a manifest and the lock uv compiles from it, and
-# both answer the same three questions. A lock left behind from an earlier pin
+# both answer the same four questions. A lock left behind from an earlier pin
 # still installs, still hashes every artifact, and still runs, so the release a
 # benchmark or a gate was measured against stops being the one the manifest
 # names and nothing fails until a number is quietly incomparable. A lock is
-# generated, so it is read here and never written: the three checks are that
-# every pin in the manifest is in the lock at the same version, that no lock
-# entry arrives without a valid SHA-256 hash, which is what an artifact installed unverified
+# generated, so it is read here and never written: the checks are that every
+# requirement in the manifest is pinned to one exact version, that every pin in
+# the manifest is in the lock at the same version, that no lock entry arrives
+# without a valid SHA-256 hash, which is what an artifact installed unverified
 # would be, and that every lock entry is reachable from a manifest pin, so a
 # lock carrying a package no requirement asks for is refused rather than
-# installed into the venv a score or a gate is run in. Regenerating is the
+# installed into the venv a score or a gate is run in. The exactness question
+# comes first because it is the one a digest cannot answer: a `>=` in a manifest
+# resolves to whichever release the index offers at install time, so the lock
+# beside it carries a digest for a version the gate never chose and the next
+# machine installs a pair no reviewed artifact describes. Regenerating is the
 # `uv pip compile` at the top of each manifest.
 #
 # The Harbor set is a lock nothing else in the tree regenerates, and the linter
@@ -33,7 +38,27 @@ for file in "$manifest" "$lock"; do
   test -f "$file" || { echo "no $file, so this dependency set is undeclared" >&2; exit 1; }
 done
 bad=0
-pins="$(sed -n 's/^\([A-Za-z0-9_.-]*==[^ ]*\).*/\1/p' "$manifest")"
+# Every requirement in the manifest, with or without its version: a `==` pin is
+# the version the lock is asked to agree with, and anything else is a range, a
+# marker or an unparsed line. A wildcard is not one either, so the version the
+# pin pattern accepts carries no `*`: `ruff==0.16.*` is a range uv re-resolves
+# at install time, and reading it as a pin would ask the lock for a version no
+# manifest states. The two seds share one line set because they must read the
+# same lines, and they are separate because a versionless line is not an error
+# here: the version of a line nobody can parse is a pin whose lock entry is then
+# neither verified against a pin nor reachable from a root, and the orphan check
+# below reports that.
+pinned_lines="$(sed -n 's/^\([A-Za-z0-9_.-]*==[A-Za-z0-9_.!+-]*\)\(.*\)/\1\2/p' "$manifest")"
+requirement_lines="$(sed -n 's/^[^#][ \t]*\([A-Za-z0-9_.-]*\)\(.*\)/\1\2/p' "$manifest")"
+unexact="$(printf '%s\n' "$requirement_lines" | grep -vE '^[A-Za-z0-9_.-]+==[A-Za-z0-9_.!+-]*$' || true)"
+if [ -n "$unexact" ]; then
+  echo "$manifest does not pin every requirement to an exact version:" >&2;
+  printf '%s\n' "$unexact" | sed 's/^/  /' >&2;
+  echo "a range lets uv resolve a release at install time, so the tree stops being the pair it was reviewed as:" >&2;
+  echo "record one version per requirement, and regenerate the lock with the 'uv pip compile' at the top of $manifest" >&2;
+  bad=1;
+fi
+pins="$pinned_lines"
 test -n "$pins" || { echo "$manifest pins no package, so this dependency set is undeclared" >&2; exit 1; }
 # A here-document rather than a pipe: a pipe would run the loop in a subshell
 # and throw away the bad=1 it sets.

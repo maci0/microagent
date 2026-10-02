@@ -362,6 +362,14 @@ release, and `microagent update` moves you to it.
   held a bare `read_text()`, so a run under a locale whose default codec is not
   UTF-8 raised `UnicodeDecodeError` inside the cleanup and skipped the kill,
   leaving the descendant process this exists to reap alive.
+- `make lint-lock` refuses a manifest that does not pin every requirement to
+  one exact version. It read only the `name==version` lines and asked the lock
+  whether it agreed with them, so a range, a `!=` or a wildcard passed a gate
+  whose other three checks are about the same artifact: uv resolves a range
+  against the index at install time, which means the digest beside it belongs
+  to a version nobody chose and the next machine installs a pair no reviewed
+  artifact describes. The two manifests here pin exactly, so this closes the
+  hole rather than reporting it.
 
 ### Security
 

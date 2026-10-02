@@ -178,7 +178,7 @@ help:
 	  'check-refs FIX=1      rewrite each stale citation to the line its symbol is on' \
 	  'lint-versions         check ruff and yamllint against the versions the gate runs, and that lint-requirements.in names the same' \
 	  'lint-versions-selftest check lint-versions refuses each drift it exists to catch, restoring the tree' \
-	  'lint-lock             check each lock carries its manifest pins, a hash each, and nothing else' \
+	  'lint-lock             check each manifest pins exactly, and each lock carries those pins, a hash each, and nothing else' \
 	  'check-sbom            run the release inventory over stand-in assets and check what a scanner reads' \
 	  'zig-version           check the local zig against the version the release is built with' \
 	  'bench AGENTS=...      three coding tasks through each harness' \
