@@ -84,8 +84,11 @@ provider, or if the tree has been reduced to a fragment with nothing to gate or 
 
 6. **A job or trigger that can publish without the gate.** The release workflow runs on
    `push` tags matching a glob. Read the glob against the conditions
-   `make check-release` enforces (`check-changelog`, `check-unreleased`, and the
-   0.y rule) and against the tag `build.zig.zon` declares: a ref the glob matches that
+   `make check-release` enforces (the tag it matches against `build.zig.zon`, the
+   stranded `[Unreleased]` entries it refuses, and the `check-changelog`,
+   `check-changelog-links` and `check-readme` it calls, the last two of which are
+   where the 0.y rule is enforced) and against the tag `build.zig.zon` declares: a
+   ref the glob matches that
    the checks would refuse spends a build before failing, a ref the checks would accept
    that the glob never matches publishes nothing, and a release job that omits a gate
    step its own comment claims it runs is a finding. The first publish step must

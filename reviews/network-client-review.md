@@ -54,11 +54,13 @@ fragment with no network surface to read.
 
 2. **A redirect, or a scheme change, that carries the key to a new host.** Read
    the redirect handling in each of the three callers, which do not spell it the
-   same way: the chat request (`openChatRequest`) and the remote MCP request
-   (`exchange`) each set `.redirect_behavior = .unhandled` on their `request`,
-   while `client.fetch` in `src/update.zig` passes no `redirect_behavior`, so it
-   takes the client's default — for a payload-less GET that is a small nonzero
-   number of allowed redirects, not `.unhandled`. The download therefore relies
+   same way: the chat request and the remote MCP request (`exchange` in
+   `src/mcp.zig`) each set `.redirect_behavior = .unhandled`, while the
+   download's `exchange` in `src/update.zig` opens the request itself and passes
+   `.redirect_behavior = @enumFromInt(default_redirects)`, the allowance a
+   payload-less GET gets by default — an asset is answered by a `302` to the
+   release CDN, so following one is a requirement of the download. The download
+   therefore relies
    on `privileged_headers` instead: std strips those on a redirect that changes
    scheme or leaves the host's parent domain, and keeps them on
    `api.github.com` → `api.github.com`. A caller that passes the key as an
