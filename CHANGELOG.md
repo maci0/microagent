@@ -41,7 +41,10 @@ release, and `microagent update` moves you to it.
 - `microagent update` spends the `Retry-After` a refusal names, where the agent
   run already did. The wait is capped at 30 s, this command's own backoff cap, so
   a person watching the command is not left waiting on a run that has given up on
-  their side. A refusal that names no wait keeps the previous backoff.
+  their side. A refusal that names no wait keeps the previous backoff, and so does
+  one naming a wait already spent (`retry-after: 0`, or a date this machine's
+  clock has passed), which took the backoff's place and sent every attempt
+  milliseconds apart.
 
 ## [0.15.0] - 2026-10-02
 

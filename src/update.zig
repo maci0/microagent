@@ -357,14 +357,23 @@ fn fetchTimeoutMs(limit: usize) u64 {
 const Outcome = struct { body: ?[]u8, retry: bool, wait_ms: ?u64 = null };
 
 /// The wait before the next attempt: the one the server named, or the shared
-/// schedule's. The reader in `net` bounds a header at the run's longer
-/// ceiling, and this path's own cap is shorter than that because nobody is
-/// waiting on a turn here: a person watching `microagent update` is asked
-/// again while they are still there. The cap applies either way, since a
-/// refusal that outlives the process is a refusal the operator restarts, and
-/// the schedule is only ever the fallback for a refusal that named no wait.
+/// schedule's. This is the agent run's rule (`retryWaitMs`, `src/main.zig`),
+/// with this path's shorter cap: the reader in `net` bounds a header at the
+/// run's longer ceiling, and nobody is waiting on a turn here, so a person
+/// watching `microagent update` is asked again while they are still there.
+/// The cap applies to a wait that was named, since a refusal that outlives
+/// the process is a refusal the operator restarts.
+///
+/// Zero is not a wait, and the two spellings of this rule treat it the same
+/// way: a header that names a wait already spent -- a literal `retry-after: 0`,
+/// or a date this machine's clock has passed -- falls through to the schedule
+/// rather than spending its place. Sending all three attempts milliseconds
+/// apart is what the schedule exists to prevent, and a refusal that named none
+/// is the ordinary reason to reach the schedule at all.
 fn waitMs(attempt: u32, asked: ?u64) u64 {
-    const wait = asked orelse return net.retryBackoffMs(attempt, max_backoff_ms);
+    const backoff = net.retryBackoffMs(attempt, max_backoff_ms);
+    const wait = asked orelse return backoff;
+    if (wait == 0) return backoff;
     return @min(wait, max_backoff_ms);
 }
 
@@ -1579,6 +1588,13 @@ test "update: a refusal that names a wait is spent on that wait" {
     try std.testing.expectEqual(@as(?u64, null), net.retryAfterMs("HTTP/1.1 503 Service Unavailable\r\n\r\n", 0));
     try std.testing.expectEqual(@as(u64, 1000), waitMs(1, null));
     try std.testing.expectEqual(@as(u64, 2000), waitMs(2, null));
+    // A wait already spent is not a wait, and takes the schedule's place
+    // rather than its own: the agent run reads a zero the same way, and
+    // taking it here sent every attempt milliseconds apart.
+    const zero = net.retryAfterMs("HTTP/1.1 429 Too Many Requests\r\nretry-after: 0\r\n\r\n", 0);
+    try std.testing.expectEqual(@as(?u64, 0), zero);
+    try std.testing.expectEqual(@as(u64, 1000), waitMs(1, zero));
+    try std.testing.expectEqual(@as(u64, 2000), waitMs(2, zero));
 }
 
 // Which failures another attempt could answer differently, and which could not.
