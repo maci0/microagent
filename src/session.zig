@@ -82,6 +82,18 @@ pub const Session = struct {
     /// The directory the log is in, so a record that cannot be written says
     /// which store went quiet rather than only why.
     dir: []const u8,
+    /// Nanoseconds the reading this store was opened from is pinned to, or
+    /// null for a run that reads the wall clock at each write instead.
+    ///
+    /// `openAt` takes its reading as an argument and `open` is the same call
+    /// with one taken from `Io.Clock.real`, so this is where the run's own
+    /// stamp source is held rather than read again per record: a store opened
+    /// with a value a caller chose is one whose `ts` fields are that value's,
+    /// not a fresh wall-clock reading at whatever moment each turn happened to
+    /// land. Without it the name is pinned and the records are not, so two
+    /// runs of the same scenario produce two identical file names carrying two
+    /// different timelines.
+    pinned_ns: ?i128 = null,
 };
 
 /// How many names `createSessionLog` tries before it gives the run no log. The
@@ -207,18 +219,25 @@ fn createSessionLog(io: Io, arena: std.mem.Allocator, session_dir: []const u8, s
 /// second is said, so an operator whose watch shows nothing learns which of the
 /// two it is.
 pub fn open(io: Io, arena: std.mem.Allocator, env: *const std.process.Environ.Map, session_dir: []const u8, model: []const u8) ?Session {
-    // The reading that names the log and measures the store's age windows.
-    // `openAt` is the spelling that lets a caller supply that instant itself.
-    return openAt(io, arena, env, session_dir, model, Io.Clock.real.now(io).nanoseconds);
+    // The reading that names the log, measures the store's age windows and
+    // stamps its records. `openAt` is the spelling that lets a caller supply
+    // that instant itself, and it pins what it is given rather than leaving
+    // the records to the wall clock, so the argument here is the wall clock.
+    var session = openAt(io, arena, env, session_dir, model, Io.Clock.real.now(io).nanoseconds) orelse return null;
+    session.pinned_ns = null;
+    return session;
 }
 
 /// `open` with the wall-clock reading passed in rather than taken, so the name
-/// of the log a run opens and the age windows pruning measures against it are
-/// a function of a value the caller chose. A production run hands it the real
-/// clock; a test or a simulated run hands it a fixed instant and gets a store
-/// it can spell out in advance. The records written into that log are stamped
-/// from the clock at each write instead: `ts` says when a response landed, so
-/// it is not a value a caller can pin for the whole run.
+/// of the log a run opens, the age windows pruning measures against it and the
+/// `ts` every record in it carries are all a function of one value the caller
+/// chose. A production run hands it the real clock, which is a different
+/// reading per write and so leaves `ts` alone; a test or a simulated run hands
+/// it a fixed instant and gets a store, from its name to its last record, that
+/// it can spell out in advance. `open` is this call with that instant read from
+/// `Io.Clock.real` rather than passed, which is why it is the one that leaves
+/// `pinned_ns` set: a run holding a reading it chose must not have a record
+/// stamped off the machine behind its back.
 pub fn openAt(io: Io, arena: std.mem.Allocator, env: *const std.process.Environ.Map, session_dir: []const u8, model: []const u8, now_ns: i128) ?Session {
     if (session_dir.len == 0) return null;
     // Every record names the directory it ran in. That is what attributes the
@@ -257,7 +276,7 @@ pub fn openAt(io: Io, arena: std.mem.Allocator, env: *const std.process.Environ.
         net.note(io, arena, "microagent: no session log could be opened under {s}; the rest of this run is not recorded\n", .{shown});
         return null;
     };
-    return .{ .file = opened, .cwd = cwd, .model = model, .dir = session_dir };
+    return .{ .file = opened, .cwd = cwd, .model = model, .dir = session_dir, .pinned_ns = now_ns };
 }
 
 /// The `cwd` a record carries, which is the resolved working directory with
@@ -699,14 +718,20 @@ fn write(io: Io, arena: std.mem.Allocator, session: *?Session, record: Record) v
     // `s.dir` is the directory the run was given, escaped for the reason
     // `createSessionLog` gives.
     const shown = chat.safeTextAll(arena, s.dir);
-    // Read here, at the write, rather than from the reading `open` captured:
-    // `ts` says when this response landed, and a log whose every line carries
-    // the instant the file was opened says it about none of them. A monitor
+    // Read at the write, so a log opened from the wall clock says when each
+    // response landed rather than when the file was created: a monitor
     // following a run while it is going deltas these against each other to
     // place a response, and `elapsed_ms` is only readable beside a `ts` that
     // moves with it. The log's *name* is the one reading `open` took, which is
     // right there: a name is written once, so one instant is all it can carry.
-    const ts_ms = recordStampMs(Io.Clock.real.now(io).nanoseconds);
+    //
+    // The pinned reading replaces the clock only for a store opened from a
+    // value, and that is the whole of the difference between the two paths.
+    // A caller who chose the instant asked for a store it can spell out in
+    // advance, and re-reading the machine per record gives it half of one: a
+    // name a replay reproduces and a timeline it cannot. `open` does not pin,
+    // so a production run is on the clock exactly as before.
+    const ts_ms = recordStampMs(s.pinned_ns orelse Io.Clock.real.now(io).nanoseconds);
     const line = sessionRecord(arena, ts_ms, s.cwd, s.model, record) catch |err| {
         net.note(io, arena, "microagent: a session record for {s} could not be built ({s}); the rest of this run is not recorded\n", .{ shown, @errorName(err) });
         close(io, session);
@@ -1009,12 +1034,12 @@ test "a repeated session log writes beside the first and never over it" {
     try std.testing.expectEqualStrings("first\n", survived);
 }
 
-// The log is named after the reading `openAt` was handed, so a store is a
-// value a test can spell out in advance. Its records are not: `ts` is when
-// each response landed, so it moves with the clock while the name stands
-// still. A log whose every line carried the opening instant would put every
-// response at one moment, and a monitor deltas `ts` to place them.
-test "the store is named from the reading it was opened with, and each record carries its own" {
+// The log is named after the reading `openAt` was handed, and so is every
+// record in it. One reading, taken once, is what the whole store is a function
+// of: a log whose records carried a fresh wall-clock reading at each write
+// would have a name a replay can spell and a timeline it cannot, so two runs
+// of one scenario produce two files of the same name holding different `ts`.
+test "a store opened from a chosen instant is named from it and stamps its records from it" {
     const alloc = std.testing.allocator;
     var f = try StoreFixture.init(alloc);
     defer f.deinit();
@@ -1055,16 +1080,65 @@ test "the store is named from the reading it was opened with, and each record ca
         checked += 1;
         const parsed = std.json.parseFromSlice(std.json.Value, arena, entry, .{}) catch return error.TestUnexpectedResult;
         try std.testing.expectEqual(@as(i64, 4 + @as(i64, @intCast(checked))), parsed.value.object.get("elapsed_ms").?.integer);
-        // Stamped at the write, so it is a real clock reading rather than the
-        // instant the file was named: at or after the run's own opening, and
-        // after the pinned name it sits beside. The clock cannot be pinned
-        // here without a seam the production path does not have, so the check
-        // is the two-sided one that holds whichever way it is read.
-        const ts = parsed.value.object.get("ts").?.integer;
-        try std.testing.expect(ts >= pinned_ms);
-        try std.testing.expect(ts > pinned_ms);
+        // The same instant the file is named, on both sides of the assertion: a
+        // stamp read off the machine here would be years away from this one and
+        // only the equality catches it.
+        try std.testing.expectEqual(pinned_ms, parsed.value.object.get("ts").?.integer);
     }
     try std.testing.expectEqual(@as(usize, 2), checked);
+}
+
+// The other side of that pair: a run that did not choose its reading is still
+// stamped off the wall clock at each write, so a monitor deltas `ts` to place
+// one response against the next. `open` is what production calls, and it leaves
+// the store unpinned rather than freezing it at the instant the file was
+// created.
+test "a store opened from the wall clock is stamped from the wall clock" {
+    const alloc = std.testing.allocator;
+    var f = try StoreFixture.init(alloc);
+    defer f.deinit();
+    const io = f.io();
+    const arena = f.arena();
+
+    const store = try storeRelative(arena, io, f.tmp);
+    var no_env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer no_env.deinit();
+
+    // The reading the record is at or after, taken here so the check is against
+    // this machine's clock rather than a number the test pinned.
+    const before_ms = recordStampMs(Io.Clock.real.now(io).nanoseconds);
+
+    var session: ?Session = open(io, arena, &no_env, store, "test/model") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(?i128, null), session.?.pinned_ns);
+
+    var result: chat.ChatResult = .{ .completion_tokens = 1 };
+    writeRecord(io, arena, &session, 5, &result);
+    close(io, &session);
+
+    // The store holds exactly this run's log, so its name is the one the walk
+    // finds rather than a value the test would have to predict off a clock.
+    var dir = try std.Io.Dir.openDir(std.Io.Dir.cwd(), io, store, .{ .iterate = true });
+    defer dir.close(io);
+    var walker = try dir.walk(arena);
+    defer walker.deinit();
+    var name: ?[]const u8 = null;
+    while (try walker.next(io)) |entry| {
+        if (entry.kind != .file or logName(entry.basename) == null) continue;
+        try std.testing.expect(name == null);
+        name = try arena.dupe(u8, entry.basename);
+    }
+    const basename = name orelse return error.TestUnexpectedResult;
+
+    const line = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(arena, &.{ store, basename }), alloc, .unlimited);
+    defer alloc.free(line);
+
+    var split = std.mem.splitScalar(u8, line, '\n');
+    const entry_line = split.next() orelse return error.TestUnexpectedResult;
+    const parsed = std.json.parseFromSlice(std.json.Value, arena, entry_line, .{}) catch return error.TestUnexpectedResult;
+    // At or after the reading taken before the store was opened: the pinned
+    // path is the one that makes this exact, and this is the side that keeps
+    // saying otherwise.
+    try std.testing.expect(parsed.value.object.get("ts").?.integer >= before_ms);
 }
 
 /// The directory a store is named in, spelled the way a run is given one:

@@ -150,6 +150,16 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- A session store opened from a chosen instant now stamps its records from
+  that instant too. `openAt` takes the reading it names the log from and
+  measures the retention window against, and every record in the file read the
+  machine's wall clock again at the write, so half the store was a function of
+  an argument and half of it was not: two runs of one scenario produced two
+  files of the same name carrying two different timelines. The reading is held
+  on the store and used for `ts`, and `open` -- what production calls -- clears
+  it, so a run that did not choose its instant still has a monitor deltas its
+  `ts` values against each other.
+
 - The interpreter floor is now held across all four places it is recorded, not
   three. `lint-versions` checked `ruff.toml`'s `target-version` against the
   `--python-version` each of the two manifests compiles its lock for, and left
