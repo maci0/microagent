@@ -2,7 +2,7 @@
 .\" `microagent update --help` list appears below, and `make check-man` checks
 .\" each one is here, so a flag cannot be added to the binary and left out of
 .\" this page. The ENVIRONMENT section is not checked: nothing reads it.
-.TH MICROAGENT 1 "2026-10-02" "microagent 0.14.0" "User Commands"
+.TH MICROAGENT 1 "2026-10-02" "microagent 0.15.0" "User Commands"
 .SH NAME
 microagent \- tiny OpenAI-compatible coding agent
 .SH SYNOPSIS
@@ -163,8 +163,7 @@ and the run says on stderr once 80% of it is spent. Environment
 .BR MICROAGENT_MAX_SPEND_TOKENS .
 .TP
 .BI \-\-reasoning\-effort " level"
-.B reasoning.effort
-sent to the provider:
+Reasoning level sent to the provider:
 .BR minimal ,
 .BR low ,
 .BR medium ,
@@ -173,6 +172,8 @@ or
 .B none
 to disable. Environment
 .BR MICROAGENT_REASONING_EFFORT .
+Config key
+.BR reasoning_effort .
 .TP
 .BI \-\-temperature " n"
 The sampling the provider draws from, 0 to 2. Left out, the field is absent

@@ -561,6 +561,10 @@ fn runMain(init: std.process.Init) !u8 {
     // The file is the weakest of the three sources, so it answers only where
     // neither the flag nor a variable did.
     if (!opts.from_flag.contains(.model) and env_model == null and loaded.model.len != 0) opts.model = loaded.model;
+    if (opts.reasoning_effort == null and loaded.reasoning_effort.len != 0) {
+        if (reasoningEffort(&err_buf, "config key reasoning_effort", loaded.reasoning_effort, &opts.reasoning_effort)) |msg|
+            return configError(io, "{s}", .{msg});
+    }
     // The base url records which of the three it was, because the refusals below
     // are about the value and an operator who set it in a variable has to be
     // sent to the variable rather than to a flag they never wrote.
@@ -650,7 +654,7 @@ fn runMain(init: std.process.Init) !u8 {
     var input_buf: [max_repl_prompt_bytes]u8 = undefined;
     var input = std.Io.File.stdin().readerStreaming(io, &input_buf);
     const prefix = try bodyPrefix(arena, opts);
-    const ep = try endpoint(arena, opts);
+    const ep = try endpoint(io, arena, opts);
     var session: ?session_mod.Session = null;
     defer session_mod.close(io, &session);
     var usage: chat_mod.Usage = .{};
@@ -1104,9 +1108,9 @@ const help_text =
     \\                         says on stderr once 80% of it is spent
     \\                         (env MICROAGENT_MAX_SPEND_TOKENS)
     \\      --reasoning-effort <level>
-    \\                         reasoning.effort sent to the provider: minimal,
+    \\                         reasoning level sent to the provider: minimal,
     \\                         low, medium, high, or none to disable (env
-    \\                         MICROAGENT_REASONING_EFFORT)
+    \\                         MICROAGENT_REASONING_EFFORT, config key reasoning_effort)
     \\      --temperature <n>   temperature sent to the provider, 0 to 2. Left
     \\                         out, the provider samples at its own default, so
     \\                         two runs of one conversation are two answers;
@@ -2270,6 +2274,7 @@ const LoadedConfig = struct {
     model: []const u8,
     base_url: []const u8,
     api_key: []const u8,
+    reasoning_effort: []const u8,
     /// The skill directories the config file named, or null when it named
     /// none, which is how the caller tells "use the default root" from "the
     /// file turned skills off".
@@ -2297,6 +2302,7 @@ fn fromConfig(parsed: config_mod.Config, source: ?[]const u8) LoadedConfig {
         .model = parsed.model,
         .base_url = parsed.base_url,
         .api_key = parsed.api_key,
+        .reasoning_effort = parsed.reasoning_effort,
         .skills = parsed.skills,
         .mcp = parsed.mcp,
         .deny_commands = parsed.deny_commands,
@@ -3569,7 +3575,15 @@ fn bodyPrefix(arena: std.mem.Allocator, opts: Options) ![]u8 {
     try w.writeAll(",\"stream\":true,\"stream_options\":{\"include_usage\":true}");
     try w.print(",\"max_tokens\":{d}", .{opts.max_tokens});
     if (opts.reasoning_effort) |effort| {
-        if (std.mem.eql(u8, effort, "none")) {
+        const opencode = if (std.Uri.parse(opts.base_url)) |uri| try isOpenCode(arena, uri) else |_| false;
+        if (opencode) {
+            if (std.mem.eql(u8, effort, "none")) {
+                try w.writeAll(",\"thinking\":{\"type\":\"disabled\"}");
+            } else {
+                try w.writeAll(",\"reasoning_effort\":");
+                try chat_mod.writeJsonString(w, effort);
+            }
+        } else if (std.mem.eql(u8, effort, "none")) {
             try w.writeAll(",\"reasoning\":{\"enabled\":false}");
         } else {
             try w.writeAll(",\"reasoning\":{\"effort\":");
@@ -3672,10 +3686,23 @@ const Endpoint = struct {
     shown_url: []const u8,
     /// The credential and identity headers, every turn of the run.
     auth: std.http.Client.Request.Headers,
+    /// OpenCode routes all turns in one conversation using this stable ID.
+    session_id: ?[]const u8 = null,
 };
 
-fn endpoint(arena: std.mem.Allocator, opts: Options) !Endpoint {
+fn isOpenCode(arena: std.mem.Allocator, uri: std.Uri) !bool {
+    const host = uri.host orelse return false;
+    return std.ascii.eqlIgnoreCase(try host.toRawMaybeAlloc(arena), "opencode.ai");
+}
+
+fn endpoint(io: Io, arena: std.mem.Allocator, opts: Options) !Endpoint {
     var uri = std.Uri.parse(opts.base_url) catch return error.InvalidUrl;
+    var session_id: ?[]const u8 = null;
+    if (try isOpenCode(arena, uri)) {
+        var random: [16]u8 = undefined;
+        io.random(&random);
+        session_id = try arena.dupe(u8, &std.fmt.bytesToHex(random, .lower));
+    }
     // Append to the parsed path, retaining encoded bytes and the query. A
     // fragment is local URL metadata and never belongs to the HTTP request.
     uri.path = .{ .percent_encoded = try std.fmt.allocPrint(arena, "{s}/chat/completions", .{std.mem.trimEnd(u8, uri.path.percent_encoded, "/")}) };
@@ -3692,7 +3719,24 @@ fn endpoint(arena: std.mem.Allocator, opts: Options) !Endpoint {
         // answers with a Location is an error rather than a second request, so
         // nothing to drop the key out of.
         .auth = try authHeaders(arena, opts.api_key),
+        .session_id = session_id,
     };
+}
+
+test "OpenCode endpoints get a fresh session ID for each conversation" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    for ([_][]const u8{ "https://opencode.ai/zen/v1", "https://OPENCODE.AI/zen/go/v1" }) |url| {
+        const first = try endpoint(std.testing.io, state.allocator(), .{ .base_url = url });
+        const second = try endpoint(std.testing.io, state.allocator(), .{ .base_url = url });
+        try std.testing.expectEqual(@as(usize, 32), first.session_id.?.len);
+        try std.testing.expect(!std.mem.eql(u8, first.session_id.?, second.session_id.?));
+        for (first.session_id.?) |c| try std.testing.expect(std.ascii.isHex(c));
+    }
+    for ([_][]const u8{ "http://127.0.0.1/v1", "https://opencode.ai.example/v1" }) |url| {
+        const other = try endpoint(std.testing.io, state.allocator(), .{ .base_url = url });
+        try std.testing.expect(other.session_id == null);
+    }
 }
 
 /// One turn's completion, asked again while the provider reports a failure it
@@ -3895,15 +3939,17 @@ fn streamChatOnce(
             r.deinit();
             req_slot = null;
         }
+        const extra_headers = [_]std.http.Header{
+            .{ .name = "content-type", .value = "application/json" },
+            .{ .name = "accept", .value = "text/event-stream" },
+            .{ .name = "x-opencode-session", .value = ep.session_id orelse "" },
+        };
         const req = openChatRequest(client, uri, .{
             .redirect_behavior = .unhandled,
             // The key and the identity ride in one header block, built once per
             // run: `authHeaders` is where both are spelled.
             .headers = auth_headers,
-            .extra_headers = &.{
-                .{ .name = "content-type", .value = "application/json" },
-                .{ .name = "accept", .value = "text/event-stream" },
-            },
+            .extra_headers = extra_headers[0..if (ep.session_id == null) @as(usize, 2) else 3],
         }, opts.stall_timeout_s) catch |err| {
             if (worthAnotherAttempt(.opened, err) and waitBeforeRetry(io, arena, shown_url, attempt, "opening the request to", err, budget)) continue;
             return err;
@@ -3991,8 +4037,7 @@ fn streamChatOnce(
                     }
                 }
             }
-            var err_transfer: [8 * 1024]u8 = undefined;
-            const err_reader = response.reader(&err_transfer);
+            const err_reader = response.readerDecompressing(&transfer, &decompress, &decompress_buffer);
             // The body is the only thing that says why the provider refused the
             // turn, so a read of it that fails is named rather than answered
             // with an empty body: `http 500:` on its own reads as a provider
@@ -4130,7 +4175,7 @@ fn streamChatOnce(
     if (result.stream_error.len != 0) {
         // Only an empty failure without reported usage can be retried. Usage
         // can report billable generation even when no visible text arrived.
-        if (result.content.items.len == 0 and calls.items.len == 0 and result.total_tokens == 0 and result.reasoning_tokens == 0 and unparsable == 0) {
+        if (result.streamed == 0 and calls.items.len == 0 and result.total_tokens == 0 and result.reasoning_tokens == 0 and unparsable == 0) {
             net.note(io, arena, "microagent: the provider reported a failure before any content from {s}: {s}\n", .{
                 shown_url, tool_mod.terminalSafe(arena, result.stream_error),
             });
@@ -4581,7 +4626,8 @@ fn assistantMessage(arena: std.mem.Allocator, result: *const chat_mod.ChatResult
     // `JsonBuf.initCapacity` is for.
     const json_per_call: usize = 64;
     const json_per_message: usize = 32;
-    var bytes: usize = result.content.items.len + json_per_message;
+    var bytes: usize = result.content.items.len + result.reasoning_content.items.len + json_per_message;
+    if (result.has_reasoning_content) bytes += ",\"reasoning_content\":\"\"".len;
     for (result.calls.items) |call| {
         bytes += call.id.len + call.name.len + call.args.items.len + json_per_call;
     }
@@ -4591,6 +4637,10 @@ fn assistantMessage(arena: std.mem.Allocator, result: *const chat_mod.ChatResult
         try msg.writer().writeAll("null");
     } else {
         try chat_mod.writeJsonString(msg.writer(), result.content.items);
+    }
+    if (result.has_reasoning_content) {
+        try msg.writer().writeAll(",\"reasoning_content\":");
+        try chat_mod.writeJsonString(msg.writer(), result.reasoning_content.items);
     }
     if (result.calls.items.len == 0) {
         try msg.writer().writeAll("}");
@@ -6860,6 +6910,12 @@ test "reasoning effort is only sent when asked for" {
     const none: Options = .{ .model = "m", .reasoning_effort = "none" };
     const body_none = try buildBody(gpa, none, msgs.items);
     try std.testing.expect(std.mem.indexOf(u8, body_none, "\"reasoning\":{\"enabled\":false}") != null);
+
+    const direct = try buildBody(gpa, .{ .base_url = "https://opencode.ai/zen/go/v1", .reasoning_effort = "high" }, "[");
+    try std.testing.expect(std.mem.indexOf(u8, direct, "\"reasoning_effort\":\"high\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, direct, "\"reasoning\":") == null);
+    const disabled = try buildBody(gpa, .{ .base_url = "https://opencode.ai/zen/v1", .reasoning_effort = "none" }, "[");
+    try std.testing.expect(std.mem.indexOf(u8, disabled, "\"thinking\":{\"type\":\"disabled\"}") != null);
 }
 
 // A run that sends no sampling field is a run whose answers the provider

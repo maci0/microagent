@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import importlib.util
 import json
 import os
@@ -40,8 +41,10 @@ class Provider(BaseHTTPRequestHandler):
     hang_body = False
     billed_error = False
     invalid_usage = False
+    failure_usage = ""
     response_bytes = 0
     response_calls = False
+    reasoning_content: ClassVar[str | None] = None
     # The one tool call the ordinary response makes, when it makes one at all.
     # "" is the ordinary response: a case sets it to the arguments of a call
     # it wants to see dispatched, and clears it again after its own assertions.
@@ -59,8 +62,10 @@ class Provider(BaseHTTPRequestHandler):
         cls.hang_body = False
         cls.billed_error = False
         cls.invalid_usage = False
+        cls.failure_usage = ""
         cls.response_bytes = 0
         cls.response_calls = False
+        cls.reasoning_content = None
         cls.tool_call_args = ""
 
     @staticmethod
@@ -117,6 +122,7 @@ class Provider(BaseHTTPRequestHandler):
         choice = (
             self.tool_call_frame()
             if Provider.tool_call_args
+            and (Provider.reasoning_content is None or Provider.seen[-1]["messages"][-1]["role"] != "tool")
             else ({"delta": {"content": "" if Provider.empty else "answer"}, "finish_reason": "stop"})
         )
         frame = {
@@ -137,15 +143,26 @@ class Provider(BaseHTTPRequestHandler):
                 }
             ]
         ending = "\n\n" if Provider.trailing_newline else ""
-        body = ("data: " + json.dumps(frame) + "\n\ndata: [DONE]" + ending).encode()
+        reasoning_frames = (
+            "".join(
+                "data: " + json.dumps({"choices": [{"delta": {"reasoning_content": piece}}]}) + "\n\n"
+                for piece in ("", Provider.reasoning_content[:3], Provider.reasoning_content[3:])
+            )
+            if Provider.reasoning_content is not None
+            else ""
+        )
+        body = (reasoning_frames + "data: " + json.dumps(frame) + "\n\ndata: [DONE]" + ending).encode()
         if Provider.billed_error:
-            usage = (
+            usage = Provider.failure_usage or (
                 '{"total_tokens":"unknown"}'
                 if Provider.invalid_usage
                 else '{"prompt_tokens":10,"completion_tokens":1,"total_tokens":11}'
             )
             body = (
-                'data: {"usage":' + usage + '}\n\ndata: {"error":{"message":"generation failed"}}\n\ndata: [DONE]\n\n'
+                reasoning_frames
+                + 'data: {"usage":'
+                + usage
+                + '}\n\ndata: {"error":{"message":"generation failed"}}\n\ndata: [DONE]\n\n'
             ).encode()
         self.send_response(200)
         self.send_header("content-type", "text/event-stream")
@@ -466,6 +483,8 @@ def check_endpoint_paths(binary: Path, root: Path, url: str) -> None:
     for suffix, expected in (
         ("", "/chat/completions"),
         ("/v1/", "/v1/chat/completions"),
+        ("/zen/v1", "/zen/v1/chat/completions"),
+        ("/zen/go/v1/", "/zen/go/v1/chat/completions"),
         ("/v1?api-version=fixture", "/v1/chat/completions?api-version=fixture"),
         ("/v1/?api-version=fixture/", "/v1/chat/completions?api-version=fixture/"),
         ("/v1#fixture", "/v1/chat/completions"),
@@ -473,6 +492,102 @@ def check_endpoint_paths(binary: Path, root: Path, url: str) -> None:
     ):
         result = invoke(binary, root, url.removesuffix("/v1") + suffix, ["endpoint path check"], "")
         expect(result.returncode == 0 and Provider.paths == [expected], (result.stderr, Provider.paths))
+
+
+def check_opencode(binary: Path, root: Path, url: str) -> None:
+    Provider.reset()
+    for suffix in ("/zen/v1", "/zen/go/v1"):
+        for reasoning in ('private "thought"\n日本', ""):
+            Provider.reasoning_content = reasoning
+            Provider.tool_call_args = json.dumps({"command": "echo tool-ok"})
+            result = invoke(binary, root, url.removesuffix("/v1") + suffix, ["-m", "kimi-k2.6", "use a tool"], "")
+            expect(result.returncode == 0 and len(Provider.seen) == 2, result.stderr)
+            expect(Provider.paths == [suffix + "/chat/completions"] * 2, Provider.paths)
+            expect(all(body["model"] == "kimi-k2.6" and body["stream"] for body in Provider.seen), Provider.seen)
+            assistant, tool = Provider.seen[-1]["messages"][-2:]
+            expect(
+                assistant["reasoning_content"] == reasoning and assistant["tool_calls"][0]["id"] == "call", assistant
+            )
+            expect(tool["role"] == "tool" and "tool-ok" in tool["content"], tool)
+            text = [line for line in result.stdout.splitlines() if not line.startswith('{"type":"usage"')]
+            expect(text == ["working", "answer"], result.stdout)
+        Provider.tool_call_args = ""
+        Provider.reasoning_content = 'private "thought"\n日本'
+        result = invoke(
+            binary, root, url.removesuffix("/v1") + suffix, ["--repl", "-m", "kimi-k2.6"], "first\nsecond\n"
+        )
+        expect(result.returncode == 0 and len(Provider.seen) == 2, result.stderr)
+        expect(Provider.seen[-1]["messages"][-2]["reasoning_content"] == Provider.reasoning_content, Provider.seen)
+        expect("private" not in result.stdout, result.stdout)
+    # Generated reasoning makes a failure billable even without a usage frame.
+    Provider.reasoning_content = "already generated"
+    Provider.billed_error = True
+    Provider.failure_usage = "{}"
+    result = invoke(binary, root, url, ["reasoning failure"], "")
+    expect(result.returncode == 1 and len(Provider.seen) == 1 and not result.stdout, result)
+    Provider.reset()
+
+
+def check_reasoning_config(binary: Path, root: Path, url: str) -> None:
+    Provider.reset()
+    path = root / "reasoning.toml"
+    for level in ("minimal", "low", "medium", "high", "none"):
+        path.write_text(f'reasoning_effort = "{level}"\n')
+        result = invoke(binary, root, url, ["reasoning config"], "", MICROAGENT_CONFIG=str(path))
+        expect(result.returncode == 0 and len(Provider.seen) == 1, result.stderr)
+        expect(
+            Provider.seen[0]["reasoning"] == ({"enabled": False} if level == "none" else {"effort": level}),
+            Provider.seen,
+        )
+    path.write_text('reasoning_effort = "high"\n')
+    for flags, environment, expected in (
+        ([], "low", "low"),
+        (["--reasoning-effort", "medium"], "low", "medium"),
+        ([], "", "high"),
+    ):
+        result = invoke(
+            binary,
+            root,
+            url,
+            [*flags, "reasoning precedence"],
+            "",
+            MICROAGENT_CONFIG=str(path),
+            MICROAGENT_REASONING_EFFORT=environment,
+        )
+        expect(result.returncode == 0 and Provider.seen[0]["reasoning"] == {"effort": expected}, result)
+    path.write_text('reasoning_effort = "typo"\n')
+    result = invoke(binary, root, url, ["invalid reasoning"], "", MICROAGENT_CONFIG=str(path))
+    expect(result.returncode == 2 and not Provider.seen and "config key reasoning_effort" in result.stderr, result)
+    result = invoke(
+        binary, root, url, ["--reasoning-effort", "low", "override invalid config"], "", MICROAGENT_CONFIG=str(path)
+    )
+    expect(result.returncode == 0 and Provider.seen[0]["reasoning"] == {"effort": "low"}, result)
+    path.write_text('reasoning_effort = ""\n')
+    result = invoke(binary, root, url, ["default reasoning"], "", MICROAGENT_CONFIG=str(path))
+    expect(result.returncode == 0 and "reasoning" not in Provider.seen[0], result)
+
+
+class CompressedError(Provider):
+    def do_POST(self) -> None:
+        self.rfile.read(int(self.headers["content-length"]))
+        body = gzip.compress(b'{"error":{"message":"compressed refusal"}}')
+        self.send_response(403)
+        self.send_header("content-encoding", "gzip")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def check_compressed_error(binary: Path, root: Path) -> None:
+    with ThreadingHTTPServer(("127.0.0.1", 0), CompressedError) as server:
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            result = invoke(binary, root, f"http://127.0.0.1:{server.server_port}/v1", ["compressed error"], "")
+            expect(result.returncode == 1 and not result.stdout and "compressed refusal" in result.stderr, result)
+        finally:
+            server.shutdown()
+            thread.join()
 
 
 def load_harbor() -> ModuleType:
@@ -587,6 +702,9 @@ if __name__ == "__main__":
             check_response_cap(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_tool_outcomes(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_endpoint_paths(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
+            check_opencode(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
+            check_reasoning_config(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
+            check_compressed_error(binary, Path(temp))
             check_harbor_numbers(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_harbor_connection_values(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
         finally:

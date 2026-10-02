@@ -99,9 +99,9 @@ usage: microagent [options] "<prompt>"
                          says on stderr once 80% of it is spent
                          (env MICROAGENT_MAX_SPEND_TOKENS)
       --reasoning-effort <level>
-                         reasoning.effort sent to the provider: minimal,
+                         reasoning level sent to the provider: minimal,
                          low, medium, high, or none to disable (env
-                         MICROAGENT_REASONING_EFFORT)
+                         MICROAGENT_REASONING_EFFORT, config key reasoning_effort)
       --temperature <n>   temperature sent to the provider, 0 to 2. Left
                          out, the provider samples at its own default, so
                          two runs of one conversation are two answers;
@@ -301,6 +301,45 @@ The key goes to the base url in an `Authorization` header on every request. Two 
 `--ca-bundle` (or `MICROAGENT_CA_BUNDLE`, else `SSL_CERT_FILE`) names a PEM file to trust instead of
 the system store, for container images that ship no `ca-certificates`.
 
+### OpenCode Zen and Go
+
+Both gateways work with the existing Chat Completions client:
+
+| Provider | `MICROAGENT_BASE_URL` |
+| --- | --- |
+| OpenCode Zen | `https://opencode.ai/zen/v1` |
+| OpenCode Go | `https://opencode.ai/zen/go/v1` |
+
+```sh
+export MICROAGENT_API_KEY=your-opencode-api-key
+export MICROAGENT_BASE_URL=https://opencode.ai/zen/go/v1
+export MICROAGENT_MODEL=kimi-k2.6
+microagent "fix the failing test and run it"
+```
+
+Use your OpenCode API key with access to the selected plan. The same settings can be entered
+with `microagent setup` or written as `api_key`, `base_url` and `model` in the config file.
+The client appends `/chat/completions` to the base URL. Send the bare model ID (`kimi-k2.6`),
+without the `opencode/` or `opencode-go/` prefix used by the OpenCode CLI, and select it explicitly:
+microagent's default model name is an OpenRouter ID.
+
+The client automatically sends a random `x-opencode-session` ID to `opencode.ai`, stable across
+every tool turn, retry and REPL prompt in one process. Go requires this header for routing and
+prompt caching; see its [client requirements](https://opencode.ai/docs/go/#where-can-i-use-it).
+Zen may return `FreeTierError` for free-tier models used outside OpenCode; use a model your
+account permits for external clients.
+
+Choose a model listed with a `/chat/completions` endpoint in the official
+[Zen](https://opencode.ai/docs/zen/#endpoints) or [Go](https://opencode.ai/docs/go/#endpoints)
+tables. Models served through other API formats, such as `/responses` or `/messages`, are
+not supported by this client. Availability and API format can differ between Zen and Go.
+
+Streamed `reasoning_content` is preserved on assistant messages, including tool calls and REPL
+history, so models that require their thinking on follow-up requests receive it unchanged.
+It shares the 16 MiB response allowance with visible text and tool arguments and is not printed
+to stdout or written to the session log. Local CLI checks cover both gateway paths and tool
+follow-ups; authenticated calls require your OpenCode API key.
+
 ## What leaves the machine
 
 One run reaches the places below, and writes one thing down. This is the whole list; a reader who wants
@@ -317,10 +356,11 @@ reaches the provider; `blame` keeps the hash, the date and the line number and h
 whoever last touched the line cut out of every line, since the hash on the same line already answers
 that and `show` will read it. The credential guards under
 [Tools](#tools) keep key material out of a tool result, and the `git` format choices keep a person's
-name out of one. The request itself carries no identifier of this run: the body is the
-model name, the tool schemas, `max_tokens`, the optional `reasoning` block and the conversation, and
-the headers are `Authorization`, `content-type` and `accept`. No user id, no session id, no machine
-name, no account name, no timestamp, no run counter.
+name out of one. The request body contains the model name, tool schemas, `max_tokens`, optional
+reasoning and temperature settings, and the conversation, including retained assistant reasoning.
+Headers include authorization, content type, accepted response type and the program's user agent.
+OpenCode also receives a random `x-opencode-session` ID shared by the turns in one process.
+That ID contains no machine name, account name or other local identifier.
 
 **GitHub.** `microagent update` and `microagent update --check` ask
 `https://api.github.com/repos/<owner>/<repo>/releases/latest` and the release page for the asset, so
@@ -407,7 +447,16 @@ run starts from states the account.
 model    = "deepseek/deepseek-v4-flash"
 base_url = "https://api.openai.com/v1"
 api_key  = "sk-..."   # in the clear: chmod 600, and keep it out of a workspace
+reasoning_effort = "high" # optional, for models that support it
 ```
+
+`reasoning_effort` accepts `minimal`, `low`, `medium`, `high`, or `none` to disable thinking.
+Only set it for a model that supports the chosen value. `--reasoning-effort` overrides
+`MICROAGENT_REASONING_EFFORT`, which overrides the config; omitted or empty uses the provider's
+default. Invalid level names stop the run before a request. OpenCode receives `reasoning_effort`
+for a level, or `thinking.type = "disabled"` for `none`; other endpoints receive `reasoning.effort`
+or `reasoning.enabled = false`. If the provider rejects optional reasoning or temperature fields
+with HTTP 400, the existing fallback reports the rejection and retries without those settings.
 
 `model` defaults to `deepseek/deepseek-v4-flash` when no source names one. `base_url` and `api_key`
 have no default: a run that names neither is refused before the first request, with the message
@@ -924,8 +973,8 @@ changing the variable.
 - **Transient failures retry.** A 408, 409, 425, 429, any 5xx, or a connection that dies before the
   request reached the provider is retried twice, with 1 s and 2 s of backoff (or the provider's
   `Retry-After`, capped at 120 s), before the run exits non-zero. Any other rejection (401, 404) fails
-  at once. A 400 does too, with one exception: when `--reasoning-effort` or `--temperature` is set,
-  the request is sent once more without the `reasoning` and `temperature` fields, since some
+  at once. A 400 does too, with one exception: when reasoning effort or temperature is set,
+  the request is sent once more without the optional reasoning and temperature fields, since some
   providers refuse those fields rather than the request.
 - **A sent turn is never re-sent.** When the whole turn was sent and no response arrives, the
   provider may already have generated and billed the completion, so the run ends with the connection

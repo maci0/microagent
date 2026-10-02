@@ -9,7 +9,7 @@ const chat_mod = @import("chat.zig");
 /// Parallel tool calls accepted from one response; higher indices are dropped.
 pub const max_tool_calls = 64;
 
-/// Ceiling on what one response may add to the run: visible text, and the
+/// Ceiling on what one response may add to the run: visible text, reasoning and the
 /// arguments of its tool calls streamed in fragments. A provider that never
 /// sends `[DONE]` would otherwise grow the run's memory for as long as it keeps
 /// sending, and the caller chose the base url, not the server on the other end
@@ -164,6 +164,7 @@ const StreamFrame = struct {
     };
     const Delta = struct {
         content: ?[]const u8 = null,
+        reasoning_content: ?[]const u8 = null,
         tool_calls: ?[]const CallDelta = null,
     };
     const CallDelta = struct {
@@ -276,6 +277,7 @@ fn applyDeclared(
     try applyFinishReason(gpa, result, choice.finish_reason);
     const delta = choice.delta orelse return true;
 
+    if (delta.reasoning_content) |text| try appendReasoning(gpa, text, result);
     if (delta.content) |text| try appendStreamed(gpa, text, result, out_buf);
     if (delta.tool_calls) |tcs| {
         for (tcs) |tc| {
@@ -446,7 +448,7 @@ fn applyUsage(result: *chat_mod.ChatResult, u: UsageFields, unparsable: *usize) 
 
 /// The one response cap, applied to whichever stream a fragment arrived on.
 /// `max_response_bytes` bounds a whole response rather than each stream in it,
-/// so the answer text and every call's arguments share one budget; two copies
+/// so answer text, reasoning and every call's arguments share one budget; two copies
 /// of this arithmetic is two places for the ceiling to be read at half of.
 fn clampToResponseCap(result: *chat_mod.ChatResult, text: []const u8) []const u8 {
     const kept = chat_mod.clamp(text, max_response_bytes -| result.streamed);
@@ -466,6 +468,41 @@ fn appendStreamed(
     const kept = clampToResponseCap(result, text);
     try result.content.appendSlice(gpa, kept);
     try out_buf.appendSlice(gpa, kept);
+}
+
+fn appendReasoning(gpa: std.mem.Allocator, text: []const u8, result: *chat_mod.ChatResult) !void {
+    result.has_reasoning_content = true;
+    try result.reasoning_content.appendSlice(gpa, clampToResponseCap(result, text));
+}
+
+test "reasoning_content is retained silently on both parse paths under the shared byte cap" {
+    const gpa = std.testing.allocator;
+    var scratch = std.heap.ArenaAllocator.init(gpa);
+    defer scratch.deinit();
+    for ([_][]const u8{ "null", "5" }) |usage| {
+        var result: chat_mod.ChatResult = .{};
+        defer result.deinit(gpa);
+        var calls: std.ArrayList(chat_mod.ToolCall) = .empty;
+        defer chat_mod.deinitCalls(gpa, &calls);
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(gpa);
+        var unparsable: usize = 0;
+        for ([_][]const u8{ "null", "\"\"", "\"think \\\"first\\\"\\n\"", "\"日本\"" }, 0..) |piece, i| {
+            const frame = try std.fmt.allocPrint(scratch.allocator(), "{{\"usage\":{s},\"choices\":[{{\"delta\":{{\"reasoning_content\":{s}}}}}]}}", .{ usage, piece });
+            try applyFrame(scratch.allocator(), gpa, frame, &result, &calls, &out, &unparsable);
+            try std.testing.expectEqual(i != 0, result.has_reasoning_content);
+        }
+        try std.testing.expectEqualStrings("think \"first\"\n日本", result.reasoning_content.items);
+        try std.testing.expectEqual(@as(usize, 0), out.items.len);
+        try std.testing.expectEqual(@as(usize, 0), unparsable);
+        try std.testing.expectEqual(result.reasoning_content.items.len, result.streamed);
+        result.streamed = max_response_bytes - 1;
+        try appendReasoning(gpa, "ab", &result);
+        try std.testing.expect(result.dropped);
+        try std.testing.expectEqual(max_response_bytes, result.streamed);
+        try appendStreamed(gpa, "answer", &result, &out);
+        try std.testing.expectEqual(@as(usize, 0), result.content.items.len);
+    }
 }
 
 /// Folds one streamed fragment of a tool call into `calls`, growing it to the
@@ -617,6 +654,7 @@ pub fn applyFrame(
     const delta = choice.object.get("delta") orelse return;
     if (delta != .object) return;
 
+    if (chat_mod.str(delta.object.get("reasoning_content"))) |text| try appendReasoning(gpa, text, result);
     if (chat_mod.str(delta.object.get("content"))) |text| try appendStreamed(gpa, text, result, out_buf);
     if (delta.object.get("tool_calls")) |tcs| if (tcs == .array) {
         for (tcs.array.items) |tc| {
@@ -2109,7 +2147,7 @@ fn checkRawAccounting(gpa: std.mem.Allocator, payload: []const u8) !void {
     try std.testing.expect(sink.result.streamed <= max_response_bytes);
     try std.testing.expect(sink.calls.items.len <= max_tool_calls);
     // Retained bytes are charged, and discarded calls spend the allowance too.
-    var held: usize = sink.result.content.items.len;
+    var held: usize = sink.result.content.items.len + sink.result.reasoning_content.items.len;
     for (sink.calls.items) |call| held += call.args.items.len;
     try std.testing.expect(held <= sink.result.streamed);
     if (sink.result.over_cap_fragments == 0) try std.testing.expectEqual(held, sink.result.streamed);

@@ -81,7 +81,7 @@ pins for its linters and its benchmark adapter, none of which is in a release. P
 machine runs:
 
 ```sh
-v=v0.14.0 t=x86_64-linux-musl
+v=v0.15.0 t=x86_64-linux-musl
 curl -fLO https://github.com/maci0/microagent/releases/download/$v/microagent-$v-$t
 curl -fLO https://github.com/maci0/microagent/releases/download/$v/microagent-$v-$t.sha256
 # GNU coreutils spells it sha256sum, macOS ships shasum; both read the same
@@ -127,6 +127,12 @@ microagent "fix the failing test and run it"
 All three may also be written in the config file (`model`, `base_url`, `api_key`); a flag beats the
 variable, which beats the file. There is no default provider and no key file.
 
+For OpenCode Zen, set `MICROAGENT_BASE_URL=https://opencode.ai/zen/v1`; for OpenCode Go,
+use `https://opencode.ai/zen/go/v1`. Set `MICROAGENT_API_KEY` to your OpenCode API key and
+`MICROAGENT_MODEL` to a Chat Completions model ID such as `kimi-k2.6`, without the
+`opencode/` or `opencode-go/` prefix. [Provider setup and API limits](docs/usage.md#opencode-zen-and-go)
+are in the usage reference.
+
 For an interactive session, run `microagent --repl`. Enter one prompt per line;
 conversation history carries over. Exit with `/quit` or Ctrl-D. The usual flags apply,
 and turn, time and token spending ceilings reset for each prompt.
@@ -138,7 +144,7 @@ self-update.
 
 ## Status
 
-Version 0.14.0. What works: the tool loop against OpenRouter, DeepSeek, OpenAI and any other
+Version 0.15.0. What works: the tool loop against OpenRouter, DeepSeek, OpenAI and any other
 OpenAI-compatible endpoint; an interactive session with `--repl`; repository instructions read
 from `AGENTS.md`; skills; MCP servers over stdio and over HTTP; the session log; verified
 self-update; reproducible release builds for Linux and macOS.

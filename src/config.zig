@@ -204,6 +204,8 @@ pub const Config = struct {
     model: []const u8 = "",
     base_url: []const u8 = "",
     api_key: []const u8 = "",
+    /// Optional reasoning level, overridden by the environment and CLI.
+    reasoning_effort: []const u8 = "",
     /// The skill directories the file named, or null when it named none and
     /// the default root applies. An empty list is a file that turned skills
     /// off, which is not the same statement as a file that did not mention
@@ -563,6 +565,7 @@ fn topKey(config: *Config, arena: std.mem.Allocator, lines: *Lines, key: []const
     if (std.mem.eql(u8, key, "model")) return topString(arena, config, key, value_text, &config.model);
     if (std.mem.eql(u8, key, "base_url")) return topString(arena, config, key, value_text, &config.base_url);
     if (std.mem.eql(u8, key, "api_key")) return topString(arena, config, key, value_text, &config.api_key);
+    if (std.mem.eql(u8, key, "reasoning_effort")) return topString(arena, config, key, value_text, &config.reasoning_effort);
     if (std.mem.eql(u8, key, "skills")) {
         const dirs = stringArray(arena, value_text) orelse
             return config.note(.{ .key = key, .kind = .bad_value });

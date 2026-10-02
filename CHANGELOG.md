@@ -19,6 +19,28 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-10-02
+
+### Added
+
+- The top-level config key `reasoning_effort` sets the same optional reasoning
+  level as `--reasoning-effort`. The flag overrides `MICROAGENT_REASONING_EFFORT`,
+  which overrides the file; omitted or empty keeps the provider's default.
+  OpenCode receives its native `reasoning_effort` field, or `thinking.type`
+  set to `disabled` for `none`.
+
+### Fixed
+
+- Preserve streamed `reasoning_content` on assistant messages so OpenCode Zen
+  and Go thinking models can continue after tool calls and across REPL prompts.
+  Reasoning shares the response byte ceiling and is kept out of stdout and
+  session logs; a stream failure after reasoning is generated is not retried.
+  Document both gateway base URLs, bare model IDs and the Chat Completions API limit.
+
+- Send a stable `x-opencode-session` header to OpenCode for each conversation;
+  Go otherwise rejects requests with `MissingSessionID`. Decode compressed
+  provider error bodies so their reason is readable instead of compressed bytes.
+
 ## [0.14.0] - 2026-10-02
 
 ### Added
@@ -3182,7 +3204,8 @@ First release.
   `aarch64-macos` with a checksum sidecar each, and refuses a tag that does not name the version in
   `build.zig.zon`.
 
-[Unreleased]: https://github.com/maci0/microagent/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/maci0/microagent/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/maci0/microagent/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/maci0/microagent/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/maci0/microagent/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/maci0/microagent/compare/v0.11.0...v0.12.0

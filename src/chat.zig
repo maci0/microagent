@@ -147,6 +147,9 @@ test "only the tools that change a file say they write" {
 
 pub const ChatResult = struct {
     content: std.ArrayList(u8) = .empty,
+    /// Replayed on assistant messages for interleaved thinking/tool calls.
+    reasoning_content: std.ArrayList(u8) = .empty,
+    has_reasoning_content: bool = false,
     calls: std.ArrayList(ToolCall) = .empty,
     prompt_tokens: u64 = 0,
     completion_tokens: u64 = 0,
@@ -184,7 +187,7 @@ pub const ChatResult = struct {
     /// by then, so a stream that reported a failure and one that ran to its end
     /// have to be told apart, and this is the field that tells them apart.
     stream_error: []u8 = &.{},
-    /// Bytes charged to this response: the visible text and every call's
+    /// Bytes charged to this response: visible text, reasoning and every call's
     /// arguments, including rejected calls. `max_response_bytes` bounds a response, not
     /// each stream in it, and the streams are not one: a provider that streams
     /// the full allowance of arguments for each of `max_tool_calls` calls holds
@@ -217,6 +220,7 @@ pub const ChatResult = struct {
     pub fn deinit(self: *ChatResult, gpa: std.mem.Allocator) void {
         deinitCalls(gpa, &self.calls);
         self.content.deinit(gpa);
+        self.reasoning_content.deinit(gpa);
         for (&[_]*[]u8{
             &self.finish_reason,
             &self.served_model,

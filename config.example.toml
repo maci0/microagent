@@ -28,6 +28,15 @@
 # model    = "deepseek/deepseek-v4-flash"
 # base_url = "https://api.openai.com/v1"
 # api_key  = "sk-..."
+# OpenCode Zen: base_url = "https://opencode.ai/zen/v1"
+# OpenCode Go:  base_url = "https://opencode.ai/zen/go/v1"
+# Use your OpenCode API key and a Chat Completions model ID, e.g. "kimi-k2.6",
+# without "opencode/" or "opencode-go/". See docs/usage.md#opencode-zen-and-go.
+
+# Optional reasoning level for models that support it: minimal, low, medium,
+# high, or none to disable. A CLI flag beats MICROAGENT_REASONING_EFFORT,
+# which beats this setting. Leave unset to use the provider's default.
+# reasoning_effort = "high"
 
 # Text appended to the system prompt after a blank line, at most 16 KB. A basic
 # string ("..." with the escapes \b \t \n \f \r \" \\ \uXXXX \UXXXXXXXX), a
@@ -196,4 +205,3 @@ runnable check behind for non-trivial logic.
 # [sandbox]
 # enabled = true
 # writable = [".", "/tmp"]
-
