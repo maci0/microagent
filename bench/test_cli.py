@@ -1,4 +1,4 @@
-"""Check the built CLI against a loopback provider: python3 scripts/test_cli.py BINARY."""
+"""Check the built CLI against a loopback provider: python3 bench/test_cli.py BINARY."""
 
 from __future__ import annotations
 
@@ -216,7 +216,7 @@ def check_refs(root: Path) -> None:
     (fixture / "scripts").mkdir(parents=True)
     (fixture / "src").mkdir()
     script = fixture / "scripts" / "check-refs.sh"
-    shutil.copyfile(Path(__file__).with_name("check-refs.sh"), script)
+    shutil.copyfile(Path(__file__).resolve().parent.parent / "scripts" / "check-refs.sh", script)
     (fixture / "src" / "example.zig").write_text("pub fn first() void {}\npub fn second() void {}\n", encoding="utf-8")
     doc = fixture / "references.md"
     for text, status in (

@@ -310,7 +310,7 @@ test:
 
 # Exercise the actual CLI over loopback, without a provider account.
 test-cli: build
-	python3 scripts/test_cli.py $(BIN)
+	python3 bench/test_cli.py $(BIN)
 	python3 bench/test_stub_provider.py
 	python3 bench/test_maxrss.py
 	python3 bench/test_limit.py
@@ -340,7 +340,28 @@ test-sanitize:
 # moment the file is committed. `--exclude-standard` keeps every build product
 # and scratch tree out of the lists, so a gate run after a build is the same one
 # a clean clone gets.
-TRACKED = git ls-files --cached --others --exclude-standard
+#
+# The trailing filter drops the one state those two halves do not cover: a path
+# git still has cached while the working tree no longer has it. A staged
+# deletion, or a `git mv` run before the index is written, leaves the old name in
+# `--cached` and the file gone from disk, and every list below hands that name
+# straight to a linter that cannot open it. The gate then reports a missing file
+# instead of a finding, which is the same green-on-a-broken-tree defect the two
+# halves above exist to prevent, reached one step later: the file moved, so
+# nothing is wrong with the new one yet. Only a file is kept, because every
+# consumer below passes these names to a formatter, a linter or a grep.
+#
+# The filter runs under `sh -c` so the caller's pathspecs land in `$$@` rather
+# than closing a pipe: in `cmd | while read` the pipe ends the command and the
+# globs become a stray argument to `read`. The `sh` after the script is `$$0`.
+TRACKED = sh -c 'git ls-files --cached --others --exclude-standard "$$@" | while read -r path; do [ -f "$$path" ] && printf "%s\n" "$$path"; done' sh
+
+# The same filter for the one caller that hands the names to `xargs -0`, which
+# needs NUL between them because a name this tree holds is not free of the
+# characters a space would split on. Same pathspecs, same test, one terminator
+# different: a newline-separated name reaches `xargs -0` as a single giant path,
+# and shellcheck then reports that it was given no files at all.
+TRACKED_NULL = sh -c 'git ls-files --cached --others --exclude-standard "$$@" | while read -r path; do [ -f "$$path" ] && printf "%s\0" "$$path"; done' sh
 
 # The Zig sources the test names are read out of, for `test`, and the ones
 # `fmt` and `fmt-check` read.
@@ -601,7 +622,7 @@ lint-shell:
 	done; \
 	SHELLCHECK_OPTS='$(SHELLCHECK_OPTS)' sh scripts/lint-shell-stale-selftest.sh; \
 	SHELLCHECK_OPTS='$(SHELLCHECK_OPTS)' sh scripts/lint-shell-stale.sh $$files; \
-	$(TRACKED) -z '*.sh' | xargs -0 shellcheck $(SHELLCHECK_OPTS)
+	$(TRACKED_NULL) '*.sh' | xargs -0 shellcheck $(SHELLCHECK_OPTS)
 
 # The shell in the workflows is the same language under the same options, and
 # it is where a release is published from, so it is checked rather than
