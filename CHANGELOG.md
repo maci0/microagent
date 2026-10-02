@@ -57,6 +57,16 @@ release, and `microagent update` moves you to it.
   clock has passed), which took the backoff's place and sent every attempt
   milliseconds apart.
 
+- The benchmark venv is built for the interpreter its lock resolves for. The
+  README's `uv venv` named none, so `uv` took whichever interpreter it found
+  first on PATH: a host whose default is 3.11 installed a lock compiled with
+  `--python-version 3.12` into an interpreter a release below the floor the
+  manifest states, and the adapter's own `from datetime import UTC` is a 3.11
+  name, so the run failed at the first summarize rather than at the install.
+  `make lint-versions` now holds that `--python` against the floor the linter
+  manifest, the Harbor manifest and `ruff.toml` are already held to, and its
+  self-test asks the same question of it as of the other four.
+
 ## [0.15.0] - 2026-10-02
 
 ### Added

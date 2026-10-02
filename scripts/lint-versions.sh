@@ -25,6 +25,12 @@ set -eu
 
 manifest="$1"
 test -f "$manifest" || { echo "no $manifest, so the interpreter the Harbor lock resolves for cannot be checked" >&2; exit 1; }
+# The README beside that manifest, derived from the path rather than spelled
+# again: the Harbor directory is written down in the Makefile and arrives here
+# as this one argument, and a second spelling of the same path in this file is
+# the spelling that goes on disagreeing with it.
+harbor_readme="$(dirname "$manifest")/README.md"
+test -f "$harbor_readme" || { echo "no $harbor_readme, so the interpreter the benchmark venv is built for cannot be checked" >&2; exit 1; }
 
 have_ruff="$(ruff --version | awk '{print $2}')"
 have_yamllint="$(yamllint --version | awk '{print $NF}')"
@@ -85,4 +91,21 @@ venv_py="$(printf '%s' "$venv_target" | tr -d .)"
 { [ -n "$ruff_target" ] && [ -n "$venv_target" ] && [ "$ruff_target" = "py$venv_py" ]; } || {
   echo "ruff.toml checks against $ruff_target and .github/actions/setup-linters/action.yml builds its venv for $venv_target: the gate runs on an interpreter nobody declared, so a bump to the floor has to bump this venv with it" >&2;
   echo "a bump to any of the three has to bump the other three: ruff.toml, the 'uv pip compile' at the top of each manifest, and the 'uv venv --python' in setup-linters" >&2; bad=1; }
+# The interpreter the benchmark's own venv is built for, a fifth record of the
+# same floor. setup-linters is the only venv the three above covered, and it is
+# the one CI builds; the venv a contributor's score is measured in is created by
+# the README's own `uv venv` line and by nothing else, so that line named no
+# interpreter at all and this check had no reason to fail on it. `uv venv`
+# without `--python` takes whichever interpreter it finds first on PATH, so a
+# host whose default is 3.11 builds the Harbor lock -- a lock compiled with
+# `--universal --python-version 3.12` -- into an interpreter one release below
+# the floor the manifest states, and the adapter's own `from datetime import UTC`
+# is a 3.11 name: the run fails at the first summarize, after the containers
+# have already been paid for, rather than at the install. Read by the same `sed`
+# shape as the venv above, so a reworded line is reported rather than skipped.
+harbor_venv_target="$(sed -n 's/.*uv venv --python \([0-9][0-9.]*\).*/\1/p' "$harbor_readme")"
+harbor_venv_py="$(printf '%s' "$harbor_venv_target" | tr -d .)"
+{ [ -n "$ruff_target" ] && [ -n "$harbor_venv_target" ] && [ "$ruff_target" = "py$harbor_venv_py" ]; } || {
+  echo "ruff.toml checks against $ruff_target and $harbor_readme creates its venv for ${harbor_venv_target:-no interpreter at all}: a benchmark is then measured in whatever interpreter uv finds on PATH rather than the one its lock resolves for" >&2;
+  echo "a bump to the floor has to bump the 'uv venv --python' there with ruff.toml, the 'uv pip compile' in each manifest, and setup-linters" >&2; bad=1; }
 test "$bad" -eq 0

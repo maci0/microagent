@@ -46,7 +46,12 @@ ruff_config="ruff.toml"
 # restored like the rest, because a case that edits it and leaves it behind is
 # the defect the list above records having had once already.
 linter_action=".github/actions/setup-linters/action.yml"
-files="$linter_manifest $linter_lock $ruff_config $manifest $linter_action"
+# The interpreter the benchmark's own venv is built for, a fifth file
+# lint-versions.sh reads: the `uv venv --python` in the README beside the
+# manifest. CI never sees it, so nothing but the self-test would notice a case
+# that stopped being refused.
+harbor_readme="$(dirname "$manifest")/README.md"
+files="$linter_manifest $linter_lock $ruff_config $manifest $linter_action $harbor_readme"
 for file in $files; do
   test -f "$file" || { echo "no $file, so there is nothing to perturb" >&2; exit 1; }
 done
@@ -155,6 +160,12 @@ expect "the linter manifest's interpreter floor" "$linter_manifest" drop_linter_
 expect "the Harbor manifest's interpreter floor" "$manifest" drop_harbor_floor
 expect "ruff.toml's target-version" "$ruff_config" drop_ruff_target
 expect "the lint venv's interpreter" "$linter_action" drop_venv_floor
+# The fifth record of the same floor: the interpreter the benchmark venv is
+# built for, which lint-versions gained after the README's `uv venv` line was
+# found naming none, so it took whichever interpreter the host had first on
+# PATH.
+drop_harbor_venv_floor() { edit_in_place "$harbor_readme" 's/uv venv --python 3\.12/uv venv --python 3.11/'; }
+expect "the benchmark venv's interpreter" "$harbor_readme" drop_harbor_venv_floor
 
 # The version pins, the other thing the script refuses. RUFF_VERSION names the
 # version the gate runs and the four places that have to agree with it are the
