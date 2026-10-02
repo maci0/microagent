@@ -180,12 +180,12 @@ test "a delegated program that is not installed costs no descriptor and no proce
     sh.reap(io);
 
     if (builtin.os.tag != .linux) return error.SkipZigTest;
-    const before = try openDescriptors(io, arena);
+    const before = try net.openDescriptors(io, arena);
     for (0..missing_program_calls) |_| {
         try std.testing.expectError(error.FileNotFound, ToolChild.spawn(io, &argv, &env));
     }
     // Failed spawns release their pipes as well as successful ones.
-    try std.testing.expectEqual(before, try openDescriptors(io, arena));
+    try std.testing.expectEqual(before, try net.openDescriptors(io, arena));
 }
 
 test "failed tool and MCP spawns close pipes and reap children" {
@@ -206,7 +206,7 @@ test "failed tool and MCP spawns close pipes and reap children" {
         defer file.close(io);
         try file.setPermissions(io, std.Io.File.Permissions.fromMode(0o755));
     }
-    const before = if (builtin.os.tag == .linux) try openDescriptors(io, arena) else 0;
+    const before = if (builtin.os.tag == .linux) try net.openDescriptors(io, arena) else 0;
     for ([_][]const u8{ "absent", "bad-interpreter", "bad-format" }) |name| {
         const path = try std.fs.path.join(arena, &.{ base, name });
         const expected: std.process.SpawnError = if (std.mem.eql(u8, name, "bad-format")) error.InvalidExe else error.FileNotFound;
@@ -240,27 +240,11 @@ test "failed tool and MCP spawns close pipes and reap children" {
                 .stderr = .pipe,
             }));
         }
-        try std.testing.expectEqual(before, try openDescriptors(io, arena));
+        try std.testing.expectEqual(before, try net.openDescriptors(io, arena));
         var status: u32 = undefined;
         try std.testing.expectEqual(std.os.linux.E.CHILD, std.os.linux.errno(std.os.linux.waitpid(-1, &status, std.os.linux.W.NOHANG)));
     }
     try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "marker", .{}));
-}
-
-/// How many descriptors this process holds, counted by walking `/proc/self/fd`.
-/// Linux only, and only a test uses it: what it measures has no portable
-/// equivalent, and a platform that has none is not the platform this leak
-/// reaches the limit on.
-fn openDescriptors(io: Io, arena: std.mem.Allocator) !usize {
-    var dir = try std.Io.Dir.cwd().openDir(io, "/proc/self/fd", .{ .iterate = true });
-    defer dir.close(io);
-    var walker = try dir.walk(arena);
-    defer walker.deinit();
-    var n: usize = 0;
-    while (try walker.next(io)) |_| n += 1;
-    // The descriptor this walk holds open, which the listing names along with
-    // the ones being counted.
-    return n -| 1;
 }
 
 /// SIGKILL to a whole process group. A group that is already gone is the normal

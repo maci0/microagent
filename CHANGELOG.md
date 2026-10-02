@@ -134,6 +134,19 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- A prune of the session store that gave up mid-walk no longer leaks a file
+  descriptor per directory level it had descended. `SelectiveWalker.deinit`
+  frees the two lists it owns and closes nothing: a directory is closed by the
+  popping half of `next`, so a walk that runs to exhaustion hands every handle
+  back and a walk that returns early -- on an entry it did not want, on a read
+  that failed, on an allocation that would not be made -- leaves every
+  directory under the point it stopped at open, for the life of the process.
+  `pruneSessionsTo` was the one walk here with those early returns, and it runs
+  once per run. The release is a named `drainWalk` in `net`, used by every walk
+  in the tree: a walk that ran to completion has nothing left for it to close,
+  so the same call is right for both, and a walk that ends early no longer
+  depends on the loop beneath it never returning.
+
 - A refused `--temperature`, `--reasoning-effort` or base url is now reported
   against the source it came from. The ceilings already named theirs
   (`MICROAGENT_MAX_TURNS must be a number`), and these three spelled the flag

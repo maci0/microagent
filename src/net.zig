@@ -613,6 +613,53 @@ pub fn dropPending(pending: *std.ArrayList(u8), scanned: ?*usize, consumed: usiz
     if (scanned) |cursor| cursor.* -|= consumed;
 }
 
+/// Releases a walk in full: every directory handle it still holds, then the
+/// memory it owns. This is the release for a walk whose loop gave up early, and
+/// the one a walk that ran to completion can use as well, since a drained walk
+/// has nothing left to close.
+///
+/// A `SelectiveWalker` owns two lists and no handles: it closes a directory as
+/// it pops the stack, and `deinit` frees the lists and stops. A walk that runs
+/// to exhaustion pops the stack down to the root it was handed and leaves
+/// nothing for this to close, but a walk that returns early -- on an entry it
+/// does not want, on a read that failed, on an allocation that would not be
+/// made -- leaves every directory under the point it stopped at open, and
+/// `deinit` on its own hands them back to nobody. That is one descriptor per
+/// level of depth for the life of the process, from a walk that ran once.
+///
+/// The root is the caller's and is not closed, which is the rule the walker's
+/// own popping half keeps: it only closes a directory that had a parent left
+/// above it.
+pub fn drainWalk(io: Io, walker: *std.Io.Dir.Walker) void {
+    defer walker.deinit();
+    // Each `next` that finds nothing pops the stack by one, closing the
+    // directory it leaves. Bounded by the depth the walk reached, so this
+    // terminates, and it is the same close the walk's own loop performs, so a
+    // directory the loop already popped is not closed twice.
+    while (walker.next(io) catch null) |_| {}
+}
+
+/// How many descriptors this process holds, counted by walking `/proc/self/fd`.
+/// Linux only, and only a test uses it: what it measures has no portable
+/// equivalent, and a platform that has none is not the platform the leak it
+/// reaches the limit on.
+///
+/// Here rather than in either module that wants it, so the tests that count a
+/// descriptor hold a number taken the same way. The walk is drained by the same
+/// rule every other walk follows, so the count does not include the handles the
+/// count itself took.
+pub fn openDescriptors(io: Io, arena: std.mem.Allocator) !usize {
+    var dir = try std.Io.Dir.cwd().openDir(io, "/proc/self/fd", .{ .iterate = true });
+    defer dir.close(io);
+    var walker = try dir.walk(arena);
+    defer drainWalk(io, &walker);
+    var n: usize = 0;
+    while (try walker.next(io)) |_| n += 1;
+    // The descriptor this walk holds open, which the listing names along with
+    // the ones being counted.
+    return n -| 1;
+}
+
 // The splitter three call sites share, so the `scanned` bookkeeping is pinned
 // here rather than only through them. An off-by-one either leaves a caller's
 // `pending` growing without bound (a `scanned` that is not lowered past the
