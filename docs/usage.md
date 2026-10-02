@@ -825,7 +825,7 @@ Two bounds keep a long run from re-sending without limit:
 | 0 | the run finished |
 | 1 | the run failed |
 | 2 | wrong command line, or a config the run cannot start with: a bad value, a `[tools.<name>]` that names no tool, every built-in disabled |
-| 3 | stopped without an answer: `--max-turns`, `--max-spend-tokens` or `--budget` reached, or the last response carried no text, was cut at `--max-tokens` or the response byte ceiling, or the provider stopped generating it. stdout is a prefix of the work, not an answer. |
+| 3 | stopped without an answer: `--max-turns`, `--max-spend-tokens` or `--budget` reached, the model asked the same tool call on three turns running, or the last response carried no text, was cut at `--max-tokens` or the response byte ceiling, or the provider stopped generating it. stdout is a prefix of the work, not an answer. |
 | 130 | interrupted (Ctrl+C or kill), taking the tool subprocess with it |
 
 A wrong flag prints the reason and the full help on stderr, so a script reading stdout gets nothing
@@ -927,6 +927,13 @@ changing the variable.
 - **Every request carries `max_tokens`**, so a model that fails to stop is not billed until something
   else stops it. `--max-turns` counts turns, not tokens, and a turn re-sends the whole conversation,
   so `--max-spend-tokens` is the ceiling on what a run spends.
+- **A run that asks the same question over and over stops.** Three turns in a row carrying the same
+  read-only tool call, with the same arguments and nothing new beside it, and the run ends there with
+  exit 3. A stuck model does not know it is stuck: the tool result is the bytes it read last turn, so
+  nothing in the conversation tells it to stop, and without this the only bound is a turn ceiling a
+  long way off. Calls that write are not counted, because a repeat of one of those is the same change
+  made twice rather than the same question asked again, and a turn of nothing but writes is not a
+  round of anything. A turn carrying any new call clears the count.
 - **`--budget`** stops starting turns after the given seconds, then takes one last turn to land an
   edit, which may run up to 5 minutes past it. A turn cut off there is discarded, not half-applied.
   The deadline also cancels blocked DNS, TLS, request writes, response headers and stream reads.

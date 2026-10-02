@@ -21,6 +21,20 @@ release, and `microagent update` moves you to it.
 
 ### Added
 
+- A run that asks the same question over and over now stops instead of
+  spending the budget on the answer. Three turns in a row carrying the same
+  read-only tool call, with the same arguments and nothing new beside it, ends
+  the run with exit 3 and a line on stderr saying why. A stuck model does not
+  know it is stuck: the tool result is the bytes it read last turn, so nothing
+  in the conversation tells it to stop, and the only other bound is a turn
+  ceiling a long way off -- 1000 turns at the default, each one re-sending the
+  whole conversation to the provider. Calls that write are not counted, because
+  a repeat of one of those is the same change made twice rather than the same
+  question asked again, and neither is a turn of nothing but writes, which is
+  what a run that does all its editing at once looks like. Any turn carrying a
+  call the last one did not clears the count, so a run that reads, edits and
+  reads the same file again is doing its work rather than looping.
+
 - A `tools/call` request now has a fuzz harness of its own. The arguments a
   model writes are spliced into the JSON-RPC frame as the bytes it sent rather
   than re-serialized, behind a JSON check that is the only thing between a
