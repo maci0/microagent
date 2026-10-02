@@ -381,7 +381,39 @@ pub const Server = struct {
         return self.answerIn(value, id);
     }
 
+    /// The nesting a frame cannot exceed, from its own bytes.
+    ///
+    /// Every level of `{}` or `[]` nesting is opened by a distinct byte, so a
+    /// document holding `n` of them is at most `n` levels deep whatever else it
+    /// contains. A `{` inside a string counts here and opens nothing there, so
+    /// the count can only be looser than the depth, never tighter: a frame at
+    /// or below the ceiling has proved it, and a frame above it has proved
+    /// nothing and still has to be walked.
+    fn mayExceedFrameDepth(frame: []const u8) bool {
+        return std.mem.count(u8, frame, "{") + std.mem.count(u8, frame, "[") > max_frame_depth;
+    }
+
+    /// Reads a frame, refusing one nested past `max_frame_depth`.
+    ///
+    /// The bound is what a run hands `std.json.Stringify` later, so a reply the
+    /// parser accepts but the serializer recurses through is a crash rather than
+    /// a skipped server. It is checked before the parse rather than by the parse,
+    /// because the parse has no depth limit of its own to consult: the two used
+    /// to be two passes over every frame, the counting one with a `Scanner`
+    /// whose `stackHeight` is a bit length, and the second pass cost as much as
+    /// the first. A frame within the bound is parsed once. A frame that is not
+    /// -- a hostile or broken server, and no ordinary answer -- is still walked,
+    /// so the refusal is unchanged and still lands before the parse that would
+    /// have recursed.
     fn parseFrame(self: *Server, scratch: std.mem.Allocator, frame: []const u8) !std.json.Value {
+        if (mayExceedFrameDepth(frame)) return self.refuseDeepFrame(frame, scratch);
+        return std.json.parseFromSliceLeaky(std.json.Value, scratch, frame, .{});
+    }
+
+    /// The depth walk, for the frames the count above could not clear. A frame
+    /// that is not JSON at all is left to the parse to report, which is what
+    /// says so; a frame that is JSON and too deep is refused here.
+    fn refuseDeepFrame(self: *Server, frame: []const u8, scratch: std.mem.Allocator) !std.json.Value {
         var scanner = std.json.Scanner.initCompleteInput(scratch, frame);
         defer scanner.deinit();
         while (try scanner.next() != .end_of_document) {
@@ -2556,6 +2588,33 @@ test "deeply nested MCP answers are refused before serialization in every transp
     try std.testing.expectEqualStrings("[" ** 254 ++ "0" ++ "]" ** 254, try resultText(arena, "nested", accepted));
     const brackets = "{\"id\":1,\"result\":{\"structuredContent\":\"" ++ "[" ** 300 ++ "\"}}";
     _ = try server.answerFor(arena, brackets, 1);
+    try std.testing.expect(!server.dead);
+}
+
+// The byte count `mayExceedFrameDepth` reads stands in for a walk of the frame,
+// so the two have to agree about every frame: a frame the count clears must be
+// one the walk would clear too, or a reply past the ceiling reaches the parse
+// that cannot be stopped. A count is a bound rather than the depth, so the
+// direction that would let one through is a count below a depth, and a brace
+// inside a string is the case that makes a count differ from a depth at all.
+test "the frame depth bound a byte count stands in for is never tighter than the depth" {
+    const nested = "[" ** (max_frame_depth + 1) ++ "0" ++ "]" ** (max_frame_depth + 1);
+    // Deep enough that the walk refuses it, and the count must agree.
+    try std.testing.expect(Server.mayExceedFrameDepth(nested));
+    // A frame at the ceiling parses, and the count must not send it to the walk.
+    const at_limit = "{\"id\":1,\"result\":{\"structuredContent\":" ++ "[" ** (max_frame_depth - 2) ++ "0" ++ "]" ** (max_frame_depth - 2) ++ "}}";
+    try std.testing.expect(!Server.mayExceedFrameDepth(at_limit));
+    // Braces that are text rather than structure: the count counts them and the
+    // walk does not, so the count sends this frame to the walk, and the walk
+    // accepts it. The bound is loose here and never tight, which is the
+    // direction that has to hold: a count below a depth would let a reply past
+    // the ceiling through to the parse.
+    const text_braces = "{\"id\":1,\"result\":{\"structuredContent\":\"" ++ "{" ** max_frame_depth ++ "\"}}";
+    try std.testing.expect(Server.mayExceedFrameDepth(text_braces));
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    var server: Server = .{ .name = "counted", .run_arena = state.allocator(), .transport = undefined, .tools = &.{} };
+    _ = try server.answerFor(state.allocator(), text_braces, 1);
     try std.testing.expect(!server.dead);
 }
 
