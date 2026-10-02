@@ -776,6 +776,18 @@ fn toolGit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, ceiling_m
     // so the path gets the refusal `read` gives it rather than a git one.
     if (path) |p| if (credentialPath(io, arena, p)) |refused| return credentialRefusal(arena, .git, refused, false);
 
+    // A `rev` on a `status` is a revision the working tree has no notion of:
+    // `git status` reports what is uncommitted against HEAD and takes no
+    // revision to read it at. The field is one the schema declares for the four
+    // commands that take one, and it reached this one and was dropped, so a call
+    // narrowing the status it reads with `rev` came back with the whole
+    // repository's. It is refused rather than ignored, the way a key a table
+    // cannot use is refused in `config`: the caller is told which field this
+    // command does not take, which is what saves the turn.
+    if (rev != null and std.mem.eql(u8, cmd, "status")) {
+        return "error: git status takes no rev; it reports the working tree against HEAD. Use cmd diff with a rev to read a past revision.";
+    }
+
     const argv = gitArgv(arena, cmd, rev, path, limit) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.UnknownCmd => return std.fmt.allocPrint(arena, "error: unknown git cmd '{s}'", .{cmd}),
@@ -977,6 +989,12 @@ fn gitArgv(
         // `fatal: not an integer`.
         try argv.appendSlice(arena, &.{ "log", "--oneline", "--no-color", "-n" });
         try argv.append(arena, try std.fmt.allocPrint(arena, "{d}", .{@min(limit, git_log_line_ceiling)}));
+        // `rev` narrows the history here the way it narrows `diff` and `show`,
+        // between the flags and the pathspecs git is given below. It was read
+        // nowhere, so a `git log` naming `HEAD~1` came back with every commit:
+        // the field the schema declares is one this command silently dropped,
+        // and the model narrowing the range it reads got the whole of it.
+        if (rev) |r| try argv.append(arena, r);
     } else if (std.mem.eql(u8, cmd, "show")) {
         // The default header of a shown commit is `Author:` and `Commit:`,
         // each a name and an email address, and a tool result is re-sent to the
@@ -6420,6 +6438,69 @@ test "a git line limit past what git parses is cut, not handed over" {
             return err;
         };
     }
+}
+
+// `rev` is one field of one schema that every `cmd` shares, and the three
+// commands that take a revision have always been handed it. `log` was the
+// fourth: the field was read nowhere, so a call narrowing the history it reads
+// with `rev` came back with every commit in the repository and no sign that the
+// range had been ignored. It is checked against a real repository rather than
+// against the argv, because the argv is what a change that puts the rev in the
+// wrong place past the `--` also produces.
+test "a git log narrows to the revision it was given, as diff and show do" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+
+    // Two commits whose subjects are the only thing that tells them apart, so
+    // the answer says which range it read rather than merely how many lines it
+    // held. `HEAD~1` reaches the first of them and not the second. The fixture
+    // helper makes its own commit, so it is called on a directory that has
+    // something in it: `git commit` with nothing staged is not a commit.
+    try tmp.dir.writeFile(io, .{ .sub_path = "f.txt", .data = "0\n" });
+    try commitOneFixture(io, arena, root);
+    try tmp.dir.writeFile(io, .{ .sub_path = "f.txt", .data = "1\n" });
+    const script = try std.fmt.allocPrint(arena,
+        \\git -C '{s}' add -A && git -C '{s}' commit -qm 'second subject'
+    , .{ root, root });
+    const made = try runCapped(io, arena, &.{ "/bin/sh", "-c", script }, 1 << 20, net.durationMs(60_000), null, null);
+    try std.testing.expect(made.term == .exited and made.term.exited == 0);
+
+    const whole = try runCapped(io, arena, try gitIn(arena, root, "log", null, null), 1 << 20, net.durationMs(60_000), null, null);
+    const narrowed = try runCapped(io, arena, try gitIn(arena, root, "log", "HEAD~1", null), 1 << 20, net.durationMs(60_000), null, null);
+    // Unnarrowed, both commits are the answer.
+    try std.testing.expect(std.mem.indexOf(u8, whole.stdout, "second subject") != null);
+    try std.testing.expect(std.mem.indexOf(u8, whole.stdout, "a subject line") != null);
+    // Narrowed to `HEAD~1`, it is not: the second commit is past the revision.
+    try std.testing.expect(std.mem.indexOf(u8, narrowed.stdout, "a subject line") != null);
+    try std.testing.expect(std.mem.indexOf(u8, narrowed.stdout, "second subject") == null);
+}
+
+// The other half of the same field: `status` reports the working tree against
+// HEAD and takes no revision, so a `rev` sent to it is refused by name rather
+// than dropped. A caller that sent one learns which field this command does not
+// take, instead of reading a whole repository's status as the answer.
+test "a git status is told a rev is not a field it takes" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const refused = try dispatch(arena, "git", "{\"cmd\":\"status\",\"rev\":\"HEAD~1\"}");
+    try std.testing.expect(std.mem.startsWith(u8, refused, "error: git status takes no rev"));
+    // The same call without the field is the ordinary one, and it is not
+    // refused: a rule that answered every `status` would be no rule at all.
+    const plain = try dispatch(arena, "git", "{\"cmd\":\"status\"}");
+    try std.testing.expect(!std.mem.startsWith(u8, plain, "error: git status takes no rev"));
 }
 
 // The command line `git` runs is composed out of two model-supplied values and
