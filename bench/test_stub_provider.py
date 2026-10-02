@@ -21,8 +21,15 @@ import time
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
+from pathlib import Path
 
-sys.path.insert(0, __file__.rsplit("/", 1)[0])
+# `Path(__file__).resolve().parent` rather than splitting `__file__` on a `/`:
+# a path separator is spelled here rather than asked of the platform, and a
+# script run as `python3 bench/test_stub_provider.py` from the checkout root
+# carries no separator at all to split on, which left the module itself on
+# sys.path instead of the directory holding `stub_provider`. Every other Python
+# file in the tree resolves its own location this way.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from stub_provider import Handler
 
@@ -49,6 +56,8 @@ def hammer(port: int, requests: int) -> dict[int, int]:
         # connection as one.
         for _ in range(200):
             try:
+                # because: the URL is a literal loopback address built two
+                # lines above, never anything a request body or a header names.
                 with urllib.request.urlopen(req) as response:  # noqa: S310
                     status = response.status
                     response.read()
