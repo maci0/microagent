@@ -2463,7 +2463,15 @@ fn reportConfigProblem(io: Io, arena: std.mem.Allocator, source: ConfigSource, p
     const key = chat_mod.safeText(arena, problem.key, net.quoted_value_bytes);
     switch (problem.kind) {
         .bad_value => net.note(io, arena, "microagent: config {s}: '{s}' is not a value this key takes; keeping the default\n", .{ configPathText(arena, source), key }),
-        .unknown_key => net.note(io, arena, "microagent: config {s}: '{s}' is not a key this file uses; keeping the default\n", .{ configPathText(arena, source), key }),
+        .unknown_key => if (problem.where.len == 0)
+            net.note(io, arena, "microagent: config {s}: '{s}' is not a key this file uses; keeping the default\n", .{ configPathText(arena, source), key })
+        else
+            // The keys that belong to a preset table: url, api_key_env,
+            // api_key_header and timeout configure the remote endpoint a
+            // preset reaches, and a built-in has no endpoint, so the table is
+            // named rather than the bare key. The name is escaped like every
+            // other value out of this file.
+            net.note(io, arena, "microagent: config {s}: '{s}' belongs to a remote preset table, and the tool table [tools.{s}] takes no other key; keeping the default\n", .{ configPathText(arena, source), key, chat_mod.safeText(arena, problem.where, net.quoted_value_bytes) }),
         .bad_server => net.note(io, arena, "microagent: config {s}: the MCP server '{s}' has no command and no url, so it is skipped\n", .{ configPathText(arena, source), key }),
         .bad_server_name => net.note(io, arena, "microagent: config {s}: the MCP server '{s}' is skipped; the name takes letters, digits, dash and underscore and no '__', because it is half of every mcp__<server>__<tool> the model is offered\n", .{ configPathText(arena, source), key }),
         .mixed_server => net.note(io, arena, "microagent: config {s}: the MCP server '{s}' names both a command and a url, or an option only the other form takes, so it is skipped; a table is a command server or a url server, and api_key_env, api_key_header and timeout belong to a url server alone\n", .{ configPathText(arena, source), key }),

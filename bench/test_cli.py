@@ -599,6 +599,38 @@ def check_reasoning_config(binary: Path, root: Path, url: str) -> None:
     expect(result.returncode == 0 and "reasoning" not in Provider.seen[0], result)
 
 
+def check_tool_table_keys(binary: Path, root: Path, url: str) -> None:
+    """A key that only a preset table takes is named with the table it went in.
+
+    `url`, `api_key_env`, `api_key_header` and `timeout` are written the same
+    way wherever they belong, so a copy of a preset table under a built-in name
+    carries them into a table that takes none of them. The run keeps its
+    defaults either way, which is right; what was missing was the line saying
+    so, so a reader was left with a timeout that did nothing and no reason.
+    """
+    Provider.reset()
+    path = root / "tool-keys.toml"
+    built_in = "[tools.bash]"
+    path.write_text(f"{built_in}\nenabled = true\ntimeout = 5\n")
+    result = invoke(binary, root, url, ["preset key under a built-in"], "", MICROAGENT_CONFIG=str(path))
+    expect(result.returncode == 0, result)
+    expect("'timeout' belongs to a remote preset table" in result.stderr, result.stderr)
+    expect(built_in in result.stderr, result.stderr)
+
+    # A key the table has no use for at all is the same line, with the table.
+    path.write_text("[tools.deepwiki]\ntimeout_s = 5\n")
+    result = invoke(binary, root, url, ["misspelled preset key"], "", MICROAGENT_CONFIG=str(path))
+    expect(result.returncode == 0, result)
+    expect("'timeout_s' belongs to a remote preset table" in result.stderr, result.stderr)
+    expect("[tools.deepwiki]" in result.stderr, result.stderr)
+
+    # Inside the preset table it belongs to there is nothing to say.
+    path.write_text('[tools.context7]\nenabled = true\ntimeout = 5\napi_key_env = "C7"\n')
+    result = invoke(binary, root, url, ["preset key in the preset table"], "", MICROAGENT_CONFIG=str(path))
+    expect(result.returncode == 0, result)
+    expect("belongs to a remote preset table" not in result.stderr, result.stderr)
+
+
 class CompressedError(Provider):
     def do_POST(self) -> None:
         self.rfile.read(int(self.headers["content-length"]))
@@ -737,6 +769,7 @@ if __name__ == "__main__":
             check_endpoint_paths(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_opencode(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_reasoning_config(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
+            check_tool_table_keys(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_compressed_error(binary, Path(temp))
             check_harbor_numbers(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_harbor_connection_values(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")

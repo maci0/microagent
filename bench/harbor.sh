@@ -13,6 +13,10 @@
 # Environment:
 #   MICROAGENT_API_KEY / MICROAGENT_BASE_URL   provider (default OpenRouter)
 #   MICROAGENT_MAX_TOKENS                      raise only if the balance allows
+#   MICROAGENT_MAX_TURNS=1500                  turn ceiling for the microagent arm (default 1200)
+#   MICROAGENT_BUDGET_SECONDS=600               working-time budget (default per benchmark)
+#   MICROAGENT_AGENT_TIMEOUT_SEC=900           hard cap on the in-container process
+#                                              (default per benchmark)
 #   PROVIDER=nvidia|deepseek                   use NVIDIA NIM or DeepSeek's own API + the opencode
 #                                              provider overlay it needs
 #   TASKS="a b c"                              override the task list
@@ -228,13 +232,28 @@ for harness in $harnesses; do
 	fi
 	case "$harness" in
 	microagent)
+		# The three ceilings the benchmark fixes are defaults, not overrides: an
+		# operator who exported one of them meant it, and a value written here
+		# in front of the command would silently win over it, so the trial set
+		# ran under a ceiling nobody chose and the job log said a different one
+		# from the one in force. Each is therefore only exported when the
+		# environment holds no value for it.
+		if [ -z "${MICROAGENT_AGENT_TIMEOUT_SEC:-}" ]; then
+			MICROAGENT_AGENT_TIMEOUT_SEC=$agent_timeout
+			export MICROAGENT_AGENT_TIMEOUT_SEC
+		fi
+		if [ -z "${MICROAGENT_BUDGET_SECONDS:-}" ]; then
+			MICROAGENT_BUDGET_SECONDS=$budget
+			export MICROAGENT_BUDGET_SECONDS
+		fi
+		if [ -z "${MICROAGENT_MAX_TURNS:-}" ]; then
+			MICROAGENT_MAX_TURNS=1200
+			export MICROAGENT_MAX_TURNS
+		fi
 		# because: $include is " -i task" per task, built above, and has to
 		# reach harbor as that many words rather than as one argument
 		# shellcheck disable=SC2086
 		PYTHONPATH="$root/integrations/harbor" \
-			MICROAGENT_AGENT_TIMEOUT_SEC=$agent_timeout \
-			MICROAGENT_BUDGET_SECONDS=$budget \
-			MICROAGENT_MAX_TURNS=1200 \
 			run_tail 6 "$harbor" run -d "$dataset" $include "$@" \
 			-a microagent_agent:Microagent -m "$model_micro" \
 			--jobs-dir "$jobs_dir" -n "$jobs" --job-name "$job" || exit $?

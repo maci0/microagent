@@ -61,10 +61,20 @@ def check() -> None:
         check_instructions(directory, env)
 
         record = directory / "harbor.json"
+        ceilings = directory / "harbor-env.json"
         executable(
             commands / "harbor",
             "import json,os,pathlib,sys\n"
             "pathlib.Path(os.environ['RECORD']).write_text(json.dumps(sys.argv[1:]))\n"
+            "pathlib.Path(os.environ['RECORD_ENV']).write_text(json.dumps({\n"
+            "    name: os.environ[name]\n"
+            "    for name in (\n"
+            "        'MICROAGENT_AGENT_TIMEOUT_SEC',\n"
+            "        'MICROAGENT_BUDGET_SECONDS',\n"
+            "        'MICROAGENT_MAX_TURNS',\n"
+            "    )\n"
+            "    if name in os.environ\n"
+            "}))\n"
             "sys.exit(int(os.environ.get('HARBOR_EXIT', '0')))\n",
         )
         executable(
@@ -77,6 +87,7 @@ def check() -> None:
             HARBOR=str(commands / "harbor"),
             PYTHON=str(commands / "summary-python"),
             RECORD=str(record),
+            RECORD_ENV=str(ceilings),
             PROVIDER="deepseek",
             MICROAGENT_API_KEY="synthetic-fixture",
             TASKS="fixture",
@@ -114,10 +125,44 @@ def check() -> None:
         expect(result.returncode == 2 and not record.exists(), result)
         expect(not list((directory / "jobs").glob(".harbor-log-*")), "Harbor output logs were left behind")
 
+        # The three ceilings the microagent arm fixes are defaults, so an
+        # operator who exported one of them gets theirs: a value written in
+        # front of the command won over the environment silently, and the trial
+        # ran under a ceiling nobody chose.
+        check_harbor_ceilings(ROOT, env, record, ceilings)
         check_sbom(directory, env)
         check_rows(directory, env)
         check_locks(directory, env)
         check_changelog_order(directory, env)
+
+
+def check_harbor_ceilings(root: Path, env: dict[str, str], record: Path, ceilings: Path) -> None:
+    """A ceiling the operator exported reaches the harness run unchanged.
+
+    The microagent arm of `bench/harbor.sh` fills in the agent timeout, the
+    working budget and the turn ceiling for a benchmark, because a run without
+    them inherits the adapter's own defaults and a benchmark is scored against
+    the figure in `docs/benchmark.md`. They are defaults and not overrides:
+    written in front of the command they beat the environment, so an operator
+    who raised the turn ceiling for a trial set of their own got the script's
+    number instead, and nothing said so.
+    """
+    names = ("MICROAGENT_AGENT_TIMEOUT_SEC", "MICROAGENT_BUDGET_SECONDS", "MICROAGENT_MAX_TURNS")
+    result = run(root / "bench/harbor.sh", "deepswe", "microagent", env=env)
+    expect(result.returncode == 0, result)
+    chosen = json.loads(ceilings.read_text())
+    for name in names:
+        # A benchmark number, so this run is the one docs/benchmark.md reports.
+        expect(int(chosen.get(name, "0")) > 0, f"{name} is not set by the benchmark: {chosen}")
+    record.unlink(missing_ok=True)
+
+    asked = {name: str(number) for name, number in zip(names, ("7", "300", "40"), strict=True)}
+    result = run(root / "bench/harbor.sh", "deepswe", "microagent", env=env, **asked)
+    expect(result.returncode == 0, result)
+    given = json.loads(ceilings.read_text())
+    for name, value in asked.items():
+        expect(given.get(name) == value, f"{name} exported by the operator was replaced: {given}")
+    record.unlink(missing_ok=True)
 
 
 def check_changelog_order(directory: Path, env: dict[str, str]) -> None:

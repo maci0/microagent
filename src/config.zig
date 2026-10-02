@@ -301,6 +301,10 @@ pub const Problem = struct {
     /// The key, table or entry as written in the file.
     key: []const u8,
     kind: Kind,
+    /// The tool table a key was written in, for the keys only a preset table
+    /// takes. Empty everywhere else: every other problem is about a top-level
+    /// key, or names its own server in `key`.
+    where: []const u8 = "",
 
     pub const Kind = enum {
         /// A key this file defines whose value names nothing it accepts.
@@ -763,7 +767,19 @@ fn toolKey(arena: std.mem.Allocator, config: *Config, target: ToolTarget, preset
         }
         const preset = switch (target) {
             .preset => |p| p,
-            .builtin => return config.note(.{ .key = key, .kind = .unknown_key }),
+            // `url`, `api_key_env`, `api_key_header` and `timeout` belong to a
+            // preset alone, and a built-in has no endpoint to point them at. It
+            // is the same case as a `[tools.bash] url = ...`, which was already
+            // stopped on, and the same line for an unknown key: it went into
+            // the file meaning something this table does not take, so it is
+            // named rather than silently dropped, which is what a reader
+            // looking for the reason a run is not confined to the root they
+            // configured is otherwise left with.
+            .builtin => |tool| return config.note(.{
+                .key = key,
+                .kind = .unknown_key,
+                .where = tool.name(),
+            }),
         };
         const setting = presets.getPtr(preset);
         if (std.mem.eql(u8, key, "url")) {
@@ -772,8 +788,11 @@ fn toolKey(arena: std.mem.Allocator, config: *Config, target: ToolTarget, preset
             setting.url = url;
             break :ok true;
         }
+        // The same line for a key the table has no use for, which names the
+        // table it was written in: a reader looking for the reason a setting
+        // did nothing needs to be told which table to move it to.
         break :ok remoteOption(arena, &setting.api_key_env, &setting.api_key_header, &setting.timeout_s, key, value_text) orelse
-            return config.note(.{ .key = key, .kind = .unknown_key });
+            return config.note(.{ .key = key, .kind = .unknown_key, .where = name });
     };
     if (usable or config.tool_problem != null) return;
     config.tool_problem = .{ .name = name, .key = key, .kind = .bad_value };
@@ -1916,6 +1935,44 @@ test "an MCP server is one [[mcp]] table, and a broken one is named and skipped"
     try std.testing.expectEqual(@as(usize, 0), one_bracket.mcp.len);
 }
 
+// The four keys that configure a remote endpoint are written the same way
+// wherever they belong, and a copy of a preset table under a built-in name
+// carries all four into a table that takes none of them. Silence there is the
+// worst answer: `timeout` beside `[tools.bash]` reads as a timeout for the
+// tool, and the run takes the default, so the line that names the mistake is
+// the only thing that tells the operator which table the key belongs in.
+test "a preset key under a built-in tool table is named, with the table" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    for ([_][]const u8{ "url", "api_key_env", "api_key_header", "timeout", "retries" }) |key| {
+        const text = try std.fmt.allocPrint(arena, "[tools.bash]\nenabled = true\n{s} = \"x\"\n", .{key});
+        const config = parse(arena, text);
+        const problem = config.problem orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(Problem.Kind.unknown_key, problem.kind);
+        try std.testing.expectEqualStrings(key, problem.key);
+        // The table is named, so the diagnostic can tell the operator where the
+        // key goes rather than only what was written.
+        try std.testing.expectEqualStrings("bash", problem.where);
+        // Nothing was configured by it: a built-in is on until a file says
+        // otherwise, and this file said `enabled = true`.
+        try std.testing.expectEqual(@as(usize, 0), config.disabled_tools.count());
+    }
+
+    // The same key inside the preset table it belongs to is no problem at all,
+    // and names nothing.
+    const preset = parse(arena, "[tools.context7]\nenabled = true\ntimeout = 9\napi_key_env = \"C7\"\n");
+    try std.testing.expect(preset.problem == null);
+    try std.testing.expectEqualStrings("C7", preset.presets.get(.context7).api_key_env);
+    try std.testing.expectEqual(@as(u32, 9), preset.presets.get(.context7).timeout_s);
+
+    // A misspelled key in a preset table is the same line, and says the table
+    // as well: the key is what has to be corrected.
+    const typo = parse(arena, "[tools.deepwiki]\ntimeout_s = 9\n");
+    try std.testing.expectEqualStrings("timeout_s", typo.problem.?.key);
+    try std.testing.expectEqualStrings("deepwiki", typo.problem.?.where);
+}
 // `config.example.toml` is the only template the project ships, and a key
 // renamed or removed leaves it naming something the reader does not have: the
 // file still copies cleanly, and every run a user makes from it prints a

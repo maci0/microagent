@@ -739,7 +739,9 @@ is how that wiki is addressed.
 config that disables every built-in stop the run before any request, with exit status 2 and a message
 naming the config path and the bad name or key; the message for a bad name lists the valid ones. A
 misspelled name never leaves a tool in a state the file did not ask for. A key the table does not
-have (`url` under `[tools.bash]`) is noted on stderr and ignored, like any unknown key in this file.
+have is noted on stderr and ignored, like any unknown key in this file, and the note names the table
+it was written in: `url`, `api_key_env`, `api_key_header` and `timeout` configure the endpoint a
+preset reaches, so one of them under `[tools.bash]` is named as a preset key with nothing left to set.
 
 ### Command filter
 
