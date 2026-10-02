@@ -101,6 +101,77 @@ const Lines = struct {
     }
 };
 
+/// Change one setting without serializing away comments, MCP tables or lists.
+/// A null value removes the setting, restoring its built-in default.
+pub fn setValue(arena: std.mem.Allocator, text: []const u8, table: []const u8, key: []const u8, value: ?[]const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var lines: Lines = .{ .rest = chat.stripBom(text) };
+    try out.appendSlice(arena, text[0 .. text.len - lines.rest.len]);
+    var in_table = table.len == 0;
+    var insertion: ?usize = if (in_table) out.items.len else null;
+    var replaced = false;
+    while (lines.rest.len != 0) {
+        const before = lines.rest;
+        const line = std.mem.trim(u8, lines.next().?, " \t\r");
+        var matches = false;
+        if (line.len != 0 and line[0] != '#') {
+            if (line[0] == '[') {
+                const header = tableName(line);
+                in_table = if (header) |h| !h.array and std.mem.eql(u8, h.name, table) else false;
+                if (in_table and insertion == null) insertion = out.items.len + before.len - lines.rest.len;
+            } else if (std.mem.indexOfScalar(u8, line, '=')) |eq| {
+                const named = std.mem.trim(u8, line[0..eq], " \t");
+                const raw = std.mem.trim(u8, line[eq + 1 ..], " \t");
+                const complete = completedValue(arena, &lines, raw) orelse return error.InvalidConfig;
+                if (std.mem.eql(u8, named, "system_prompt_extra"))
+                    _ = promptString(arena, &lines, complete) orelse return error.InvalidConfig;
+                matches = in_table and std.mem.eql(u8, named, key);
+            }
+        }
+        if (matches) {
+            if (!replaced) if (value) |v| try out.appendSlice(arena, try std.fmt.allocPrint(arena, "{s} = {s}\n", .{ key, v }));
+            replaced = true;
+        } else {
+            try out.appendSlice(arena, before[0 .. before.len - lines.rest.len]);
+        }
+    }
+    if (!replaced) if (value) |v| {
+        const setting = try std.fmt.allocPrint(arena, "{s} = {s}\n", .{ key, v });
+        if (insertion) |at| {
+            return std.fmt.allocPrint(arena, "{s}{s}{s}{s}", .{ out.items[0..at], if (table.len != 0 and at != 0 and out.items[at - 1] != '\n') "\n" else "", setting, out.items[at..] });
+        }
+        try out.appendSlice(arena, try std.fmt.allocPrint(arena, "\n[{s}]\n{s}", .{ table, setting }));
+    };
+    return out.items;
+}
+
+test "setup changes settings while preserving multiline content and other tables" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    const original = "\xef\xbb\xbf# Keep this comment\n" ++
+        "system_prompt_extra = '''\n[tools.read]\nenabled = false\n'''\n" ++
+        "skills = [\n  'custom', # Keep this path\n]\n" ++
+        "[[mcp]]\nname = 'mine'\nurl = 'https://example.com/mcp'\n" ++
+        "[tools.read] # Keep this comment too\nenabled = false\n";
+    var text = try setValue(arena, original, "", "model", "\"new\\\"model\"");
+    text = try setValue(arena, text, "tools.read", "enabled", "true");
+    const cfg = parse(arena, text);
+    try std.testing.expect(cfg.problem == null and cfg.tool_problem == null);
+    try std.testing.expectEqualStrings("new\"model", cfg.model);
+    try std.testing.expectEqualStrings("[tools.read]\nenabled = false\n", cfg.system_prompt_extra);
+    try std.testing.expect(!cfg.disabled_tools.contains(.read));
+    try std.testing.expect(std.mem.startsWith(u8, text, "\xef\xbb\xbf"));
+    try std.testing.expect(std.mem.indexOf(u8, text, "# Keep this comment") != null);
+    try std.testing.expectEqualStrings("custom", cfg.skills.?[0]);
+    try std.testing.expectEqualStrings("mine", cfg.mcp[0].name);
+    text = try setValue(arena, text, "", "skills", "[]");
+    try std.testing.expectEqual(@as(usize, 0), parse(arena, text).skills.?.len);
+    text = try setValue(arena, text, "", "skills", null);
+    try std.testing.expect(parse(arena, text).skills == null);
+    try std.testing.expectEqualStrings("[sandbox]\nenabled = true\n", try setValue(arena, "[sandbox]", "sandbox", "enabled", "true"));
+}
+
 /// One MCP server as the file declares it: the entry this run will start, built
 /// up a line at a time while a `[[mcp]]` table is open, beside the three
 /// facts about how the table was spelled that the entry itself does not carry.
@@ -143,6 +214,8 @@ pub const Config = struct {
     mcp: []const mcp_mod.Entry = &.{},
     /// The built-in tools the file switched off.
     disabled_tools: std.EnumSet(chat.Tool) = .initEmpty(),
+    /// Preset settings, including endpoints retained while a preset is off.
+    presets: std.EnumArray(mcp_mod.Preset, PresetSetting) = .initFill(.{}),
     /// The first `[tools.*]` mistake, which the run stops on: a tool left on
     /// or off by a misspelling is not a default anyone chose.
     tool_problem: ?ToolProblem = null,
@@ -461,6 +534,7 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8) Config {
         };
     }
     config.mcp = entries.items;
+    config.presets = presets;
     return config;
 }
 

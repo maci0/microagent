@@ -19,6 +19,23 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-10-02
+
+### Added
+
+- `microagent setup` initializes a missing config from the embedded template
+  and asks about provider settings, built-in tools, remote tool endpoints,
+  repository instructions, skills, the system prompt addendum and sandboxing.
+  Enter keeps existing values; EOF cancels edits. Existing comments and custom
+  MCP servers survive, API key input is hidden, and edits are saved atomically
+  with owner-only permissions. `--config` selects another file.
+
+### Fixed
+
+- CI and release jobs install a checksummed ShellCheck 0.11.0 binary. The
+  runner's older version lacked an enabled optional check and stopped both
+  pipelines before tests or publication.
+
 ## [0.13.0] - 2026-10-02
 
 ### Added
@@ -3165,7 +3182,8 @@ First release.
   `aarch64-macos` with a checksum sidecar each, and refuses a tag that does not name the version in
   `build.zig.zon`.
 
-[Unreleased]: https://github.com/maci0/microagent/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/maci0/microagent/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/maci0/microagent/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/maci0/microagent/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/maci0/microagent/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/maci0/microagent/compare/v0.10.1...v0.11.0

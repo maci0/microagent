@@ -3,11 +3,22 @@
 # than repeating the install, so the linters a release is published from are
 # the ones a push was gated with.
 name: setup-linters
-description: install the ruff and yamllint versions the gate runs, pinned by hash
+description: install the ShellCheck, ruff and yamllint versions the gate runs, pinned by hash
 
 runs:
   using: composite
   steps:
+    # Ubuntu's ShellCheck 0.9 lacks optional checks the gate enables.
+    - name: install ShellCheck 0.11.0
+      shell: bash
+      run: |
+        set -euo pipefail
+        curl -fL https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz \
+          -o "$RUNNER_TEMP/shellcheck.tar.xz"
+        printf '%s  %s\n' 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198 "$RUNNER_TEMP/shellcheck.tar.xz" | sha256sum -c -
+        tar -xJf "$RUNNER_TEMP/shellcheck.tar.xz" -C "$RUNNER_TEMP"
+        echo "$RUNNER_TEMP/shellcheck-v0.11.0" >> "$GITHUB_PATH"
+
     # The file is installed with --require-hashes, so an artifact whose
     # sha256 is not the one written down there fails the job instead of
     # becoming the linter that decides the gate passes. The pins are ruff and

@@ -5,10 +5,14 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import pty
+import select
 import shutil
 import subprocess
 import sys
 import tempfile
+import termios
+import tomllib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from socketserver import BaseRequestHandler, ThreadingTCPServer
@@ -226,6 +230,102 @@ def check_refs(root: Path) -> None:
     # because: a missing file is deliberately passed to the validator
     result = subprocess.run(["/bin/sh", str(script), str(doc)], capture_output=True, text=True, check=False)  # noqa: S603
     expect(result.returncode != 0, result.stderr)
+
+
+def check_setup(binary: Path, root: Path, url: str) -> None:
+    home = root / "setup-home"
+    path = home / ".microagent" / "config.toml"
+    # No config or provider is needed to print either spelling of setup help.
+    for args in (["setup", "--help"], ["help", "setup"]):
+        result = invoke(binary, root, url, args, "", HOME=str(home))
+        expect(result.returncode == 0 and "usage: microagent setup" in result.stdout, result)
+        expect(not path.exists() and not Provider.seen, result)
+    result = invoke(binary, root, url, ["setup"], "", HOME=str(home), MICROAGENT_CONFIG=" ")
+    expect(result.returncode == 2 and not path.exists(), result)
+    # EOF leaves the freshly initialized template; every default then keeps it byte-for-byte.
+    result = invoke(binary, root, url, ["setup"], "", HOME=str(home), MICROAGENT_CONFIG=str(path))
+    expect(result.returncode == 1 and "SetupCancelled" in result.stderr, result)
+    template = path.read_text(encoding="utf-8")
+    expect(
+        template == Path(__file__).resolve().parents[1].joinpath("config.example.toml").read_text(encoding="utf-8"),
+        template,
+    )
+    result = invoke(binary, root, url, ["setup"], "\n" * 20, HOME=str(home), MICROAGENT_CONFIG="\t" + str(path))
+    expect(result.returncode == 0 and path.read_text(encoding="utf-8") == template, result)
+    # Provider escaping, toggles, invalid input retries, and a custom remote endpoint.
+    answers = ["bad-url", url, 'model"with\\escapes', "secret", "n", "n", "n", "n"]
+    answers += ["maybe", "n"] + [""] * 8
+    answers += ["y", "http://example.com/mcp", url + "/mcp", "BAD NAME", "REMOTE_KEY", "", "", ""]
+    result = invoke(binary, root, url, ["setup", "--config=" + str(path)], "\n".join(answers) + "\n")
+    expect(result.returncode == 0 and not Provider.seen, result)
+    saved = path.read_text(encoding="utf-8")
+    cfg = tomllib.loads(saved)
+    expect(cfg["base_url"] == url and cfg["model"] == 'model"with\\escapes' and cfg["api_key"] == "secret", cfg)
+    expect(cfg["system_prompt_extra"] == "" and cfg["agents_files"] == [] and cfg["skills"] == [], cfg)
+    expect(cfg["tools"]["bash"]["enabled"] is False, cfg)
+    expect(cfg["tools"]["web_search"] == {"enabled": True, "url": url + "/mcp", "api_key_env": "REMOTE_KEY"}, cfg)
+    expect(path.stat().st_mode & 0o777 == 0o600 and "secret" not in result.stderr, result)
+    # Existing custom settings survive; cancellation never writes partial answers.
+    existing = saved + '\n[[mcp]]\nname = "custom"\nurl = "https://example.com/mcp"\n'
+    path.write_text(existing, encoding="utf-8")
+    result = invoke(binary, root, url, ["setup", "--config", str(path)], "https://changed.example/v1\n")
+    expect(result.returncode == 1 and path.read_text(encoding="utf-8") == existing, result)
+    result = invoke(binary, root, url, ["setup", "--config", str(path)], "\n" * 22)
+    expect(result.returncode == 0 and path.read_text(encoding="utf-8") == existing, result)
+    # An endpoint configured while a preset is off remains its default when enabled again.
+    path.write_text(existing.replace("\nenabled = true\n", "\nenabled = false\n"), encoding="utf-8")
+    result = invoke(binary, root, url, ["setup", "--config", str(path)], "\n" * 16 + "y\n" + "\n" * 5)
+    expect(result.returncode == 0 and path.read_text(encoding="utf-8") == existing, result)
+    # Reject disabling the last tool and allow a corrected answer to finish setup.
+    result = invoke(binary, root, url, ["setup", "--config", str(path)], "\n" * 7 + "n\n" * 9 + "y\n" + "\n" * 6)
+    expect(result.returncode == 0 and "At least one built-in tool" in result.stderr, result)
+    cfg = tomllib.loads(path.read_text(encoding="utf-8"))
+    expect(not any(settings["enabled"] for name, settings in cfg["tools"].items() if name != "web_search"), cfg)
+    expect("todo" not in cfg["tools"], cfg)  # The remaining tool keeps its enabled default.
+    result = invoke(binary, root, url, ["setup", "--unknown"], "")
+    expect(result.returncode == 2 and not Provider.seen, result)
+
+
+def check_setup_terminal(binary: Path, root: Path) -> None:
+    path = root / "terminal-config.toml"
+    for cancel in (False, True):
+        master, slave = pty.openpty()
+        try:
+            # because: the explicitly supplied local binary is the program under test
+            with subprocess.Popen(  # noqa: S603
+                [str(binary), "setup", "--config", str(path)],
+                stdin=slave,
+                stdout=slave,
+                stderr=slave,
+                env={"PATH": os.environ.get("PATH", "")},
+            ) as process:
+                try:
+                    os.write(master, b"\n\n")
+                    output = b""
+                    while b"API key [" not in output:
+                        expect(select.select([master], [], [], 5)[0], "setup did not ask for API key")
+                        output += os.read(master, 4096)
+                    expect(not termios.tcgetattr(slave)[3] & termios.ECHO, "API key input was echoed")
+                    if not cancel:
+                        os.write(master, b"test-terminal-key\n")
+                        while b"Enable the system prompt" not in output:
+                            expect(select.select([master], [], [], 5)[0], "setup did not finish key input")
+                            output += os.read(master, 4096)
+                        expect(b"test-terminal-key" not in output, output)
+                        expect(termios.tcgetattr(slave)[3] & termios.ECHO, "terminal echo was not restored")
+                    else:
+                        # Interrupt hidden input and verify the terminal survives.
+                        process.terminate()
+                        process.wait(timeout=5)
+                        expect(process.returncode == 130, process.returncode)
+                        expect(termios.tcgetattr(slave)[3] & termios.ECHO, "interrupt left terminal echo disabled")
+                finally:
+                    if process.poll() is None:
+                        process.terminate()
+                    process.wait(timeout=5)
+        finally:
+            os.close(master)
+            os.close(slave)
 
 
 def check(binary: Path, root: Path, url: str) -> None:
@@ -480,6 +580,8 @@ if __name__ == "__main__":
         thread.start()
         try:
             check_refs(Path(temp))
+            check_setup(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
+            check_setup_terminal(binary, Path(temp))
             check(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_timeouts(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_response_cap(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")

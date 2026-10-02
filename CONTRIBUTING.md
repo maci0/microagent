@@ -64,11 +64,11 @@ uv pip install --python .scratch/lintenv/bin/python --require-hashes -r lint-req
 export PATH="$PWD/.scratch/lintenv/bin:$PATH"
 ```
 
-`shellcheck` comes with the runner image, so it has no pinned version. It is a
-system package, and `make check` needs it for the bench shell:
+CI installs ShellCheck 0.11.0 from its upstream release with a pinned SHA-256.
+`make check` needs ShellCheck 0.11.0 or newer for the optional checks it enables:
 
 ```sh
-apt-get install -y shellcheck     # or: brew install shellcheck
+brew install shellcheck          # or download the upstream 0.11.0 binary
 ```
 
 CI installs `ruff` and `yamllint` from [lint-requirements.txt](lint-requirements.txt),

@@ -81,7 +81,7 @@ pins for its linters and its benchmark adapter, none of which is in a release. P
 machine runs:
 
 ```sh
-v=v0.13.0 t=x86_64-linux-musl
+v=v0.14.0 t=x86_64-linux-musl
 curl -fLO https://github.com/maci0/microagent/releases/download/$v/microagent-$v-$t
 curl -fLO https://github.com/maci0/microagent/releases/download/$v/microagent-$v-$t.sha256
 # GNU coreutils spells it sha256sum, macOS ships shasum; both read the same
@@ -111,6 +111,11 @@ machine that has the package installed. An install from a release asset needs th
 
 ## First run
 
+Run `microagent setup` to create the config from the template and answer questions about the
+provider, built-in tools, remote endpoints, repository instructions, skills and sandbox.
+Enter keeps current values. Run it again to change settings, or use
+`microagent setup --config path/to/config.toml` for another file.
+
 ```sh
 export MICROAGENT_API_KEY=sk-...                        # any OpenAI-compatible provider's key
 export MICROAGENT_BASE_URL=https://api.openai.com/v1   # no default: one source must name it
@@ -133,7 +138,7 @@ self-update.
 
 ## Status
 
-Version 0.13.0. What works: the tool loop against OpenRouter, DeepSeek, OpenAI and any other
+Version 0.14.0. What works: the tool loop against OpenRouter, DeepSeek, OpenAI and any other
 OpenAI-compatible endpoint; an interactive session with `--repl`; repository instructions read
 from `AGENTS.md`; skills; MCP servers over stdio and over HTTP; the session log; verified
 self-update; reproducible release builds for Linux and macOS.

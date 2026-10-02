@@ -79,8 +79,8 @@ REPRO_GLOBAL ?= $(CURDIR)/.scratch/repro-global
 # version is a green run CI disagrees with. Spelled once, here:
 # `lint-versions` checks a local install against them, and checks that
 # lint-requirements.in, which lint-requirements.txt is compiled from, names the
-# same two, because the ci.yml lint job installs that file. shellcheck rides on
-# the runner image, so it has no version to pin here.
+# same two, because the ci.yml lint job installs that file. setup-linters
+# installs ShellCheck 0.11, which provides every optional check below.
 RUFF_VERSION := 0.16.4
 YAMLLINT_VERSION := 1.38.0
 
@@ -496,9 +496,8 @@ zig-version:
 # on them. lint-shell now fails on a name the installed shellcheck does not
 # list, which is what a rename upstream turns this into otherwise.
 #
-# Every name here is one shellcheck 0.9, the version the ubuntu-24.04 image
-# carries, already has, so this runs on the runner as it runs here. The list
-# below ends at the checks the runner's shellcheck has: a name it does not
+# CI installs ShellCheck 0.11 through setup-linters rather than using the
+# runner image's older version. A name the installed shellcheck does not
 # know fails `lint-shell` rather than enabling nothing, which is what the
 # `shellcheck --list-optional` lookup below is for, so adding a check a later
 # shellcheck introduces is a line here and a red gate rather than a silent
@@ -521,9 +520,8 @@ zig-version:
 # useless-use-of-cat is on for the same reason rather than a spelling:
 # the tree passes it, and a `cat file | command` runs the command on a pipe
 # whose failure `cat` swallows, so a script passes on a command that never ran.
-# It is a defect class rather than a spelling, and the check has been in
-# shellcheck since 0.7, before the 0.9 the rest of this list is written
-# against. The three that stay off are enabled per file with a `# shellcheck
+# It is a defect class rather than a spelling, and enabling its optional
+# check requires ShellCheck 0.11. The three that stay off are enabled per file with a `# shellcheck
 # disable=`, preceded by the `# because:` line lint-shell below asks for.
 SHELLCHECK_CHECKS := check-set-e-suppressed,check-unassigned-uppercase,deprecate-which,avoid-nullary-conditions,check-extra-masked-returns,quote-safe-variables,useless-use-of-cat,avoid-negated-conditions
 SHELLCHECK_OPTS := -x --enable=$(SHELLCHECK_CHECKS)

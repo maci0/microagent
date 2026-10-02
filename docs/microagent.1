@@ -2,7 +2,7 @@
 .\" `microagent update --help` list appears below, and `make check-man` checks
 .\" each one is here, so a flag cannot be added to the binary and left out of
 .\" this page. The ENVIRONMENT section is not checked: nothing reads it.
-.TH MICROAGENT 1 "2026-10-02" "microagent 0.13.0" "User Commands"
+.TH MICROAGENT 1 "2026-10-02" "microagent 0.14.0" "User Commands"
 .SH NAME
 microagent \- tiny OpenAI-compatible coding agent
 .SH SYNOPSIS
@@ -17,8 +17,11 @@ microagent \- tiny OpenAI-compatible coding agent
 .B microagent update
 .RB [ \-c | \-\-check ]
 .br
+.B microagent setup
+.RI [ "\-\-config file" ]
+.br
 .B "microagent help"
-.RI [ update ]
+.RI [ "setup | update" ]
 .SH DESCRIPTION
 .B microagent
 runs one non-interactive task of an OpenAI-compatible coding agent: it sends a
@@ -183,6 +186,25 @@ Print the built-in usage text and exit. Also reached by a bare
 .TP
 .BR \-V ", " \-\-version
 Print the version and exit.
+.SH SETUP SUBCOMMAND
+.B microagent setup
+creates a missing config from the embedded template, then asks about the
+provider URL, model, API key, system prompt addendum, repository instructions,
+skills, sandbox, built-in tools and remote tool endpoints.
+.B \-\-config
+selects a file; otherwise it uses
+.B MICROAGENT_CONFIG
+or ~/.microagent/config.toml. An empty MICROAGENT_CONFIG disables config
+and requires an explicit \-\-config for setup.
+.PP
+Enter keeps current values; a dash clears a text setting. EOF cancels edits,
+leaving a newly created template in place. API key input is hidden.
+Changes preserve comments and custom MCP entries and are saved atomically
+with mode 600. Environment variables and run flags still override the file.
+.B "microagent help setup"
+and
+.B "microagent setup \-\-help"
+print setup usage without creating a config.
 .SH UPDATE SUBCOMMAND
 .B microagent update
 downloads

@@ -21,7 +21,8 @@
 //! config    <- mcp, chat    the one config file: the prompt addendum, skills, MCP servers, the tool set
 //! stream    <- chat         folding one provider frame into the response
 //! conversation <- skill, net, chat  the system prompt, the message array and its compaction
-//! update    <- net, chat    the one subcommand, `microagent update`
+//! update    <- net, chat    verified self-update
+//! setup     <- config, tool, net, chat, mcp    interactive configuration
 //! main      <- all of the above
 //! ```
 //!
@@ -55,6 +56,7 @@ const conversation_mod = @import("conversation.zig");
 const mcp_mod = @import("mcp.zig");
 const net = @import("net.zig");
 const session_mod = @import("session.zig");
+const setup_mod = @import("setup.zig");
 const sandbox_mod = @import("sandbox.zig");
 const skill_mod = @import("skill.zig");
 const stream_mod = @import("stream.zig");
@@ -453,11 +455,28 @@ fn runMain(init: std.process.Init) !u8 {
 
     debug_enabled = debugEnabled(init.environ_map);
 
-    // `microagent update` is a subcommand, not a prompt: it is dispatched
+    // Subcommands are dispatched
     // before the agent's own flags so it never needs an API key. Only in first
     // position, which is why the help text has to say so: anywhere else the word
     // is a task, the way `help` is a task after `-p`.
     if (args.items.len > 1 and subcommandArg(args.items[1])) {
+        if (std.mem.eql(u8, args.items[1], "setup")) {
+            const rest = args.items[2..];
+            if (rest.len == 1 and isFlag(rest[0], "-h", "--help")) {
+                try net.writeOut(io, setup_mod.usage);
+                return 0;
+            }
+            const flag = setup_mod.configArg(rest) catch return usageError(io, "setup takes only --config <file> or --help", .{});
+            const arena = init.arena.allocator();
+            const source = configSource(init.environ_map, arena, flag);
+            const path = source.path orelse return configError(io, "setup needs a config path: pass --config <file> or set HOME (MICROAGENT_CONFIG must not be empty)", .{});
+            writeDefaultConfig(io, arena, source);
+            setup_mod.run(io, arena, path, default_model, max_config_bytes) catch |err| {
+                net.note(io, arena, "microagent: setup: {s}; configuration edits were not saved\n", .{@errorName(err)});
+                return 1;
+            };
+            return 0;
+        }
         return update_mod.run(io, gpa, init.arena.allocator(), init.environ_map, args.items[2..]);
     }
 
@@ -477,8 +496,12 @@ fn runMain(init: std.process.Init) !u8 {
                 update_mod.printUsage(io);
                 return 0;
             },
+            .setup => {
+                try net.writeOut(io, setup_mod.usage);
+                return 0;
+            },
         } else if (rest.len == 1)
-            return usageError(io, "help takes no argument '{s}'; the only subcommand is update", .{clip(rest[0])})
+            return usageError(io, "help takes no argument '{s}'; subcommands are setup and update", .{clip(rest[0])})
         else
             // The word that names no subcommand is named, the way the
             // single-argument case above names it: a count sends the reader
@@ -1026,7 +1049,8 @@ const help_text =
     \\usage: microagent [options] "<prompt>"
     \\       microagent --repl [options] ["<prompt>"]
     \\       microagent update [-c | --check]
-    \\       microagent help [update]
+    \\       microagent setup [--config <file>]
+    \\       microagent help [setup | update]
     \\
     \\      --repl             read one prompt per line; /quit or /exit or EOF
     \\                         exits, /help lists the session's commands.
@@ -1143,7 +1167,14 @@ const help_text =
     \\  and `timeout` (seconds). A name that is not a tool stops the run with exit
     \\  status 2.
     \\
-    \\subcommand:
+    \\"setup" is also a subcommand only as the first argument; "help setup"
+    \\prints its own text. Use --print setup or -- setup for a task of that name.
+    \\
+    \\subcommands:
+    \\  setup [--config <file>]
+    \\                         create a missing config from the template, then
+    \\                         ask about features and API endpoints. Enter keeps
+    \\                         current values; EOF cancels edits.
     \\  update [-c | --check]
     \\                         replace this binary with the latest GitHub
     \\                         release after verifying its .sha256 sidecar
@@ -1314,7 +1345,8 @@ test "the help text spells every invocation in the usage block" {
     const lines = [_][]const u8{
         "usage: microagent [options] \"<prompt>\"",
         "       microagent update [-c | --check]",
-        "       microagent help [update]",
+        "       microagent setup [--config <file>]",
+        "       microagent help [setup | update]",
     };
     for (lines) |line| {
         if (std.mem.indexOf(u8, help_text, line) == null) {
@@ -1348,7 +1380,8 @@ test "help names a subcommand's own text, and a word that names none is a usage 
     // The usage block says `help` alone prints this text, and the subcommand's
     // own block says nothing about `help update`, so the help text has to be
     // the one place the second spelling is written down.
-    try std.testing.expect(std.mem.indexOf(u8, help_text, "microagent help [update]") != null);
+    try std.testing.expectEqual(HelpFor.setup, helpTarget(&.{"setup"}).?);
+    try std.testing.expect(std.mem.indexOf(u8, help_text, "microagent help [setup | update]") != null);
     try std.testing.expect(std.mem.indexOf(u8, help_text, "\"help update\" is that") != null);
 }
 
@@ -1984,6 +2017,7 @@ const known_words = [_][]const u8{
     "-k",
     help_word,
     "update",
+    "setup",
 };
 
 /// The action `--help` or `--version` asks for, or null when the command line
@@ -2027,22 +2061,23 @@ fn earlyAction(argv: []const []const u8) ?Action {
 /// `update` answers to `--help` and `-h` only, so the word is spelled here.
 const help_word = "help";
 
-/// The one bare word that names a subcommand rather than a task, and only in
+/// Bare words that name subcommands rather than tasks, and only in
 /// first position: the prompt parser never sees it, so a task of that name has
 /// to arrive after a flag or a `--`.
 fn subcommandArg(arg: []const u8) bool {
-    return std.mem.eql(u8, arg, "update");
+    return std.mem.eql(u8, arg, "update") or std.mem.eql(u8, arg, "setup");
 }
 
 /// What `microagent help` with the arguments after the word resolves to, or null
 /// when those arguments are a usage error. A subcommand's name asks for that
 /// subcommand's own text, and `-h` asks for the text `help` already is, so it is
 /// the same request rather than a second one.
-const HelpFor = enum { self_text, update };
+const HelpFor = enum { self_text, update, setup };
 
 fn helpTarget(rest: []const []const u8) ?HelpFor {
     if (rest.len != 1) return null;
-    if (subcommandArg(rest[0])) return .update;
+    if (std.mem.eql(u8, rest[0], "setup")) return .setup;
+    if (std.mem.eql(u8, rest[0], "update")) return .update;
     if (isFlag(rest[0], "-h", "--help")) return .self_text;
     return null;
 }

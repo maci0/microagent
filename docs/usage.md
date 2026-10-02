@@ -12,6 +12,7 @@ Everything a run reads and everything it writes. The [README](../README.md) is t
 - [Output](#output): [stdout](#stdout), [exit status](#exit-status), [session log](#session-log), [what survives](#what-survives-and-how-to-get-it-back)
 - [Failure handling](#failure-handling)
 - [Driving it from gauntlet](#driving-it-from-gauntlet)
+- [Setup](#setup)
 - [Update](#update)
 - [Versioning](#versioning)
 
@@ -44,7 +45,8 @@ microagent - tiny OpenAI-compatible coding agent
 usage: microagent [options] "<prompt>"
        microagent --repl [options] ["<prompt>"]
        microagent update [-c | --check]
-       microagent help [update]
+       microagent setup [--config <file>]
+       microagent help [setup | update]
 
       --repl             read one prompt per line; /quit or /exit or EOF
                          exits, /help lists the session's commands.
@@ -160,7 +162,14 @@ Tools (`[tools.<name>]` tables in the config):
   and `timeout` (seconds). A name that is not a tool stops the run with exit
   status 2.
 
-subcommand:
+"setup" is also a subcommand only as the first argument; "help setup"
+prints its own text. Use --print setup or -- setup for a task of that name.
+
+subcommands:
+  setup [--config <file>]
+                         create a missing config from the template, then
+                         ask about features and API endpoints. Enter keeps
+                         current values; EOF cancels edits.
   update [-c | --check]
                          replace this binary with the latest GitHub
                          release after verifying its .sha256 sidecar
@@ -976,6 +985,32 @@ worth nothing, and one that stops deliberately still has the model's diff. A rev
 
 Usage is always machine-readable, so no `stream` flags are needed, and no `usage.roots` entry is
 required.
+
+## Setup
+
+Run `microagent setup` for interactive configuration, or
+`microagent setup --config path/to/config.toml` to select another file.
+The path follows the same order as a run: `--config`, `MICROAGENT_CONFIG`, then
+`~/.microagent/config.toml`. An empty `MICROAGENT_CONFIG` turns config off;
+pass `--config` explicitly to set up a file in that case.
+
+A missing file is created from the embedded `config.example.toml` template
+with mode 600. Questions cover the provider API base URL, model, optional API
+key, system prompt addendum, repository instructions, skills, workspace
+sandbox, the nine built-in tools and the four remote tool presets. Enabling a
+remote preset also asks for its endpoint and optional API key environment
+variable. URLs must use HTTPS or HTTP on loopback, without embedded credentials.
+
+Enter keeps each current value; `-` clears a text setting. API key input is
+hidden and its current value is never printed. At least one built-in tool
+must stay enabled. EOF cancels edits; a newly initialized template remains.
+Existing comments, custom paths, sandbox writable roots and custom MCP entries
+are preserved. Edits are saved atomically with mode 600 after all questions
+finish. Setup makes no API requests. Run flags and environment variables still
+override these file settings.
+
+`microagent setup --help` and `microagent help setup` print usage without
+reading or creating a config.
 
 ## Update
 
