@@ -2657,7 +2657,62 @@ const PendingFile = struct {
     path: []const u8,
     text: []u8,
     replacements: usize = 0,
+    /// How many of this call's edits named this file, whether this run applied
+    /// them or resumed them. The write loop skips a file whose edits are all
+    /// resumed, and that is the question this answers.
+    edits: usize = 0,
+    /// Replacements of this file that an earlier run of this same call had
+    /// already written, so a retry skips them rather than refusing on them.
+    /// See `alreadyApplied`.
+    resumed: usize = 0,
 };
+
+/// Whether one replacement of a `multi_edit` call has already landed, which is
+/// what makes a retry of a half-written batch finish the batch.
+///
+/// The batch is applied in memory and then written file by file, so a write
+/// that fails part way leaves the first files carrying their edits and the
+/// rest untouched — the one state a batch cannot undo, which is why the
+/// failure names how many landed. A model that re-issues the same call then
+/// gets `old_string not found` on the *first* file, and every other file in
+/// the batch is never written: the retry cannot get past the one file that
+/// succeeded, so the call is stuck rather than merely repeated. Nothing in
+/// the bytes can tell an applied replacement from a first one, because the two
+/// leave the same text — the reasoning `applyEdit` refuses a shape that would
+/// nest for exactly this reason.
+///
+/// What does distinguish them is the pair: an edit whose `old_string` is gone
+/// and whose `new_string` is in the file was already applied, because that is
+/// the only way the first text left the file and the second arrived. The
+/// match is counted and the edit skipped, so the file is left as the first run
+/// wrote it and the batch carries on to the files that never landed.
+///
+/// The narrow case this cannot settle is a file that never held `old_string`
+/// to begin with and happens to hold `new_string` for another reason; the
+/// edit is skipped and the summary counts it as resumed rather than applied,
+/// which is visible in the answer the model reads and re-read with a `read`
+/// rather than a silent skip. The rule is scoped to `multi_edit` and its
+/// retry: `edit` alone refuses an `old_string` that is not there, because a
+/// single replacement has no earlier files to leave the model with a batch to
+/// finish, and reporting "already applied" for a typo'd `old_string` would
+/// hide the typo.
+fn alreadyApplied(raw: []const u8, old: []const u8, new: []const u8, all: bool) ?usize {
+    if (old.len == 0 or new.len == 0) return null;
+    if (std.mem.eql(u8, old, new)) return null;
+    if (std.mem.indexOf(u8, raw, old) != null) return null;
+    const count = std.mem.count(u8, raw, new);
+    if (count == 0) return null;
+    // `replace_all` is the one shape where a count is not a match: the first
+    // run replaced every occurrence, and how many there were is not
+    // recoverable from the result, so the edits are counted as one resumed
+    // replacement rather than guessed at.
+    if (all) return 1;
+    // More than one `new_string` is not this edit: the file holds text the
+    // model put there by another route, and guessing which of them is the one
+    // the first run wrote is how a resumed batch applies an edit twice.
+    if (count > 1) return null;
+    return count;
+}
 
 /// The refusal for edit `n` of `total`, in the words `edit` uses for the same fault, with the fact
 /// that matters to the caller: none of the batch was applied.
@@ -2673,6 +2728,18 @@ fn refusedAt(arena: std.mem.Allocator, n: usize, total: usize, message: []const 
 /// refusal names the edit and leaves every file as it was. The files are then written one at a
 /// time, each atomically: a write that fails part way says how many files had already landed,
 /// because that is the one state a batch cannot undo.
+///
+/// That state is also the one this call has to survive being re-issued over. A batch is a tool
+/// call, so it arrives twice: a transport fault the model retried, a turn cut before the result
+/// reached it, a provider redelivering the call under the same arguments. Re-issuing it changes
+/// nothing to the bytes: a batch whose files all landed finds every edit already on disk, and one
+/// that failed part way finds the first files' edits on disk and the rest still to do. With no
+/// resume point the second of those is stuck rather than merely repeated: the re-issue refuses on
+/// the first file because that file *was* written, and the files that never landed never get their
+/// edits at all. So an edit whose `old_string` is gone and whose `new_string` is in the file is
+/// counted as already applied and skipped, which is what `alreadyApplied` decides and what its
+/// comment says that pair can and cannot prove, and the batch finishes. A file every one of whose
+/// edits was resumed is not rewritten at all.
 fn toolMultiEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, writable_roots: []const []const u8) ![]const u8 {
     const list = switch (args.get("edits") orelse return "error: missing edits") {
         .array => |a| a.items,
@@ -2711,6 +2778,18 @@ fn toolMultiEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, wri
             try files.append(arena, .{ .key = key, .path = path, .text = raw });
             break :blk &files.items[files.items.len - 1];
         };
+        // The resume point. A batch whose earlier run wrote this file and then
+        // failed on another one comes back here with the first file's
+        // `old_string` already gone, and `applyEdit` would refuse the whole
+        // batch on it. An edit whose text is already in the file is that
+        // first run's work, so it is counted and skipped, and the batch goes
+        // on to the files that never landed. The file itself is not rewritten
+        // when nothing else in the batch touched it, below.
+        file.edits += 1;
+        if (alreadyApplied(file.text, old, new, all)) |done| {
+            file.resumed += done;
+            continue;
+        }
         switch (try applyEdit(arena, path, file.text, old, new, all)) {
             .refused => |message| return refusedAt(arena, n, list.len, message),
             .text => |done| {
@@ -2720,17 +2799,43 @@ fn toolMultiEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, wri
         }
     }
 
-    for (files.items, 0..) |file, written| {
+    // A file every one of whose edits this run resumed holds the text the
+    // first run wrote, so rewriting it would be a second write of the same
+    // bytes. It is left alone: the batch is resumed, not re-applied, and a
+    // write of identical content is a needless window in which the file is
+    // absent. The count is of files the loop actually wrote, which is what the
+    // failure below reports, so it cannot claim a file it did not touch.
+    var wrote: usize = 0;
+    for (files.items) |file| {
+        if (file.resumed == file.edits) continue;
         writeFileAtomic(io, std.Io.Dir.cwd(), file.path, file.text) catch |err| {
             return std.fmt.allocPrint(arena, "{s}; {d} of {d} file(s) had already been written", .{
-                writeFailed(arena, file.path, err), written, files.items.len,
+                writeFailed(arena, file.path, err), wrote, files.items.len,
             });
         };
+        wrote += 1;
     }
 
     var summary: std.ArrayList(u8) = .empty;
-    try summary.print(arena, "applied {d} edit(s) to {d} file(s):", .{ list.len, files.items.len });
-    for (files.items) |file| try summary.print(arena, " {s} ({d})", .{ shownPath(arena, file.path), file.replacements });
+    var resumed: usize = 0;
+    var applied: usize = 0;
+    for (files.items) |file| {
+        resumed += file.resumed;
+        applied += file.edits - file.resumed;
+    }
+    if (resumed == 0) {
+        try summary.print(arena, "applied {d} edit(s) to {d} file(s):", .{ list.len, files.items.len });
+    } else {
+        // The count says how much of this batch was already on disk, so a
+        // model reading one answer can tell a batch this run finished from
+        // one it re-issued over a half-written store. The two spellings are
+        // not the same sentence: the first is what a reader expects to see
+        // and the second is the only way the retry is visible at all.
+        try summary.print(arena, "applied {d} edit(s) to {d} file(s) ({d} already applied by an earlier run of this call):", .{
+            applied, files.items.len, resumed,
+        });
+    }
+    for (files.items) |file| try summary.print(arena, " {s} ({d})", .{ shownPath(arena, file.path), file.replacements + file.resumed });
     return summary.items;
 }
 
@@ -7905,15 +8010,92 @@ test "multi_edit changes nothing when any edit is refused, and names it" {
     try std.testing.expectEqualStrings("one two", try cwd.tmp.dir.readFileAlloc(io, "a.txt", arena, .limited(64)));
     try std.testing.expectEqualStrings("alpha", try cwd.tmp.dir.readFileAlloc(io, "b.txt", arena, .limited(64)));
 
-    // The same batch run twice is refused the second time at its first edit, the way a repeated
-    // `edit` is, and the files stay as the first run left them.
+    // A completed batch re-issued changes nothing, and says so rather than refusing: the first
+    // run already applied the edit, which the pair (old_string gone, new_string present) proves.
+    // The file stays exactly as the first run left it. This is the property a retry of an
+    // already-applied batch depends on.
     try std.testing.expect(std.mem.startsWith(u8, try dispatch(arena, "multi_edit",
         \\{"edits":[{"path":"a.txt","old_string":"one","new_string":"1"}]}
     ), "applied 1 edit(s)"));
-    try std.testing.expectEqualStrings("error: edit 1 of 1: old_string not found in a.txt (no file was changed)", try dispatch(arena, "multi_edit",
+    try std.testing.expectEqualStrings("applied 0 edit(s) to 1 file(s) (1 already applied by an earlier run of this call): a.txt (1)", try dispatch(arena, "multi_edit",
         \\{"edits":[{"path":"a.txt","old_string":"one","new_string":"1"}]}
     ));
     try std.testing.expectEqualStrings("1 two", try cwd.tmp.dir.readFileAlloc(io, "a.txt", arena, .limited(64)));
+}
+
+test "a multi_edit re-issued after a partial write finishes the files that never landed" {
+    var cwd = try CwdFixture.init();
+    defer cwd.deinit();
+    const arena = cwd.arena();
+    const io = std.testing.io;
+
+    try cwd.tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "one two" });
+    try cwd.tmp.dir.writeFile(io, .{ .sub_path = "b.txt", .data = "alpha beta" });
+
+    // What a write that fails on the second file leaves behind: the batch was
+    // two edits, the first file carries the first edit, the second file is
+    // untouched. There is no record anywhere that a.txt was done, so the only
+    // thing a retry has to work from is the bytes of the two files.
+    try cwd.tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "1 two" });
+
+    const batch =
+        \\{"edits":[
+        \\ {"path":"a.txt","old_string":"one","new_string":"1"},
+        \\ {"path":"b.txt","old_string":"alpha","new_string":"gamma"}
+        \\]}
+    ;
+
+    // The retry must not refuse at the first file. That file is already
+    // correct, and a refusal there is what strands the second edit forever.
+    const result = try dispatch(arena, "multi_edit", batch);
+    try std.testing.expectEqualStrings(
+        "applied 1 edit(s) to 2 file(s) (1 already applied by an earlier run of this call): a.txt (1) b.txt (1)",
+        result,
+    );
+    // a.txt is not rewritten with the bytes it already had, and b.txt gets the
+    // edit the first run never reached.
+    try std.testing.expectEqualStrings("1 two", try cwd.tmp.dir.readFileAlloc(io, "a.txt", arena, .limited(64)));
+    try std.testing.expectEqualStrings("gamma beta", try cwd.tmp.dir.readFileAlloc(io, "b.txt", arena, .limited(64)));
+
+    // And the retry of the retry has nothing left to do: the second run
+    // finished the batch, so the third finds both edits already applied and
+    // changes nothing. The state after one run and after three is one state.
+    try std.testing.expectEqualStrings(
+        "applied 0 edit(s) to 2 file(s) (2 already applied by an earlier run of this call): a.txt (1) b.txt (1)",
+        try dispatch(arena, "multi_edit", batch),
+    );
+    try std.testing.expectEqualStrings("1 two", try cwd.tmp.dir.readFileAlloc(io, "a.txt", arena, .limited(64)));
+    try std.testing.expectEqualStrings("gamma beta", try cwd.tmp.dir.readFileAlloc(io, "b.txt", arena, .limited(64)));
+}
+
+test "alreadyApplied only claims an edit the file proves, and never a nested one" {
+    const cases = [_]struct { name: []const u8, raw: []const u8, old: []const u8, new: []const u8, all: bool, want: ?usize }{
+        // The shape a first run left: the old text is gone and the new text is
+        // in the file exactly once.
+        .{ .name = "applied", .raw = "1 two", .old = "one", .new = "1", .all = false, .want = 1 },
+        // The old text is still there, so this is a first run and it is not skipped.
+        .{ .name = "first run", .raw = "one two", .old = "one", .new = "1", .all = false, .want = null },
+        // Neither text is there: a typo'd old_string must still be refused, not
+        // quietly treated as applied.
+        .{ .name = "neither", .raw = "three four", .old = "one", .new = "1", .all = false, .want = null },
+        // The new text is there twice, so which occurrence the first run wrote
+        // is not decidable and the edit is refused rather than guessed at.
+        .{ .name = "ambiguous", .raw = "1 and 1", .old = "one", .new = "1", .all = false, .want = null },
+        // replace_all replaced every occurrence, so the count is not a match
+        // and the edit is resumed as the one replacement it was.
+        .{ .name = "replace_all", .raw = "1 1 1", .old = "one", .new = "1", .all = true, .want = 1 },
+        // A replacement equal to what it replaces is a no-op, not a resume.
+        .{ .name = "no-op", .raw = "one two", .old = "one", .new = "one", .all = false, .want = null },
+        // An empty old_string is the refusal `applyEdit` makes, not a resume.
+        .{ .name = "empty old", .raw = "one two", .old = "", .new = "1", .all = false, .want = null },
+        .{ .name = "empty new", .raw = "one two", .old = "one", .new = "", .all = false, .want = null },
+    };
+    for (cases) |case| {
+        std.testing.expectEqualDeep(case.want, alreadyApplied(case.raw, case.old, case.new, case.all)) catch |err| {
+            std.debug.print("case {s}: {s}\n", .{ case.name, @errorName(err) });
+            return err;
+        };
+    }
 }
 
 test "multi_edit treats two spellings of one path as one file" {
