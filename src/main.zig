@@ -2920,6 +2920,15 @@ fn run(
     var verify_asked = false;
     var spend_alarmed = false;
     var progress: Progress = .{};
+    // The loop detector's own state, kept for the run rather than the turn:
+    // what makes a loop is the same call arriving again on the next turn, and
+    // the turn arena is reset at the top of every iteration, so a history kept
+    // there would not survive to be compared. The run's allocator holds it, and
+    // it holds one turn of calls at a time, so what it costs is the largest
+    // single turn's tool arguments.
+    var history = CallHistory.init(gpa);
+    defer history.deinit();
+    var repeat_rounds: usize = 0;
     while (turn < opts.max_turns) : (turn += 1) {
         _ = turn_state.reset(.{ .retain_with_limit = turn_arena_retain_bytes });
         // Before the time budget, because the final push below is a turn like
@@ -2948,7 +2957,7 @@ fn run(
             // way any other does. A model that answers it finished, and one
             // that asks for more tools was cut off mid-work, which is a
             // different exit status from a finished run.
-            return try runTurn(client, io, turn_arena, gpa, prefix, opts, ep, msgs, session, usage, &spent, budget.withGraceNs(final_push_grace_s), tool_env, &progress, mcp);
+            return try runTurn(client, io, turn_arena, gpa, prefix, opts, ep, msgs, session, usage, &spent, budget.withGraceNs(final_push_grace_s), tool_env, &progress, mcp, &history, &repeat_rounds);
         }
         // The ceiling is announced on the turn it applies to, before it is
         // spent, so a truncated answer is never the last thing on stdout with no
@@ -2958,7 +2967,7 @@ fn run(
         try conversation_mod.compactMessages(io, gpa, msgs, turn_arena, &compaction_floor);
         // `.wants_tools` keeps the loop going, and `.cut_off` is the budget
         // ending the run mid-turn, so neither is a finished run.
-        switch (try runTurn(client, io, turn_arena, gpa, prefix, opts, ep, msgs, session, usage, &spent, budget, tool_env, &progress, mcp)) {
+        switch (try runTurn(client, io, turn_arena, gpa, prefix, opts, ep, msgs, session, usage, &spent, budget, tool_env, &progress, mcp, &history, &repeat_rounds)) {
             // The tool results are already appended, so the next request
             // carries them and the loop asks again. Returning here ended the
             // run on the first turn that asked for a tool, which is every turn
@@ -3136,6 +3145,164 @@ const Progress = struct {
     tested: bool = false,
 };
 
+/// How many turns in a row may carry the same tool call, asked again with the
+/// same arguments and no other call between them, before the run is called
+/// stuck. A confused model asking for the same thing is the ordinary failure
+/// this catches: a `bash` it has run before comes back with the same output, so
+/// the next turn reads exactly what the turn before read, and nothing in the
+/// conversation tells it to stop. `--max-turns` is the only other bound, and at
+/// its default a thousand turns is a thousand billed requests for a run whose
+/// results stopped changing on the second.
+///
+/// The count is deliberately more than one: a model that re-reads a file after
+/// writing it, or reruns a test after an edit, is repeating a call and is not
+/// stuck. Three identical rounds is past any of that, and small enough that a
+/// genuinely stuck run stops long before the turn ceiling rather than after it.
+///
+/// Read-only calls only. A `write` or an `edit` asking twice is not a loop, it
+/// is the same edit applied again, and the model's intent behind that is not
+/// something a byte comparison can read, so the refusal to repeat stays with
+/// the read-only calls, where a repeat is the model asking again for an answer
+/// it already has.
+const stuck_repeat_turns: usize = 3;
+
+/// The identity of one tool call: its name and the argument text it streamed,
+/// which is exactly what decides what the tool runs, so two calls this says are
+/// the same ask the same thing twice.
+///
+/// The name's length is spelled into the key ahead of it, and that is what
+/// keeps two calls apart: a length makes the name's end unambiguous whatever
+/// follows, so `multi` taking `edit{}` cannot land on the key `multi_edit`
+/// takes `{}` to, and no byte an argument carries can shift a name across the
+/// boundary. The separator after the name is what a reader would expect there;
+/// the length is what makes it correct.
+fn callKey(arena: std.mem.Allocator, name: []const u8, args: []const u8) ![]u8 {
+    return std.fmt.allocPrint(arena, "{d}:{s}\x00{s}", .{ name.len, name, args });
+}
+
+/// The calls one turn carried, so the loop can tell a run making progress from
+/// one asking the same question again.
+///
+/// One turn of history rather than the run's: what makes a loop is the same
+/// call arriving again and again, and a run that asks for something it asked
+/// for ten turns ago and has moved on since is working.
+///
+/// The map and the keys it holds come off one allocator that is released with
+/// it. A managed map over the run's allocator would keep every key the run ever
+/// built until the run ended, which is a turn's tool arguments a turn for a
+/// diagnostic that only ever reads the last one.
+const CallHistory = struct {
+    set: std.StringHashMapUnmanaged(void) = .empty,
+    arena: std.mem.Allocator,
+
+    fn init(gpa: std.mem.Allocator) CallHistory {
+        return .{ .arena = gpa };
+    }
+
+    fn deinit(self: *CallHistory) void {
+        // The map is unmanaged and the keys are its contents rather than its
+        // allocation, so releasing one and not the other leaks a turn's worth
+        // of tool arguments every time a run ends.
+        var it = self.set.keyIterator();
+        while (it.next()) |key| self.arena.free(key.*);
+        self.set.deinit(self.arena);
+    }
+
+    /// Rebuilds the set from one turn's calls, so what the next turn is judged
+    /// against is the turn before it rather than the turn that judged the last
+    /// one. A call dropped for carrying no name is not entered: it never ran,
+    /// so a turn full of them is a turn the model asked for something this run
+    /// could not dispatch, not a round of the same question. Neither is a call
+    /// that writes, for the reason on `stuck_repeat_turns`.
+    ///
+    /// The keys the last turn built are freed before the set is emptied. The
+    /// map is unmanaged and holds them by pointer, so its own clear keeps the
+    /// array and drops the pointers; the bytes each pointed at would be the
+    /// run's until it ended, one turn's tool arguments a turn.
+    ///
+    /// A turn with nothing to enter clears the set, which is what makes the
+    /// next turn's first call look new: a run that only writes has nothing to
+    /// loop on, and the count is not raised against a turn that was never
+    /// compared with anything.
+    fn record(self: *CallHistory, calls: []const chat_mod.ToolCall) !void {
+        var it = self.set.keyIterator();
+        while (it.next()) |key| self.arena.free(key.*);
+        self.set.clearRetainingCapacity();
+        for (calls) |call| {
+            if (!isRepeatable(call.name, call.args.items)) continue;
+            const key = try callKey(self.arena, call.name, call.args.items);
+            errdefer self.arena.free(key);
+            try self.set.put(self.arena, key, {});
+        }
+    }
+
+    /// Whether this turn carried a call the last one did not, which is the only
+    /// thing that separates progress from a loop.
+    ///
+    /// The key it looks for is built in the history's own arena and handed
+    /// back, so a lookup the run makes on every turn of a thousand does not
+    /// leave a turn's worth of keys behind on the run's heap. One is enough:
+    /// the call names and the arguments are the call's own bytes, so the key is
+    /// the same on every turn and the one built first is reused.
+    fn madeProgress(self: *CallHistory, calls: []const chat_mod.ToolCall) bool {
+        for (calls) |call| {
+            if (!isRepeatable(call.name, call.args.items)) continue;
+            const key = callKey(self.arena, call.name, call.args.items) catch continue;
+            defer self.arena.free(key);
+            if (!self.set.contains(key)) return true;
+        }
+        return false;
+    }
+};
+
+/// Whether a call of this name and these arguments is one whose repeat says the
+/// model is stuck. The name is resolved the way dispatch resolves it, so a name
+/// this program has no tool for is not a repeat worth counting: it was refused,
+/// the model is told so in the tool result, and the turn after it asking again
+/// is the model reacting to that refusal rather than the refusal repeating.
+///
+/// The tools that write are excluded, `ast` with them when its arguments ask
+/// for a rewrite. A repeat of those is not a loop but the same change made
+/// twice, and whether the model meant to is not something a byte comparison can
+/// read; the refusal to repeat stays with the calls that only look.
+fn isRepeatable(call_name: []const u8, args: []const u8) bool {
+    const tool = chat_mod.Tool.fromName(call_name) orelse return false;
+    if (tool.writes()) return false;
+    if (tool != .ast) return true;
+    return !isEdit(call_name, args);
+}
+
+/// Whether this turn is one more round of the same question, and holds the
+/// count of rounds in a row that have gone that way. The count rises on a turn
+/// that repeats and is cleared by a turn that does not, so a run that loops
+/// three turns, works, and loops three more is left the second time and the
+/// first three are not counted twice.
+///
+/// A turn with nothing to compare leaves the count where it was rather than
+/// raising it: there is no evidence a run that only writes is stuck, and
+/// `stuck_repeat_turns` rounds of nothing would otherwise stop every run that
+/// makes its changes in one turn, which is most of them.
+fn repeatedTurn(calls: []const chat_mod.ToolCall, history: *CallHistory, rounds: *usize) bool {
+    if (hasRepeatableCall(calls)) {
+        if (history.madeProgress(calls)) {
+            rounds.* = 0;
+        } else {
+            rounds.* += 1;
+        }
+    }
+    return rounds.* >= stuck_repeat_turns;
+}
+
+/// Whether any of this turn's calls is one the repeat count can judge. A turn
+/// of nothing but writes, or of names this program refused, has nothing to
+/// compare and must not be counted.
+fn hasRepeatableCall(calls: []const chat_mod.ToolCall) bool {
+    for (calls) |call| {
+        if (isRepeatable(call.name, call.args.items)) return true;
+    }
+    return false;
+}
+
 /// One request and everything its answer causes: the completion, the assistant
 /// message and tool results it appends, the usage line, and the session record.
 /// `.answered` when the response asked for no tools, which ends the loop;
@@ -3157,6 +3324,8 @@ fn runTurn(
     tool_env: *const std.process.Environ.Map,
     progress: *Progress,
     mcp: *mcp_mod.Servers,
+    history: *CallHistory,
+    rounds: *usize,
 ) !TurnEnd {
     // Stamped on `model_clock`, which `elapsedMs` below is read on: the two
     // ends of one duration on one clock, not the difference between origins.
@@ -3200,7 +3369,32 @@ fn runTurn(
         try conversation_mod.appendMessage(gpa, msgs, "user", "Some requested tool calls were not dispatched because their id/name or JSON arguments were invalid, or the parallel-call limit was exceeded. Reissue only the missing work as valid tool calls.");
         return .wants_tools;
     }
-    if (result.calls.items.len != 0) return .wants_tools;
+    if (result.calls.items.len != 0) {
+        // The turn is one more round of the same question only if none of its
+        // calls is one the last turn did not carry. A run that loops does not
+        // know it is looping: the tool result is the same bytes it read before,
+        // so nothing in the conversation asks it to stop, and
+        // `stuck_repeat_turns` is the only bound here that does not have to
+        // wait for the turn ceiling, which at its default is a thousand
+        // billed requests away.
+        //
+        // The calls are recorded whether or not the turn trips the bound, so
+        // this turn's calls are what the next one is judged against rather
+        // than the ones before it. A run that is about to be stopped has no
+        // next turn, so recording after the check would only ever be the path
+        // that returns `.wants_tools`.
+        const stuck = repeatedTurn(result.calls.items, history, rounds);
+        history.record(result.calls.items) catch |err| switch (err) {
+            // The history is a diagnostic: a run that cannot afford the
+            // bookkeeping still runs, and loses only the loop bound.
+            error.OutOfMemory => net.note(io, arena, "microagent: the turn's tool calls could not be recorded for loop detection (OutOfMemory); a stuck run will stop at the turn ceiling instead\n", .{}),
+        };
+        if (stuck) {
+            net.note(io, arena, "microagent: the model asked for the same tool call {d} turns running without asking for anything new; stopped to save the rest of the budget\n", .{rounds.*});
+            return .cut_off;
+        }
+        return .wants_tools;
+    }
     // No tool call ends the loop, but only an answer ends the run. A refusal, a
     // provider that stopped generating, a response cut at `max_tokens` and a
     // response with nothing in it all arrive as "called no tool", and each
@@ -5194,6 +5388,148 @@ test "a run stops at the spend ceiling, and announces itself before it does" {
     try std.testing.expectEqual(@as(u64, 99), spendAlarmThreshold(124));
     try std.testing.expect(!spendAlarmDue(98, 124));
     try std.testing.expect(spendAlarmDue(99, 124));
+}
+
+/// One tool call for a test to judge, built the way a stream builds it: the id
+/// and the name are duplicated into the arena and the arguments are appended as
+/// they arrive, a fragment at a time, because that is the shape
+/// `repeatedTurn` is handed.
+fn newCall(
+    arena: std.mem.Allocator,
+    id: []const u8,
+    name: []const u8,
+    args: []const u8,
+) !chat_mod.ToolCall {
+    var call: chat_mod.ToolCall = .{ .id = try arena.dupe(u8, id), .name = try arena.dupe(u8, name) };
+    try call.args.appendSlice(arena, args);
+    return call;
+}
+
+test "a model that asks the same tool call over and over is stopped before the turn ceiling" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var history = CallHistory.init(std.testing.allocator);
+    defer history.deinit();
+    var rounds: usize = 0;
+
+    var calls = [_]chat_mod.ToolCall{try newCall(arena, "call_0", "read", "{\"path\":\"src/main.zig\"}")};
+
+    // The first turn has nothing to be judged against -- the set is empty, so
+    // every call in it is new -- and it is recorded. A run is allowed one look
+    // before the bound means anything.
+    try std.testing.expect(!repeatedTurn(&calls, &history, &rounds));
+    try history.record(&calls);
+
+    // The next three are the same question, and a round or two of that is not
+    // a stuck model: a run that re-reads a file it has just written, or reruns
+    // a test it has just run, is doing what it was asked.
+    try std.testing.expect(!repeatedTurn(&calls, &history, &rounds));
+    try history.record(&calls);
+    try std.testing.expect(!repeatedTurn(&calls, &history, &rounds));
+    try history.record(&calls);
+    try std.testing.expectEqual(@as(usize, 2), rounds);
+
+    // The third round of it is the bound, and the run stops there rather than
+    // at the turn ceiling, which at its default is a thousand billed requests
+    // away.
+    try std.testing.expect(repeatedTurn(&calls, &history, &rounds));
+    try std.testing.expectEqual(@as(usize, stuck_repeat_turns), rounds);
+
+    // A turn that asks for something new clears the count, so a run that loops,
+    // works, and loops again is left at its second round rather than stopped on
+    // the strength of a loop it has already come out of.
+    rounds = 0;
+    var other = [_]chat_mod.ToolCall{try newCall(arena, "call_1", "read", "{\"path\":\"src/chat.zig\"}")};
+    try std.testing.expect(!repeatedTurn(&other, &history, &rounds));
+    try std.testing.expectEqual(@as(usize, 0), rounds);
+    try history.record(&other);
+}
+
+test "the loop detector counts the calls that only look, and leaves the ones that write alone" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var history = CallHistory.init(std.testing.allocator);
+    defer history.deinit();
+    var rounds: usize = 0;
+
+    // A turn of nothing but writes has nothing to compare, so it must not be
+    // counted as a round: a model that makes its whole change in one turn is
+    // working, and three such turns is most runs.
+    var write = [_]chat_mod.ToolCall{try newCall(arena, "w0", "write", "{\"path\":\"a\",\"content\":\"b\"}")};
+    for (0..stuck_repeat_turns + 3) |_| {
+        try std.testing.expect(!repeatedTurn(&write, &history, &rounds));
+        try history.record(&write);
+    }
+    try std.testing.expectEqual(@as(usize, 0), rounds);
+
+    // A name this program has no tool for was refused rather than run, so
+    // asking again is the model reacting to the refusal, not the refusal
+    // repeating.
+    var refused = [_]chat_mod.ToolCall{try newCall(arena, "x0", "deploy", "{}")};
+    for (0..stuck_repeat_turns + 3) |_| {
+        try std.testing.expect(!repeatedTurn(&refused, &history, &rounds));
+        try history.record(&refused);
+    }
+    try std.testing.expectEqual(@as(usize, 0), rounds);
+
+    // An `ast` call is only counted when it looks: one asking for a rewrite
+    // changes the tree, and a repeat of that is the same change twice rather
+    // than the model asking for the same answer again.
+    var rewrite = [_]chat_mod.ToolCall{try newCall(arena, "a0", "ast", "{\"lang\":\"rust\",\"pattern\":\"$A == $A\",\"rewrite\":\"$B\",\"path\":\"src/main.zig\"}")};
+    for (0..stuck_repeat_turns + 3) |_| {
+        try std.testing.expect(!repeatedTurn(&rewrite, &history, &rounds));
+        try history.record(&rewrite);
+    }
+    try std.testing.expectEqual(@as(usize, 0), rounds);
+
+    // The same call without the rewrite is the same question twice, and the
+    // third round of it is the bound.
+    var search = [_]chat_mod.ToolCall{try newCall(arena, "a1", "ast", "{\"lang\":\"rust\",\"pattern\":\"$A == $A\",\"path\":\"src/main.zig\"}")};
+    for (0..stuck_repeat_turns) |_| {
+        try std.testing.expect(!repeatedTurn(&search, &history, &rounds));
+        try history.record(&search);
+    }
+    try std.testing.expect(repeatedTurn(&search, &history, &rounds));
+}
+
+test "two calls are the same call only when the name and the arguments both match" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var history = CallHistory.init(std.testing.allocator);
+    defer history.deinit();
+
+    // The name is separated from the arguments by its length, so a name cannot
+    // be shifted into the arguments and collide with a call to another tool:
+    // `multi_edit` taking an argument beginning with `it` is `multi_edit`, not
+    // `multi` taking `edit...`. The two keys are what keeps them apart.
+    const shifted = try callKey(arena, "multi", "edit{}");
+    const whole = try callKey(arena, "multi_edit", "{}");
+    try std.testing.expect(!std.mem.eql(u8, shifted, whole));
+
+    // A separator an argument may itself carry cannot merge two calls either:
+    // the name's length fixes where the arguments start, whatever is in them.
+    const nul_in_args = try callKey(arena, "read", "{\"path\":\"a\\u0000b\"}");
+    const other_name = try callKey(arena, "read\\x00{\"path\"", "b\"}");
+    try std.testing.expect(!std.mem.eql(u8, nul_in_args, other_name));
+
+    // The same arguments under a different tool are a different question.
+    var third = [_]chat_mod.ToolCall{try newCall(arena, "c2", "read", "{}")};
+    var fourth = [_]chat_mod.ToolCall{try newCall(arena, "c3", "search", "{}")};
+    try history.record(&third);
+    try std.testing.expect(history.madeProgress(&fourth));
+
+    // Identical name and identical arguments is the same call.
+    try history.record(&third);
+    try std.testing.expect(!history.madeProgress(&third));
+
+    // One argument different is a different call: a `read` of another path is
+    // the model asking something new, and a loop detector that called it the
+    // same question would stop every run that walks a file one edit at a time.
+    var fifth = [_]chat_mod.ToolCall{try newCall(arena, "c4", "read", "{\"path\":\"b\"}")};
+    try std.testing.expect(history.madeProgress(&fifth));
 }
 
 test "the spend ceiling is set from a flag or its variable, and the run trace names it" {
