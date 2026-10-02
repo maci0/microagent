@@ -160,6 +160,28 @@ release, and `microagent update` moves you to it.
   it, so a run that did not choose its instant still has a monitor deltas its
   `ts` values against each other.
 
+- The gate is green again on this tree. Two of its own targets were red and had
+  been for a while, so every push and every tag failed at the lint step for a
+  reason that had nothing to do with the change under it. `lint-python` refused
+  the `noqa: S310` in the stub-provider burst test because the directive carried
+  no `# because:` line above it, the reason every other suppression in the tree
+  names; the test now says the URL is its own `ThreadingHTTPServer` on the
+  loopback address. `check-refs` refused fifty-odd source citations across
+  `docs/threat-model.md`, all of them drifted by the same offset after a commit
+  added lines above them, plus one citation that named a bare line number where
+  the pair had to be checked. The drifted ones are rewritten to the line their
+  symbol is on, and the bare one no longer cites a line number at all: the
+  call it meant is the first statement of `Servers.call`, so the row says that
+  rather than pointing at a line the pair check cannot verify.
+
+- The threat model's citation of the release workflow named the `publish` step
+  rather than the command. It pointed at `release.yml:139`, where the step's
+  `env:` block was, and said `gh release create`, which is at 164. It is a
+  hand-written citation in a file `check-refs` does not read, so nothing asked:
+  a reader following it to learn how a release is published landed on the token
+  two lines above the command instead. It names the line the command is on, and
+  is the only workflow citation in the tree.
+
 - The interpreter floor is now held across all four places it is recorded, not
   three. `lint-versions` checked `ruff.toml`'s `target-version` against the
   `--python-version` each of the two manifests compiles its lock for, and left

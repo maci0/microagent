@@ -56,8 +56,9 @@ def hammer(port: int, requests: int) -> dict[int, int]:
         # connection as one.
         for _ in range(200):
             try:
-                # because: the URL is a literal loopback address built two
-                # lines above, never anything a request body or a header names.
+                # because: the URL is this test's own ThreadingHTTPServer on the
+                # loopback address, a literal built two lines above and never
+                # read from a request body or a header
                 with urllib.request.urlopen(req) as response:  # noqa: S310
                     status = response.status
                     response.read()
