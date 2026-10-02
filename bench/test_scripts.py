@@ -543,7 +543,16 @@ def check_rows(directory: Path, env: dict[str, str]) -> None:
     bench = fixture / "bench"
     task = bench / "tasks/fixture"
     task.mkdir(parents=True)
-    for name in ("run.sh", "gauntlet.sh", "monotonic.sh", "portable.sh", "rows.sh", "limit.py", "row.py", "review_row.py"):
+    for name in (
+        "run.sh",
+        "gauntlet.sh",
+        "monotonic.sh",
+        "portable.sh",
+        "rows.sh",
+        "limit.py",
+        "row.py",
+        "review_row.py",
+    ):
         (bench / name).write_bytes((ROOT / "bench" / name).read_bytes())
     (task / "setup.sh").write_text("printf '%s\\n' fixture > answer.txt\n")
     (task / "check.sh").write_text("exit 0\n")
