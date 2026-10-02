@@ -764,6 +764,84 @@ fn sessionId(arena: std.mem.Allocator, head: std.http.Client.Response.Head) ![]c
     return "";
 }
 
+// A response head a server can send, and the shapes of a session id that would
+// be refused rather than carried. `std.testing.fuzz` runs this corpus through
+// the harness on every `zig build test`, and through the fuzzer's mutations
+// when the test binary is built in fuzz mode. A header the transport accepted,
+// one spelled in either case, an id of every length the bound decides, an id
+// carrying a byte no header value may hold (a NUL, a CR, an LF, a tab, a DEL
+// and a byte above the visible range), a folding continuation, a duplicate, and
+// heads that are not heads at all.
+const session_id_corpus = [_][]const u8{
+    "HTTP/1.1 200 OK\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nMcp-Session-Id: sess-7f3a\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nmcp-session-id: sess-7f3a\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nMCP-SESSION-ID: sess\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nMcp-Session-Id: \r\n\r\n",
+    "HTTP/1.1 200 OK\r\nMcp-Session-Id:\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nMcp-Session-Id: a\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nMcp-Session-Id: !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nMcp-Session-Id: sess\r\nMcp-Session-Id: other\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nMcp-Session-Id: sess\r\nContent-Type: application/json\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nMcp-Session-Id: sess\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nMcp-Session-Id: sess\tvalue\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nMcp-Session-Id: sess\x00\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nMcp-Session-Id: ses\rs\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nMcp-Session-Id: ses\ns\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nMcp-Session-Id: ses\x7fs\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nMcp-Session-Id: ses\xffs\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nMcp-Session-Id: ses\u{80}s\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nMcp-Session-Id: ses\u{e9}s\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nMcp-Session-Id:  \r\n\r\n",
+    "HTTP/1.1 200 OK\r\nMcp-Session-Id: sess \r\n\r\n",
+    "HTTP/1.1 200 OK\r\nMcp-Session-Id: sess-7f3a\r\n",
+    "HTTP/1.1 200 OK\r\nMcp-Session-Id: sess-7f3a",
+    "HTTP/1.1 200\r\nMcp-Session-Id: sess\r\n\r\n",
+    "HTTP/1.1 200 OK\nMcp-Session-Id: sess\n\n",
+    "garbage",
+    "",
+    "\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nMcp-Session-Id: sess\r\n folded\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nOther: x\r\n\r\n",
+};
+
+test "a fuzzed response head carries a session id that is safe to send back" {
+    try std.testing.fuzz({}, fuzzSessionId, .{ .corpus = &session_id_corpus });
+}
+
+fn fuzzSessionId(_: void, smith: *std.testing.Smith) !void {
+    var scratch: [4 * 1024]u8 = undefined;
+    const raw: []const u8 = if (smith.in) |seed| seed else scratch[0..smith.slice(&scratch)];
+
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    // A head the transport refuses carries no header this client can read, so
+    // there is nothing to copy out of it and the run proceeds without a session
+    // rather than reading a head that was never a head.
+    const head = std.http.Client.Response.Head.parse(raw) catch return;
+    const id = try sessionId(arena, head);
+    if (id.len == 0) return;
+
+    // The id goes back out as a header value on the next request, so every byte
+    // of it has to be one a header value may hold: a value carrying a CR or an
+    // LF ends the header it rides in, and a NUL or a byte above the visible
+    // range is not a header value at all.
+    for (id) |c| {
+        if (c < 0x21 or c > 0x7e) {
+            std.debug.print("\nsession_id: '{s}' carries the byte {x}\n", .{ raw, c });
+            return error.TestUnexpectedResult;
+        }
+    }
+    // It is the head's own bytes rather than a span of the read buffer, which
+    // the next response overwrites while the run still holds the id.
+    try std.testing.expect(std.mem.indexOf(u8, raw, id) != null);
+    // And the same head read twice says the same thing: nothing here holds
+    // state across calls, and the fuzzer would find it if it did.
+    try std.testing.expectEqualStrings(id, try sessionId(arena, head));
+}
+
 /// The tool `exposed` names on this server, or null. A lazy preset's table is
 /// replaced by the server's own answer at its first call, so the tool the model
 /// named is looked up again there rather than trusted from the table it was
@@ -1774,6 +1852,54 @@ test "MCP commands and arguments refuse embedded NUL before spawning" {
         defer servers.shutdown(io);
         try std.testing.expectEqual(@as(usize, 0), servers.items.len);
         try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, name, .{}));
+    }
+}
+
+test "concurrent handshakes each keep their own tool table on the shared run arena" {
+    // The rest of this file connects through `std.testing.io`, which has no
+    // threads, so `Group.concurrent` refuses and every remote handshake runs
+    // inline instead. That leaves the one path where several servers share the
+    // run arena untested: an arena grown from two handshakes at once hands the
+    // same bytes to both when its bookkeeping is not serialized, and each
+    // server's tool table comes back as the other server's name. Four loopback
+    // servers over a threaded io is the run's own shape, and the tool table is
+    // read back by exposed name because that is the string every server writes
+    // differently.
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const count = 4;
+    const fakes = try gpa.alloc(*FakeMcp, count);
+    defer gpa.free(fakes);
+    for (fakes) |*slot| slot.* = try FakeMcp.start(gpa, io, .normal);
+    defer for (fakes) |fake| fake.finish();
+
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    var env: std.process.Environ.Map = .init(state.allocator());
+    var client: std.http.Client = .{ .allocator = gpa, .io = io };
+    defer client.deinit();
+
+    const arena = state.allocator();
+    const entries = try arena.alloc(Entry, count);
+    for (entries, fakes, 0..) |*entry, fake, index| {
+        entry.* = .{ .name = try std.fmt.allocPrint(arena, "fake{d}", .{index}) };
+        entry.url = try fake.url(arena);
+    }
+    var servers = connect(io, arena, &env, &client, entries, "test");
+    defer servers.shutdown(io);
+
+    try std.testing.expectEqual(count, servers.items.len);
+    for (entries, 0..) |entry, index| {
+        // Every server named its own tool `echo`, so a table that crossed
+        // servers resolves under the wrong exposed name, or not at all.
+        const exposed = try std.fmt.allocPrint(arena, "mcp__{s}__echo", .{entry.name});
+        _ = index;
+        const resolved = servers.resolve(exposed) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqualStrings(entry.name, resolved.server.name);
+        try std.testing.expectEqualStrings("pong", try Servers.call(io, arena, resolved, "{\"text\":\"hi\"}", net.durationMs(10_000)));
     }
 }
 

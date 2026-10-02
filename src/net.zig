@@ -263,9 +263,21 @@ fn codepointLen(s: []const u8, i: usize) usize {
 /// Levenshtein distance over two rows of codepoints, so a long word costs two
 /// allocations of its own length rather than a square of it. Null when a word
 /// is too long for a row of `u8` distances, which no flag this suggests is.
+///
+/// Both ends are measured before anything is allocated. The row a distance
+/// lands in is a `u8`, and a row holds a distance, so a word of more than 255
+/// characters has a distance that does not fit one whichever side it is on. The
+/// flag side is a handful of characters and was never at risk; the word side is
+/// whatever a person typed or a paste delivered, and `at` and the row values
+/// grew past 255 with it until a long word overflowed the row and took the run
+/// down. Refusing is the answer the row cannot give, and it is the answer a
+/// word that long already deserves: it is further from every flag than the two
+/// edits a suggestion is worth.
 fn editDistance(a: []const u8, b: []const u8) ?usize {
     if (a.len == 0) return codepointCount(b);
     if (b.len == 0) return codepointCount(a);
+    const a_len = codepointCount(a);
+    if (a_len >= std.math.maxInt(u8)) return null;
     const b_len = codepointCount(b);
     if (b_len >= std.math.maxInt(u8)) return null;
     const gpa = std.heap.page_allocator;
@@ -1229,6 +1241,116 @@ test "a mistyped flag is answered from the nearest one that command has" {
     // distance: the byte it cannot read is one character of the five, and
     // dropping it is the one edit that makes the word the flag.
     try std.testing.expectEqualStrings("--print", nearestFlag("--pri\xfft", &.{"--print"}).?);
+}
+
+// The words both command lines answer a misspelling from, and the shapes of a
+// word a person half-typed: a truncation, a transposition, a flag with its
+// leading dashes, a short flag, a word whose letters came from a non-ASCII
+// keyboard layout, one cut off from a paste, and a word past what the edit
+// budget can reach. `std.testing.fuzz` runs this corpus through the harness on
+// every `zig build test`, and through the fuzzer's mutations when the test
+// binary is built in fuzz mode.
+const nearest_flag_corpus = [_][]const u8{
+    "",
+    "-",
+    "--",
+    "mo",
+    "-m",
+    "--m",
+    "--mode",
+    "--model",
+    "mod",
+    "modle",
+    "--modle",
+    "--api-ke",
+    "--api-key",
+    "--pront",
+    "--pirnt",
+    "--pront",
+    "nope",
+    "--check",
+    "-c",
+    "--help",
+    "-h",
+    "--version",
+    "-V",
+    "--reasoning",
+    "--reasoning-effort",
+    "--print",
+    "--max-tokens",
+    "-p",
+    "--pri字t",
+    "--принт",
+    "--pri\xfft",
+    "\u{65e5}\u{8a00}",
+    "日本語",
+    "--модель",
+    "\u{0301}",
+    "\u{feff}--model",
+    "-\x00model",
+    "--model\x00",
+    "--model\n",
+    "\t--model",
+    "--" ++ "a" ** 3,
+    "--" ++ "a" ** 255,
+    "--model" ++ "x" ** 100,
+    "\xff\xfe--print",
+    "--model=deepseek",
+    "--Model",
+};
+
+test "a fuzzed misspelling is answered from the list, or from nothing" {
+    try std.testing.fuzz({}, fuzzNearestFlag, .{ .corpus = &nearest_flag_corpus });
+}
+
+fn fuzzNearestFlag(_: void, smith: *std.testing.Smith) !void {
+    var scratch: [512]u8 = undefined;
+    const text: []const u8 = if (smith.in) |seed| seed else scratch[0..smith.slice(&scratch)];
+    const word = if (text.len == 0) "" else text;
+
+    const flags = [_][]const u8{ "--model", "--print", "--api-key", "--check", "--help", "--version", "-m", "-c", "-h", "-V" };
+    const near = nearestFlag(word, &flags);
+
+    // A suggestion is one of the caller's own names, never a name it invented
+    // and never a fragment: the whole word is echoed back with "did you mean",
+    // so a suggestion that is not on the list tells the reader to type a flag
+    // this program does not have.
+    if (near) |name| {
+        var on_the_list = false;
+        for (flags) |flag| if (std.mem.eql(u8, flag, name)) {
+            on_the_list = true;
+        };
+        if (!on_the_list) {
+            std.debug.print("\nnearestFlag: '{s}' suggests '{s}', which is not a flag\n", .{ word, name });
+            return error.TestUnexpectedResult;
+        }
+    }
+
+    // A word under three characters has no budget to spend an edit in, so it is
+    // answered with nothing however well it is spelled. The measurement here is
+    // in bytes where the rule is in characters, so a word of three or more
+    // bytes that spells fewer than three characters is held to the rule too.
+    if (word.len < 3 or codepointCount(word) < 3) {
+        if (near != null) {
+            std.debug.print("\nnearestFlag: '{s}' suggests '{s}' with no budget for it\n", .{ word, near.? });
+            return error.TestUnexpectedResult;
+        }
+    }
+
+    // An empty list suggests nothing, however close the word is, and the same
+    // answer comes back on every call: the suggestion reads no state.
+    try std.testing.expectEqual(@as(?[]const u8, null), nearestFlag(word, &.{}));
+    try std.testing.expectEqual(@as(?[]const u8, null), nearestFlag(word, &.{}));
+    try std.testing.expectEqualStrings(nearestFlag(word, &flags) orelse "", nearestFlag(word, &flags) orelse "");
+
+    // A flag spelled exactly is either a one-edit truncation of itself or one
+    // substitution away from nothing, so it answers itself rather than a
+    // neighbour. This is the pair a suggestion is measured against: the same
+    // word against a list holding only itself can only name that one.
+    if (near) |name| {
+        const alone = [_][]const u8{name};
+        try std.testing.expectEqualStrings(name, nearestFlag(word, &alone) orelse name);
+    }
 }
 
 test "a header value is refused for every control byte and accepted for the rest" {
