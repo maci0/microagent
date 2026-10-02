@@ -581,7 +581,7 @@ fn pruneSessionsTo(io: Io, arena: std.mem.Allocator, session_dir: []const u8, ke
             net.note(io, arena, "microagent: the session store under {s} could not be walked for pruning ({s}); it is not pruned and is left as it stands\n", .{ shown, @errorName(err) });
             return 0;
         };
-        defer walker.deinit();
+        defer net.drainWalk(io, &walker);
         while (true) {
             const entry = walker.next(io) catch |err| {
                 partialList(io, arena, shown, found.items.len, err);
@@ -640,6 +640,49 @@ fn pruneSessionsTo(io: Io, arena: std.mem.Allocator, session_dir: []const u8, ke
         failed, deleting, shown, @errorName(first_err.?), keep, max_session_log_age_days,
     });
     return deleting - failed;
+}
+
+// A walk that returns before it has finished leaves every directory below the
+// point it stopped at open: `SelectiveWalker.deinit` frees the two lists it
+// owns and closes nothing, and only the popping half of `next` closes a
+// directory as it goes. `pruneSessionsTo` is the one walk in this program with
+// early returns inside its loop, and it runs once per run, so each of them
+// leaked a handle per level of depth still under it. The walk is drained before
+// it is deinited, so the count is the same whatever the loop gave up on.
+test "a walk that gives up mid-tree leaves no descriptor behind" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    var f = try StoreFixture.init(gpa);
+    defer f.deinit();
+    const io = f.io();
+    const store = try storeRelative(f.arena(), io, f.tmp);
+
+    // Deep enough that a walk holding the stack has several handles open, with a
+    // log at the bottom so the loop is still inside a subdirectory when it
+    // gives up. The store a run creates is one level deep; a monitor that
+    // reorganised it is what makes it deeper, and the walk does not care.
+    const deep = try std.fs.path.join(f.arena(), &.{ store, "a", "b", "c", "d", "e" });
+    try f.tmp.dir.createDirPath(io, deep);
+    const deep_log = try std.fs.path.join(f.arena(), &.{ store, "a", "b", "c", "d", "e", "1.jsonl" });
+    try f.tmp.dir.writeFile(io, .{ .sub_path = deep_log, .data = "" });
+
+    const baseline = try net.openDescriptors(io, f.arena());
+
+    var dir = try std.Io.Dir.cwd().openDir(io, store, .{ .iterate = true });
+    defer dir.close(io);
+    {
+        var walker = try dir.walk(f.arena());
+        defer net.drainWalk(io, &walker);
+        // The shape `pruneSessionsTo` has: give up as soon as the first file is
+        // met, which is while every directory above it is still on the stack.
+        while (walker.next(io) catch null) |entry| {
+            if (entry.kind == .file) break;
+        }
+    }
+    // The point of the test: whatever the loop did above, and however deep the
+    // store was, the drain returned every handle the walk had taken, so the
+    // only descriptor still open is the store handle the caller owns.
+    try std.testing.expectEqual(baseline + 1, try net.openDescriptors(io, f.arena()));
 }
 
 /// Closes the log and clears the slot, so the handle is closed exactly once.
@@ -1558,7 +1601,7 @@ test "a session log is readable by its owner alone" {
     var store_dir = try std.Io.Dir.openDir(std.Io.Dir.cwd(), io, relative, .{ .iterate = true });
     defer store_dir.close(io);
     var walker = try store_dir.walk(arena);
-    defer walker.deinit();
+    defer net.drainWalk(io, &walker);
     var checked: usize = 0;
     var name_buf: [std.fs.max_path_bytes]u8 = undefined;
     while (try walker.next(io)) |entry| {
@@ -1613,7 +1656,7 @@ test "a store whose name is not plain text is created where it was named" {
     var dir = try std.Io.Dir.openDirAbsolute(io, hostile, .{ .iterate = true });
     defer dir.close(io);
     var walker = try dir.walk(arena);
-    defer walker.deinit();
+    defer net.drainWalk(io, &walker);
     var logs: usize = 0;
     while (try walker.next(io)) |entry| {
         if (entry.kind == .file and std.mem.endsWith(u8, entry.basename, ".jsonl")) logs += 1;
@@ -1783,7 +1826,7 @@ const test_now_ns: i128 = @as(i128, max_session_logs + 1) * std.time.ns_per_s;
 
 fn countLogsIn(dir: Io.Dir, io: Io, arena: std.mem.Allocator) !usize {
     var walker = try dir.walk(arena);
-    defer walker.deinit();
+    defer net.drainWalk(io, &walker);
     var n: usize = 0;
     while (try walker.next(io)) |entry| {
         if (entry.kind != .file) continue;
