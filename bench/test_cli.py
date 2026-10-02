@@ -411,6 +411,38 @@ class SilentTLS(BaseRequestHandler):
             pass
 
 
+def check_failed_turn_record(binary: Path, root: Path, url: str) -> None:
+    """A turn the provider never finished still leaves one session record.
+
+    Every other run here writes a record per response, so a run that dies on a
+    transport error or on its own response ceiling leaves a log whose last line
+    is the last answer that arrived, and a reader counting records finds a run
+    that ended where it was last heard from rather than one that failed there.
+    The reason is written in the same shape as a response, with every counter at
+    zero because nothing was billed, so `session.zig`'s own test of the record
+    and this one of the writing are the two halves of the same promise.
+    """
+    Provider.reset()
+    Provider.response_bytes = 16 * 1024 * 1024 + 65536  # One frame past the byte ceiling.
+    store = root / "failed-turn-sessions"
+    result = invoke(binary, root, url, ["oversized unfinished response"], "", MICROAGENT_SESSION_DIR=str(store))
+    Provider.reset()
+    expect(result.returncode == 3 and len(Provider.seen) == 1, result.stderr)
+    logs = sorted(store.glob("*.jsonl")) if store.exists() else []
+    expect(len(logs) == 1, f"a turn the ceiling cut wrote {len(logs)} session logs, not one")
+    rows = [json.loads(line) for line in logs[0].read_text(encoding="utf-8").splitlines()]
+    expect(len(rows) == 1, rows)
+    expect(rows[0]["error"] == "ResponseTooLarge", rows)
+    # Nothing was billed for a response the run refused, so every counter is
+    # zero: a monitor summing `usage` over this log is not charged for a turn
+    # that never arrived, and one counting records still finds the turn.
+    expect(rows[0]["usage"]["total_tokens"] == 0, rows)
+    # The same shape an answered turn carries, so a reader does not have to know
+    # which of the two a line is before it can read it.
+    expect(rows[0]["finish_reason"] == "" and rows[0]["served_model"] == "", rows)
+    expect(isinstance(rows[0]["elapsed_ms"], int) and rows[0]["elapsed_ms"] >= 0, rows)
+
+
 def check_timeouts(binary: Path, root: Path, url: str) -> None:
     Provider.reset()
     # `hang` stays on across the three cases here because all three need a
@@ -700,6 +732,7 @@ if __name__ == "__main__":
             check(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_timeouts(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_response_cap(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
+            check_failed_turn_record(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_tool_outcomes(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_endpoint_paths(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_opencode(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")

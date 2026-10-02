@@ -6990,13 +6990,24 @@ test "a refused value is reported against where it came from, flag or variable" 
     try std.testing.expect(std.mem.indexOf(u8, reasoningEffort(&buf, "--reasoning-effort", "loud", &level).?, reasoning_effort_names) != null);
 }
 
+// The agent run's half of the same set `net` holds: this loop decides whether a
+// turn is asked again, so a name added to or dropped from `retryableStatus` is a
+// change to what a billable request is worth repeating, and three examples of
+// each side is not enough to see it happen. `net` names the whole set, and this
+// test is the one that says the run agrees with it rather than with a sample.
 test "only weather-shaped statuses are retried" {
-    try std.testing.expect(net.retryableStatus(.too_many_requests));
-    try std.testing.expect(net.retryableStatus(.bad_gateway));
-    try std.testing.expect(net.retryableStatus(.service_unavailable));
-    try std.testing.expect(!net.retryableStatus(.bad_request));
-    try std.testing.expect(!net.retryableStatus(.unauthorized));
-    try std.testing.expect(!net.retryableStatus(.not_found));
+    for ([_]std.http.Status{ .request_timeout, .conflict, .too_early, .too_many_requests, .internal_server_error, .bad_gateway, .service_unavailable, .gateway_timeout }) |status| {
+        std.testing.expect(net.retryableStatus(status)) catch |err| {
+            std.debug.print("the run would not retry {d}\n", .{@intFromEnum(status)});
+            return err;
+        };
+    }
+    for ([_]std.http.Status{ .ok, .created, .bad_request, .unauthorized, .payment_required, .forbidden, .not_found, .method_not_allowed }) |status| {
+        std.testing.expect(!net.retryableStatus(status)) catch |err| {
+            std.debug.print("the run would retry {d}\n", .{@intFromEnum(status)});
+            return err;
+        };
+    }
 }
 
 // The provider reading a whole request is the point at which the turn behind

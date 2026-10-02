@@ -1595,18 +1595,90 @@ test "update: a refusal that names a wait is spent on that wait" {
     try std.testing.expectEqual(@as(?u64, 0), zero);
     try std.testing.expectEqual(@as(u64, 1000), waitMs(1, zero));
     try std.testing.expectEqual(@as(u64, 2000), waitMs(2, zero));
+
+    // The date form is where a zero reaches this path from on its own, and it
+    // is not the same header: `net` reads a deadline this machine's clock has
+    // already passed as a wait of none rather than an absent one, so a CDN or
+    // gateway running its own clock even a minute ahead turns every refusal it
+    // answers into `0` here. A `waitMs` that only knew about the literal
+    // `retry-after: 0` above would take that zero, and all three attempts
+    // would go out milliseconds apart, which is the outcome this rule exists
+    // to prevent. The date is the one `net` writes, so the header the test
+    // builds is one the parser has to agree with.
+    const now = net.nowSeconds(std.testing.io);
+    var date_buf: [64]u8 = undefined;
+    var head_buf: [160]u8 = undefined;
+    for ([_]i64{ -60, -1, 0 }) |spent| {
+        const written = try net.writeHttpDate(now + spent, &date_buf);
+        const spent_head = try std.fmt.bufPrint(&head_buf, "HTTP/1.1 429 Too Many Requests\r\nretry-after: {s}\r\n\r\n", .{written});
+        const spent_wait = net.retryAfterMs(spent_head, now);
+        try std.testing.expectEqual(@as(?u64, 0), spent_wait);
+        try std.testing.expectEqual(@as(u64, 1000), waitMs(1, spent_wait));
+        try std.testing.expectEqual(@as(u64, 2000), waitMs(2, spent_wait));
+    }
+    // The same date past only proves the parser read it: a wait still in the
+    // future is this path's to spend as named, so the zero above is the
+    // deadline form reaching the schedule rather than a header whose date was
+    // simply never checked.
+    const ahead = try net.writeHttpDate(now + 7, &date_buf);
+    const ahead_head = try std.fmt.bufPrint(&head_buf, "HTTP/1.1 429 Too Many Requests\r\nretry-after: {s}\r\n\r\n", .{ahead});
+    try std.testing.expectEqual(@as(?u64, 7000), net.retryAfterMs(ahead_head, now));
+    try std.testing.expectEqual(@as(u64, 7000), waitMs(1, net.retryAfterMs(ahead_head, now)));
 }
 
 // Which failures another attempt could answer differently, and which could not.
 // A 404 names something that is not published and asking again changes nothing;
 // a 503 is the server being busy, and the same set the agent run retries on.
+//
+// The two are enumerated rather than sampled. This path decides whether a
+// second GET is worth making from both, so a name added to either set is a
+// policy change to this command and a member dropped from either is a loop that
+// gives up on a server that was only busy. Two examples of each are not enough
+// to notice either, and this test's whole job is to notice.
 test "update: a download retries the statuses and errors the run retries on" {
-    try std.testing.expect(net.retryableStatus(.service_unavailable));
-    try std.testing.expect(net.retryableStatus(.too_many_requests));
-    try std.testing.expect(!net.retryableStatus(.not_found));
-    try std.testing.expect(!net.retryableStatus(.forbidden));
-    try std.testing.expect(net.transientTransportError(error.ConnectionResetByPeer));
-    try std.testing.expect(!net.transientTransportError(error.InvalidUrl));
+    for ([_]std.http.Status{ .request_timeout, .conflict, .too_early, .too_many_requests, .internal_server_error, .bad_gateway, .service_unavailable, .gateway_timeout }) |status| {
+        std.testing.expect(net.retryableStatus(status)) catch |err| {
+            std.debug.print("update would not retry {d}\n", .{@intFromEnum(status)});
+            return err;
+        };
+    }
+    for ([_]std.http.Status{ .ok, .bad_request, .unauthorized, .payment_required, .forbidden, .not_found, .method_not_allowed }) |status| {
+        std.testing.expect(!net.retryableStatus(status)) catch |err| {
+            std.debug.print("update would retry {d}\n", .{@intFromEnum(status)});
+            return err;
+        };
+    }
+    // Every transport failure a second connection can answer, not one of them.
+    // A name left out here is a dropped connection that ends an update the
+    // network could have finished, and the set is written out in `net`.
+    for ([_]anyerror{
+        error.TemporaryNameServerFailure,
+        error.NameServerFailure,
+        error.UnknownHostName,
+        error.HostLacksNetworkAddresses,
+        error.NetworkDown,
+        error.ConnectionRefused,
+        error.ConnectionResetByPeer,
+        error.ConnectionAborted,
+        error.BrokenPipe,
+        error.ConnectionTimedOut,
+        error.Timeout,
+        error.TlsInitializationFailed,
+    }) |err| {
+        std.testing.expect(net.transientTransportError(err)) catch |failure| {
+            std.debug.print("update would not retry a {s}\n", .{@errorName(err)});
+            return failure;
+        };
+    }
+    // A failure this run got wrong is not weather, and neither is the machine
+    // running out of memory: a second attempt is handed the same buffer, which
+    // is what ran out.
+    for ([_]anyerror{ error.InvalidUrl, error.TlsCertificateInvalid, error.OutOfMemory, error.StreamTooLong }) |err| {
+        std.testing.expect(!net.transientTransportError(err)) catch |failure| {
+            std.debug.print("update would retry a {s}\n", .{@errorName(err)});
+            return failure;
+        };
+    }
 }
 
 /// A tmp-dir file as a path `replaceBinary` opens from the working directory.
