@@ -94,7 +94,14 @@ pub fn build(b: *std.Build) void {
         }
     }.pin;
     pin_test_env(run_tests);
+    // The copy module's own run gets it too, for the reason the safety runs
+    // below do: `pin_test_env` exists so a child a test spawns cannot answer
+    // differently because of the host's settings, and the one function that
+    // applies it is the only way a run step gets that guarantee. A run added
+    // beside these and left unpinned reads as covered by the comment above
+    // `pin_test_env` and is not.
     const run_copy_tests = b.addRunArtifact(b.addTest(.{ .root_module = copy_module, .filters = test_filters, .zig_lib_dir = zig_lib }));
+    pin_test_env(run_copy_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
     test_step.dependOn(&run_copy_tests.step);
