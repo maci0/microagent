@@ -19,6 +19,8 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-10-03
+
 ### Changed
 
 - The `bash` tool tells the model which shell it runs. The name is `bash` and
@@ -66,6 +68,16 @@ release, and `microagent update` moves you to it.
   `make lint-versions` now holds that `--python` against the floor the linter
   manifest, the Harbor manifest and `ruff.toml` are already held to, and its
   self-test asks the same question of it as of the other four.
+
+- The `git` tool honors `rev` on `cmd = "log"` to narrow commit history. The
+  tool schema declared the field for the commands taking one, but `log` dropped
+  it silently and returned the entire log. `cmd = "status"` now explicitly
+  refuses `rev`, explaining that status reports the working tree against HEAD.
+
+- Remote preset configuration keys (`url`, `api_key_env`, `api_key_header`,
+  `timeout`) written under built-in tool tables like `[tools.bash]` report the
+  table name in the diagnostic message instead of an unspecific unknown-key
+  notice.
 
 ## [0.15.0] - 2026-10-02
 
@@ -3252,7 +3264,8 @@ First release.
   `aarch64-macos` with a checksum sidecar each, and refuses a tag that does not name the version in
   `build.zig.zon`.
 
-[Unreleased]: https://github.com/maci0/microagent/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/maci0/microagent/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/maci0/microagent/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/maci0/microagent/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/maci0/microagent/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/maci0/microagent/compare/v0.12.0...v0.13.0

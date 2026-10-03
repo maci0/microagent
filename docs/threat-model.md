@@ -5,7 +5,7 @@ carries a file reference, so the next pass can re-verify it against the code rat
 against this document. Flags, environment variables and the config file are documented in
 [usage.md](usage.md).
 
-Last reviewed: 2026-10-02, against `0.15.0` ([build.zig.zon](../build.zig.zon)) and the
+Last reviewed: 2026-10-03, against `0.16.0` ([build.zig.zon](../build.zig.zon)) and the
 `Unreleased` section of [CHANGELOG.md](../CHANGELOG.md).
 
 This pass re-read the document against `0.15.0`: it named the fourth writer whose
