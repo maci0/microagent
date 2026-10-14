@@ -23,6 +23,26 @@
 //! not YAML: `name` and `description` are read and everything else is ignored,
 //! the same way `config.zig` reads its config.
 
+
+fn repeat(comptime count: usize, comptime value: []const u8) *const [count * value.len]u8 {
+    const out = comptime blk: {
+    var buf: [count * value.len]u8 = undefined;
+    if (value.len == 1) {
+        @memset(&buf, value[0]);
+    } else {
+        // Doubling copies the pattern in log(count) steps, which stays inside
+        // the comptime backwards-branch limit a one-step loop does not.
+        @memcpy(buf[0..value.len], value);
+        var filled: usize = value.len;
+        while (filled * 2 <= buf.len) : (filled *= 2) @memcpy(buf[filled..][0..filled], buf[0..filled]);
+        if (filled < buf.len) @memcpy(buf[filled..], buf[0 .. buf.len - filled]);
+    }
+    break :blk buf;
+    };
+    return &out;
+}
+
+
 const std = @import("std");
 const Io = std.Io;
 
@@ -637,7 +657,7 @@ test "a skill name comes from the frontmatter, else the directory, and must be a
     try std.testing.expectEqualStrings("dir", try skillName(arena, "dir", "---\nname: \"\"\n---\n"));
     try std.testing.expectEqualStrings("dir", try skillName(arena, "dir", "no frontmatter\n"));
     try std.testing.expectError(error.InvalidName, skillName(arena, "dir", "---\nname: two words\n---\n"));
-    try std.testing.expectError(error.InvalidName, skillName(arena, "dir", "---\nname: " ++ "x" ** 100 ++ "\n---\n"));
+    try std.testing.expectError(error.InvalidName, skillName(arena, "dir", "---\nname: " ++ repeat(100, "x").* ++ "\n---\n"));
 }
 
 test "the description falls back to the body's first line" {
@@ -883,7 +903,7 @@ test "a listing past the prompt cap names the skills it left out" {
     for (items, 0..) |*item, i| {
         item.* = .{
             .name = try std.fmt.allocPrint(scratch, "s{d}", .{i}),
-            .description = "d" ** max_skill_description_bytes,
+            .description = repeat(max_skill_description_bytes, "d"),
             .path = "/p",
         };
     }

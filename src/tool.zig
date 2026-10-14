@@ -5,6 +5,26 @@
 //! everything below is reached by a model-supplied name and model-supplied
 //! arguments, so it is capped, reaped and reported from one place.
 
+
+fn repeat(comptime count: usize, comptime value: []const u8) *const [count * value.len]u8 {
+    const out = comptime blk: {
+    var buf: [count * value.len]u8 = undefined;
+    if (value.len == 1) {
+        @memset(&buf, value[0]);
+    } else {
+        // Doubling copies the pattern in log(count) steps, which stays inside
+        // the comptime backwards-branch limit a one-step loop does not.
+        @memcpy(buf[0..value.len], value);
+        var filled: usize = value.len;
+        while (filled * 2 <= buf.len) : (filled *= 2) @memcpy(buf[filled..][0..filled], buf[0..filled]);
+        if (filled < buf.len) @memcpy(buf[filled..], buf[0 .. buf.len - filled]);
+    }
+    break :blk buf;
+    };
+    return &out;
+}
+
+
 const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
@@ -245,7 +265,7 @@ test "failed tool and MCP spawns close pipes and reap children" {
             }));
         }
         try std.testing.expectEqual(before, try net.openDescriptors(io, arena));
-        var status: u32 = undefined;
+        var status: i32 = undefined;
         try std.testing.expectEqual(std.os.linux.E.CHILD, std.os.linux.errno(std.os.linux.waitpid(-1, &status, std.os.linux.W.NOHANG)));
     }
     try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "marker", .{}));
@@ -276,8 +296,7 @@ fn signalGroup(pgid: std.posix.pid_t) void {
 /// group outside the table -- the exact child Ctrl+C then leaves running. `0` is
 /// the free marker, never a pid, so it can stay the initial value.
 const max_child_groups: usize = 64;
-var child_groups: [max_child_groups]std.atomic.Value(std.posix.pid_t) =
-    [_]std.atomic.Value(std.posix.pid_t){.init(0)} ** max_child_groups;
+var child_groups: [max_child_groups]std.atomic.Value(std.posix.pid_t) = @splat(.init(0));
 
 /// Publishes a child's group so `onInterrupt` can signal it. False when the
 /// table is full, and the caller stops the child rather than start one the
@@ -577,14 +596,14 @@ const capture_corpus = [_][]const u8{
     "\xff\xfe\xc3\x80",
     "\xe6\x97",
     "\xe6\x97\xa5",
-    "\"" ** 32,
-    "x" ** 1024,
-    "x" ** (max_tool_output - 1),
-    "x" ** max_tool_output,
-    "x" ** (max_tool_output + 1),
-    "x" ** (max_tool_output + 500),
-    "\u{65e5}" ** (max_tool_output / 3 + 8),
-    "a" ** 300 ++ "\u{1f600}",
+    repeat(32, "\""),
+    repeat(1024, "x"),
+    repeat((max_tool_output - 1), "x"),
+    repeat(max_tool_output, "x"),
+    repeat((max_tool_output + 1), "x"),
+    repeat((max_tool_output + 500), "x"),
+    repeat((max_tool_output / 3 + 8), "\u{65e5}"),
+    repeat(300, "a").* ++ "\u{1f600}",
 };
 
 test "a fuzzed subprocess capture stays under the cap with every note whole" {
@@ -619,7 +638,7 @@ fn fuzzCaptureResult(_: void, smith: *std.testing.Smith) !void {
     const reason: ?[]const u8 = switch (flags >> 3 & 3) {
         0 => null,
         1 => "error: the command could not be run",
-        else => "error: " ++ ("why " ** (max_tool_output / 2)),
+        else => "error: " ++ (repeat((max_tool_output / 2), "why ").*),
     };
     const term: ?std.process.Child.Term = if (want_term) switch (flags >> 5 & 3) {
         0 => .{ .exited = 0 },
@@ -1591,7 +1610,7 @@ fn deniedInCommand(command: []const u8, deny_list: []const []const u8) ?[]const 
                 if (wordMatches(word, entry_tokens[0])) return raw_entry;
             }
         } else {
-            if (std.ascii.indexOfIgnoreCase(command, entry) != null) return raw_entry;
+            if (std.ascii.findIgnoreCase(command, entry) != null) return raw_entry;
             if (truncated) continue;
 
             var words = std.mem.tokenizeAny(u8, command, deny_word_separators);
@@ -2615,7 +2634,7 @@ fn applyEdit(arena: std.mem.Allocator, path: []const u8, raw: []u8, old_in: []co
             rest = rest[at + old.len ..];
         }
         std.mem.copyForwards(u8, raw[written..][0..rest.len], rest);
-        buf = .{ .items = raw[0 .. written + rest.len], .capacity = raw.len };
+        buf = .{ .items = raw[0 .. written + rest.len], .capacity = raw.len, .pointer_stability = .{} };
     } else {
         // A replacement longer than the text it replaces cannot be written
         // behind the read cursor, so the result is a fresh buffer. `count` is
@@ -3761,12 +3780,12 @@ const read_lines_corpus = [_][]const u8{
     "a\n\nb\n",
     "no newline anywhere",
     "\x00\n\x00\x00",
-    "head\n" ++ "z" ** (read_chunk - 5) ++ "\ntail",
-    "head\n" ++ "z" ** (read_chunk - 4) ++ "\ntail",
-    "head\n" ++ "z" ** (read_chunk - 3) ++ "\ntail",
-    "head\n" ++ "z" ** (read_chunk * 2 + 1) ++ "\ntail\n",
-    "head\n" ++ "z" ** (read_chunk - 1) ++ "\n" ++ "y" ** (read_chunk - 1) ++ "\n",
-    ("line\n" ** 2000),
+    "head\n" ++ repeat((read_chunk - 5), "z").* ++ "\ntail",
+    "head\n" ++ repeat((read_chunk - 4), "z").* ++ "\ntail",
+    "head\n" ++ repeat((read_chunk - 3), "z").* ++ "\ntail",
+    "head\n" ++ repeat((read_chunk * 2 + 1), "z").* ++ "\ntail\n",
+    "head\n" ++ repeat((read_chunk - 1), "z").* ++ "\n" ++ repeat((read_chunk - 1), "y").* ++ "\n",
+    (repeat(2000, "line\n")),
     "caf\u{00e9}\n\u{65e5}\u{672c}\u{8a9e}\n\u{1f680}\n",
     "\xff\xfe\n\xc3\n",
     " {\"a\":1}\n {\"b\":2}\n",
@@ -3853,9 +3872,9 @@ test "lines longer than a read come back whole, whatever they straddle" {
 
     // One line per read-chunk boundary, one that straddles three of them, and
     // a last line with no newline: the three shapes a cursor can lose.
-    const short = "a" ** 16;
-    const straddling = "b" ** (read_chunk * 3 + 7);
-    const unterminated = "c" ** (read_chunk + 1);
+    const short = repeat(16, "a");
+    const straddling = repeat((read_chunk * 3 + 7), "b");
+    const unterminated = repeat((read_chunk + 1), "c");
     var raw: std.ArrayList(u8) = .empty;
     try raw.appendSlice(arena, short);
     try raw.append(arena, '\n');
@@ -3946,7 +3965,7 @@ test "the tool gutter stays one line whatever the model sent" {
     // beside a full-budget detail. Only the detail is the model's own bytes,
     // so only the detail is cut, and the line still ends exactly once.
     var long_args: std.json.ObjectMap = .empty;
-    try long_args.put(arena, "command", .{ .string = "日" ** 300 });
+    try long_args.put(arena, "command", .{ .string = repeat(300, "日") });
     for (chat.tools()) |tool| {
         try std.testing.expect(tool.name().len <= 40);
         const long_line = try toolCallLine(arena, &buf, tool, long_args, false);
@@ -4001,7 +4020,7 @@ const call_corpus = [_][]const u8{
     "{\"path\":\"src/main.zig\",\"offset\":0,\"limit\":1}",
     "{\"path\":\"src/main.zig\",\"offset\":-1,\"limit\":\"12\"}",
     "{\"pattern\":\"fn main\",\"lang\":\"zig\"}",
-    "{\"pattern\":\"日本\" ** 40}",
+    "{\"pattern\":\"" ++ repeat(40, "日本").* ++ "\"}",
     "{\"cmd\":\"log\",\"limit\":400}",
     "{\"cmd\":\"log\",\"limit\":0}",
     "{\"cmd\":\"log\",\"limit\":-5}",
@@ -4025,8 +4044,8 @@ const call_corpus = [_][]const u8{
     "{\"command\":\"caf\\u00e9 \\u65e5\\u8a00 \\ud83d\\ude80\"}",
     "{\"command\":\"line1\\nline2\\r\\nline3\"}",
     "{\"command\":\"\\u2028\\u2029\"}",
-    "{\"command\":\"a\" ** 500}",
-    "{\"command\":\"日\" ** 500}",
+    "{\"command\":\"" ++ repeat(500, "a").* ++ "\"}",
+    "{\"command\":\"" ++ repeat(500, "日").* ++ "\"}",
 };
 
 test "a fuzzed tool call leaves one gutter line and limits inside their ceilings" {
@@ -4216,9 +4235,9 @@ test "a capped tool result says how much was dropped" {
     const whole = try toolResult(arena, "one line");
     try std.testing.expectEqualStrings("one line", whole);
 
-    const big = "x" ** (max_tool_output + 500);
+    const big = repeat((max_tool_output + 500), "x");
     const cut = try toolResult(arena, big);
-    try std.testing.expect(std.mem.startsWith(u8, cut, "x" ** max_tool_output));
+    try std.testing.expect(std.mem.startsWith(u8, cut, repeat(max_tool_output, "x")));
     try std.testing.expect(std.mem.endsWith(u8, cut, "truncated at 24576 of 25076 bytes]"));
 }
 
@@ -4232,10 +4251,10 @@ test "the note an MCP result carries is this one, and it survives its own cut" {
     // paths. The room the note is held back from is what keeps the note intact
     // when the text beside it was cut first, which is the order `mcp` uses and
     // the order `toolResult` does not, so the note is checked both ways here.
-    const big = "y" ** (max_tool_output + 500);
+    const big = repeat((max_tool_output + 500), "y");
     const note = "... [tool output truncated at 24576 of 25076 bytes]";
     const capped = try truncationNote(arena, chat.clamp(big, max_tool_output - truncation_note_room), max_tool_output, big.len);
-    try std.testing.expect(std.mem.startsWith(u8, capped, "y" ** (max_tool_output - truncation_note_room)));
+    try std.testing.expect(std.mem.startsWith(u8, capped, repeat((max_tool_output - truncation_note_room), "y")));
     try std.testing.expect(std.mem.endsWith(u8, capped, note));
     // The path `toolResult` takes: the text clamped to the cap, then the note
     // appended past it, so the two spellings are read off the same two results.
@@ -4269,7 +4288,7 @@ test "a cut inside a character still names the cap it was cut at" {
     // little leaves both assertions above saying the same thing.
     const kept = cut[0 .. cut.len - marker.len];
     try std.testing.expectEqual(max_tool_output - 1, kept.len);
-    try std.testing.expect(std.mem.startsWith(u8, kept, "x" ** (max_tool_output - 1)));
+    try std.testing.expect(std.mem.startsWith(u8, kept, repeat((max_tool_output - 1), "x")));
     // The euro sign straddles the cap, so the kept bytes stop before its lead
     // byte and the `z` behind it is dropped with the rest.
     try std.testing.expect(std.unicode.utf8ValidateSlice(kept));
@@ -4645,9 +4664,9 @@ const terminal_corpus = [_][]const u8{
     "\xff\xfe",
     "{\"error\":{\"message\":\"rate limit\"}}",
     "<html>\n<head><title>502</title></head>\n</html>",
-    "\x1b[31m" ** 20,
-    "\u{009b}" ** 20,
-    "mixed \xff caf\u{00e9} \u{009b} \n text" ** 8,
+    repeat(20, "\x1b[31m"),
+    repeat(20, "\u{009b}"),
+    repeat(8, "mixed \xff caf\u{00e9} \u{009b} \n text"),
 };
 
 test "a fuzzed error body leaves nothing a terminal acts on" {
@@ -4892,9 +4911,9 @@ const credential_path_corpus = [_][]const u8{
     ".env\u{0301}",
     "id_r\u{017f}a",
     "certs/server.\u{212a}ey",
-    "a" ** 200,
-    ("dir/" ** 32) ++ ".env",
-    ("../" ** 32) ++ "x",
+    repeat(200, "a"),
+    (repeat(32, "dir/").*) ++ ".env",
+    (repeat(32, "../").*) ++ "x",
 };
 
 test "a name rule folds Unicode case, not only ASCII, and still reads a bad byte" {
@@ -6248,9 +6267,9 @@ const blame_corpus = [_][]const u8{
     "caf\u{00e9} (Marcel W. Wysocki 2026-09-29 23:23:33 +0800  1) main",
     "\u{1f469}\u{200d}\u{1f4bb} (\u{200b} 2026-09-30 03:29:32 +0800 1) ",
     "abc1234 (Rosa Fixture 2026-09-30 03:29:32 +0800 1) \xff\xfe",
-    "abc1234 (Rosa Fixture 2026-09-30 03:29:32 +0800 1) x\n" ** 8,
-    "abc1234 (Name 2026-09-30 03:29:32 +0800 " ** 16,
-    ("abc1234 (Name 2026-09-30 03:29:32 +0800 1) x\n" ** 8) ++ "abc1234 (Name",
+    repeat(8, "abc1234 (Rosa Fixture 2026-09-30 03:29:32 +0800 1) x\n"),
+    repeat(16, "abc1234 (Name 2026-09-30 03:29:32 +0800 "),
+    (repeat(8, "abc1234 (Name 2026-09-30 03:29:32 +0800 1) x\n").*) ++ "abc1234 (Name",
     // A name is not ASCII: the date, the zone and the number beside it are, and
     // the cut is counted back from those rather than forward from the name, so a
     // name of two or three bytes to the character has to leave them where they
@@ -6686,7 +6705,7 @@ test "a child that outruns the capture cap keeps its first bytes instead of fail
     }, cap, net.durationMs(30_000), null, null);
     try std.testing.expectEqual(cap, noisy.stdout.len);
     try std.testing.expect(noisy.partial().atCaptureLimit());
-    try std.testing.expectEqualStrings("a" ** 8, noisy.stdout[0..8]);
+    try std.testing.expectEqualStrings(repeat(8, "a"), noisy.stdout[0..8]);
     // The child still ran to its own end, so the status is the command's.
     switch (noisy.term) {
         .exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
@@ -6727,8 +6746,8 @@ test "both pipes past the cap drain together, so the child never wedges" {
     }, cap, net.durationMs(30_000), null, null);
     try std.testing.expectEqual(cap, noisy.stdout.len);
     try std.testing.expectEqual(cap, noisy.stderr.len);
-    try std.testing.expectEqualStrings("a" ** 8, noisy.stdout[0..8]);
-    try std.testing.expectEqualStrings("b" ** 8, noisy.stderr[0..8]);
+    try std.testing.expectEqualStrings(repeat(8, "a"), noisy.stdout[0..8]);
+    try std.testing.expectEqualStrings(repeat(8, "b"), noisy.stderr[0..8]);
 }
 
 test "a truncated tool result keeps whole codepoints" {
@@ -6975,7 +6994,7 @@ const ast_rewrite_corpus = [_][]const u8{
     "fn $NAME() {}\nfn $NAME() -> void {}",
     "return $X\nreturn [$X] // $X\n",
     "日$X\n日[$X]",
-    "foo($A)" ** 8,
+    repeat(8, "foo($A)"),
     "$A$B$C\n[$A$B$C]",
 };
 
@@ -7291,7 +7310,7 @@ test "children claimed on several threads each hold a slot of the interrupt tabl
     // and no other thread can be holding the pid it is asking about.
     const first_pid: std.posix.pid_t = 10_000;
     var joined: usize = 0;
-    var workers: [threads]?std.Thread = .{null} ** threads;
+    var workers: [threads]?std.Thread = @splat(null);
     defer while (joined < threads) : (joined += 1) {
         if (workers[joined]) |t| t.join();
     };
@@ -8384,7 +8403,7 @@ test "todo keeps a bounded, printable text for each item" {
         "1. [pending] ".len + max_todo_text_bytes + "\n0 of 1 done".len,
         result.len,
     );
-    try std.testing.expectEqualStrings("a" ** max_todo_text_bytes, result["1. [pending] ".len..][0..max_todo_text_bytes]);
+    try std.testing.expectEqualStrings(repeat(max_todo_text_bytes, "a"), result["1. [pending] ".len..][0..max_todo_text_bytes]);
     // No escape byte reaches the model's next turn or the operator's screen
     // through it, and the tail the escaper cut is not in the line either.
     try std.testing.expect(std.mem.indexOfScalar(u8, result, 0x1b) == null);
@@ -8415,7 +8434,7 @@ test "a path a read would block on is refused by name, by all three tools" {
     // carrying a `mknod` for it.
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     const linux = std.os.linux;
-    const made = linux.mknod((try arena.dupeZ(u8, fifo)).ptr, 0o010000 | 0o600, 0);
+    const made = linux.mknod((try arena.dupeSentinel(u8, fifo, 0)).ptr, 0o010000 | 0o600, 0);
     if (linux.errno(made) != .SUCCESS) return error.SkipZigTest;
     const shown = shownPath(arena, fifo);
 

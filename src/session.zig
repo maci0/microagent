@@ -8,6 +8,26 @@
 //! one finished response at a time, so the log can be read, tested and changed
 //! without the loop.
 
+
+fn repeat(comptime count: usize, comptime value: []const u8) *const [count * value.len]u8 {
+    const out = comptime blk: {
+    var buf: [count * value.len]u8 = undefined;
+    if (value.len == 1) {
+        @memset(&buf, value[0]);
+    } else {
+        // Doubling copies the pattern in log(count) steps, which stays inside
+        // the comptime backwards-branch limit a one-step loop does not.
+        @memcpy(buf[0..value.len], value);
+        var filled: usize = value.len;
+        while (filled * 2 <= buf.len) : (filled *= 2) @memcpy(buf[filled..][0..filled], buf[0..filled]);
+        if (filled < buf.len) @memcpy(buf[filled..], buf[0 .. buf.len - filled]);
+    }
+    break :blk buf;
+    };
+    return &out;
+}
+
+
 const std = @import("std");
 const Io = std.Io;
 
@@ -2084,7 +2104,7 @@ const session_record_corpus = [_][]const u8{
     "ok\xff\ntool\xfe",
     "a\nb\nc\nd",
     "vendor/model-with-a-name-long-enough-to-push-the-record\nstop",
-    "\x00" ** 32 ++ "\n" ++ "m" ** 32,
+    repeat(32, "\x00").* ++ "\n" ++ repeat(32, "m").*,
 };
 
 test "a fuzzed session record is one line that reads back as itself" {

@@ -3,21 +3,19 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const zig_lib = fixedSpawnLibrary(b);
 
     const exe = b.addExecutable(.{
         .name = "microagent",
-        .zig_lib_dir = zig_lib,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
             // Debug keeps symbols so a panic is readable; release builds are
             // stripped because nothing reads them at runtime.
-            .strip = optimize != .Debug,
+            .strip = optimize != .debug,
             // Nothing unwinds the stack in a release build, and the tables are 62 KB of read-only
             // data the kernel maps in around every page the program touches.
-            .unwind_tables = if (optimize == .Debug) null else .none,
+            .unwind_tables = if (optimize == .debug) null else .none,
         }),
     });
     // A fixed-address image, not a position-independent one. Address-space randomization protects
@@ -48,7 +46,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/copy.zig"),
         .target = target,
         .optimize = optimize,
-        .strip = optimize != .Debug,
+        .strip = optimize != .debug,
         .no_builtin = true,
     });
     exe.root_module.addImport("copy", copy_module);
@@ -56,7 +54,7 @@ pub fn build(b: *std.Build) void {
 
     const run = b.addRunArtifact(exe);
     run.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run.addArgs(args);
+    run.addPassthruArgs();
     b.step("run", "Run microagent").dependOn(&run.step);
 
     // -Dtest-filter runs one test by name, so editing a function does not mean
@@ -69,7 +67,6 @@ pub fn build(b: *std.Build) void {
     const test_filters: []const []const u8 = if (test_filter) |f| &[_][]const u8{f} else &.{};
     const tests = b.addTest(.{
         .root_module = exe.root_module,
-        .zig_lib_dir = zig_lib,
         .filters = test_filters,
     });
     const run_tests = b.addRunArtifact(tests);
@@ -100,7 +97,7 @@ pub fn build(b: *std.Build) void {
     // applies it is the only way a run step gets that guarantee. A run added
     // beside these and left unpinned reads as covered by the comment above
     // `pin_test_env` and is not.
-    const run_copy_tests = b.addRunArtifact(b.addTest(.{ .root_module = copy_module, .filters = test_filters, .zig_lib_dir = zig_lib }));
+    const run_copy_tests = b.addRunArtifact(b.addTest(.{ .root_module = copy_module, .filters = test_filters }));
     pin_test_env(run_copy_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
@@ -123,19 +120,18 @@ pub fn build(b: *std.Build) void {
     const safe_copy_module = b.createModule(.{
         .root_source_file = b.path("src/copy.zig"),
         .target = target,
-        .optimize = .ReleaseSafe,
+        .optimize = .safe,
         .no_builtin = true,
     });
     const safety_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
-        .optimize = .ReleaseSafe,
+        .optimize = .safe,
     });
     safety_module.addImport("build_options", build_options_module);
     safety_module.addImport("copy", safe_copy_module);
     const safety_tests = b.addTest(.{
         .root_module = safety_module,
-        .zig_lib_dir = zig_lib,
         .filters = test_filters,
     });
     const run_safety = b.addRunArtifact(safety_tests);
@@ -143,7 +139,6 @@ pub fn build(b: *std.Build) void {
     const run_safe_copy = b.addRunArtifact(b.addTest(.{
         .root_module = safe_copy_module,
         .filters = test_filters,
-        .zig_lib_dir = zig_lib,
     }));
     pin_test_env(run_safe_copy);
 
@@ -173,39 +168,4 @@ pub fn build(b: *std.Build) void {
     safety_step.dependOn(&run_safe_copy.step);
 }
 
-/// Zig 0.16 loses the pipes and PID when a POSIX child reports an exec error.
-/// Patch only our cached library, using its existing child cleanup routine.
-/// Remove this workaround when the pinned toolchain closes and reaps that path.
-fn fixedSpawnLibrary(b: *std.Build) std.Build.LazyPath {
-    const library = b.graph.zig_lib_directory;
-    const source = library.handle.readFileAlloc(b.graph.io, "std/Io/Threaded.zig", b.allocator, .unlimited) catch
-        @panic("cannot read Zig's process spawn implementation");
-    const old =
-        \\        const child_err: process.SpawnError = @errorCast(@errorFromInt(child_err_int));
-        \\        return child_err;
-    ;
-    const replacement =
-        \\        const child_err: process.SpawnError = @errorCast(@errorFromInt(child_err_int));
-        \\        var child: process.Child = .{
-        \\            .id = spawned.pid,
-        \\            .thread_handle = {},
-        \\            .stdin = spawned.stdin,
-        \\            .stdout = spawned.stdout,
-        \\            .stderr = spawned.stderr,
-        \\            .request_resource_usage_statistics = options.request_resource_usage_statistics,
-        \\        };
-        \\        const protection = swapCancelProtection(userdata, .blocked);
-        \\        defer _ = swapCancelProtection(userdata, protection);
-        \\        _ = childWaitPosix(&child) catch {};
-        \\        return child_err;
-    ;
-    if (std.mem.count(u8, source, old) != 1)
-        @panic("Zig's process spawn implementation changed; review the cleanup workaround");
-    const patched = std.mem.replaceOwned(u8, b.allocator, source, old, replacement) catch @panic("OOM");
-    const files = b.addWriteFiles();
-    _ = files.addCopyDirectory(.{ .cwd_relative = library.path orelse "." }, "", .{
-        .exclude_extensions = &.{"Threaded.zig"},
-    });
-    _ = files.add("std/Io/Threaded.zig", patched);
-    return files.getDirectory();
-}
+

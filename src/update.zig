@@ -2,6 +2,26 @@
 //! unless `--check`, replace the running executable once the downloaded asset
 //! matches the `.sha256` sidecar the release publishes.
 
+
+fn repeat(comptime count: usize, comptime value: []const u8) *const [count * value.len]u8 {
+    const out = comptime blk: {
+    var buf: [count * value.len]u8 = undefined;
+    if (value.len == 1) {
+        @memset(&buf, value[0]);
+    } else {
+        // Doubling copies the pattern in log(count) steps, which stays inside
+        // the comptime backwards-branch limit a one-step loop does not.
+        @memcpy(buf[0..value.len], value);
+        var filled: usize = value.len;
+        while (filled * 2 <= buf.len) : (filled *= 2) @memcpy(buf[filled..][0..filled], buf[0..filled]);
+        if (filled < buf.len) @memcpy(buf[filled..], buf[0 .. buf.len - filled]);
+    }
+    break :blk buf;
+    };
+    return &out;
+}
+
+
 const std = @import("std");
 const builtin = @import("builtin");
 const net = @import("net.zig");
@@ -295,7 +315,7 @@ fn statusHint(status: std.http.Status, body: []const u8) []const u8 {
 /// already have set is worse than one told nothing.
 fn isRateLimited(body: []const u8) bool {
     if (body.len == 0) return false;
-    return std.ascii.indexOfIgnoreCase(body, "rate limit") != null;
+    return std.ascii.findIgnoreCase(body, "rate limit") != null;
 }
 
 /// How many times one download is attempted before it is given up on, and the
@@ -922,8 +942,8 @@ const trusted_url_corpus = [_][]const u8{
     "https://github.com\x00/x",
     "https://github.com/日/x",
     "https://xn--github.com/x",
-    "https://github.com." ++ "a" ** 300,
-    "https://" ++ "a" ** 300 ++ ".github.com/x",
+    "https://github.com." ++ repeat(300, "a").*,
+    "https://" ++ repeat(300, "a").* ++ ".github.com/x",
 };
 
 test "update: fuzz: a url is trusted only for the host and the scheme it names" {
@@ -1083,7 +1103,7 @@ const args_corpus = [_][]const u8{
     "\u{0}\u{1}\u{7f}",
     "--\u{65e5}\u{8a00}",
     "\xff\xfe",
-    "a" ** 200,
+    repeat(200, "a"),
 };
 
 /// Whether the first word that is not a check flag is one of the two spellings
@@ -1467,7 +1487,7 @@ test "update: text from the network is quoted before it is printed" {
 
     // Invalid UTF-8 becomes U+FFFD, and the cut lands on a whole character.
     try std.testing.expectEqualStrings("bad\\x1b[31m\u{fffd}", quoteUntrusted(arena, "bad\x1b[31m\xff"));
-    try std.testing.expectEqualStrings("日" ** 26, quoteUntrusted(arena, "日" ** 40));
+    try std.testing.expectEqualStrings(repeat(26, "日"), quoteUntrusted(arena, repeat(40, "日")));
     try std.testing.expectEqualStrings("microagent", quoteUntrusted(arena, "microagent"));
 }
 
@@ -1831,9 +1851,9 @@ const sidecar_corpus = [_][]const u8{
     abc_sha[0..63],
     abc_sha[0..63] ++ "  " ++ asset_base,
     abc_sha ++ "\t " ++ asset_base,
-    "g" ** 64 ++ "  " ++ asset_base,
-    "0" ** 64 ++ "  " ++ asset_base,
-    "\x00" ** 64 ++ "  " ++ asset_base,
+    repeat(64, "g").* ++ "  " ++ asset_base,
+    repeat(64, "0").* ++ "  " ++ asset_base,
+    repeat(64, "\x00").* ++ "  " ++ asset_base,
     "  " ++ asset_base,
     "\u{fffd} microagent\n",
 };
@@ -1888,7 +1908,7 @@ test "update: the binary is replaced only when the sidecar vouches for the downl
     try tmp.dir.writeFile(io, .{ .sub_path = "microagent", .data = "old-content" });
 
     const good = abc_sha ++ "  " ++ asset_base ++ "\n";
-    const wrong_digest = "0" ** 64 ++ "  " ++ asset_base ++ "\n";
+    const wrong_digest = repeat(64, "0").* ++ "  " ++ asset_base ++ "\n";
     const other_file = abc_sha ++ "  microagent-v0.1.0-aarch64-linux-musl\n";
     for ([_][]const u8{ wrong_digest, other_file, "", "not a sidecar" }) |sidecar| {
         try std.testing.expectError(error.ChecksumMismatch, installIfVerified(io, exe, "abc", sidecar, asset_base));

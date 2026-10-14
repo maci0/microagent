@@ -10,6 +10,26 @@
 //! release tag, a session directory and a path pasted back are all bytes this
 //! program did not choose, and they are normalized once.
 
+
+fn repeat(comptime count: usize, comptime value: []const u8) *const [count * value.len]u8 {
+    const out = comptime blk: {
+    var buf: [count * value.len]u8 = undefined;
+    if (value.len == 1) {
+        @memset(&buf, value[0]);
+    } else {
+        // Doubling copies the pattern in log(count) steps, which stays inside
+        // the comptime backwards-branch limit a one-step loop does not.
+        @memcpy(buf[0..value.len], value);
+        var filled: usize = value.len;
+        while (filled * 2 <= buf.len) : (filled *= 2) @memcpy(buf[filled..][0..filled], buf[0..filled]);
+        if (filled < buf.len) @memcpy(buf[filled..], buf[0 .. buf.len - filled]);
+    }
+    break :blk buf;
+    };
+    return &out;
+}
+
+
 const std = @import("std");
 const Io = std.Io;
 
@@ -124,7 +144,7 @@ test "a tool's wire name and its variant are the same name both ways" {
     }
     // The whole set, so a variant that is not reachable by the name the schema
     // advertises cannot pass by having a name nothing resolves to.
-    try std.testing.expectEqual(@typeInfo(Tool).@"enum".fields.len, tools().len);
+    try std.testing.expectEqual(@typeInfo(Tool).@"enum".field_names.len, tools().len);
     // And the names a model can send that are not tools, which are the ordinary
     // case at this boundary rather than an error.
     for ([_][]const u8{ "", "bash ", "Bash", "delete_everything", "bash\n", "read/write" }) |name| {
@@ -323,7 +343,7 @@ pub const JsonBuf = struct {
 /// needs the UTF-8 check, and every other ASCII byte is copied. DEL (0x7f) is
 /// one of those others, as it was before: JSON does not require it escaped.
 const json_literal_byte = blk: {
-    var table = [_]bool{false} ** 256;
+    var table: [256]bool = @splat(false);
     for (0x20..0x80) |c| table[c] = true;
     table['"'] = false;
     table['\\'] = false;
@@ -984,8 +1004,8 @@ test "JSON buffers release their allocation when any write fails" {
             var buf = JsonBuf.initCapacity(gpa, capacity);
             defer buf.deinit();
             writeJsonString(buf.writer(), "before") catch return error.OutOfMemory;
-            writeJsonString(buf.writer(), "x" ** 4096) catch return error.OutOfMemory;
-            writeJsonString(buf.writer(), "y" ** 16384) catch return error.OutOfMemory;
+            writeJsonString(buf.writer(), repeat(4096, "x")) catch return error.OutOfMemory;
+            writeJsonString(buf.writer(), repeat(16384, "y")) catch return error.OutOfMemory;
             try std.testing.expect(buf.items().len > 20_000);
         }
     };
@@ -1223,7 +1243,7 @@ test "a quoted value never exceeds its budget" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    for ([_][]const u8{ "a\nb\nc\nd\ne\nf\n", "\x01\x02\x03\x04\x05", "日本語" ** 10, "ok\xff\xff\xff" }) |raw| {
+    for ([_][]const u8{ "a\nb\nc\nd\ne\nf\n", "\x01\x02\x03\x04\x05", repeat(10, "日本語"), "ok\xff\xff\xff" }) |raw| {
         for (0..raw.len + 1) |max| {
             const quoted = safeText(arena, raw, max);
             try std.testing.expect(quoted.len <= max);
@@ -1235,7 +1255,7 @@ test "a quoted value never exceeds its budget" {
     // them. The escaped length is not a multiple of anything: it depends on
     // which characters the budget left inside an escape, so a length rule
     // would only be a statement about this fixture.
-    const wide = "日本語" ** 10;
+    const wide = repeat(10, "日本語");
     for (0..wide.len + 1) |max| {
         const quoted = safeText(arena, wide, max);
         try std.testing.expect(quoted.len <= max);
@@ -1287,10 +1307,10 @@ const safe_text_corpus = [_][]const u8{
     "\xc3\x28",
     "ok\xff",
     "{\"key\":\"value\"}",
-    "\x00" ** 64,
-    "\x1b[31m" ** 20,
-    "\u{1f600}" ** 20,
-    "mixed \xff caf\u{00e9} \u{009b} \n text" ** 8,
+    repeat(64, "\x00"),
+    repeat(20, "\x1b[31m"),
+    repeat(20, "\u{1f600}"),
+    repeat(8, "mixed \xff caf\u{00e9} \u{009b} \n text"),
 };
 
 test "a fuzzed quoted value is printable, whole, and inside its budget" {

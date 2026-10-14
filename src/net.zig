@@ -13,6 +13,26 @@
 //! importing one another. `chat` is imported for the one escaping the notes
 //! here need, which is the escaping the rest of the program uses.
 
+
+fn repeat(comptime count: usize, comptime value: []const u8) *const [count * value.len]u8 {
+    const out = comptime blk: {
+    var buf: [count * value.len]u8 = undefined;
+    if (value.len == 1) {
+        @memset(&buf, value[0]);
+    } else {
+        // Doubling copies the pattern in log(count) steps, which stays inside
+        // the comptime backwards-branch limit a one-step loop does not.
+        @memcpy(buf[0..value.len], value);
+        var filled: usize = value.len;
+        while (filled * 2 <= buf.len) : (filled *= 2) @memcpy(buf[filled..][0..filled], buf[0..filled]);
+        if (filled < buf.len) @memcpy(buf[filled..], buf[0 .. buf.len - filled]);
+    }
+    break :blk buf;
+    };
+    return &out;
+}
+
+
 const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
@@ -756,7 +776,7 @@ pub fn urlCarriesKey(url: []const u8) bool {
     if (std.ascii.eqlIgnoreCase(uri.scheme, "https")) return true;
     if (!std.ascii.eqlIgnoreCase(uri.scheme, "http")) return false;
     var host_buf: [Io.net.HostName.max_len]u8 = undefined;
-    return isLoopbackHost((uri.getHost(&host_buf) catch return false).bytes);
+    return isLoopbackHost((Io.net.HostName.fromUri(uri, &host_buf) catch return false).bytes);
 }
 
 /// Whether a host names this machine and no other.
@@ -1291,9 +1311,9 @@ const nearest_flag_corpus = [_][]const u8{
     "--model\x00",
     "--model\n",
     "\t--model",
-    "--" ++ "a" ** 3,
-    "--" ++ "a" ** 255,
-    "--model" ++ "x" ** 100,
+    "--" ++ repeat(3, "a").*,
+    "--" ++ repeat(255, "a").*,
+    "--model" ++ repeat(100, "x").*,
     "\xff\xfe--print",
     "--model=deepseek",
     "--Model",
@@ -2384,7 +2404,7 @@ test "releaseDeadStack gives back stack pages the caller no longer uses" {
     try std.testing.expect(dirty >= before + 384);
     try std.testing.expect(after + 384 <= dirty);
     // What the caller still uses is intact: a live array on this frame survives a release.
-    const live = [_]u8{0xa5} ** 4096;
+    const live: [4096]u8 = @splat(0xa5);
     releaseDeadStack();
     for (live) |byte| try std.testing.expectEqual(@as(u8, 0xa5), byte);
 }
@@ -2509,18 +2529,18 @@ const resolve_path_corpus = [_][]const u8{
     "sub/rel",
     "rel_chain/leaf",
     "link_to_abs",
-    "a" ** 200,
-    ("sub/" ** 40) ++ "leaf",
-    ("../" ** 40) ++ "real",
-    ("../" ** 40) ++ "loop_a",
-    ("a" ** 4095) ++ "/real",
-    ("a" ** 4096),
+    repeat(200, "a"),
+    (repeat(40, "sub/").*) ++ "leaf",
+    (repeat(40, "../").*) ++ "real",
+    (repeat(40, "../").*) ++ "loop_a",
+    (repeat(4095, "a").*) ++ "/real",
+    (repeat(4096, "a")),
     // A path whose composed bytes outgrow the walk's own buffers. The walk has
     // to refuse one of these rather than write past the buffer holding it.
-    ("d/" ** 2100) ++ "leaf",
-    ("d/" ** 2100) ++ "chain",
-    ("a" ** 100 ++ "/") ** 45 ++ "leaf",
-    ("a" ** 100 ++ "/") ** 45 ++ "sub/link",
+    (repeat(2100, "d/").*) ++ "leaf",
+    (repeat(2100, "d/").*) ++ "chain",
+    repeat(45, repeat(100, "a").* ++ "/") ++ "leaf",
+    repeat(45, repeat(100, "a").* ++ "/") ++ "sub/link",
     ("\u{202e}gnp/.env"),
     ".env",
     "sub/../.env",

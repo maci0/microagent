@@ -8,6 +8,26 @@
 //! The module is compiled with `-fno-builtin` (build.zig). Without it LLVM recognizes the loop below
 //! as a copy and replaces it with a call to `memcpy`, which is this function.
 
+
+fn repeat(comptime count: usize, comptime value: []const u8) *const [count * value.len]u8 {
+    const out = comptime blk: {
+    var buf: [count * value.len]u8 = undefined;
+    if (value.len == 1) {
+        @memset(&buf, value[0]);
+    } else {
+        // Doubling copies the pattern in log(count) steps, which stays inside
+        // the comptime backwards-branch limit a one-step loop does not.
+        @memcpy(buf[0..value.len], value);
+        var filled: usize = value.len;
+        while (filled * 2 <= buf.len) : (filled *= 2) @memcpy(buf[filled..][0..filled], buf[0..filled]);
+        if (filled < buf.len) @memcpy(buf[filled..], buf[0 .. buf.len - filled]);
+    }
+    break :blk buf;
+    };
+    return &out;
+}
+
+
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -33,7 +53,7 @@ pub fn memcpyWords(noalias dest: ?[*]u8, noalias src: ?[*]const u8, len: usize) 
 }
 
 comptime {
-    if (builtin.mode == .ReleaseSmall and builtin.os.tag == .linux and !builtin.link_libc and !builtin.is_test) {
+    if (builtin.mode == .small and builtin.target.os.tag == .linux and !builtin.link_libc and !builtin.is_test) {
         @export(&memcpyWords, .{ .name = "memcpy", .linkage = .strong });
     }
 }
@@ -44,7 +64,7 @@ test "memcpyWords copies every length between every pair of alignments" {
     for (0..word + 1) |src_offset| {
         for (0..word + 1) |dest_offset| {
             for (0..100) |len| {
-                var dest = [_]u8{0xaa} ** 128;
+                var dest: [128]u8 = @splat(0xaa);
                 const got = memcpyWords(dest[dest_offset..].ptr, src[src_offset..].ptr, len);
                 try std.testing.expectEqual(@as(?[*]u8, dest[dest_offset..].ptr), got);
                 try std.testing.expectEqualSlices(u8, src[src_offset..][0..len], dest[dest_offset..][0..len]);

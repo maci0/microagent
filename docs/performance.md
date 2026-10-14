@@ -38,7 +38,7 @@ so a row here that moves is a gate that moved with it:
 | a streamed content frame (47 B) | n/a | 4,160 |
 | a streamed tool-argument frame | n/a | 9,253 |
 | compaction of a 1 MB conversation | 31,049,215 | one call |
-| building the request body (the row measures 40 of them) | 123,841 | 3,096 |
+| building the request body (the row measures 40 of them) | 2,764,260 | 69,106 |
 | a ranged read of a 512 KB line | 7,521,158 | one call |
 | the session log's share of a run (ReleaseFast) | 332,061 | once per run |
 | one more turn of the loop (ReleaseFast) | 47,552 | a tool call that runs nothing |

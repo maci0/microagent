@@ -53,6 +53,26 @@
 //! leading byte order mark is dropped, so a file an editor saved with one
 //! reads by its first key rather than by a key spelled with U+FEFF.
 
+
+fn repeat(comptime count: usize, comptime value: []const u8) *const [count * value.len]u8 {
+    const out = comptime blk: {
+    var buf: [count * value.len]u8 = undefined;
+    if (value.len == 1) {
+        @memset(&buf, value[0]);
+    } else {
+        // Doubling copies the pattern in log(count) steps, which stays inside
+        // the comptime backwards-branch limit a one-step loop does not.
+        @memcpy(buf[0..value.len], value);
+        var filled: usize = value.len;
+        while (filled * 2 <= buf.len) : (filled *= 2) @memcpy(buf[filled..][0..filled], buf[0..filled]);
+        if (filled < buf.len) @memcpy(buf[filled..], buf[0 .. buf.len - filled]);
+    }
+    break :blk buf;
+    };
+    return &out;
+}
+
+
 const std = @import("std");
 
 const chat = @import("chat.zig");
@@ -215,7 +235,7 @@ pub const Config = struct {
     /// the remote presets it switched on.
     mcp: []const mcp_mod.Entry = &.{},
     /// The built-in tools the file switched off.
-    disabled_tools: std.EnumSet(chat.Tool) = .initEmpty(),
+    disabled_tools: std.EnumSet(chat.Tool) = .empty,
     /// Preset settings, including endpoints retained while a preset is off.
     presets: std.EnumArray(mcp_mod.Preset, PresetSetting) = .initFill(.{}),
     /// The first `[tools.*]` mistake, which the run stops on: a tool left on
@@ -253,8 +273,8 @@ pub const ToolProblem = struct {
 /// Every name `[tools.<name>]` takes, spelled for the message that names them.
 pub const tool_names = blk: {
     var text: []const u8 = "";
-    for (@typeInfo(chat.Tool).@"enum".fields) |f| text = text ++ (if (text.len == 0) "" else ", ") ++ f.name;
-    for (@typeInfo(mcp_mod.Preset).@"enum".fields) |f| text = text ++ ", " ++ f.name;
+    for (@typeInfo(chat.Tool).@"enum".field_names) |name| text = text ++ (if (text.len == 0) "" else ", ") ++ name;
+    for (@typeInfo(mcp_mod.Preset).@"enum".field_names) |name| text = text ++ ", " ++ name;
     break :blk text;
 };
 
@@ -1213,12 +1233,12 @@ test "agents_files names the repository instructions, and an empty list turns th
     // longer than any path is too.
     const bare_string = parse(arena, "agents_files = \"AGENTS.md\"\n");
     try std.testing.expectEqualStrings("agents_files", bare_string.problem.?.key);
-    const long = parse(arena, std.fmt.allocPrint(arena, "agents_files = [\"{s}\"]\n", .{"a" ** (max_agents_path_bytes + 1)}) catch unreachable);
+    const long = parse(arena, std.fmt.allocPrint(arena, "agents_files = [\"{s}\"]\n", .{repeat(max_agents_path_bytes + 1, "a")}) catch unreachable);
     try std.testing.expectEqualStrings("agents_files", long.problem.?.key);
 
     // The accepting side of the same bound, because a comparison that moved by
     // one byte refuses a path the length is there to allow.
-    const at_limit = parse(arena, std.fmt.allocPrint(arena, "agents_files = [\"{s}\"]\n", .{"a" ** max_agents_path_bytes}) catch unreachable);
+    const at_limit = parse(arena, std.fmt.allocPrint(arena, "agents_files = [\"{s}\"]\n", .{repeat(max_agents_path_bytes, "a")}) catch unreachable);
     try std.testing.expectEqual(@as(?Problem, null), at_limit.problem);
     try std.testing.expectEqual(@as(usize, 1), at_limit.agents_files.?.len);
     try std.testing.expectEqual(max_agents_path_bytes, at_limit.agents_files.?[0].len);
@@ -1316,17 +1336,17 @@ test "system_prompt_extra past its bound is refused" {
     defer state.deinit();
     const arena = state.allocator();
 
-    const fits = try std.fmt.allocPrint(arena, "system_prompt_extra = \"{s}\"\n", .{"a" ** max_system_prompt_extra_bytes});
+    const fits = try std.fmt.allocPrint(arena, "system_prompt_extra = \"{s}\"\n", .{repeat(max_system_prompt_extra_bytes, "a")});
     const at_limit = parse(arena, fits);
     try std.testing.expect(at_limit.problem == null);
     try std.testing.expectEqual(max_system_prompt_extra_bytes, at_limit.system_prompt_extra.len);
 
-    const over = try std.fmt.allocPrint(arena, "system_prompt_extra = \"{s}\"\n", .{"a" ** (max_system_prompt_extra_bytes + 1)});
+    const over = try std.fmt.allocPrint(arena, "system_prompt_extra = \"{s}\"\n", .{repeat((max_system_prompt_extra_bytes + 1), "a")});
     const refused = parse(arena, over);
     try std.testing.expectEqual(Problem.Kind.bad_value, refused.problem.?.kind);
     try std.testing.expectEqualStrings("", refused.system_prompt_extra);
 
-    const multi = try std.fmt.allocPrint(arena, "system_prompt_extra = \"\"\"\n{s}\"\"\"\n", .{"a" ** (max_system_prompt_extra_bytes + 1)});
+    const multi = try std.fmt.allocPrint(arena, "system_prompt_extra = \"\"\"\n{s}\"\"\"\n", .{repeat((max_system_prompt_extra_bytes + 1), "a")});
     try std.testing.expectEqual(Problem.Kind.bad_value, parse(arena, multi).problem.?.kind);
 }
 
@@ -1796,7 +1816,7 @@ test "the sandbox is the [sandbox] table with enabled and writable, and only tru
     try std.testing.expect(commented.sandbox.enabled);
 }
 
-const preset_count = @typeInfo(mcp_mod.Preset).@"enum".fields.len;
+const preset_count = @typeInfo(mcp_mod.Preset).@"enum".field_names.len;
 
 test "an MCP server is one [[mcp]] table, and a broken one is named and skipped" {
     var state = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -2186,7 +2206,7 @@ test "every built-in tool is on until the file says otherwise, and every preset 
     // regression to a default that ships them all again is not this test.
     const every = comptime blk: {
         var t: []const u8 = "";
-        for (@typeInfo(mcp_mod.Preset).@"enum".fields) |f| t = t ++ "[tools." ++ f.name ++ "]\nenabled = true\n";
+        for (@typeInfo(mcp_mod.Preset).@"enum".field_names) |name| t = t ++ "[tools." ++ name ++ "]\nenabled = true\n";
         break :blk t;
     };
     try std.testing.expectEqual(preset_count, parse(arena, every).mcp.len);

@@ -15,6 +15,26 @@
 //! mode that store directory is created with is that store's constant rather
 //! than one spelled here beside it.
 
+
+fn repeat(comptime count: usize, comptime value: []const u8) *const [count * value.len]u8 {
+    const out = comptime blk: {
+    var buf: [count * value.len]u8 = undefined;
+    if (value.len == 1) {
+        @memset(&buf, value[0]);
+    } else {
+        // Doubling copies the pattern in log(count) steps, which stays inside
+        // the comptime backwards-branch limit a one-step loop does not.
+        @memcpy(buf[0..value.len], value);
+        var filled: usize = value.len;
+        while (filled * 2 <= buf.len) : (filled *= 2) @memcpy(buf[filled..][0..filled], buf[0..filled]);
+        if (filled < buf.len) @memcpy(buf[filled..], buf[0 .. buf.len - filled]);
+    }
+    break :blk buf;
+    };
+    return &out;
+}
+
+
 const std = @import("std");
 const builtin = @import("builtin");
 const net = @import("net.zig");
@@ -287,7 +307,7 @@ fn applyLandlock(io: Io, arena: std.mem.Allocator, writable_roots: []const []con
         // A root whose name cannot be made a C string is named with the same refusal the
         // allocation failure below gets: it stays read-only, and the operator is told which
         // writable root is not one.
-        const c_path = arena.dupeZ(u8, root_path) catch {
+        const c_path = arena.dupeSentinel(u8, root_path, 0) catch {
             rootRefused(io, arena, root_path, "OutOfMemory");
             continue;
         };
@@ -400,7 +420,7 @@ fn applySeatbelt(io: Io, arena: std.mem.Allocator, writable_roots: []const []con
         seatbeltRefused(io, arena, @errorName(err));
         return false;
     };
-    const profile_z = arena.dupeZ(u8, profile) catch |err| {
+    const profile_z = arena.dupeSentinel(u8, profile, 0) catch |err| {
         seatbeltRefused(io, arena, @errorName(err));
         return false;
     };
@@ -817,7 +837,7 @@ const profile_corpus = [_][]const u8{
     "/work/sp ace\t",
     "\"\")\n(allow file-write*)\n",
     "..",
-    "/a" ** 300,
+    repeat(300, "/a"),
 };
 
 test "a fuzzed writable root comes back out of the profile as itself" {
