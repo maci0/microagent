@@ -20,12 +20,12 @@ setup: `lint-requirements.in`, `lint-requirements.txt`, `ruff.toml`,
 
 ## Setup
 
-Zig 0.16.0 or newer, the minimum declared as `.minimum_zig_version` in
+Zig 0.17.0 or newer, the minimum declared as `.minimum_zig_version` in
 [build.zig.zon](build.zig.zon). There is no dependency to install, no service to
 start and no configuration to copy: a clone plus a Zig toolchain builds and
-tests. A newer Zig requires review of the library patch below; `make check` wants exactly 0.16.0,
+tests. A newer Zig requires review of the library patch below; `make check` wants exactly 0.17.0,
 the version CI installs and the release assets are built with. `make
-zig-version` runs that check alone. 0.16.0 is also the newest stable release;
+zig-version` runs that check alone. 0.17.0 is also the newest stable release;
 [docs/performance.md](docs/performance.md#the-toolchain) says why there is no
 compiler upgrade or build flag to take for speed.
 
@@ -128,7 +128,7 @@ rather than repeating their commands, so a step added to `check` is a step CI
 runs.
 
 The second test run compiles the same tests, including the copy module, in
-[ReleaseSafe](https://ziglang.org/documentation/0.16.0/#ReleaseSafe): optimizations
+[ReleaseSafe](https://ziglang.org/documentation/0.17.0/#ReleaseSafe): optimizations
 and Zig's runtime safety checks are both enabled. The default Debug run also
 has safety checks, while the `ReleaseSmall` release binary disables them.
 `test-sanitize` keeps its original command name; it uses Zig's safety checks
@@ -316,7 +316,7 @@ not code: leave the appended line out of a change that did not run a benchmark.
 A parser that reads bytes it did not write gets a `std.testing.fuzz` harness and
 a corpus beside it, in the same file. An ordinary `zig build test` asserts the
 harness on the corpus, so a new seed goes there. Mutating beyond the seeds
-needs `zig build test --fuzz`, which does not build on the pinned 0.16.0: the
+needs `zig build test --fuzz`, which does not build on the pinned 0.17.0: the
 toolchain's own test runner fails to compile under `-ffuzz`
 (`compiler/test_runner.zig:566`, an `@errorReturnTrace()` the fuzzer's
 instrumentation gives a different type), so the command fails before reaching a

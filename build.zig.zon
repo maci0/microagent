@@ -1,8 +1,8 @@
 .{
     .name = .microagent,
-    .version = "0.16.0",
+    .version = "0.17.0",
     .fingerprint = 0xbcb601c787fe8c8,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .paths = .{
         "build.zig",
         "build.zig.zon",

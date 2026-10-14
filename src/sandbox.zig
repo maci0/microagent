@@ -15,25 +15,25 @@
 //! mode that store directory is created with is that store's constant rather
 //! than one spelled here beside it.
 
-
 fn repeat(comptime count: usize, comptime value: []const u8) *const [count * value.len]u8 {
-    const out = comptime blk: {
-    var buf: [count * value.len]u8 = undefined;
-    if (value.len == 1) {
-        @memset(&buf, value[0]);
-    } else {
-        // Doubling copies the pattern in log(count) steps, which stays inside
-        // the comptime backwards-branch limit a one-step loop does not.
-        @memcpy(buf[0..value.len], value);
-        var filled: usize = value.len;
-        while (filled * 2 <= buf.len) : (filled *= 2) @memcpy(buf[filled..][0..filled], buf[0..filled]);
-        if (filled < buf.len) @memcpy(buf[filled..], buf[0 .. buf.len - filled]);
-    }
-    break :blk buf;
+    const S = struct {
+        const out: [count * value.len]u8 = blk: {
+            var buf: [count * value.len]u8 = undefined;
+            if (value.len == 1) {
+                @memset(&buf, value[0]);
+            } else {
+                // Doubling copies the pattern in log(count) steps, which stays inside
+                // the comptime backwards-branch limit a one-step loop does not.
+                @memcpy(buf[0..value.len], value);
+                var filled: usize = value.len;
+                while (filled * 2 <= buf.len) : (filled *= 2) @memcpy(buf[filled..][0..filled], buf[0..filled]);
+                if (filled < buf.len) @memcpy(buf[filled..], buf[0 .. buf.len - filled]);
+            }
+            break :blk buf;
+        };
     };
-    return &out;
+    return &S.out;
 }
-
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -320,7 +320,7 @@ fn applyLandlock(io: Io, arena: std.mem.Allocator, writable_roots: []const []con
     // `landlock_restrict_self` fails where the ruleset named a right the
     // running kernel does not enforce. Both say so rather than handing back a
     // false the caller reports as a kernel too old, which is a different fix.
-    const no_new_privs = linux.prctl(@intFromEnum(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0);
+    const no_new_privs = linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0);
     if (checked(no_new_privs) == null) {
         sandboxNotApplied(io, arena, linux.errno(no_new_privs));
         return false;

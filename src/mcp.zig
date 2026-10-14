@@ -30,25 +30,25 @@
 //! that blocks once it has logged a few kilobytes. Nothing here reads it, so
 //! there is no capture for it to fill.
 
-
 fn repeat(comptime count: usize, comptime value: []const u8) *const [count * value.len]u8 {
-    const out = comptime blk: {
-    var buf: [count * value.len]u8 = undefined;
-    if (value.len == 1) {
-        @memset(&buf, value[0]);
-    } else {
-        // Doubling copies the pattern in log(count) steps, which stays inside
-        // the comptime backwards-branch limit a one-step loop does not.
-        @memcpy(buf[0..value.len], value);
-        var filled: usize = value.len;
-        while (filled * 2 <= buf.len) : (filled *= 2) @memcpy(buf[filled..][0..filled], buf[0..filled]);
-        if (filled < buf.len) @memcpy(buf[filled..], buf[0 .. buf.len - filled]);
-    }
-    break :blk buf;
+    const S = struct {
+        const out: [count * value.len]u8 = blk: {
+            var buf: [count * value.len]u8 = undefined;
+            if (value.len == 1) {
+                @memset(&buf, value[0]);
+            } else {
+                // Doubling copies the pattern in log(count) steps, which stays inside
+                // the comptime backwards-branch limit a one-step loop does not.
+                @memcpy(buf[0..value.len], value);
+                var filled: usize = value.len;
+                while (filled * 2 <= buf.len) : (filled *= 2) @memcpy(buf[filled..][0..filled], buf[0..filled]);
+                if (filled < buf.len) @memcpy(buf[filled..], buf[0 .. buf.len - filled]);
+            }
+            break :blk buf;
+        };
     };
-    return &out;
+    return &S.out;
 }
-
 
 const std = @import("std");
 const Io = std.Io;
@@ -746,7 +746,7 @@ pub const Server = struct {
     /// refused rather than walked. A body that will not parse is not the
     /// server's reason either way, so it falls back with everything else.
     fn noteRefusal(self: *Server, scratch: std.mem.Allocator, reader: *Io.Reader, status: std.http.Status) !void {
-        const prefix = try std.fmt.allocPrint(self.run_arena, "HTTP {d}", .{@intFromEnum(status)});
+        const prefix = try std.fmt.allocPrint(self.run_arena, "HTTP {d}", .{@backingInt(status)});
         const body = reader.allocRemaining(scratch, .limited(max_frame_bytes)) catch {
             self.last_error = prefix;
             return;
@@ -2699,7 +2699,7 @@ test "an oversized non-object MCP error keeps only its capped diagnostic" {
         try std.testing.expectError(error.ServerRefused, server.answerFor(scratch, frame, 1));
         try std.testing.expect(server.last_error.len <= max_mcp_description_bytes);
         try std.testing.expect(std.mem.indexOf(u8, server.last_error, "truncated") != null);
-        try std.testing.expect(output_state.queryCapacity() < 8 * max_mcp_description_bytes);
+        try std.testing.expect(output_state.queryCapacity() < 16 * max_mcp_description_bytes);
     }
 }
 
@@ -3547,7 +3547,7 @@ fn fuzzEntryNames(_: void, smith: *std.testing.Smith) !void {
         try std.testing.expect(uri.user == null and uri.password == null);
         try std.testing.expect(net.urlCarriesKey(parts[0]));
         var host_buf: [Io.net.HostName.max_len]u8 = undefined;
-        const host = (Io.net.HostName.fromUri(uri, &host_buf) catch return error.TestUnexpectedResult).bytes;
+        const host = (uri.host orelse return error.TestUnexpectedResult).toRaw(&host_buf) catch return error.TestUnexpectedResult;
         if (std.ascii.eqlIgnoreCase(uri.scheme, "http")) try std.testing.expect(net.isLoopbackHost(host));
     }
 

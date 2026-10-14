@@ -2,25 +2,25 @@
 //! unless `--check`, replace the running executable once the downloaded asset
 //! matches the `.sha256` sidecar the release publishes.
 
-
 fn repeat(comptime count: usize, comptime value: []const u8) *const [count * value.len]u8 {
-    const out = comptime blk: {
-    var buf: [count * value.len]u8 = undefined;
-    if (value.len == 1) {
-        @memset(&buf, value[0]);
-    } else {
-        // Doubling copies the pattern in log(count) steps, which stays inside
-        // the comptime backwards-branch limit a one-step loop does not.
-        @memcpy(buf[0..value.len], value);
-        var filled: usize = value.len;
-        while (filled * 2 <= buf.len) : (filled *= 2) @memcpy(buf[filled..][0..filled], buf[0..filled]);
-        if (filled < buf.len) @memcpy(buf[filled..], buf[0 .. buf.len - filled]);
-    }
-    break :blk buf;
+    const S = struct {
+        const out: [count * value.len]u8 = blk: {
+            var buf: [count * value.len]u8 = undefined;
+            if (value.len == 1) {
+                @memset(&buf, value[0]);
+            } else {
+                // Doubling copies the pattern in log(count) steps, which stays inside
+                // the comptime backwards-branch limit a one-step loop does not.
+                @memcpy(buf[0..value.len], value);
+                var filled: usize = value.len;
+                while (filled * 2 <= buf.len) : (filled *= 2) @memcpy(buf[filled..][0..filled], buf[0..filled]);
+                if (filled < buf.len) @memcpy(buf[filled..], buf[0 .. buf.len - filled]);
+            }
+            break :blk buf;
+        };
     };
-    return &out;
+    return &S.out;
 }
-
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -33,7 +33,7 @@ const default_repo = "maci0/microagent";
 const tool_name = "microagent";
 const release_api_url = "https://api.github.com/repos/" ++ default_repo ++ "/releases/latest";
 
-const exec_mode: std.Io.File.Permissions = @enumFromInt(@as(std.posix.mode_t, 0o755));
+const exec_mode: std.Io.File.Permissions = @fromBackingInt(@intCast(@as(std.posix.mode_t, 0o755)));
 
 const max_api_bytes: usize = 10 * 1024 * 1024;
 const max_sidecar_bytes: usize = 64 * 1024;
@@ -481,8 +481,8 @@ fn fetchOnce(
                 _ = fail(io, "could not download {s} ({s})", .{ what, reason });
                 return .{ .body = null, .retry = net.transientTransportError(err) };
             };
-            if (@intFromEnum(received.status) >= 400) {
-                _ = fail(io, "GitHub returned HTTP {d} for {s}{s}", .{ @intFromEnum(received.status), what, statusHint(received.status, capped.body.written()) });
+            if (@backingInt(received.status) >= 400) {
+                _ = fail(io, "GitHub returned HTTP {d} for {s}{s}", .{ @backingInt(received.status), what, statusHint(received.status, capped.body.written()) });
                 return .{
                     .body = null,
                     .retry = net.retryableStatus(received.status),
@@ -528,7 +528,7 @@ fn exchange(
     // download is answered by a `302` to the release CDN; the key is a
     // privileged header, so it is not replayed to whatever host that names.
     var request = try client.request(.GET, try std.Uri.parse(url), .{
-        .redirect_behavior = @enumFromInt(default_redirects),
+        .redirect_behavior = @fromBackingInt(@intCast(default_redirects)),
         .headers = .{ .user_agent = .{ .override = net.user_agent } },
         .privileged_headers = auth_headers,
     });
@@ -1658,13 +1658,13 @@ test "update: a refusal that names a wait is spent on that wait" {
 test "update: a download retries the statuses and errors the run retries on" {
     for ([_]std.http.Status{ .request_timeout, .conflict, .too_early, .too_many_requests, .internal_server_error, .bad_gateway, .service_unavailable, .gateway_timeout }) |status| {
         std.testing.expect(net.retryableStatus(status)) catch |err| {
-            std.debug.print("update would not retry {d}\n", .{@intFromEnum(status)});
+            std.debug.print("update would not retry {d}\n", .{@backingInt(status)});
             return err;
         };
     }
     for ([_]std.http.Status{ .ok, .bad_request, .unauthorized, .payment_required, .forbidden, .not_found, .method_not_allowed }) |status| {
         std.testing.expect(!net.retryableStatus(status)) catch |err| {
-            std.debug.print("update would retry {d}\n", .{@intFromEnum(status)});
+            std.debug.print("update would retry {d}\n", .{@backingInt(status)});
             return err;
         };
     }

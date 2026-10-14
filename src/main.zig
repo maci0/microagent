@@ -34,25 +34,25 @@
 //! the same cap and the same note; and `conversation` sits over `skill` because
 //! the system prompt names the skills this run found.
 
-
 fn repeat(comptime count: usize, comptime value: []const u8) *const [count * value.len]u8 {
-    const out = comptime blk: {
-    var buf: [count * value.len]u8 = undefined;
-    if (value.len == 1) {
-        @memset(&buf, value[0]);
-    } else {
-        // Doubling copies the pattern in log(count) steps, which stays inside
-        // the comptime backwards-branch limit a one-step loop does not.
-        @memcpy(buf[0..value.len], value);
-        var filled: usize = value.len;
-        while (filled * 2 <= buf.len) : (filled *= 2) @memcpy(buf[filled..][0..filled], buf[0..filled]);
-        if (filled < buf.len) @memcpy(buf[filled..], buf[0 .. buf.len - filled]);
-    }
-    break :blk buf;
+    const S = struct {
+        const out: [count * value.len]u8 = blk: {
+            var buf: [count * value.len]u8 = undefined;
+            if (value.len == 1) {
+                @memset(&buf, value[0]);
+            } else {
+                // Doubling copies the pattern in log(count) steps, which stays inside
+                // the comptime backwards-branch limit a one-step loop does not.
+                @memcpy(buf[0..value.len], value);
+                var filled: usize = value.len;
+                while (filled * 2 <= buf.len) : (filled *= 2) @memcpy(buf[filled..][0..filled], buf[0..filled]);
+                if (filled < buf.len) @memcpy(buf[filled..], buf[0 .. buf.len - filled]);
+            }
+            break :blk buf;
+        };
     };
-    return &out;
+    return &S.out;
 }
-
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -386,7 +386,7 @@ test "the async limit covers the handshakes and their address fan-out" {
     // when it comes back: the regression is a wait, not work, so the guard is
     // the configuration rather than a counter, and the only way to fail it is
     // for the run to configure a smaller limit.
-    try std.testing.expectEqual(io_worker_limit, @intFromEnum(threaded.async_limit));
+    try std.testing.expectEqual(io_worker_limit, @backingInt(threaded.async_limit));
 }
 
 const word_bytes = @sizeOf(usize);
@@ -2691,8 +2691,8 @@ fn writeDefaultConfig(io: Io, arena: std.mem.Allocator, source: ConfigSource) vo
 /// The config file holds operator settings and may later hold a provider key, so
 /// the template is written as the same 0600 the rest of the home state uses,
 /// under a 0700 directory holding this and the session logs.
-const default_config_mode: Io.File.Permissions = @enumFromInt(@as(std.posix.mode_t, 0o600));
-const default_config_dir_mode: Io.File.Permissions = @enumFromInt(@as(std.posix.mode_t, 0o700));
+const default_config_mode: Io.File.Permissions = @fromBackingInt(@intCast(@as(std.posix.mode_t, 0o600)));
+const default_config_dir_mode: Io.File.Permissions = @fromBackingInt(@intCast(@as(std.posix.mode_t, 0o700)));
 
 /// The file the config is read from, and whether anything named it. A
 /// flag or a variable naming a file that cannot be read is a caller's mistake
@@ -4005,7 +4005,7 @@ fn streamChatOnce(
             noteTurnSentInFull(io, arena, shown_url, @errorName(err));
             return err;
         };
-        if (debug_enabled) std.debug.print("[mdebug] head status={d} enc={s}\n", .{ @intFromEnum(response.head.status), @tagName(response.head.content_encoding) });
+        if (debug_enabled) std.debug.print("[mdebug] head status={d} enc={s}\n", .{ @backingInt(response.head.status), @tagName(response.head.content_encoding) });
         if (response.head.status != .ok) {
             // The one retry the declaration above is for, on the status that
             // carries the refusal.
@@ -4044,11 +4044,11 @@ fn streamChatOnce(
                     // billable refusal the header was meant to prevent, so the
                     // turn is given up here with the reason below.
                     net.note(io, arena, "microagent: {s} answered HTTP {d} asking for {d}ms, which is past what is left of this run's budget; the turn is given up\n", .{
-                        shown_url, @intFromEnum(response.head.status), wait,
+                        shown_url, @backingInt(response.head.status), wait,
                     });
                 } else {
                     net.note(io, arena, "microagent: {s} answered HTTP {d}, retrying in {d}ms (attempt {d}/{d})\n", .{
-                        shown_url, @intFromEnum(response.head.status), wait, attempt + 1, max_attempts,
+                        shown_url, @backingInt(response.head.status), wait, attempt + 1, max_attempts,
                     });
                     // The same rule `waitBeforeRetry` follows: a sleep that
                     // failed is not a sleep, and continuing would answer a
@@ -4074,7 +4074,7 @@ fn streamChatOnce(
             const err_body = withStallTimeout(io, opts.stall_timeout_s, Io.Reader.allocRemaining, .{ err_reader, arena, Io.Limit.limited(max_error_body_bytes) }) catch |err|
                 try std.fmt.allocPrint(arena, "(the error body could not be read: {s})", .{@errorName(err)});
             const msg = try std.fmt.allocPrint(arena, "http {d}: {s}\n", .{
-                @intFromEnum(response.head.status),
+                @backingInt(response.head.status),
                 tool_mod.terminalSafe(arena, err_body),
             });
             net.writeErr(io, msg);
@@ -5013,7 +5013,7 @@ fn fuzzBaseUrl(_: void, smith: *std.testing.Smith) !void {
         // Plaintext. The host has to be this machine, spelled the four ways a
         // resolver sends to this machine and no other.
         var host_buf: [Io.net.HostName.max_len]u8 = undefined;
-        const host = (Io.net.HostName.fromUri(uri, &host_buf) catch return error.TestUnexpectedResult).bytes;
+        const host = (uri.host orelse return error.TestUnexpectedResult).toRaw(&host_buf) catch return error.TestUnexpectedResult;
         try std.testing.expect(net.isLoopbackHost(host));
         var lower: [256]u8 = undefined;
         if (host.len > lower.len) return error.TestUnexpectedResult;
@@ -7026,13 +7026,13 @@ test "a refused value is reported against where it came from, flag or variable" 
 test "only weather-shaped statuses are retried" {
     for ([_]std.http.Status{ .request_timeout, .conflict, .too_early, .too_many_requests, .internal_server_error, .bad_gateway, .service_unavailable, .gateway_timeout }) |status| {
         std.testing.expect(net.retryableStatus(status)) catch |err| {
-            std.debug.print("the run would not retry {d}\n", .{@intFromEnum(status)});
+            std.debug.print("the run would not retry {d}\n", .{@backingInt(status)});
             return err;
         };
     }
     for ([_]std.http.Status{ .ok, .created, .bad_request, .unauthorized, .payment_required, .forbidden, .not_found, .method_not_allowed }) |status| {
         std.testing.expect(!net.retryableStatus(status)) catch |err| {
-            std.debug.print("the run would retry {d}\n", .{@intFromEnum(status)});
+            std.debug.print("the run would retry {d}\n", .{@backingInt(status)});
             return err;
         };
     }

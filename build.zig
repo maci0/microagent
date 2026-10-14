@@ -3,9 +3,11 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const zig_lib = fixedSpawnLibrary(b);
 
     const exe = b.addExecutable(.{
         .name = "microagent",
+        .zig_lib_dir = zig_lib,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
@@ -67,6 +69,7 @@ pub fn build(b: *std.Build) void {
     const test_filters: []const []const u8 = if (test_filter) |f| &[_][]const u8{f} else &.{};
     const tests = b.addTest(.{
         .root_module = exe.root_module,
+        .zig_lib_dir = zig_lib,
         .filters = test_filters,
     });
     const run_tests = b.addRunArtifact(tests);
@@ -97,7 +100,7 @@ pub fn build(b: *std.Build) void {
     // applies it is the only way a run step gets that guarantee. A run added
     // beside these and left unpinned reads as covered by the comment above
     // `pin_test_env` and is not.
-    const run_copy_tests = b.addRunArtifact(b.addTest(.{ .root_module = copy_module, .filters = test_filters }));
+    const run_copy_tests = b.addRunArtifact(b.addTest(.{ .root_module = copy_module, .filters = test_filters, .zig_lib_dir = zig_lib }));
     pin_test_env(run_copy_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
@@ -132,6 +135,7 @@ pub fn build(b: *std.Build) void {
     safety_module.addImport("copy", safe_copy_module);
     const safety_tests = b.addTest(.{
         .root_module = safety_module,
+        .zig_lib_dir = zig_lib,
         .filters = test_filters,
     });
     const run_safety = b.addRunArtifact(safety_tests);
@@ -139,6 +143,7 @@ pub fn build(b: *std.Build) void {
     const run_safe_copy = b.addRunArtifact(b.addTest(.{
         .root_module = safe_copy_module,
         .filters = test_filters,
+        .zig_lib_dir = zig_lib,
     }));
     pin_test_env(run_safe_copy);
 
@@ -168,4 +173,40 @@ pub fn build(b: *std.Build) void {
     safety_step.dependOn(&run_safe_copy.step);
 }
 
-
+/// Zig loses the pipes and PID when a POSIX child reports an exec error.
+/// Patch only our cached library, using its existing child cleanup routine.
+/// Remove this workaround when the pinned toolchain closes and reaps that path.
+fn fixedSpawnLibrary(b: *std.Build) std.Build.LazyPath {
+    const lib_dir = b.pathJoin(&.{ std.fs.path.dirname(b.graph.zig_exe).?, "lib" });
+    const threaded_path = b.pathJoin(&.{ lib_dir, "std/Io/Threaded.zig" });
+    const source = std.Io.Dir.cwd().readFileAlloc(b.graph.io, threaded_path, b.allocator, .unlimited) catch
+        @panic("cannot read Zig's process spawn implementation");
+    const old =
+        \\        const child_err: process.SpawnError = @errorCast(@errorFromInt(child_err_int));
+        \\        return child_err;
+    ;
+    const replacement =
+        \\        const child_err: process.SpawnError = @errorCast(@errorFromInt(child_err_int));
+        \\        var child: process.Child = .{
+        \\            .id = spawned.pid,
+        \\            .thread_handle = {},
+        \\            .stdin = spawned.stdin,
+        \\            .stdout = spawned.stdout,
+        \\            .stderr = spawned.stderr,
+        \\            .request_resource_usage_statistics = options.request_resource_usage_statistics,
+        \\        };
+        \\        const protection = swapCancelProtection(userdata, .blocked);
+        \\        defer _ = swapCancelProtection(userdata, protection);
+        \\        _ = childWaitPosix(&child) catch {};
+        \\        return child_err;
+    ;
+    if (std.mem.count(u8, source, old) != 1)
+        @panic("Zig's process spawn implementation changed; review the cleanup workaround");
+    const patched = std.mem.replaceOwned(u8, b.allocator, source, old, replacement) catch @panic("OOM");
+    const files = b.addWriteFiles();
+    _ = files.addCopyDirectory(.{ .cwd_relative = lib_dir }, "", .{
+        .exclude_extensions = &.{"Threaded.zig"},
+    });
+    _ = files.add("std/Io/Threaded.zig", patched);
+    return files.getDirectory();
+}

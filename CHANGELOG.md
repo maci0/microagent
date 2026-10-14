@@ -19,6 +19,28 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-10-14
+
+### Changed
+
+- Upgrade the toolchain to Zig 0.17.0. Migrated build configurations, module
+  definitions, and standard library APIs across the codebase to Zig 0.17
+  conventions (`std.Io`, `std.process.Environ.Map`, `std.posix`, and arena
+  allocator semantics).
+
+### Fixed
+
+- Support IPv6 loopback URI host literals (`[::1]`) in network client host
+  validation (`urlCarriesKey`), extracting raw URI host strings rather than
+  strictly parsing RFC 1123 DNS hostnames.
+
+- Maintain POSIX child process spawning pipe and child cleanup on `execvpe`
+  failure under Zig 0.17, preventing file descriptor leaks during failed tool
+  and MCP server launches.
+
+- Fix static storage for test suite repeated byte buffers, avoiding runtime
+  stack exhaustion during response ceiling boundary tests.
+
 ## [0.16.0] - 2026-10-03
 
 ### Changed
@@ -3264,7 +3286,8 @@ First release.
   `aarch64-macos` with a checksum sidecar each, and refuses a tag that does not name the version in
   `build.zig.zon`.
 
-[Unreleased]: https://github.com/maci0/microagent/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/maci0/microagent/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/maci0/microagent/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/maci0/microagent/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/maci0/microagent/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/maci0/microagent/compare/v0.13.0...v0.14.0

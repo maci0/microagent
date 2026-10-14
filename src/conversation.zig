@@ -8,25 +8,25 @@
 //! over `net` and `chat` for the escaping and the value types every part of
 //! the body is written from.
 
-
 fn repeat(comptime count: usize, comptime value: []const u8) *const [count * value.len]u8 {
-    const out = comptime blk: {
-    var buf: [count * value.len]u8 = undefined;
-    if (value.len == 1) {
-        @memset(&buf, value[0]);
-    } else {
-        // Doubling copies the pattern in log(count) steps, which stays inside
-        // the comptime backwards-branch limit a one-step loop does not.
-        @memcpy(buf[0..value.len], value);
-        var filled: usize = value.len;
-        while (filled * 2 <= buf.len) : (filled *= 2) @memcpy(buf[filled..][0..filled], buf[0..filled]);
-        if (filled < buf.len) @memcpy(buf[filled..], buf[0 .. buf.len - filled]);
-    }
-    break :blk buf;
+    const S = struct {
+        const out: [count * value.len]u8 = blk: {
+            var buf: [count * value.len]u8 = undefined;
+            if (value.len == 1) {
+                @memset(&buf, value[0]);
+            } else {
+                // Doubling copies the pattern in log(count) steps, which stays inside
+                // the comptime backwards-branch limit a one-step loop does not.
+                @memcpy(buf[0..value.len], value);
+                var filled: usize = value.len;
+                while (filled * 2 <= buf.len) : (filled *= 2) @memcpy(buf[filled..][0..filled], buf[0..filled]);
+                if (filled < buf.len) @memcpy(buf[filled..], buf[0 .. buf.len - filled]);
+            }
+            break :blk buf;
+        };
     };
-    return &out;
+    return &S.out;
 }
-
 
 const std = @import("std");
 const Io = std.Io;
@@ -543,7 +543,7 @@ test "a result that reads like a marker is elided rather than skipped" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const blob = "[earlier tool output elided: 5 bytes] and then the file dump" ++ "x";
+    const blob = "[earlier tool output elided: 5 bytes] and then the file dump" ++ repeat(8192, "x").*;
     var msgs: std.ArrayList(u8) = .empty;
     defer msgs.deinit(gpa);
     try msgs.appendSlice(gpa, "[{\"role\":\"user\",\"content\":\"look\"},");

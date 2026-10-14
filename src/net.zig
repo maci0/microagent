@@ -13,25 +13,25 @@
 //! importing one another. `chat` is imported for the one escaping the notes
 //! here need, which is the escaping the rest of the program uses.
 
-
 fn repeat(comptime count: usize, comptime value: []const u8) *const [count * value.len]u8 {
-    const out = comptime blk: {
-    var buf: [count * value.len]u8 = undefined;
-    if (value.len == 1) {
-        @memset(&buf, value[0]);
-    } else {
-        // Doubling copies the pattern in log(count) steps, which stays inside
-        // the comptime backwards-branch limit a one-step loop does not.
-        @memcpy(buf[0..value.len], value);
-        var filled: usize = value.len;
-        while (filled * 2 <= buf.len) : (filled *= 2) @memcpy(buf[filled..][0..filled], buf[0..filled]);
-        if (filled < buf.len) @memcpy(buf[filled..], buf[0 .. buf.len - filled]);
-    }
-    break :blk buf;
+    const S = struct {
+        const out: [count * value.len]u8 = blk: {
+            var buf: [count * value.len]u8 = undefined;
+            if (value.len == 1) {
+                @memset(&buf, value[0]);
+            } else {
+                // Doubling copies the pattern in log(count) steps, which stays inside
+                // the comptime backwards-branch limit a one-step loop does not.
+                @memcpy(buf[0..value.len], value);
+                var filled: usize = value.len;
+                while (filled * 2 <= buf.len) : (filled *= 2) @memcpy(buf[filled..][0..filled], buf[0..filled]);
+                if (filled < buf.len) @memcpy(buf[filled..], buf[0 .. buf.len - filled]);
+            }
+            break :blk buf;
+        };
     };
-    return &out;
+    return &S.out;
 }
-
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -775,8 +775,10 @@ pub fn urlCarriesKey(url: []const u8) bool {
     const uri = std.Uri.parse(url) catch return false;
     if (std.ascii.eqlIgnoreCase(uri.scheme, "https")) return true;
     if (!std.ascii.eqlIgnoreCase(uri.scheme, "http")) return false;
+    const host_comp = uri.host orelse return false;
     var host_buf: [Io.net.HostName.max_len]u8 = undefined;
-    return isLoopbackHost((Io.net.HostName.fromUri(uri, &host_buf) catch return false).bytes);
+    const host = host_comp.toRaw(&host_buf) catch return false;
+    return isLoopbackHost(host);
 }
 
 /// Whether a host names this machine and no other.
@@ -875,9 +877,9 @@ pub fn retryBackoffMs(attempt: u32, max_wait_ms: u64) u64 {
 /// wrong than the POST that does. 404 is not: it names something that is not
 /// published, and asking again for the same name changes nothing.
 pub fn retryableStatus(status: std.http.Status) bool {
-    return switch (@intFromEnum(status)) {
+    return switch (@backingInt(status)) {
         408, 409, 425, 429 => true,
-        else => @intFromEnum(status) >= 500,
+        else => @backingInt(status) >= 500,
     };
 }
 
@@ -1071,7 +1073,7 @@ fn httpDateEpochSeconds(raw: []const u8) ?i64 {
     if (year < 1) return null;
 
     const day = std.fmt.parseInt(u32, day_text, 10) catch return null;
-    if (day == 0 or day > std.time.epoch.getDaysInMonth(@intCast(year), @enumFromInt(month))) return null;
+    if (day == 0 or day > std.time.epoch.getDaysInMonth(@intCast(year), @fromBackingInt(@intCast(month)))) return null;
     if (hour < 0 or hour > 23 or minute < 0 or minute > 59 or second < 0 or second > 60) return null;
 
     return daysFromCivil(year, month, day) * @as(i64, std.time.s_per_day) +
@@ -1177,22 +1179,22 @@ test "a key is only sent over a scheme that keeps it off the wire" {
 test "only a busy or a broken server is asked again" {
     for ([_]std.http.Status{ .request_timeout, .conflict, .too_early, .too_many_requests, .internal_server_error, .bad_gateway, .service_unavailable, .gateway_timeout }) |status| {
         std.testing.expect(retryableStatus(status)) catch |err| {
-            std.debug.print("status {d}\n", .{@intFromEnum(status)});
+            std.debug.print("status {d}\n", .{@backingInt(status)});
             return err;
         };
     }
     for ([_]std.http.Status{ .ok, .created, .bad_request, .unauthorized, .payment_required, .forbidden, .not_found, .method_not_allowed, .not_acceptable, .upgrade_required, .unprocessable_entity }) |status| {
         std.testing.expect(!retryableStatus(status)) catch |err| {
-            std.debug.print("status {d}\n", .{@intFromEnum(status)});
+            std.debug.print("status {d}\n", .{@backingInt(status)});
             return err;
         };
     }
     // The 5xx block is a range rather than a list, so the ends of it are named
     // as well as the statuses inside it.
-    try std.testing.expect(retryableStatus(@enumFromInt(500)));
-    try std.testing.expect(retryableStatus(@enumFromInt(599)));
-    try std.testing.expect(retryableStatus(@enumFromInt(600)));
-    try std.testing.expect(!retryableStatus(@enumFromInt(499)));
+    try std.testing.expect(retryableStatus(@fromBackingInt(@intCast(500))));
+    try std.testing.expect(retryableStatus(@fromBackingInt(@intCast(599))));
+    try std.testing.expect(retryableStatus(@fromBackingInt(@intCast(600))));
+    try std.testing.expect(!retryableStatus(@fromBackingInt(@intCast(499))));
 }
 
 // The schedule the two network paths share. Saturating at both ends, because
@@ -2322,7 +2324,7 @@ fn stdDaysFromCivil(year: i64, month: u32, day: u32) i64 {
     while (y > year) : (y -= 1) total -= std.time.epoch.getDaysInYear(@intCast(y - 1));
     var m: u32 = 1;
     while (m < month) : (m += 1)
-        total += std.time.epoch.getDaysInMonth(@intCast(year), @enumFromInt(m));
+        total += std.time.epoch.getDaysInMonth(@intCast(year), @fromBackingInt(@intCast(m)));
     return total + @as(i64, day) - 1;
 }
 

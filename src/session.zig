@@ -8,25 +8,25 @@
 //! one finished response at a time, so the log can be read, tested and changed
 //! without the loop.
 
-
 fn repeat(comptime count: usize, comptime value: []const u8) *const [count * value.len]u8 {
-    const out = comptime blk: {
-    var buf: [count * value.len]u8 = undefined;
-    if (value.len == 1) {
-        @memset(&buf, value[0]);
-    } else {
-        // Doubling copies the pattern in log(count) steps, which stays inside
-        // the comptime backwards-branch limit a one-step loop does not.
-        @memcpy(buf[0..value.len], value);
-        var filled: usize = value.len;
-        while (filled * 2 <= buf.len) : (filled *= 2) @memcpy(buf[filled..][0..filled], buf[0..filled]);
-        if (filled < buf.len) @memcpy(buf[filled..], buf[0 .. buf.len - filled]);
-    }
-    break :blk buf;
+    const S = struct {
+        const out: [count * value.len]u8 = blk: {
+            var buf: [count * value.len]u8 = undefined;
+            if (value.len == 1) {
+                @memset(&buf, value[0]);
+            } else {
+                // Doubling copies the pattern in log(count) steps, which stays inside
+                // the comptime backwards-branch limit a one-step loop does not.
+                @memcpy(buf[0..value.len], value);
+                var filled: usize = value.len;
+                while (filled * 2 <= buf.len) : (filled *= 2) @memcpy(buf[filled..][0..filled], buf[0..filled]);
+                if (filled < buf.len) @memcpy(buf[filled..], buf[0 .. buf.len - filled]);
+            }
+            break :blk buf;
+        };
     };
-    return &out;
+    return &S.out;
 }
-
 
 const std = @import("std");
 const Io = std.Io;
@@ -150,8 +150,8 @@ const max_session_suffix_bytes = std.fmt.count("{d}", .{session_name_attempts - 
 /// first decides it for both. Handing out the mode let the sandbox spell its own
 /// create beside it, and the two copies agreed only until one of them was
 /// edited. `log_file_mode` is read by this module alone.
-pub const log_file_mode: Io.File.Permissions = @enumFromInt(@as(std.posix.mode_t, 0o600));
-const log_dir_mode: Io.File.Permissions = @enumFromInt(@as(std.posix.mode_t, 0o700));
+pub const log_file_mode: Io.File.Permissions = @fromBackingInt(@intCast(@as(std.posix.mode_t, 0o600)));
+const log_dir_mode: Io.File.Permissions = @fromBackingInt(@intCast(@as(std.posix.mode_t, 0o700)));
 
 /// Creates the session store directory if it is not there, with this module's
 /// mode, and reports a failure through `fmt` rather than to stderr itself.

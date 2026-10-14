@@ -69,10 +69,10 @@ socket after each response is read.
 
 ## The toolchain
 
-The project pins Zig 0.16.0, the newest stable release: [the download
-index](https://ziglang.org/download/index.json) lists no 0.16.1, and `master` is 0.17.0-dev, which
+The project pins Zig 0.17.0, the newest stable release: [the download
+index](https://ziglang.org/download/index.json) lists no 0.17.1, and `master` is 0.18.0-dev, which
 is not a release to build a release asset with. There is no compiler upgrade to take for
-performance until 0.17 ships. Measured here, `-mcpu=native` moves the hot paths by less than the
+performance until 0.18 ships. Measured here, `-mcpu=native` moves the hot paths by less than the
 run-to-run noise, so there is no build flag to reach for either.
 
 ## What was changed, and what it bought

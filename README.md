@@ -43,7 +43,7 @@ a container that has nothing installed. microagent is the other shape:
 
 ## What it looks like
 
-A fresh build on this machine (x86_64 Linux, Zig 0.16.0):
+A fresh build on this machine (x86_64 Linux, Zig 0.17.0):
 
 ```console
 $ zig build -Doptimize=ReleaseSmall
@@ -81,7 +81,7 @@ pins for its linters and its benchmark adapter, none of which is in a release. P
 machine runs:
 
 ```sh
-v=v0.16.0 t=x86_64-linux-musl
+v=v0.17.0 t=x86_64-linux-musl
 curl -fLO https://github.com/maci0/microagent/releases/download/$v/microagent-$v-$t
 curl -fLO https://github.com/maci0/microagent/releases/download/$v/microagent-$v-$t.sha256
 # GNU coreutils spells it sha256sum, macOS ships shasum; both read the same
@@ -92,7 +92,7 @@ $sum -c microagent-$v-$t.sha256 && mkdir -p ~/.local/bin && install -m 755 micro
 
 `microagent update` replaces an installed binary with the latest release after checking its digest.
 
-Or build it. Zig 0.16.0 or newer is the only requirement:
+Or build it. Zig 0.17.0 or newer is the only requirement:
 
 ```sh
 zig build -Doptimize=ReleaseSmall     # zig-out/bin/microagent
@@ -144,7 +144,7 @@ self-update.
 
 ## Status
 
-Version 0.16.0. What works: the tool loop against OpenRouter, DeepSeek, OpenAI and any other
+Version 0.17.0. What works: the tool loop against OpenRouter, DeepSeek, OpenAI and any other
 OpenAI-compatible endpoint; an interactive session with `--repl`; repository instructions read
 from `AGENTS.md`; skills; MCP servers over stdio and over HTTP; the session log; verified
 self-update; reproducible release builds for Linux and macOS.
