@@ -81,7 +81,7 @@ pins for its linters and its benchmark adapter, none of which is in a release. P
 machine runs:
 
 ```sh
-v=v0.17.0 t=x86_64-linux-musl
+v=v0.18.0 t=x86_64-linux-musl
 curl -fLO https://github.com/maci0/microagent/releases/download/$v/microagent-$v-$t
 curl -fLO https://github.com/maci0/microagent/releases/download/$v/microagent-$v-$t.sha256
 # GNU coreutils spells it sha256sum, macOS ships shasum; both read the same
@@ -137,14 +137,14 @@ For an interactive session, run `microagent --repl`. Enter one prompt per line;
 conversation history carries over. Exit with `/quit` or Ctrl-D. The usual flags apply,
 and turn, time and token spending ceilings reset for each prompt.
 
-`microagent --help` lists every flag. [docs/usage.md](docs/usage.md) is the full reference: flags and
+`microagent --help` lists every flag. `microagent schema` prints a CLI Spec 0.3 document and reads no config. `-o json` asks `--version`, `setup`, and `update` for one JSON document; the model's stdout stays text. The API key is `MICROAGENT_API_KEY` or the config file, and `--api-key` still works. [docs/usage.md](docs/usage.md) is the full reference: flags and
 environment variables, the config file (provider settings, system prompt addendum, skills, MCP servers), the tools and their
 credential guards, the stdout and session-log formats, exit codes, retries, gauntlet setup, and
 self-update.
 
 ## Status
 
-Version 0.17.0. What works: the tool loop against OpenRouter, DeepSeek, OpenAI and any other
+Version 0.18.0. What works: the tool loop against OpenRouter, DeepSeek, OpenAI and any other
 OpenAI-compatible endpoint; an interactive session with `--repl`; repository instructions read
 from `AGENTS.md`; skills; MCP servers over stdio and over HTTP; the session log; verified
 self-update; reproducible release builds for Linux and macOS.

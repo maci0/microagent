@@ -117,6 +117,23 @@ pub fn build(b: *std.Build) void {
     // optimizing-less build of one file costs.
     test_step.dependOn(&exe.step);
 
+    // The suite cannot call `main` with a real argv. This runs the binary the
+    // test step just compiled and checks schema, `-o json`, and a JSON failure.
+    const clispec_check = b.addExecutable(.{
+        .name = "clispec_check",
+        .zig_lib_dir = zig_lib,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/clispec_check.zig"),
+            .target = target,
+            .optimize = optimize,
+            .strip = optimize != .debug,
+        }),
+    });
+    const run_clispec = b.addRunArtifact(clispec_check);
+    run_clispec.addArtifactArg(exe);
+    pin_test_env(run_clispec);
+    test_step.dependOn(&run_clispec.step);
+
     // Keep the existing test-sanitize command, but use Zig's optimized safety
     // checks: sanitize_c only instruments C, and this program has no C sources.
     // Separate modules keep the executable's requested optimization mode intact.

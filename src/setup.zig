@@ -158,7 +158,7 @@ const Wizard = struct {
     }
 };
 
-pub fn run(io: std.Io, arena: std.mem.Allocator, path: []const u8, default_model: []const u8, max_bytes: usize) !void {
+pub fn run(io: std.Io, arena: std.mem.Allocator, path: []const u8, default_model: []const u8, max_bytes: usize) !bool {
     const original = try std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_bytes));
     const cfg = config.parse(arena, original);
     if (cfg.problem != null or cfg.tool_problem != null) return error.InvalidConfig;
@@ -171,9 +171,12 @@ pub fn run(io: std.Io, arena: std.mem.Allocator, path: []const u8, default_model
     if (result.problem != null or result.tool_problem != null or wizard.text.len > max_bytes) return error.InvalidConfig;
     const latest = try std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_bytes));
     if (!std.mem.eql(u8, latest, original)) return error.ConfigChangedDuringSetup;
+    var changed = false;
     if (!std.mem.eql(u8, wizard.text, original)) {
         try std.Io.Dir.cwd().setFilePermissions(io, path, .fromMode(0o600), .{});
         try tool.writeFileAtomic(io, std.Io.Dir.cwd(), path, wizard.text);
+        changed = true;
     }
     net.note(io, arena, "Saved config: {s}\n", .{chat.safeTextAll(arena, path)});
+    return changed;
 }

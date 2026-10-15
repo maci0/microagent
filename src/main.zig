@@ -21,7 +21,8 @@
 //! config    <- mcp, chat    the one config file: the prompt addendum, skills, MCP servers, the tool set
 //! stream    <- chat         folding one provider frame into the response
 //! conversation <- skill, net, chat  the system prompt, the message array and its compaction
-//! update    <- net, chat    verified self-update
+//! clispec   <- net, chat    the CLI Spec document, -o, and the JSON error envelope
+//! update    <- clispec, net, chat    verified self-update
 //! setup     <- config, tool, net, chat, mcp    interactive configuration
 //! main      <- all of the above
 //! ```
@@ -71,6 +72,7 @@ const Io = std.Io;
 
 const build_options = @import("build_options");
 const chat_mod = @import("chat.zig");
+const clispec = @import("clispec.zig");
 const config_mod = @import("config.zig");
 const conversation_mod = @import("conversation.zig");
 const mcp_mod = @import("mcp.zig");
@@ -240,7 +242,10 @@ const Action = enum { run, help, version };
 fn writeAction(io: Io, action: Action) void {
     switch (action) {
         .help => net.writeOut(io, help_text) catch {},
-        .version => net.writeOut(io, "microagent " ++ version ++ "\n") catch {},
+        .version => if (clispec.json_mode)
+            clispec.writeVersion(io) catch {}
+        else
+            net.writeOut(io, "microagent " ++ version ++ "\n") catch {},
         .run => {},
     }
 }
@@ -475,11 +480,45 @@ fn runMain(init: std.process.Init) !u8 {
 
     debug_enabled = debugEnabled(init.environ_map);
 
+    // `-o` is global and is read before the subcommand, which is where a caller
+    // puts it. A valued flag's own value is not an output format, and a bare
+    // `--` ends the scan so `microagent -- -o json` is a task.
+    const stripped = clispec.stripOutput(gpa, args.items, outputTakesValue) catch {
+        net.writeErr(io, "microagent: out of memory\n");
+        return 1;
+    };
+    defer if (stripped.failure == null and stripped.argv.ptr != args.items.ptr) gpa.free(stripped.argv);
+    if (stripped.failure) |msg| return usageError(io, "{s}", .{msg});
+    clispec.select(stripped.mode);
+    args.clearRetainingCapacity();
+    try args.appendSlice(gpa, stripped.argv);
+
     // Subcommands are dispatched
     // before the agent's own flags so it never needs an API key. Only in first
     // position, which is why the help text has to say so: anywhere else the word
     // is a task, the way `help` is a task after `-p`.
     if (args.items.len > 1 and subcommandArg(args.items[1])) {
+        if (std.mem.eql(u8, args.items[1], "schema")) {
+            const rest = args.items[2..];
+            if (rest.len == 1 and isFlag(rest[0], "-h", "--help")) {
+                try net.writeOut(io, clispec.schema_usage);
+                return 0;
+            }
+            if (rest.len == 1 and isFlag(rest[0], "-V", "--version")) {
+                writeAction(io, .version);
+                return 0;
+            }
+            const filter = try joinCommandPath(init.arena.allocator(), rest);
+            clispec.writeSchema(io, init.arena.allocator(), filter) catch |err| switch (err) {
+                error.NoMatch => return usageError(io, "schema has no command '{s}'", .{clip(filter)}),
+                else => {
+                    net.writeErr(io, "microagent: could not write the schema\n");
+                    if (clispec.json_mode) clispec.writeError(io, "failure", "could not write the schema", "");
+                    return 1;
+                },
+            };
+            return 0;
+        }
         if (std.mem.eql(u8, args.items[1], "setup")) {
             const rest = args.items[2..];
             if (rest.len == 1 and isFlag(rest[0], "-h", "--help")) {
@@ -491,8 +530,13 @@ fn runMain(init: std.process.Init) !u8 {
             const source = configSource(init.environ_map, arena, flag);
             const path = source.path orelse return configError(io, "setup needs a config path: pass --config <file> or set HOME (MICROAGENT_CONFIG must not be empty)", .{});
             writeDefaultConfig(io, arena, source);
-            setup_mod.run(io, arena, path, default_model, max_config_bytes) catch |err| {
+            const changed = setup_mod.run(io, arena, path, default_model, max_config_bytes) catch |err| {
                 net.note(io, arena, "microagent: setup: {s}; configuration edits were not saved\n", .{@errorName(err)});
+                if (clispec.json_mode) clispec.writeError(io, "failure", "setup did not save the configuration", "EOF cancels; a terminal is not required");
+                return 1;
+            };
+            if (clispec.json_mode) clispec.writeSetup(io, arena, changed, path) catch {
+                clispec.writeError(io, "failure", "could not write the setup result", "");
                 return 1;
             };
             return 0;
@@ -520,8 +564,12 @@ fn runMain(init: std.process.Init) !u8 {
                 try net.writeOut(io, setup_mod.usage);
                 return 0;
             },
+            .schema => {
+                try net.writeOut(io, clispec.schema_usage);
+                return 0;
+            },
         } else if (rest.len == 1)
-            return usageError(io, "help takes no argument '{s}'; subcommands are setup and update", .{clip(rest[0])})
+            return usageError(io, "help takes no argument '{s}'; subcommands are setup, update, and schema", .{clip(rest[0])})
         else
             // The word that names no subcommand is named, the way the
             // single-argument case above names it: a count sends the reader
@@ -687,9 +735,11 @@ fn runMain(init: std.process.Init) !u8 {
             opts.prompt = (replPrompt(io, &input.interface) catch |err| {
                 if (err == error.StreamTooLong) {
                     net.note(io, arena, "microagent: REPL prompt exceeds the {d} byte input buffer\n", .{max_repl_prompt_bytes});
+                    if (clispec.json_mode) clispec.writeError(io, "usage", "REPL prompt exceeds the input buffer", "");
                     return 2;
                 }
                 net.note(io, arena, "microagent: reading REPL input failed: {s}\n", .{@errorName(err)});
+                if (clispec.json_mode) clispec.writeError(io, "failure", "reading REPL input failed", "");
                 return 1;
             }) orelse return 0;
         }
@@ -709,13 +759,17 @@ fn runMain(init: std.process.Init) !u8 {
                 @errorName(err),
             });
             net.writeErr(io, msg);
+            if (clispec.json_mode) clispec.writeError(io, "failure", "the run failed", "");
             return 1;
         };
         // A run that stopped at a ceiling still has the model's words on stdout,
         // and they are a prefix of the work rather than an answer to it. Reporting
         // 0 would tell a script reading them that the task finished, which is the
         // one claim a ceiling-truncated answer cannot support.
-        if (ended != .answered) return exit_incomplete;
+        if (ended != .answered) {
+            if (clispec.json_mode) clispec.writeError(io, "incomplete", "the run stopped without an answer; stdout is a prefix", "");
+            return exit_incomplete;
+        }
         if (!opts.repl) return 0;
         opts.prompt = "";
     }
@@ -1074,7 +1128,8 @@ const help_text =
     \\       microagent --repl [options] ["<prompt>"]
     \\       microagent update [-c | --check]
     \\       microagent setup [--config <file>]
-    \\       microagent help [setup | update]
+    \\       microagent schema [command]
+    \\       microagent help [setup | update | schema]
     \\
     \\      --repl             read one prompt per line; /quit or /exit or EOF
     \\                         exits, /help lists the session's commands.
@@ -1136,8 +1191,16 @@ const help_text =
     \\                         two runs of one conversation are two answers;
     \\                         0 is the one setting that repeats
     \\                         (env MICROAGENT_TEMPERATURE)
+    \\  -o, --output <format> auto, text, or json (default auto). Before the
+    \\                         subcommand. auto stays text when stdout is not a
+    \\                         terminal, because the pipe contract is the model's
+    \\                         text. json asks schema, --version, setup and update
+    \\                         for one JSON document, and a failure's last stderr
+    \\                         line is an error envelope with the same exit
+    \\                         status. The API key is never printed
     \\  -h, --help             this text ("help" as the only argument too)
-    \\  -V, --version          version
+    \\  -V, --version          version. With -o json, one document of name and
+    \\                         version
     \\
     \\every long flag taking a value also takes --flag=value. A flag wins over the environment
     \\variable for the same option, and wins over one the run could not use:
@@ -1191,8 +1254,10 @@ const help_text =
     \\  and `timeout` (seconds). A name that is not a tool stops the run with exit
     \\  status 2.
     \\
-    \\"setup" is also a subcommand only as the first argument; "help setup"
-    \\prints its own text. Use --print setup or -- setup for a task of that name.
+    \\"setup" and "schema" are subcommands only as the first argument; "help
+    \\setup" and "help schema" print their own text. Use --print or -- for a
+    \\task of either name. schema prints the CLI Spec document and reads no
+    \\config.
     \\
     \\subcommands:
     \\  setup [--config <file>]
@@ -1205,6 +1270,9 @@ const help_text =
     \\                         (--check only reports; GITHUB_TOKEN lifts the
     \\                         API rate limit). "microagent update --help" has
     \\                         the details.
+    \\  schema [command]       print the CLI Spec 0.3 document. No config, no
+    \\                         credentials, no network. A command path keeps
+    \\                         that command and paths that start with it.
     \\
     \\examples:
     \\  microagent "fix the failing test in src/net.zig and run it"
@@ -1223,7 +1291,7 @@ const help_text =
     \\output: stdout carries the model's text and one JSON line per response,
     \\{"type":"usage","usage":{...}}, and nothing else. stderr carries the tool
     \\gutter, the notes and every error, so a script reading stdout gets the
-    \\answer and the token counters.
+    \\answer and the token counters. -o json does not re-encode this stdout.
     \\
     \\MDEBUG=1                 trace a stuck stream on stderr, and print the
     \\                         configuration this run resolved: model, base
@@ -1280,6 +1348,16 @@ fn configError(io: Io, comptime fmt: []const u8, args: anytype) noreturn {
 }
 
 fn die(io: Io, comptime fallback: []const u8, comptime fmt: []const u8, args: anytype) noreturn {
+    if (clispec.json_mode) {
+        const detail = std.fmt.allocPrint(std.heap.page_allocator, fmt, args) catch fallback;
+        const kind = if (comptime std.mem.eql(u8, fallback, "bad configuration")) "config" else "usage";
+        const hint = if (comptime std.mem.eql(u8, fallback, "bad configuration"))
+            "the API key is --api-key, MICROAGENT_API_KEY, or api_key in the config file"
+        else
+            "microagent --help";
+        clispec.writeError(io, kind, detail, hint);
+        std.process.exit(2);
+    }
     const msg = std.fmt.allocPrint(std.heap.page_allocator, "microagent: " ++ fmt ++ "\n", args) catch
         "microagent: " ++ fallback ++ "\n";
     net.writeErr(io, msg);
@@ -1370,7 +1448,8 @@ test "the help text spells every invocation in the usage block" {
         "usage: microagent [options] \"<prompt>\"",
         "       microagent update [-c | --check]",
         "       microagent setup [--config <file>]",
-        "       microagent help [setup | update]",
+        "       microagent schema [command]",
+        "       microagent help [setup | update | schema]",
     };
     for (lines) |line| {
         if (std.mem.indexOf(u8, help_text, line) == null) {
@@ -1405,7 +1484,9 @@ test "help names a subcommand's own text, and a word that names none is a usage 
     // own block says nothing about `help update`, so the help text has to be
     // the one place the second spelling is written down.
     try std.testing.expectEqual(HelpFor.setup, helpTarget(&.{"setup"}).?);
-    try std.testing.expect(std.mem.indexOf(u8, help_text, "microagent help [setup | update]") != null);
+    try std.testing.expectEqual(HelpFor.schema, helpTarget(&.{"schema"}).?);
+    try std.testing.expect(subcommandArg("schema"));
+    try std.testing.expect(std.mem.indexOf(u8, help_text, "microagent help [setup | update | schema]") != null);
     try std.testing.expect(std.mem.indexOf(u8, help_text, "\"help update\" is that") != null);
 }
 
@@ -2035,6 +2116,8 @@ const known_words = [_][]const u8{
     "--stall-timeout",
     "--help",
     "--version",
+    "--output",
+    "-o",
     "-p",
     "-m",
     "-b",
@@ -2042,6 +2125,7 @@ const known_words = [_][]const u8{
     help_word,
     "update",
     "setup",
+    "schema",
 };
 
 /// The action `--help` or `--version` asks for, or null when the command line
@@ -2089,21 +2173,38 @@ const help_word = "help";
 /// first position: the prompt parser never sees it, so a task of that name has
 /// to arrive after a flag or a `--`.
 fn subcommandArg(arg: []const u8) bool {
-    return std.mem.eql(u8, arg, "update") or std.mem.eql(u8, arg, "setup");
+    return std.mem.eql(u8, arg, "update") or std.mem.eql(u8, arg, "setup") or std.mem.eql(u8, arg, "schema");
 }
 
 /// What `microagent help` with the arguments after the word resolves to, or null
 /// when those arguments are a usage error. A subcommand's name asks for that
 /// subcommand's own text, and `-h` asks for the text `help` already is, so it is
 /// the same request rather than a second one.
-const HelpFor = enum { self_text, update, setup };
+const HelpFor = enum { self_text, update, setup, schema };
 
 fn helpTarget(rest: []const []const u8) ?HelpFor {
     if (rest.len != 1) return null;
     if (std.mem.eql(u8, rest[0], "setup")) return .setup;
     if (std.mem.eql(u8, rest[0], "update")) return .update;
+    if (std.mem.eql(u8, rest[0], "schema")) return .schema;
     if (isFlag(rest[0], "-h", "--help")) return .self_text;
     return null;
+}
+
+/// Whether `name` is a flag whose next argument is its value, so `-o` stripping
+/// does not eat that value. `--output` itself is not one of these.
+fn outputTakesValue(name: []const u8) bool {
+    return valuedFlag(name) != null;
+}
+
+fn joinCommandPath(arena: std.mem.Allocator, rest: []const []const u8) ![]const u8 {
+    if (rest.len == 0) return "";
+    var buf: std.ArrayList(u8) = .empty;
+    for (rest, 0..) |part, i| {
+        if (i != 0) try buf.append(arena, ' ');
+        try buf.appendSlice(arena, part);
+    }
+    return buf.items;
 }
 
 /// The word a `help` invocation named that no subcommand answers to, so the

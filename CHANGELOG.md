@@ -19,6 +19,25 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-10-15
+
+### Added
+
+- `microagent schema` prints a CLI Spec 0.3 document and exits 0. It reads no
+  config, no credentials, and no network. `microagent schema <command>` keeps
+  that command and any command whose path starts with it. `schema` is a
+  subcommand only as the first argument; a task of that name goes after `--`
+  or `--print`.
+- `-o` / `--output` selects `auto`, `text`, or `json` (default `auto`) and is
+  accepted before the subcommand. The pipe contract stays the model's text, so
+  `auto` stays text on a pipe and an explicit `-o json` is what asks for JSON.
+  `--version`, `setup`, and `update` (including `--check`) then print one JSON
+  document. `update` and `setup` include `changed`. A JSON-mode error's last
+  stderr line is `{"error":{"kind","message","hint"}}`, and the exit status
+  stays 2 for a bad command line or bad configuration, 1 for a failure, 3 for
+  a run that stopped without an answer, and 130 for an interrupt. The model's
+  own stdout is unchanged, and the session log's JSON keys are unchanged.
+
 ## [0.17.0] - 2026-10-14
 
 ### Changed
@@ -3286,7 +3305,8 @@ First release.
   `aarch64-macos` with a checksum sidecar each, and refuses a tag that does not name the version in
   `build.zig.zon`.
 
-[Unreleased]: https://github.com/maci0/microagent/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/maci0/microagent/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/maci0/microagent/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/maci0/microagent/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/maci0/microagent/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/maci0/microagent/compare/v0.14.0...v0.15.0

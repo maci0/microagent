@@ -26,6 +26,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const net = @import("net.zig");
 const chat = @import("chat.zig");
+const clispec = @import("clispec.zig");
 
 const version = @import("build_options").version;
 
@@ -274,6 +275,11 @@ fn say(io: std.Io, comptime fmt: []const u8, args: anytype) void {
 
 fn fail(io: std.Io, comptime fmt: []const u8, args: anytype) u8 {
     say(io, "microagent update: " ++ fmt, args);
+    if (clispec.json_mode) {
+        var buf: [line_bytes]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, fmt, args) catch "update failed";
+        clispec.writeError(io, "failure", msg, "");
+    }
     return 1;
 }
 
@@ -599,7 +605,10 @@ const usage_text =
     \\                        else SSL_CERT_FILE
     \\
     \\stdout is the release page URL with --check, else one "Installed <tag> to
-    \\<path>" line (nothing when already current); notes go to stderr. Exit 0:
+    \\<path>" line (nothing when already current). -o json replaces that stdout
+    \\with one document (tag, page, running, relation, current, changed, path)
+    \\and an already-current install sets changed to false. auto and text keep
+    \\the text. Notes go to stderr. Exit 0:
     \\checked, installed or current. Exit 1: failed. Exit 2: usage error, with the
     \\reason and this text on stderr. A misspelled flag is answered with the one
     \\it is closest to, so --chek says did you mean --check?
@@ -673,12 +682,21 @@ pub fn run(
             return 0;
         },
         .version => {
-            net.writeOut(io, tool_name ++ " " ++ version ++ "\n") catch {};
+            if (clispec.json_mode) {
+                clispec.writeVersion(io) catch return fail(io, "could not write the version", .{});
+            } else {
+                net.writeOut(io, tool_name ++ " " ++ version ++ "\n") catch {};
+            }
             return 0;
         },
         .unknown => |arg| {
-            say(io, "microagent update: {s}", .{unknownArgument(arena, arg)});
-            net.writeErr(io, usage_text);
+            const msg = unknownArgument(arena, arg);
+            say(io, "microagent update: {s}", .{msg});
+            if (clispec.json_mode) {
+                clispec.writeError(io, "usage", msg, "microagent update --help");
+            } else {
+                net.writeErr(io, usage_text);
+            }
             return 2;
         },
         .check => true,
@@ -720,13 +738,45 @@ pub fn run(
         .gt => say(io, "{s} is newer than the latest release ({s}); nothing to install", .{ version, tag }),
         .lt => say(io, "New release: {s} (running {s})", .{ tag, version }),
     }
+    const relation: []const u8 = if (order == .gt)
+        "newer"
+    else if (order == .lt)
+        "older"
+    else if (current or same_version)
+        "current"
+    else
+        "incomparable";
+    const is_current = std.mem.eql(u8, relation, "current");
 
     if (check_only or current or same_version or order == .gt) {
-        if (check_only) writeLine(io, arena, quoteUntrusted(arena, rel.page)) catch |err|
+        if (clispec.json_mode) {
+            clispec.writeUpdateStatus(io, arena, .{
+                .tag = rel.tag,
+                .page = rel.page,
+                .running = version,
+                .relation = relation,
+                .current = is_current,
+                .changed = false,
+                .path = null,
+            }) catch |err| return fail(io, "could not write the status to stdout ({s})", .{@errorName(err)});
+        } else if (check_only) writeLine(io, arena, quoteUntrusted(arena, rel.page)) catch |err|
             return fail(io, "could not write the release page to stdout ({s})", .{@errorName(err)});
         return 0;
     }
-    if (!tag_is_version) return 0;
+    if (!tag_is_version) {
+        if (clispec.json_mode) {
+            clispec.writeUpdateStatus(io, arena, .{
+                .tag = rel.tag,
+                .page = rel.page,
+                .running = version,
+                .relation = relation,
+                .current = false,
+                .changed = false,
+                .path = null,
+            }) catch |err| return fail(io, "could not write the status to stdout ({s})", .{@errorName(err)});
+        }
+        return 0;
+    }
 
     const asset_name = assetName(arena, rel.tag, builtin.cpu.arch, builtin.os.tag) catch
         return fail(io, "out of memory", .{});
@@ -755,10 +805,22 @@ pub fn run(
         error.ChecksumMismatch => fail(io, "checksum mismatch; refusing to install unverified binary", .{}),
         else => fail(io, "could not replace {s} ({s}); the binary was not replaced", .{ shown_exe, @errorName(err) }),
     };
-    const line = std.fmt.allocPrint(arena, "Installed {s} to {s}", .{ tag, shown_exe }) catch
-        return fail(io, "{s} was installed", .{shown_exe});
-    writeLine(io, arena, line) catch |err|
-        return fail(io, "{s} was installed, but the install line could not be written to stdout ({s})", .{ shown_exe, @errorName(err) });
+    if (clispec.json_mode) {
+        clispec.writeUpdateStatus(io, arena, .{
+            .tag = rel.tag,
+            .page = rel.page,
+            .running = version,
+            .relation = relation,
+            .current = false,
+            .changed = true,
+            .path = exe,
+        }) catch |err| return fail(io, "{s} was installed, but the status could not be written to stdout ({s})", .{ shown_exe, @errorName(err) });
+    } else {
+        const line = std.fmt.allocPrint(arena, "Installed {s} to {s}", .{ tag, shown_exe }) catch
+            return fail(io, "{s} was installed", .{shown_exe});
+        writeLine(io, arena, line) catch |err|
+            return fail(io, "{s} was installed, but the install line could not be written to stdout ({s})", .{ shown_exe, @errorName(err) });
+    }
     return 0;
 }
 

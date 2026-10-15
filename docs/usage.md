@@ -46,7 +46,8 @@ usage: microagent [options] "<prompt>"
        microagent --repl [options] ["<prompt>"]
        microagent update [-c | --check]
        microagent setup [--config <file>]
-       microagent help [setup | update]
+       microagent schema [command]
+       microagent help [setup | update | schema]
 
       --repl             read one prompt per line; /quit or /exit or EOF
                          exits, /help lists the session's commands.
@@ -107,8 +108,16 @@ usage: microagent [options] "<prompt>"
                          two runs of one conversation are two answers;
                          0 is the one setting that repeats
                          (env MICROAGENT_TEMPERATURE)
+  -o, --output <format> auto, text, or json (default auto). Before the
+                         subcommand. auto stays text when stdout is not a
+                         terminal, because the pipe contract is the model's
+                         text. json asks schema, --version, setup and update
+                         for one JSON document, and a failure's last stderr
+                         line is an error envelope with the same exit
+                         status. The API key is never printed
   -h, --help             this text ("help" as the only argument too)
-  -V, --version          version
+  -V, --version          version. With -o json, one document of name and
+                         version
 
 every long flag taking a value also takes --flag=value. A flag wins over the environment
 variable for the same option, and wins over one the run could not use:
@@ -162,8 +171,10 @@ Tools (`[tools.<name>]` tables in the config):
   and `timeout` (seconds). A name that is not a tool stops the run with exit
   status 2.
 
-"setup" is also a subcommand only as the first argument; "help setup"
-prints its own text. Use --print setup or -- setup for a task of that name.
+"setup" and "schema" are subcommands only as the first argument; "help
+setup" and "help schema" print their own text. Use --print or -- for a
+task of either name. schema prints the CLI Spec document and reads no
+config.
 
 subcommands:
   setup [--config <file>]
@@ -176,6 +187,9 @@ subcommands:
                          (--check only reports; GITHUB_TOKEN lifts the
                          API rate limit). "microagent update --help" has
                          the details.
+  schema [command]       print the CLI Spec 0.3 document. No config, no
+                         credentials, no network. A command path keeps
+                         that command and paths that start with it.
 
 examples:
   microagent "fix the failing test in src/net.zig and run it"
@@ -194,7 +208,7 @@ stdout is a prefix of the work rather than an answer, 130 interrupted
 output: stdout carries the model's text and one JSON line per response,
 {"type":"usage","usage":{...}}, and nothing else. stderr carries the tool
 gutter, the notes and every error, so a script reading stdout gets the
-answer and the token counters.
+answer and the token counters. -o json does not re-encode this stdout.
 
 MDEBUG=1                 trace a stuck stream on stderr, and print the
                          configuration this run resolved: model, base
