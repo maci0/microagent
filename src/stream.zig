@@ -858,12 +858,15 @@ test "a repeated call id and name are copied once, not once a fragment" {
     try applyCallDelta(arena, .{ .integer = 0 }, "call_1", "read", "", &result, &calls);
     try std.testing.expectEqualStrings("call_1", calls.items[0].id);
     try std.testing.expectEqualStrings("read", calls.items[0].name);
-    const after_first = run_state.queryCapacity();
+    const first_id = calls.items[0].id.ptr;
+    const first_name = calls.items[0].name.ptr;
 
     const fragments: usize = 500;
     var i: usize = 0;
     while (i < fragments) : (i += 1) {
         try applyCallDelta(arena, .{ .integer = 0 }, "call_1", "read", "{\"pa", &result, &calls);
+        try std.testing.expect(calls.items[0].id.ptr == first_id);
+        try std.testing.expect(calls.items[0].name.ptr == first_name);
     }
 
     // The values are the same strings, held in the same buffers: nothing about
@@ -871,12 +874,8 @@ test "a repeated call id and name are copied once, not once a fragment" {
     try std.testing.expectEqualStrings("call_1", calls.items[0].id);
     try std.testing.expectEqualStrings("read", calls.items[0].name);
     try std.testing.expectEqual(fragments * 4, calls.items[0].args.items.len);
-    const growth = run_state.queryCapacity() - after_first;
-    // Geometric growth over `fragments * 4` argument bytes, with nothing else
-    // allocated per frame. Copying the id and the name every time would add
-    // roughly `fragments * (7 + 4)` bytes of freed-then-reallocated space on
-    // top, and the freed blocks are the ones the arena cannot hand back.
-    try std.testing.expect(growth < 8 * fragments * 4);
+    // Pointer identity checks the no-copy contract independently of the
+    // allocator's platform-specific capacity growth.
 }
 
 // The guard above is a skip on an unchanged value, and the case it must not

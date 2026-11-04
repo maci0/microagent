@@ -19,8 +19,16 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-11-04
+
 ### Fixed
 
+- Create the default configuration atomically and leave an existing file untouched.
+- Treat a repeated edit as already applied instead of changing the file again.
+- Serialize concurrent stderr notes and MCP handshake arena writes.
+- Record benchmark run timestamps in UTC regardless of the host timezone.
+- Check repeated tool-call IDs and names by buffer identity, avoiding a
+  platform-dependent allocator-capacity assertion on macOS.
 - Build with Homebrew's Zig layout on macOS by discovering the compiler's
   library directory instead of assuming it sits beside the executable.
 
@@ -3310,7 +3318,8 @@ First release.
   `aarch64-macos` with a checksum sidecar each, and refuses a tag that does not name the version in
   `build.zig.zon`.
 
-[Unreleased]: https://github.com/maci0/microagent/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/maci0/microagent/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/maci0/microagent/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/maci0/microagent/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/maci0/microagent/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/maci0/microagent/compare/v0.15.0...v0.16.0
