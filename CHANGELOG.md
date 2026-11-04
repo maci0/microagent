@@ -19,6 +19,22 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-11-04
+
+### Added
+
+- `microagent acp` serves the Agent Client Protocol v1 over stdin and stdout.
+  It implements initialization, session creation, prompts, streaming message
+  and tool-call updates, cancellation, session list/resume/load/delete/close,
+  and stdio and HTTP MCP servers supplied by the client.
+
+## [0.21.0] - 2026-11-04
+
+### Changed
+
+- Reduce allocations when suggesting corrections for misspelled options.
+- Enable additional Python and YAML lint checks.
+
 ## [0.20.0] - 2026-11-04
 
 ### Changed
@@ -3332,7 +3348,9 @@ First release.
   `aarch64-macos` with a checksum sidecar each, and refuses a tag that does not name the version in
   `build.zig.zon`.
 
-[Unreleased]: https://github.com/maci0/microagent/compare/v0.20.0...HEAD
+[Unreleased]: https://github.com/maci0/microagent/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/maci0/microagent/compare/v0.21.0...v0.22.0
+[0.21.0]: https://github.com/maci0/microagent/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/maci0/microagent/compare/v0.19.1...v0.20.0
 [0.19.1]: https://github.com/maci0/microagent/compare/v0.19.0...v0.19.1
 [0.19.0]: https://github.com/maci0/microagent/compare/v0.18.0...v0.19.0

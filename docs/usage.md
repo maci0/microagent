@@ -12,6 +12,7 @@ Everything a run reads and everything it writes. The [README](../README.md) is t
 - [Output](#output): [stdout](#stdout), [exit status](#exit-status), [session log](#session-log), [what survives](#what-survives-and-how-to-get-it-back)
 - [Failure handling](#failure-handling)
 - [Driving it from gauntlet](#driving-it-from-gauntlet)
+- [Agent Client Protocol](#agent-client-protocol)
 - [Setup](#setup)
 - [Update](#update)
 - [Versioning](#versioning)
@@ -47,7 +48,8 @@ usage: microagent [options] "<prompt>"
        microagent update [-c | --check]
        microagent setup [--config <file>]
        microagent schema [command]
-       microagent help [setup | update | schema]
+       microagent acp
+       microagent help [setup | update | schema | acp]
 
       --repl             read one prompt per line; /quit or /exit or EOF
                          exits, /help lists the session's commands.
@@ -190,6 +192,8 @@ subcommands:
   schema [command]       print the CLI Spec 0.3 document. No config, no
                          credentials, no network. A command path keeps
                          that command and paths that start with it.
+  acp                    serve the Agent Client Protocol v1 on stdin and
+                         stdout for an editor or harness client.
 
 examples:
   microagent "fix the failing test in src/net.zig and run it"
@@ -1050,6 +1054,36 @@ worth nothing, and one that stops deliberately still has the model's diff. A rev
 
 Usage is always machine-readable, so no `stream` flags are needed, and no `usage.roots` entry is
 required.
+
+## Agent Client Protocol
+
+`microagent acp` serves the Agent Client Protocol (ACP) v1 on stdin and stdout. A client
+launches it as a subprocess, sends JSON-RPC 2.0 frames, and receives streamed
+`session/update` notifications and one result per prompt. Configuration, provider
+credentials, skills, tools and the session log resolve exactly as they do for a
+terminal run; the example below needs the same `MICROAGENT_API_KEY`,
+`MICROAGENT_BASE_URL` and `MICROAGENT_MODEL`.
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}
+{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/workspace","mcpServers":[]}}
+{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"sess_...","prompt":[{"type":"text","text":"fix the failing test"}]}}
+```
+
+The agent advertises `close`, `delete`, `list` and `resume` session capabilities,
+text, resource-link and embedded-text prompts, and both stdio and HTTP MCP
+servers. Model text arrives as `agent_message_chunk`, each tool call as
+`tool_call` followed by `tool_call_update` statuses (`in_progress`, then
+`completed` or `failed` with its output). A `session/cancel` notification stops
+the provider request and any tool call that has not started, and the outstanding
+`session/prompt` answers `{"stopReason":"cancelled"}`. Prompts answer
+`end_turn`, `max_turn_requests`, `max_tokens`, `refusal` or `cancelled`.
+
+A session's `cwd` is the directory the tools run in, and every file path the
+client sends must be absolute. The client-supplied MCP `env` and header values
+are used to launch or reach those servers and are never echoed in a session
+update. Image and audio prompt blocks are refused because this agent advertises
+neither capability.
 
 ## Setup
 

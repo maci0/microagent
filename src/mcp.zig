@@ -216,6 +216,10 @@ pub const Server = struct {
         /// the server needs no key.
         key_header: []const u8 = "",
         key_value: []const u8 = "",
+        /// Every header the caller configured, including the credential one.
+        /// ACP clients describe HTTP MCP servers as a list of headers rather
+        /// than as one key, so the transport carries both shapes.
+        headers: []const [2][]const u8 = &.{},
         /// The longest one request may take, from the first byte sent to the
         /// last one read.
         timeout_ms: u64,
@@ -554,25 +558,27 @@ pub const Server = struct {
         try writeFrame(jb.writer(), id, method, params_json);
         const body = jb.items();
 
-        var extra: [5]std.http.Header = undefined;
-        var extra_len: usize = 0;
-        extra[extra_len] = .{ .name = "content-type", .value = "application/json" };
-        extra_len += 1;
-        extra[extra_len] = .{ .name = "accept", .value = "application/json, text/event-stream" };
-        extra_len += 1;
+        var extra: std.ArrayList(std.http.Header) = .empty;
+        defer extra.deinit(self.run_arena);
+        try extra.append(self.run_arena, .{ .name = "content-type", .value = "application/json" });
+        try extra.append(self.run_arena, .{ .name = "accept", .value = "application/json, text/event-stream" });
         if (http.negotiated_version) |selected| {
-            extra[extra_len] = .{ .name = "mcp-protocol-version", .value = selected };
-            extra_len += 1;
+            try extra.append(self.run_arena, .{ .name = "mcp-protocol-version", .value = selected });
         }
         if (http.session_id.len != 0) {
-            extra[extra_len] = .{ .name = "mcp-session-id", .value = http.session_id };
-            extra_len += 1;
+            try extra.append(self.run_arena, .{ .name = "mcp-session-id", .value = http.session_id });
         }
         // Not a `privileged` header: this client never writes those. Nothing
         // is redirected, so the key goes to the one host the entry names.
         if (http.key_value.len != 0) {
-            extra[extra_len] = .{ .name = http.key_header, .value = http.key_value };
-            extra_len += 1;
+            try extra.append(self.run_arena, .{ .name = http.key_header, .value = http.key_value });
+        }
+        // Directly configured headers. The key pair above is already in this
+        // list when the caller described it that way; a client that sends an
+        // Authorization header through `headers` must not have it sent twice.
+        for (http.headers) |header| {
+            if (http.key_value.len != 0 and std.ascii.eqlIgnoreCase(header[0], http.key_header)) continue;
+            try extra.append(self.run_arena, .{ .name = header[0], .value = header[1] });
         }
 
         var req = try http.client.request(.POST, http.uri, .{
@@ -580,7 +586,7 @@ pub const Server = struct {
             // request may carry a key, and the answer to it is not a page.
             .redirect_behavior = .unhandled,
             .headers = .{ .user_agent = .{ .override = net.user_agent } },
-            .extra_headers = extra[0..extra_len],
+            .extra_headers = extra.items,
         });
         defer req.deinit();
         const connection = req.connection.?;
@@ -1200,6 +1206,10 @@ pub const Entry = struct {
     /// The key itself, read out of the environment by `withKeys`. Empty when
     /// the entry names no variable or the variable is unset or empty.
     api_key: []const u8 = "",
+    /// Headers supplied directly rather than through a variable, as ACP's
+    /// `mcpServers` entries do. Each is `{ name, value }`; the credential
+    /// fields above still describe the one this client treats as a key.
+    headers: []const [2][]const u8 = &.{},
 };
 
 /// The public remote servers `[tools.<name>]` can switch on. They are served
@@ -1991,6 +2001,7 @@ fn openRemote(
             .uri = uri.?,
             .key_header = entry.api_key_header,
             .key_value = key_value,
+            .headers = entry.headers,
             .timeout_ms = @as(u64, entry.timeout_s) * std.time.ms_per_s,
         } },
         .tools = &.{},

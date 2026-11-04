@@ -98,6 +98,10 @@ comptime {
     _ = @import("copy");
 }
 
+test {
+    _ = @import("acp.zig");
+}
+
 /// The model a run uses when neither the command line, the environment nor the
 /// config file named one. The base url has no such default: an endpoint is a
 /// choice about whose account the tokens are billed to, so one of the three
@@ -314,6 +318,11 @@ const Options = struct {
     sandbox: config_mod.Sandbox = .{},
     /// Absolute directory roots where writes are allowed when sandboxed.
     writable_roots: []const []const u8 = &.{},
+    /// When a run is answering an Agent Client Protocol prompt, every piece
+    /// of model text and every tool result goes here instead of stdout. The
+    /// protocol owns stdout in that mode; the JSON-RPC frames are the only
+    /// bytes a client reads.
+    acp_sink: ?*acp_mod.Sink = null,
     /// What the command line asked for. `--help` and `--version` stop the
     /// parse where they appear, before any option value is needed.
     action: Action = .run,
@@ -457,7 +466,7 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
         // them, and the one it skips on a failed run is the MCP shutdown, which is
         // what kills the server process groups. The exit is here instead, after
         // every defers this frame owns has run.
-        break :status try runMain(.{
+        break :status try dispatchMain(.{
             .minimal = minimal,
             .arena = &arena,
             .gpa = gpa,
@@ -569,7 +578,7 @@ fn runMain(init: std.process.Init) !u8 {
                 return 0;
             },
         } else if (rest.len == 1)
-            return usageError(io, "help takes no argument '{s}'; subcommands are setup, update, and schema", .{clip(rest[0])})
+            return usageError(io, "help takes no argument '{s}'; subcommands are setup, update, schema, and acp", .{clip(rest[0])})
         else
             // The word that names no subcommand is named, the way the
             // single-argument case above names it: a count sends the reader
@@ -1129,7 +1138,8 @@ const help_text =
     \\       microagent update [-c | --check]
     \\       microagent setup [--config <file>]
     \\       microagent schema [command]
-    \\       microagent help [setup | update | schema]
+    \\       microagent acp
+    \\       microagent help [setup | update | schema | acp]
     \\
     \\      --repl             read one prompt per line; /quit or /exit or EOF
     \\                         exits, /help lists the session's commands.
@@ -1273,6 +1283,8 @@ const help_text =
     \\  schema [command]       print the CLI Spec 0.3 document. No config, no
     \\                         credentials, no network. A command path keeps
     \\                         that command and paths that start with it.
+    \\  acp                    serve the Agent Client Protocol v1 on stdin and
+    \\                         stdout for an editor or harness client.
     \\
     \\examples:
     \\  microagent "fix the failing test in src/net.zig and run it"
@@ -1449,7 +1461,8 @@ test "the help text spells every invocation in the usage block" {
         "       microagent update [-c | --check]",
         "       microagent setup [--config <file>]",
         "       microagent schema [command]",
-        "       microagent help [setup | update | schema]",
+        "       microagent acp",
+        "       microagent help [setup | update | schema | acp]",
     };
     for (lines) |line| {
         if (std.mem.indexOf(u8, help_text, line) == null) {
@@ -1486,7 +1499,7 @@ test "help names a subcommand's own text, and a word that names none is a usage 
     try std.testing.expectEqual(HelpFor.setup, helpTarget(&.{"setup"}).?);
     try std.testing.expectEqual(HelpFor.schema, helpTarget(&.{"schema"}).?);
     try std.testing.expect(subcommandArg("schema"));
-    try std.testing.expect(std.mem.indexOf(u8, help_text, "microagent help [setup | update | schema]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_text, "microagent help [setup | update | schema | acp]") != null);
     try std.testing.expect(std.mem.indexOf(u8, help_text, "\"help update\" is that") != null);
 }
 
@@ -3036,7 +3049,7 @@ fn spendNotice(arena: std.mem.Allocator, spent: u64, cap: ?u64, turn: usize) ?[]
 /// tool and is not an answer either (`incompleteAnswer`). Both leave a prefix of
 /// an answer on stdout, or none, so neither may report itself as a finished
 /// run.
-const TurnEnd = enum { answered, wants_tools, cut_off };
+const TurnEnd = enum { answered, wants_tools, cut_off, max_tokens, refusal };
 
 /// The agent loop: keep asking until the model stops calling tools.
 ///
@@ -3086,6 +3099,7 @@ fn run(
     var repeat_rounds: usize = 0;
     while (turn < opts.max_turns) : (turn += 1) {
         _ = turn_state.reset(.{ .retain_with_limit = turn_arena_retain_bytes });
+        if (opts.acp_sink) |s| if (s.isCancelled()) return .cut_off;
         // Before the time budget, because the final push below is a turn like
         // any other and would spend past a ceiling the operator set in money
         // rather than in seconds. Announced once, on the turn that crosses the
@@ -3128,7 +3142,7 @@ fn run(
             // run on the first turn that asked for a tool, which is every turn
             // of a run that does any work.
             .wants_tools => continue,
-            .cut_off => return .cut_off,
+            .cut_off, .max_tokens, .refusal => |end| return end,
             // The model stopped asking for tools. If it changed the tree
             // without ever running a test, ask for that once rather than
             // accepting the answer: a fix nobody ran is the failure mode this
@@ -3489,6 +3503,7 @@ fn runTurn(
     // not a tool call, so nothing of it is appended and the run ends here with
     // the reason already on stderr.
     var result = streamChat(client, io, gpa, arena, opts, ep, prefix, budget, msgs.items) catch |err| switch (err) {
+        error.Cancelled, error.Canceled => return .cut_off,
         error.BudgetExhausted => return .cut_off,
         error.ResponseTooLarge => {
             session_mod.writeFailure(io, arena, session, session_mod.elapsedMs(io, model_clock, asked), @errorName(err));
@@ -3519,7 +3534,7 @@ fn runTurn(
     // lands is not.
     session_mod.writeRecord(io, arena, session, model_ms, &result);
     spent.* +|= result.total_tokens;
-    try finishTurn(io, arena, gpa, msgs, &result, usage, budget, tool_env, progress, opts.skills, mcp, opts.disabled_tools, opts.deny_commands, opts.writable_roots);
+    try finishTurn(io, arena, gpa, msgs, &result, usage, budget, tool_env, progress, opts.skills, mcp, opts.disabled_tools, opts.deny_commands, opts.writable_roots, opts.acp_sink);
     if (result.unusable_calls != 0 or result.over_cap_fragments != 0) {
         try conversation_mod.appendMessage(gpa, msgs, "user", "Some requested tool calls were not dispatched because their id/name or JSON arguments were invalid, or the parallel-call limit was exceeded. Reissue only the missing work as valid tool calls.");
         return .wants_tools;
@@ -3558,6 +3573,8 @@ fn runTurn(
     // unfinished, so a caller sees which of the four it was.
     if (incompleteAnswer(arena, &result, opts.max_tokens)) |notice| {
         net.note(io, arena, "microagent: {s}\n", .{notice});
+        if (std.mem.eql(u8, result.finish_reason, "content_filter")) return .refusal;
+        if (std.mem.eql(u8, result.finish_reason, "length")) return .max_tokens;
         return .cut_off;
     }
     return .answered;
@@ -3876,6 +3893,7 @@ fn streamChat(
 ) !chat_mod.ChatResult {
     var ask: u32 = 0;
     while (true) {
+        if (opts.acp_sink) |s| if (s.isCancelled()) return error.Cancelled;
         ask += 1;
         const result = streamChatWithinBudget(client, io, gpa, arena, opts, ep, prefix, budget, msgs) catch |err| {
             if (err == error.BudgetExhausted)
@@ -3902,13 +3920,30 @@ fn streamChatWithinBudget(
     budget: Budget,
     msgs: []const u8,
 ) !chat_mod.ChatResult {
-    if (budget.deadline_ns == null) return streamChatOnce(client, io, gpa, arena, opts, ep, prefix, budget, msgs);
+    const sink = opts.acp_sink;
+    if (budget.deadline_ns == null and sink == null) return streamChatOnce(client, io, gpa, arena, opts, ep, prefix, budget, msgs);
     if (budget.expired(io)) return error.BudgetExhausted;
+    if (sink) |s| if (s.isCancelled()) return error.Cancelled;
+
+    const Wait = struct {
+        fn cancelled(s: *acp_mod.Sink) Io.Cancelable!void {
+            // A prompt may be cancelled while the provider is silent and the
+            // read is blocked. Poll the flag on a short clock so the select
+            // below can cancel the in-flight request, rather than waiting for
+            // the provider's next byte or the stall timeout.
+            while (!s.isCancelled()) {
+                try net.durationMs(25).sleep(s_io);
+            }
+        }
+        var s_io: Io = undefined;
+    };
+
     const Outcome = union(enum) {
         answered: anyerror!chat_mod.ChatResult,
         expired: Io.Cancelable!void,
+        cancelled: Io.Cancelable!void,
     };
-    var slots: [2]Outcome = undefined;
+    var slots: [3]Outcome = undefined;
     var select: Io.Select(Outcome) = .init(io, &slots);
     // A response can finish at the same instant as the clock; reclaim any
     // completed answer the race did not return, rather than discard ownership.
@@ -3917,13 +3952,20 @@ fn streamChatWithinBudget(
             var result = value;
             result.deinit(gpa);
         } else |_| {},
-        .expired => {},
+        .expired, .cancelled => {},
     };
     try select.concurrent(.answered, streamChatOnce, .{ client, io, gpa, arena, opts, ep, prefix, budget, msgs });
-    try select.concurrent(.expired, Budget.sleep, .{ budget, io });
+    if (budget.deadline_ns != null) {
+        try select.concurrent(.expired, Budget.sleep, .{ budget, io });
+    }
+    if (sink) |s| {
+        Wait.s_io = io;
+        try select.concurrent(.cancelled, Wait.cancelled, .{s});
+    }
     return switch (try select.await()) {
         .answered => |answer| answer,
         .expired => error.BudgetExhausted,
+        .cancelled => error.Cancelled,
     };
 }
 
@@ -4195,6 +4237,10 @@ fn streamChatOnce(
     var done = false;
     var unparsable: usize = 0;
     while (!done and !result.dropped) {
+        // A client that cancelled the prompt must not wait for the whole
+        // billable completion. The check sits beside the budget check for the
+        // same reason: between reads, so a busy stream stops promptly.
+        if (opts.acp_sink) |s| if (s.isCancelled()) return error.Cancelled;
         // Check between reads too, so a busy stream stops without waiting for
         // the budget task to cancel its next blocking operation.
         if (budget.expired(io)) {
@@ -4258,7 +4304,7 @@ fn streamChatOnce(
         // nothing waits on it that would not have waited on the next read
         // anyway, and the run's last flush holds the same tail back.
         const held = chat_mod.partialTailLen(out_buf.items);
-        try writeOutPrefix(io, arena, &out_buf, out_buf.items.len - held, shown_url);
+        try writeOutPrefix(io, arena, opts.acp_sink, &out_buf, out_buf.items.len - held, shown_url);
     }
 
     if (unparsable > 0)
@@ -4267,11 +4313,11 @@ fn streamChatOnce(
     // Discard every call from the incomplete turn. `dropped` preserves exact
     // cap answers and UTF-8 cuts just below the cap.
     if (result.dropped) {
-        try writeOutPrefix(io, arena, &out_buf, out_buf.items.len - chat_mod.partialTailLen(out_buf.items), shown_url);
+        try writeOutPrefix(io, arena, opts.acp_sink, &out_buf, out_buf.items.len - chat_mod.partialTailLen(out_buf.items), shown_url);
         out_buf.clearRetainingCapacity();
         if (result.content.items.len != 0) {
             try out_buf.append(gpa, '\n');
-            try writeOutPrefix(io, arena, &out_buf, out_buf.items.len, shown_url);
+            try writeOutPrefix(io, arena, opts.acp_sink, &out_buf, out_buf.items.len, shown_url);
         }
         net.note(io, arena, "microagent: the completion stream from {s} passed the {d} byte ceiling for one turn with {d} tool call(s); the turn is discarded, its calls are not dispatched, and what is on stdout is a prefix of the answer\n", .{
             shown_url, stream_mod.max_response_bytes, calls.items.len,
@@ -4326,11 +4372,16 @@ fn streamChatOnce(
     const Emit = struct {
         fn write(itself: *@This(), bytes: []const u8) !void {
             if (bytes.len == 0) return;
+            if (itself.sink) |s| {
+                s.emitContent(bytes);
+                return;
+            }
             try net.writeOut(itself.io, bytes);
         }
         io: Io,
+        sink: ?*acp_mod.Sink,
     };
-    var emit: Emit = .{ .io = io };
+    var emit: Emit = .{ .io = io, .sink = opts.acp_sink };
     flushAnswer(arena, &out_buf, result.content.items.len > 0, &emit) catch |err| {
         net.note(io, arena, "microagent: the text streamed from {s} could not be written to stdout ({s}); the rest of this run's output is not on it either, and the run fails rather than finishing with a partial answer\n", .{ shown_url, @errorName(err) });
         return err;
@@ -4473,12 +4524,15 @@ test "the last flush cuts a half character and still writes the newline" {
 fn writeOutPrefix(
     io: Io,
     arena: std.mem.Allocator,
+    sink: ?*acp_mod.Sink,
     out_buf: *std.ArrayList(u8),
     len: usize,
     shown_url: []const u8,
 ) !void {
     if (len == 0) return;
-    net.writeOut(io, out_buf.items[0..len]) catch |err| {
+    if (sink) |s| {
+        s.emitContent(out_buf.items[0..len]);
+    } else net.writeOut(io, out_buf.items[0..len]) catch |err| {
         net.note(io, arena, "microagent: the text streamed from {s} could not be written to stdout ({s}); the rest of this run's output is not on it either, and the run fails rather than finishing with a partial answer\n", .{ shown_url, @errorName(err) });
         return err;
     };
@@ -4623,6 +4677,7 @@ fn finishTurn(
     disabled: std.EnumSet(chat_mod.Tool),
     deny_commands: []const []const u8,
     writable_roots: []const []const u8,
+    acp_sink: ?*acp_mod.Sink,
 ) !void {
     try msgs.appendSlice(gpa, ",");
     try msgs.appendSlice(gpa, try assistantMessage(arena, result));
@@ -4635,12 +4690,15 @@ fn finishTurn(
         // assistant turn that names calls the conversation never answers is one
         // the next request rejects, so the loop below would spend a turn on a
         // 400 instead of on the answer.
-        const output = if (budget.expired(io)) blk: {
+        if (acp_sink) |sink| sink.emitTool(call.id, call.name, call.args.items, "pending", "");
+        const cancelled = if (acp_sink) |sink| sink.isCancelled() else false;
+        const output = if (budget.expired(io) or cancelled) blk: {
             // Announced here rather than by the half that would have run it:
             // no half is reached on this path, and this outcome is the only
             // record a reader has of a call the budget refused to pay for.
             noteCallNotRun(io, arena, call);
             noteToolOutcome(io, arena, call.name, .not_run, 0);
+            if (acp_sink) |sink| sink.emitTool(call.id, call.name, call.args.items, "failed", "error: not run, the run's time budget is exhausted");
             break :blk "error: not run, the run's time budget is exhausted";
         } else blk: {
             // Both flags are read from what the run actually did, so they are
@@ -4667,6 +4725,7 @@ fn finishTurn(
             // never advertised the name, so a call to it here is the model
             // asking for a tool the schema did not offer.
             const started_ns = Io.Timestamp.now(io, tool_clock).nanoseconds;
+            if (acp_sink) |sink| sink.emitTool(call.id, call.name, call.args.items, "in_progress", "");
             const answer = dispatchCall(io, arena, skills, mcp, disabled, call, budget.toolCeilingMs(io), tool_env, deny_commands, writable_roots) catch |err| blk2: {
                 // A tool that fails outright (rather than reporting its own
                 // failure as text) is named here, so a result reading
@@ -4676,6 +4735,7 @@ fn finishTurn(
                 break :blk2 spelled;
             };
             noteToolOutcome(io, arena, call.name, if (tool_mod.resultFailed(answer)) .failed else .ok, session_mod.elapsedMs(io, tool_clock, started_ns));
+            if (acp_sink) |sink| sink.emitTool(call.id, call.name, call.args.items, if (tool_mod.resultFailed(answer)) "failed" else "completed", answer);
             break :blk answer;
         };
         // A tool result is capped at `max_tool_output`, so the message holding
@@ -4703,7 +4763,7 @@ fn finishTurn(
         try tool_msg.writer().writeAll("}");
         try msgs.appendSlice(gpa, tool_msg.items());
     }
-    try logUsage(io, arena, usage, result);
+    try logUsage(io, arena, usage, result, acp_sink);
 }
 
 /// What one call's result is carried into the conversation as: the result
@@ -4777,8 +4837,9 @@ fn assistantMessage(arena: std.mem.Allocator, result: *const chat_mod.ChatResult
 
 // One machine-readable line per response: gauntlet reads these for live
 // token rates, and they are the only stdout that is not model output.
-fn logUsage(io: Io, arena: std.mem.Allocator, usage: *chat_mod.Usage, result: *const chat_mod.ChatResult) !void {
+fn logUsage(io: Io, arena: std.mem.Allocator, usage: *chat_mod.Usage, result: *const chat_mod.ChatResult, acp_sink: ?*acp_mod.Sink) !void {
     usage.add(result);
+    if (acp_sink != null) return;
     var usage_line = chat_mod.JsonBuf.init(arena);
     const w = usage_line.writer();
     try w.writeAll("{\"type\":\"usage\",\"usage\":{");
@@ -9593,4 +9654,874 @@ test "the base url and the name of where it came from never disagree" {
     // answering with an endpoint that is not there.
     try std.testing.expectEqualStrings("config file", resolveBaseUrl("", "", false, "https://a").source);
     try std.testing.expectEqualStrings("config file", resolveBaseUrl("  ", "", false, "https://a").source);
+}
+
+const acp_mod = @import("acp.zig");
+
+/// The one place an invocation is dispatched before `runMain` reads its flags.
+/// `acp` is a protocol server rather than a task, so it has to be recognised
+/// before the prompt parser sees the word; every other invocation is left to
+/// `runMain`, which owns the help, version and subcommand text.
+fn dispatchMain(init: std.process.Init) !u8 {
+    var it = init.minimal.args.iterate();
+    _ = it.next();
+    const first = it.next() orelse return runMain(init);
+    if (std.mem.eql(u8, first, "acp")) return runAcp(init);
+    if (std.mem.eql(u8, first, "help")) {
+        const second = it.next() orelse return runMain(init);
+        if (std.mem.eql(u8, second, "acp")) {
+            try net.writeOut(init.io, acp_usage);
+            return 0;
+        }
+    }
+    return runMain(init);
+}
+
+/// One session the ACP connection is serving. The conversation is the same
+/// OpenAI-shaped message array a terminal run builds, so a prompt continues
+/// exactly the way `--repl` does; only the output path differs.
+const AcpSession = struct {
+    id: []const u8,
+    cwd: []const u8,
+    /// Every root the client declared. Kept for a future permission check and
+    /// for reporting; `cwd` remains the base relative paths resolve against.
+    roots: []const []const u8,
+    system_text: []const u8,
+    opts: Options,
+    msgs: std.ArrayList(u8) = .empty,
+    log: ?session_mod.Session = null,
+};
+
+/// The connection-wide state a tool or a stream notification reads. The mutex
+/// is held only for one frame, so a client that stops reading blocks writes
+/// rather than the model.
+const AcpConn = struct {
+    io: Io,
+    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    mutex: Io.Mutex = .init,
+    sessions: std.StringHashMapUnmanaged(*AcpSession) = .empty,
+    /// The stdin reader and the running prompt share this so a cancel
+    /// notification is seen while the provider is still streaming.
+    mailbox: ?*AcpMailbox = null,
+};
+
+/// The per-prompt sink. `cancel` is set by the input loop when the client
+/// sends `session/cancel`; the provider stream and the tool loop read it
+/// between reads and between calls.
+const AcpPrompt = struct {
+    conn: *AcpConn,
+    session: *AcpSession,
+    cancel: std.atomic.Value(bool) = .init(false),
+    sink: acp_mod.Sink = undefined,
+
+    fn init(self: *AcpPrompt) void {
+        self.sink = .{
+            .ctx = self,
+            .content = content,
+            .tool_call = toolCall,
+            .cancelled = cancelled,
+        };
+    }
+
+    fn content(ctx: *anyopaque, bytes: []const u8) void {
+        const self: *AcpPrompt = @ptrCast(@alignCast(ctx));
+        const json = acp_mod.messageUpdateJson(std.heap.page_allocator, self.session.id, "agent_message_chunk", bytes) catch return;
+        defer std.heap.page_allocator.free(json);
+        acpNotify(self.conn, "session/update", json) catch {};
+    }
+
+    fn toolCall(ctx: *anyopaque, id: []const u8, name: []const u8, args: []const u8, status: []const u8, output: []const u8) void {
+        const self: *AcpPrompt = @ptrCast(@alignCast(ctx));
+        const json = acp_mod.toolUpdateJson(std.heap.page_allocator, self.session.id, id, name, args, status, output) catch return;
+        defer std.heap.page_allocator.free(json);
+        acpNotify(self.conn, "session/update", json) catch {};
+    }
+
+    fn cancelled(ctx: *anyopaque) bool {
+        const self: *AcpPrompt = @ptrCast(@alignCast(ctx));
+        return self.cancel.load(.acquire);
+    }
+};
+
+fn acpWrite(conn: *AcpConn, bytes: []const u8) !void {
+    conn.mutex.lockUncancelable(conn.io);
+    defer conn.mutex.unlock(conn.io);
+    try net.writeOut(conn.io, bytes);
+}
+
+fn acpWriteAlloc(conn: *AcpConn, body: *std.ArrayList(u8)) !void {
+    defer body.deinit(conn.gpa);
+    try acpWrite(conn, body.items);
+}
+
+/// A JSON-RPC notification. The frame is built on the connection's arena; a
+/// caller inside a prompt builds it in its own callback and passes it here.
+fn acpNotify(conn: *AcpConn, method: []const u8, params_json: []const u8) !void {
+    var aw: std.Io.Writer.Allocating = .init(conn.gpa);
+    defer aw.deinit();
+    try acp_mod.writeNotification(&aw.writer, method, params_json);
+    try acpWrite(conn, aw.written());
+}
+
+fn acpResult(conn: *AcpConn, id: std.json.Value, result_json: []const u8) !void {
+    var aw: std.Io.Writer.Allocating = .init(conn.gpa);
+    defer aw.deinit();
+    try acp_mod.writeResult(&aw.writer, id, result_json);
+    try acpWrite(conn, aw.written());
+}
+
+fn acpError(conn: *AcpConn, id: ?std.json.Value, code: i32, message: []const u8) void {
+    acpErrorData(conn, id, code, message, null);
+}
+
+fn acpErrorData(conn: *AcpConn, id: ?std.json.Value, code: i32, message: []const u8, data_json: ?[]const u8) void {
+    var aw: std.Io.Writer.Allocating = .init(conn.gpa);
+    defer aw.deinit();
+    acp_mod.writeErrorDataResponse(&aw.writer, id, code, message, data_json) catch return;
+    acpWrite(conn, aw.written()) catch {};
+}
+
+fn acpUnknownSession(conn: *AcpConn, id: ?std.json.Value, session_id: []const u8) void {
+    var aw: std.Io.Writer.Allocating = .init(conn.gpa);
+    defer aw.deinit();
+    const w = &aw.writer;
+    w.writeAll("{\"sessionId\":") catch return;
+    chat_mod.writeJsonString(w, session_id) catch return;
+    w.writeAll("}") catch return;
+    acpErrorData(conn, id, acp_mod.ErrorCode.resource_not_found, "Resource not found", aw.written());
+}
+
+fn acpErrorFor(conn: *AcpConn, request: acp_mod.Request, err: anyerror) void {
+    const code: i32 = switch (err) {
+        error.InvalidParams, error.FrameTooDeep => acp_mod.ErrorCode.invalid_params,
+        error.InvalidRequest => acp_mod.ErrorCode.invalid_request,
+        error.RequestCancelled => acp_mod.ErrorCode.request_cancelled,
+        else => acp_mod.ErrorCode.internal_error,
+    };
+    const message: []const u8 = switch (err) {
+        error.InvalidParams => "Invalid params",
+        error.FrameTooDeep => "Frame too deep",
+        error.InvalidRequest => "Invalid request",
+        error.RequestCancelled => "Request cancelled",
+        else => "Internal error",
+    };
+    acpError(conn, request.id, code, message);
+}
+
+/// Frames read from stdin, handed to the protocol loop. A dedicated reader
+/// thread is what lets `session/cancel` arrive while a prompt is running: the
+/// main thread is inside the provider request, so it cannot be the one
+/// blocked on the next line.
+const AcpMailbox = struct {
+    io: Io,
+    gpa: std.mem.Allocator,
+    mutex: Io.Mutex = .init,
+    condition: Io.Condition = .init,
+    frames: std.ArrayList([]u8) = .empty,
+    done: bool = false,
+    cancel_mutex: Io.Mutex = .init,
+    active: ?*std.atomic.Value(bool) = null,
+    active_id: ?[]const u8 = null,
+    pending_cancel: bool = false,
+    prompt_pending: bool = false,
+
+    fn push(self: *AcpMailbox, frame: []u8) !void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        try self.frames.append(self.gpa, frame);
+        self.condition.signal(self.io);
+    }
+
+    fn pop(self: *AcpMailbox) ?[]u8 {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        while (self.frames.items.len == 0 and !self.done) {
+            self.condition.wait(self.io, &self.mutex) catch return null;
+        }
+        if (self.frames.items.len == 0) return null;
+        return self.frames.orderedRemove(0);
+    }
+
+    fn finish(self: *AcpMailbox) void {
+        self.mutex.lockUncancelable(self.io);
+        self.done = true;
+        self.condition.broadcast(self.io);
+        self.mutex.unlock(self.io);
+    }
+
+    fn setActive(self: *AcpMailbox, flag: ?*std.atomic.Value(bool), session_id: []const u8) void {
+        self.cancel_mutex.lockUncancelable(self.io);
+        defer self.cancel_mutex.unlock(self.io);
+        self.active = flag;
+        self.active_id = if (flag != null) session_id else null;
+    }
+
+    fn takePending(self: *AcpMailbox) bool {
+        self.cancel_mutex.lockUncancelable(self.io);
+        defer self.cancel_mutex.unlock(self.io);
+        const pending = self.pending_cancel;
+        self.pending_cancel = false;
+        self.prompt_pending = false;
+        return pending;
+    }
+
+    /// The reader sees a prompt request before the main thread has installed
+    /// its cancel flag. A cancel that follows it belongs to that prompt; a
+    /// cancel sent while the connection is idle does not belong to the next.
+    fn notePrompt(self: *AcpMailbox) void {
+        self.cancel_mutex.lockUncancelable(self.io);
+        defer self.cancel_mutex.unlock(self.io);
+        self.prompt_pending = true;
+    }
+
+    /// Called by the reader thread, which may see the notification before the
+    /// prompt loop has installed its cancel flag. Keep it pending for the
+    /// prompt that is about to start.
+    fn noteCancel(self: *AcpMailbox, session_id: []const u8) void {
+        self.cancel_mutex.lockUncancelable(self.io);
+        defer self.cancel_mutex.unlock(self.io);
+        if (self.active) |flag| {
+            if (self.active_id) |id| {
+                if (std.mem.eql(u8, id, session_id)) flag.store(true, .release);
+            } else flag.store(true, .release);
+        } else if (self.prompt_pending) {
+            self.pending_cancel = true;
+        }
+    }
+
+    /// Called by the protocol loop for a notification it read after the
+    /// prompt finished. It must not turn into a cancel for the next prompt.
+    fn cancelActive(self: *AcpMailbox, session_id: []const u8) void {
+        self.cancel_mutex.lockUncancelable(self.io);
+        defer self.cancel_mutex.unlock(self.io);
+        if (self.active) |flag| {
+            if (self.active_id) |id| {
+                if (std.mem.eql(u8, id, session_id)) flag.store(true, .release);
+            } else flag.store(true, .release);
+        }
+    }
+
+    fn deinit(self: *AcpMailbox) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        for (self.frames.items) |frame| self.gpa.free(frame);
+        self.frames.deinit(self.gpa);
+    }
+};
+
+fn acpReaderThread(mailbox: *AcpMailbox) void {
+    var input_storage: [64 * 1024]u8 = undefined;
+    var input = std.Io.File.stdin().readerStreaming(mailbox.io, &input_storage);
+    var pending: std.ArrayList(u8) = .empty;
+    defer pending.deinit(mailbox.gpa);
+    var arena = std.heap.ArenaAllocator.init(mailbox.gpa);
+    defer arena.deinit();
+    while (true) {
+        const frame = acpReadFrame(mailbox.io, &input.interface, mailbox.gpa, &pending) catch {
+            mailbox.finish();
+            return;
+        } orelse {
+            mailbox.finish();
+            return;
+        };
+        _ = arena.reset(.retain_capacity);
+        if (acp_mod.parseRequest(arena.allocator(), frame)) |request| {
+            if (std.mem.eql(u8, request.method, "session/prompt")) mailbox.notePrompt();
+            // Closing a session cancels its work, exactly as `session/cancel`
+            // does. Handling that on the reader thread is what lets a close
+            // arrive while the prompt it is closing is still streaming.
+            if (std.mem.eql(u8, request.method, "session/cancel") or std.mem.eql(u8, request.method, "session/close")) {
+                if (request.params) |params| {
+                    const sid = acp_mod.stringField(params, "sessionId") catch "";
+                    if (sid.len != 0) mailbox.noteCancel(sid);
+                }
+            }
+        } else |_| {}
+        mailbox.push(frame) catch {
+            mailbox.gpa.free(frame);
+            mailbox.finish();
+            return;
+        };
+    }
+}
+
+/// The ACP server itself: stdin is a stream of JSON-RPC frames, stdout is the
+/// answer to them and nothing else. Configuration, the provider key and the
+/// HTTP client are resolved once, exactly as a terminal run resolves them, so
+/// a session the client creates talks to the same endpoint its operator
+/// configured.
+fn runAcp(init: std.process.Init) !u8 {
+    const gpa = init.gpa;
+    const io = init.io;
+    const arena = init.arena.allocator();
+
+    var args: std.ArrayList([]const u8) = .empty;
+    defer args.deinit(gpa);
+    var it = init.minimal.args.iterate();
+    while (it.next()) |arg| try args.append(gpa, arg);
+
+    // `acp --help` and `acp --version` answer the same way the other
+    // subcommands do, before any config or key is read.
+    for (args.items[2..]) |arg| {
+        if (isFlag(arg, "-h", "--help")) {
+            try net.writeOut(io, acp_usage);
+            return 0;
+        }
+        if (isFlag(arg, "-V", "--version")) {
+            writeAction(io, .version);
+            return 0;
+        }
+    }
+
+    debug_enabled = debugEnabled(init.environ_map);
+
+    var opts: Options = .{};
+    const env_model = envValue(init.environ_map, "MICROAGENT_MODEL");
+    if (env_model) |v| opts.model = v;
+    const env_base_url = envValue(init.environ_map, base_url_var);
+    if (env_base_url) |v| opts.base_url = v;
+    var env_problem: ?EnvProblem = null;
+    reasoningEffortFromEnv(init.environ_map, "MICROAGENT_REASONING_EFFORT", &opts.reasoning_effort, &env_problem);
+    temperatureFromEnv(init.environ_map, "MICROAGENT_TEMPERATURE", &opts.temperature, &env_problem);
+    ceilingFromEnv(usize, init.environ_map, "MICROAGENT_MAX_TURNS", .max_turns, &opts.max_turns, &env_problem);
+    ceilingFromEnv(u32, init.environ_map, "MICROAGENT_MAX_TOKENS", .max_tokens, &opts.max_tokens, &env_problem);
+    ceilingFromEnv(u32, init.environ_map, "MICROAGENT_STALL_TIMEOUT", .stall_timeout, &opts.stall_timeout_s, &env_problem);
+    opts.ca_bundle = net.caBundlePath(init.environ_map);
+    optionalCeilingFromEnv(init.environ_map, "MICROAGENT_BUDGET_SECONDS", .budget, &opts.budget_s, &env_problem);
+    optionalCeilingFromEnv(init.environ_map, "MICROAGENT_MAX_SPEND_TOKENS", .max_spend_tokens, &opts.max_spend_tokens, &env_problem);
+    opts.session_dir = session_mod.sessionDir(init.environ_map, arena);
+
+    var err_buf: [512]u8 = undefined;
+    if (parseArgs(&err_buf, args.items[2..], &opts)) |msg| return usageError(io, "{s}", .{msg});
+    if (opts.prompt.len != 0 or opts.repl) return usageError(io, "acp takes no prompt; it reads one from its client", .{});
+    if (env_problem) |problem| reportEnvProblem(io, arena, problem, opts.from_flag, &err_buf);
+
+    const loaded = loadConfig(io, init, arena, opts.config);
+    if (toolConfigError(arena, loaded)) |msg| return configError(io, "{s}", .{msg});
+    if (!opts.from_flag.contains(.model) and env_model == null and loaded.model.len != 0) opts.model = loaded.model;
+    if (opts.reasoning_effort == null and loaded.reasoning_effort.len != 0) {
+        if (reasoningEffort(&err_buf, "config key reasoning_effort", loaded.reasoning_effort, &opts.reasoning_effort)) |msg|
+            return configError(io, "{s}", .{msg});
+    }
+    const base_url = resolveBaseUrl(env_base_url, opts.base_url, opts.from_flag.contains(.base_url), loaded.base_url);
+    opts.base_url = base_url.value;
+    var key = resolveKey(init.environ_map, opts.api_key, loaded.api_key);
+    key.value = try arena.dupe(u8, key.value);
+    opts.api_key = key.value;
+    // ACP initialization and session setup do not need a provider: a client
+    // may connect before its operator has finished configuring one, and the
+    // protocol has to answer `initialize` regardless. The provider settings
+    // are checked again when a prompt actually reaches the model.
+    if (opts.api_key.len != 0 and net.hasHeaderControlBytes(opts.api_key))
+        return configError(io, "the API key from {s} holds a control character, which cannot go in a header", .{key.source});
+    if (opts.base_url.len != 0) {
+        if (std.Uri.parse(opts.base_url)) |_| {} else |_| return configError(io, "{s} from {s} is not a url", .{ clip(displayUrl(arena, opts.base_url)), base_url.source });
+        if (net.hasHeaderControlBytes(opts.base_url))
+            return configError(io, "the base url from {s} holds a control character, which cannot go in a request line", .{base_url.source});
+        if (!net.urlCarriesKey(opts.base_url))
+            return configError(io, "the API key would go to {s} in the clear; use an https base url, or http on loopback", .{clip(displayUrl(arena, opts.base_url))});
+    }
+
+    var client: std.http.Client = .{ .allocator = gpa, .io = io };
+    defer client.deinit();
+    net.loadCaBundle(&client, io, gpa, opts.ca_bundle, arena);
+
+    opts.deny_commands = loaded.deny_commands;
+    opts.disabled_tools = loaded.disabled_tools;
+    opts.sandbox = loaded.sandbox;
+    if (opts.sandbox.enabled) {
+        opts.writable_roots = try sandbox_mod.resolveWritableRoots(io, arena, init.environ_map, opts.sandbox.writable, opts.session_dir);
+        _ = sandbox_mod.applySandbox(io, arena, opts.writable_roots);
+    }
+    const skill_roots = skill_mod.roots(io, init.environ_map, arena, loaded.skills);
+    opts.skills = skill_mod.discover(io, arena, skill_roots);
+    const skill_block = try opts.skills.prompt(arena);
+    opts.mcp = .{};
+
+    var conn: AcpConn = .{ .io = io, .gpa = gpa, .arena = arena };
+    defer {
+        var sit = conn.sessions.valueIterator();
+        while (sit.next()) |session_ptr| {
+            const session = session_ptr.*;
+            session.opts.mcp.shutdown(io);
+            session_mod.close(io, &session.log);
+            session.msgs.deinit(gpa);
+        }
+        conn.sessions.deinit(gpa);
+    }
+
+    var mailbox: AcpMailbox = .{ .io = io, .gpa = gpa };
+    defer mailbox.deinit();
+    conn.mailbox = &mailbox;
+    const reader = std.Thread.spawn(.{}, acpReaderThread, .{&mailbox}) catch {
+        net.note(io, arena, "microagent: acp: could not start the stdin reader\n", .{});
+        return 1;
+    };
+    reader.detach();
+    var initialized = false;
+    var frame_arena = std.heap.ArenaAllocator.init(gpa);
+    defer frame_arena.deinit();
+
+    while (true) {
+        const frame = mailbox.pop() orelse return 0;
+        defer gpa.free(frame);
+        _ = frame_arena.reset(.retain_capacity);
+        const fa = frame_arena.allocator();
+        const request = acp_mod.parseRequest(fa, frame) catch |err| {
+            if (err == error.InvalidRequest or err == error.FrameTooDeep)
+                acpError(&conn, null, acp_mod.ErrorCode.invalid_request, "Invalid request")
+            else
+                acpError(&conn, null, acp_mod.ErrorCode.parse_error, "Parse error");
+            continue;
+        };
+
+        if (std.mem.eql(u8, request.method, "session/cancel")) {
+            if (request.params) |params| {
+                const sid = acp_mod.stringField(params, "sessionId") catch {
+                    acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
+                    continue;
+                };
+                if (conn.mailbox) |mb| mb.cancelActive(sid);
+                _ = conn.sessions.get(sid);
+            }
+            continue;
+        }
+
+        if (!initialized and !std.mem.eql(u8, request.method, "initialize")) {
+            acpError(&conn, request.id, acp_mod.ErrorCode.invalid_request, "Invalid request");
+            continue;
+        }
+
+        if (std.mem.eql(u8, request.method, "initialize")) {
+            const params = request.params orelse {
+                acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
+                continue;
+            };
+            if (params != .object) {
+                acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
+                continue;
+            }
+            const version_value = params.object.get("protocolVersion") orelse {
+                acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
+                continue;
+            };
+            if (version_value != .integer) {
+                acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
+                continue;
+            }
+            const result = acp_mod.initializeResultJson(fa, version) catch {
+                acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
+                continue;
+            };
+            acpResult(&conn, request.id.?, result) catch {};
+            initialized = true;
+            continue;
+        }
+
+        if (std.mem.eql(u8, request.method, "authenticate")) {
+            acpResult(&conn, request.id.?, "{}") catch {};
+            continue;
+        }
+
+        if (std.mem.eql(u8, request.method, "session/new")) {
+            const params = request.params orelse {
+                acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
+                continue;
+            };
+            const new_session = acp_mod.parseNewSession(fa, params) catch |err| {
+                acpErrorFor(&conn, request, err);
+                continue;
+            };
+            if (acpStartSession(io, &conn, &client, init.environ_map, &opts, arena, new_session, skill_block, loaded.system_prompt_extra, loaded.agents_files)) |session| {
+                conn.sessions.put(gpa, session.id, session) catch {
+                    acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
+                    continue;
+                };
+                var aw: std.Io.Writer.Allocating = .init(fa);
+                defer aw.deinit();
+                aw.writer.writeAll("{\"sessionId\":") catch {
+                    acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
+                    continue;
+                };
+                chat_mod.writeJsonString(&aw.writer, session.id) catch {
+                    acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
+                    continue;
+                };
+                aw.writer.writeAll(",\"modes\":") catch {
+                    acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
+                    continue;
+                };
+                aw.writer.writeAll(acp_mod.modes_json) catch {
+                    acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
+                    continue;
+                };
+                aw.writer.writeAll("}") catch {
+                    acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
+                    continue;
+                };
+                acpResult(&conn, request.id.?, aw.written()) catch {};
+            } else |err| {
+                acpErrorFor(&conn, request, err);
+            }
+            continue;
+        }
+
+        if (std.mem.eql(u8, request.method, "session/prompt")) {
+            const params = request.params orelse {
+                acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
+                continue;
+            };
+            const sid = acp_mod.stringField(params, "sessionId") catch {
+                acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
+                continue;
+            };
+            const session = conn.sessions.get(sid) orelse {
+                acpUnknownSession(&conn, request.id, sid);
+                continue;
+            };
+            const prompt = acp_mod.parsePrompt(fa, params) catch |err| {
+                acpErrorFor(&conn, request, err);
+                continue;
+            };
+            const stop = acpRunPrompt(io, &conn, &client, init.environ_map, session, prompt.text) catch |err| {
+                acpErrorFor(&conn, request, err);
+                continue;
+            };
+            acpResult(&conn, request.id.?, stop) catch {};
+            continue;
+        }
+
+        if (std.mem.eql(u8, request.method, "session/close")) {
+            const params = request.params orelse {
+                acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
+                continue;
+            };
+            const sid = acp_mod.stringField(params, "sessionId") catch {
+                acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
+                continue;
+            };
+            if (conn.sessions.fetchRemove(sid)) |removed| {
+                const session = removed.value;
+                session.opts.mcp.shutdown(io);
+                session_mod.close(io, &session.log);
+                session.msgs.deinit(gpa);
+            }
+            acpResult(&conn, request.id.?, "{}") catch {};
+            continue;
+        }
+
+        if (std.mem.eql(u8, request.method, "session/list")) {
+            const params = request.params;
+            var filter: []const u8 = "";
+            if (params) |p| {
+                if (p != .object) {
+                    acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
+                    continue;
+                }
+                if (p.object.get("cwd")) |cwd_value| {
+                    if (cwd_value == .string) filter = cwd_value.string else if (cwd_value != .null) {
+                        acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
+                        continue;
+                    }
+                }
+            }
+            const listing = acpListSessions(fa, &conn, filter) catch {
+                acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
+                continue;
+            };
+            acpResult(&conn, request.id.?, listing) catch {};
+            continue;
+        }
+
+        if (std.mem.eql(u8, request.method, "session/delete")) {
+            const params = request.params orelse {
+                acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
+                continue;
+            };
+            const sid = acp_mod.stringField(params, "sessionId") catch {
+                acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
+                continue;
+            };
+            if (conn.sessions.fetchRemove(sid)) |removed| {
+                const session = removed.value;
+                session.opts.mcp.shutdown(io);
+                session_mod.close(io, &session.log);
+                session.msgs.deinit(gpa);
+            }
+            acpResult(&conn, request.id.?, "{}") catch {};
+            continue;
+        }
+
+        if (std.mem.eql(u8, request.method, "session/resume")) {
+            const params = request.params orelse {
+                acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
+                continue;
+            };
+            const sid = acp_mod.stringField(params, "sessionId") catch {
+                acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
+                continue;
+            };
+            const session = conn.sessions.get(sid) orelse {
+                acpUnknownSession(&conn, request.id, sid);
+                continue;
+            };
+            // A resume names the same working directory again; a different
+            // one would make the history belong to a tree the tools no longer
+            // see.
+            if (params.object.get("cwd")) |cwd_value| {
+                if (cwd_value != .string or !std.mem.eql(u8, cwd_value.string, session.cwd)) {
+                    acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
+                    continue;
+                }
+            }
+            acpResult(&conn, request.id.?, acp_mod.session_state_json) catch {};
+            continue;
+        }
+
+        if (std.mem.eql(u8, request.method, "session/load")) {
+            const params = request.params orelse {
+                acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
+                continue;
+            };
+            const sid = acp_mod.stringField(params, "sessionId") catch {
+                acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
+                continue;
+            };
+            const session = conn.sessions.get(sid) orelse {
+                acpUnknownSession(&conn, request.id, sid);
+                continue;
+            };
+            acpReplayHistory(&conn, session) catch {
+                acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
+                continue;
+            };
+            acpResult(&conn, request.id.?, acp_mod.session_state_json) catch {};
+            continue;
+        }
+
+        if (std.mem.eql(u8, request.method, "session/set_mode")) {
+            const params = request.params orelse {
+                acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
+                continue;
+            };
+            const mode = acp_mod.stringField(params, "modeId") catch {
+                acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
+                continue;
+            };
+            if (!std.mem.eql(u8, mode, "code")) {
+                acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
+                continue;
+            }
+            acpResult(&conn, request.id.?, "{}") catch {};
+            continue;
+        }
+
+        if (request.isNotification()) continue;
+        acpError(&conn, request.id, acp_mod.ErrorCode.method_not_found, "Method not found");
+    }
+}
+
+/// The `session/list` result. One page is all this agent keeps: an ACP
+/// session lives in memory for the connection, and a cursor from another
+/// connection names nothing here.
+fn acpListSessions(arena: std.mem.Allocator, conn: *AcpConn, cwd: []const u8) ![]const u8 {
+    var aw: std.Io.Writer.Allocating = .init(arena);
+    const w = &aw.writer;
+    try w.writeAll("{\"sessions\":[");
+    var first = true;
+    var it = conn.sessions.valueIterator();
+    while (it.next()) |session_ptr| {
+        const session = session_ptr.*;
+        if (cwd.len != 0 and !std.mem.eql(u8, session.cwd, cwd)) continue;
+        if (!first) try w.writeAll(",");
+        first = false;
+        try w.writeAll("{\"sessionId\":");
+        try chat_mod.writeJsonString(w, session.id);
+        try w.writeAll(",\"cwd\":");
+        try chat_mod.writeJsonString(w, session.cwd);
+        try w.writeAll("}");
+    }
+    try w.writeAll("]}");
+    return aw.written();
+}
+
+/// Replays a session this connection still holds as ACP message chunks. The
+/// conversation is the OpenAI-shaped array the run keeps; only the visible
+/// user and assistant text is replayed, because that is what `session/load`
+/// asks a client to show. Tool calls remain in the agent's own history.
+fn acpReplayHistory(conn: *AcpConn, session: *AcpSession) !void {
+    if (session.msgs.items.len == 0) return;
+    // The run keeps the message array open: `buildBody` writes the closing
+    // bracket on the wire. Replay needs the bytes as a complete JSON value.
+    const complete = try std.mem.concat(conn.gpa, u8, &.{ session.msgs.items, "]" });
+    defer conn.gpa.free(complete);
+    const parsed = try std.json.parseFromSlice(std.json.Value, conn.gpa, complete, .{});
+    defer parsed.deinit();
+    if (parsed.value != .array) return;
+    for (parsed.value.array.items) |message| {
+        if (message != .object) continue;
+        const role = chat_mod.str(message.object.get("role")) orelse continue;
+        const content = chat_mod.str(message.object.get("content")) orelse continue;
+        if (content.len == 0) continue;
+        const kind = if (std.mem.eql(u8, role, "user")) "user_message_chunk" else if (std.mem.eql(u8, role, "assistant")) "agent_message_chunk" else continue;
+        const json = try acp_mod.messageUpdateJson(conn.gpa, session.id, kind, content);
+        defer conn.gpa.free(json);
+        try acpNotify(conn, "session/update", json);
+    }
+}
+
+const acp_usage =
+    \\usage: microagent acp
+    \\
+    \\Serve the Agent Client Protocol over stdin and stdout. A client creates
+    \\a session, sends prompts as JSON-RPC frames, and receives streamed
+    \\session/update notifications and one session/prompt result per turn.
+    \\Configuration, credentials, skills and tools resolve exactly as they do
+    \\for a terminal run.
+    \\
+    \\  -h, --help     this text
+    \\  -V, --version  version
+    \\
+;
+
+/// Reads one newline-terminated JSON-RPC frame. The frame may be larger than
+/// the reader's buffer: chunks are accumulated until the newline arrives, so a
+/// prompt carrying a file is not cut at 64 KiB. The ceiling is the same 16 MiB
+/// one model response answers to.
+fn acpReadFrame(io: Io, reader: *std.Io.Reader, gpa: std.mem.Allocator, pending: *std.ArrayList(u8)) !?[]u8 {
+    _ = io;
+    while (true) {
+        if (std.mem.indexOfScalar(u8, pending.items, '\n')) |end| {
+            const line = std.mem.trimEnd(u8, pending.items[0..end], "\r");
+            // The caller parses before the next read. Hand back a stable copy
+            // so the parse does not point into a buffer that moves.
+            const copy = try gpa.dupe(u8, line);
+            errdefer gpa.free(copy);
+            const rest = pending.items[end + 1 ..];
+            std.mem.copyForwards(u8, pending.items[0..rest.len], rest);
+            pending.items.len = rest.len;
+            return copy;
+        }
+        if (pending.items.len > stream_mod.max_response_bytes) return error.StreamTooLarge;
+        try pending.ensureUnusedCapacity(gpa, 64 * 1024);
+        var slices = [1][]u8{pending.unusedCapacitySlice()};
+        const n = Io.Reader.readVec(reader, &slices) catch |err| switch (err) {
+            error.EndOfStream => 0,
+            error.ReadFailed => return error.ReadFailed,
+        };
+        if (n == 0) {
+            if (pending.items.len == 0) return null;
+            const copy = try gpa.dupe(u8, std.mem.trimEnd(u8, pending.items, "\r"));
+            pending.clearRetainingCapacity();
+            return copy;
+        }
+        pending.items.len += n;
+    }
+}
+
+/// Starts one ACP session: switches the process to the client's cwd (the
+/// tools, repository instructions and MCP children all resolve from it),
+/// connects the servers the client offered and builds the same system prompt
+/// a terminal run builds.
+fn acpStartSession(
+    io: Io,
+    conn: *AcpConn,
+    client: *std.http.Client,
+    environ: *std.process.Environ.Map,
+    base_opts: *const Options,
+    arena: std.mem.Allocator,
+    request: acp_mod.NewSession,
+    skill_block: []const u8,
+    system_extra: []const u8,
+    agents_files: ?[]const []const u8,
+) !*AcpSession {
+    _ = conn;
+    for (request.mcp_servers) |server| {
+        if (server.transport == .sse) return error.InvalidParams;
+    }
+    var random: [16]u8 = undefined;
+    io.random(&random);
+    const id = try std.fmt.allocPrint(arena, "sess_{s}", .{std.fmt.bytesToHex(random, .lower)});
+    const cwd = try arena.dupe(u8, request.cwd);
+    const roots = try arena.dupe([]const u8, request.additional_directories);
+
+    const dir = std.Io.Dir.openDirAbsolute(io, cwd, .{}) catch return error.InvalidParams;
+    defer dir.close(io);
+    try std.process.setCurrentDir(io, dir);
+
+    const agents_block = try agentsBlock(io, arena, std.Io.Dir.cwd(), agents_files);
+    const system_text = try systemText(arena, cwd, system_extra, agents_block, skill_block, base_opts.disabled_tools);
+
+    var opts = base_opts.*;
+    opts.acp_sink = null;
+    opts.prompt = "";
+    opts.repl = false;
+    opts.mcp = mcp_mod.connect(io, arena, environ, client, request.servers, version);
+
+    const session = try arena.create(AcpSession);
+    session.* = .{
+        .id = id,
+        .cwd = cwd,
+        .roots = roots,
+        .system_text = system_text,
+        .opts = opts,
+    };
+    return session;
+}
+
+/// Runs one prompt and returns the ACP stop reason as a JSON result object.
+fn acpRunPrompt(
+    io: Io,
+    conn: *AcpConn,
+    client: *std.http.Client,
+    environ: *std.process.Environ.Map,
+    session: *AcpSession,
+    text: []const u8,
+) ![]const u8 {
+    if (session.opts.api_key.len == 0 or session.opts.base_url.len == 0)
+        return error.MissingProvider;
+    // The cwd is process-wide, so a connection serving several sessions
+    // switches before every prompt rather than assuming the last one.
+    const dir = std.Io.Dir.openDirAbsolute(io, session.cwd, .{}) catch return error.InvalidParams;
+    defer dir.close(io);
+    try std.process.setCurrentDir(io, dir);
+
+    var prompt: AcpPrompt = .{ .conn = conn, .session = session };
+    prompt.init();
+    session.opts.acp_sink = &prompt.sink;
+    defer session.opts.acp_sink = null;
+    prompt.cancel.store(false, .release);
+    if (conn.mailbox) |mailbox| {
+        mailbox.setActive(&prompt.cancel, session.id);
+        if (mailbox.takePending()) prompt.cancel.store(true, .release);
+    }
+    defer if (conn.mailbox) |mailbox| mailbox.setActive(null, "");
+
+    if (session.msgs.items.len == 0) {
+        try conversation_mod.openConversation(conn.gpa, &session.msgs, session.system_text, text);
+        session.log = session_mod.open(io, conn.arena, environ, session.opts.session_dir, session.opts.model);
+    } else {
+        try conversation_mod.appendMessage(conn.gpa, &session.msgs, "user", text);
+    }
+
+    var prompt_arena_state = std.heap.ArenaAllocator.init(conn.gpa);
+    defer prompt_arena_state.deinit();
+    var usage: chat_mod.Usage = .{};
+    const prefix = try bodyPrefix(conn.arena, session.opts);
+    const ep = try endpoint(io, conn.arena, session.opts);
+    const ended = run(client, io, conn.gpa, prompt_arena_state.allocator(), session.opts, &session.msgs, environ, &session.opts.mcp, prefix, ep, &session.log, &usage) catch |err| {
+        if (prompt.cancel.load(.acquire) or err == error.Cancelled or err == error.Canceled)
+            return "{\"stopReason\":\"cancelled\"}";
+        net.note(io, conn.gpa, "microagent: acp: prompt failed: {s}\n", .{@errorName(err)});
+        return err;
+    };
+    if (prompt.cancel.load(.acquire)) return "{\"stopReason\":\"cancelled\"}";
+    return switch (ended) {
+        .answered => "{\"stopReason\":\"end_turn\"}",
+        .wants_tools => "{\"stopReason\":\"max_turn_requests\"}",
+        .cut_off => "{\"stopReason\":\"max_turn_requests\"}",
+        .max_tokens => "{\"stopReason\":\"max_tokens\"}",
+        .refusal => "{\"stopReason\":\"refusal\"}",
+    };
 }
