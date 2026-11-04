@@ -289,18 +289,22 @@ fn codepointLen(s: []const u8, i: usize) usize {
 }
 
 /// Levenshtein distance over two rows of codepoints, so a long word costs two
-/// allocations of its own length rather than a square of it. Null when a word
-/// is too long for a row of `u8` distances, which no flag this suggests is.
+/// rows of its own length rather than a square of it. Null when a word is
+/// too long for a row of `u8` distances, which no flag this suggests is.
 ///
-/// Both ends are measured before anything is allocated. The row a distance
-/// lands in is a `u8`, and a row holds a distance, so a word of more than 255
-/// characters has a distance that does not fit one whichever side it is on. The
-/// flag side is a handful of characters and was never at risk; the word side is
-/// whatever a person typed or a paste delivered, and `at` and the row values
-/// grew past 255 with it until a long word overflowed the row and took the run
-/// down. Refusing is the answer the row cannot give, and it is the answer a
-/// word that long already deserves: it is further from every flag than the two
-/// edits a suggestion is worth.
+/// Both ends are measured before anything is done. The row a distance lands
+/// in is a `u8`, and a row holds a distance, so a word of more than 255
+/// characters has a distance that does not fit one whichever side it is on.
+/// The flag side is a handful of characters and was never at risk; the word
+/// side is whatever a person typed or a paste delivered, and `at` and the
+/// row values grew past 255 with it until a long word overflowed the row and
+/// took the run down. Refusing is the answer the row cannot give, and it is
+/// the answer a word that long already deserves: it is further from every
+/// flag than the two edits a suggestion is worth.
+///
+/// The rows are fixed-size buffers on the stack: `b_len` is under 255, so
+/// they fit. No allocator is reached, so a misspelling cannot pay a page
+/// mapping per candidate.
 fn editDistance(a: []const u8, b: []const u8) ?usize {
     if (a.len == 0) return codepointCount(b);
     if (b.len == 0) return codepointCount(a);
@@ -308,19 +312,18 @@ fn editDistance(a: []const u8, b: []const u8) ?usize {
     if (a_len >= std.math.maxInt(u8)) return null;
     const b_len = codepointCount(b);
     if (b_len >= std.math.maxInt(u8)) return null;
-    const gpa = std.heap.page_allocator;
-    const prev = gpa.alloc(u8, b_len + 1) catch return null;
-    defer gpa.free(prev);
-    const cur = gpa.alloc(u8, b_len + 1) catch return null;
-    defer gpa.free(cur);
-    for (0..b_len + 1) |j| prev[j] = @intCast(j);
+    var prev: [std.math.maxInt(u8)]u8 = undefined;
+    var cur: [std.math.maxInt(u8)]u8 = undefined;
+    const prev_row = prev[0 .. b_len + 1];
+    const cur_row = cur[0 .. b_len + 1];
+    for (0..b_len + 1) |j| prev_row[j] = @intCast(j);
     var i: usize = 0;
     var at: usize = 0;
     while (i < a.len) {
         const ca = a[i .. i + codepointLen(a, i)];
         i += ca.len;
         at += 1;
-        cur[0] = @intCast(at);
+        cur_row[0] = @intCast(at);
         var j: usize = 0;
         var bj: usize = 0;
         while (bj < b.len) {
@@ -328,11 +331,11 @@ fn editDistance(a: []const u8, b: []const u8) ?usize {
             bj += cb.len;
             j += 1;
             const cost: u8 = if (std.mem.eql(u8, ca, cb)) 0 else 1;
-            cur[j] = @min(@min(cur[j - 1] + 1, prev[j] + 1), prev[j - 1] + cost);
+            cur_row[j] = @min(@min(cur_row[j - 1] + 1, prev_row[j] + 1), prev_row[j - 1] + cost);
         }
-        @memcpy(prev, cur);
+        @memcpy(prev_row, cur_row);
     }
-    return prev[b_len];
+    return prev_row[b_len];
 }
 
 /// The directory every default path this program builds lives under, below the
