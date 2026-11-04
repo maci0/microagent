@@ -2733,59 +2733,44 @@ fn writeDefaultConfig(io: Io, arena: std.mem.Allocator, source: ConfigSource) vo
             return;
         };
     }
-    const file = std.Io.Dir.createFileAbsolute(io, path, .{ .exclusive = true, .permissions = default_config_mode }) catch |err| switch (err) {
-        // Another run wrote it between the read and this call, which is the
-        // file the reader wanted and no reason for a line.
-        error.PathAlreadyExists => return,
+    // The template is written to a temporary beside the destination and
+    // published with `link`, which fails if the name is already taken: a
+    // second run racing this one finds the first run's file and keeps it,
+    // and a crash or power loss at any point before the link leaves no
+    // partial file at `path` for the next run to read as the operator's
+    // own settings. The previous shape created `path` exclusively and
+    // then wrote into it, so a crash between the create and the write
+    // left exactly that partial file behind.
+    var af = std.Io.Dir.cwd().createFileAtomic(io, path, .{ .replace = false, .make_path = false, .permissions = default_config_mode }) catch |err| switch (err) {
         else => |e| {
             net.note(io, arena, "microagent: config {s}: the template could not be created ({s}); the built-in defaults are in force\n", .{ shown, @errorName(e) });
             return;
         },
     };
-    defer file.close(io);
-    if (file.writeStreamingAll(io, config_template)) |_| {} else |err| {
-        // The file was created exclusive, so the run that leaves it behind is
-        // the run that owns the name, and the next run finds a config there
-        // and reads a half-written template as the operator's own settings.
-        // The defaults are not what it would then get. A template is a
-        // convenience, so a failure to write one costs the run nothing: the
-        // partial file is taken back down, and when the unlink itself fails
-        // the note says the file is still there rather than claiming a file
-        // is not. A filesystem that refuses the write and then the unlink
-        // (a read-only mount, an immutable attribute) is exactly the case
-        // where the next run would read the prefix as the operator's own
-        // settings, and a note saying nothing was left is what hides it.
-        std.Io.Dir.cwd().deleteFile(io, path) catch |unlink_err| {
-            net.note(io, arena, "microagent: config {s}: the template could not be written ({s}) and the half-written file could not be removed ({s}); the built-in defaults are in force, and the next run reads the part that was written until it is removed\n", .{
-                shown, @errorName(err), @errorName(unlink_err),
-            });
-            return;
-        };
+    defer af.deinit(io);
+    if (af.file.writeStreamingAll(io, config_template)) |_| {} else |err| {
         net.note(io, arena, "microagent: config {s}: the template could not be written ({s}); the built-in defaults are in force and no file was left\n", .{ shown, @errorName(err) });
         return;
     }
     // The run tells the operator the template is there to edit, and the next
-    // run reads whatever is on disk as the operator's own settings. A crash
-    // between the write above and the close below would leave a truncated file
-    // that the unlink above only ever removes for a write the kernel refused:
-    // a file the run has already said it wrote, read back as half a config.
-    // Syncing before the claim makes the claim true, so a template that is
-    // reported written is one that survives the machine stopping right here.
-    if (file.sync(io)) |_| {} else |err| {
-        // The bytes reached the file and only the durability failed, but the
-        // next run would read this file as the operator's settings whether or
-        // not it reached the platter, so the half-guaranteed file is taken back
-        // down on the same terms as a failed write: what could not be promised
-        // is not left where it will be believed.
-        std.Io.Dir.cwd().deleteFile(io, path) catch |unlink_err| {
-            net.note(io, arena, "microagent: config {s}: the template could not be flushed to disk ({s}) and the file could not be removed ({s}); the built-in defaults are in force, and the next run reads the template as the operator's own settings until it is removed\n", .{
-                shown, @errorName(err), @errorName(unlink_err),
-            });
-            return;
-        };
+    // run reads whatever is on disk as the operator's own settings. Syncing
+    // before the claim makes the claim true, so a template that is reported
+    // written is one that survives the machine stopping right here. The
+    // temporary is not at `path`, so a failed flush leaves nothing behind
+    // for a later run to mistake for a config.
+    if (af.file.sync(io)) |_| {} else |err| {
         net.note(io, arena, "microagent: config {s}: the template could not be flushed to disk ({s}); the built-in defaults are in force and no file was left\n", .{ shown, @errorName(err) });
         return;
     }
+    af.link(io) catch |err| switch (err) {
+        // Another run wrote it between the read and this call, which is the
+        // file the reader wanted and no reason for a line.
+        error.PathAlreadyExists => return,
+        else => |e| {
+            net.note(io, arena, "microagent: config {s}: the template could not be installed ({s}); the built-in defaults are in force\n", .{ shown, @errorName(e) });
+            return;
+        },
+    };
     net.note(io, arena, "microagent: config {s}: no file there, so the commented template was written; edit it to configure the run\n", .{shown});
 }
 
