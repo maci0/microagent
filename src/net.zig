@@ -143,9 +143,17 @@ pub fn loadCaBundle(
     client.now = now;
 }
 
+/// One write to stderr at a time, so two notes writing at once do not
+/// interleave byte by byte. The mutex is uncancelable: a note is short, and
+/// dropping it on cancelation would only lose the line the cancelation
+/// already made urgent.
+var stderr_mutex: Io.Mutex = .init;
+
 /// Bytes on stderr, which is where gauntlet shows harness notes. A closed
 /// stream costs the run nothing: the reader left, it is not a fault.
 pub fn writeErr(io: Io, bytes: []const u8) void {
+    stderr_mutex.lockUncancelable(io);
+    defer stderr_mutex.unlock(io);
     Io.File.stderr().writeStreamingAll(io, bytes) catch {};
 }
 

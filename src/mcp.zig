@@ -1716,6 +1716,15 @@ pub fn connect(
 ) Servers {
     var locked: HandshakeAllocator = .{ .io = io, .inner = run_arena };
     const arena = locked.allocator();
+    // A server's kept bytes are written from this same locked arena during
+    // the parallel handshakes below, not from the bare run arena: several
+    // handshakes run at once, and each allocates its `last_error` and session
+    // id from `run_arena` while it runs. An arena grown from two workers at
+    // once hands the same bytes to both, so one server's error line comes
+    // back as another's. The adapter lives on this frame until every
+    // handshake joins, and kept servers are re-pointed at the bare arena
+    // below, on the serial path that follows.
+    const shared_arena = arena;
     // Every local server is started before any of them is asked to initialize.
     // What a handshake mostly waits for is the server's own boot -- `npx`
     // resolving a package, a node or python interpreter coming up -- and that
@@ -1726,6 +1735,10 @@ pub fn connect(
     for (entries) |entry| {
         if (entry.url.len != 0) openRemote(io, arena, client, entry, client_version, &spawned) else spawnOne(io, arena, environ_map, entry, &spawned);
     }
+    // Servers built above carry `arena` as their kept-bytes allocator; give
+    // the parallel handshakes the locked spelling of that same arena, so
+    // their `run_arena` allocations are serialized too.
+    for (spawned.items) |*server| server.run_arena = shared_arena;
 
     // The remote handshakes are round trips over the network, so each runs as
     // its own task and they cost the slowest one, not the sum. The local ones
