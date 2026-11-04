@@ -21,6 +21,10 @@ release, and `microagent update` moves you to it.
 
 ## [0.19.0] - 2026-11-04
 
+### Added
+
+- Add `SECURITY.md` defining project vulnerability reporting policy and response procedures.
+
 ### Fixed
 
 - Create the default configuration atomically and leave an existing file untouched.
@@ -31,6 +35,7 @@ release, and `microagent update` moves you to it.
   platform-dependent allocator-capacity assertion on macOS.
 - Build with Homebrew's Zig layout on macOS by discovering the compiler's
   library directory instead of assuming it sits beside the executable.
+- Fix threat-model citations to align with source lines and pass reference validation.
 
 ## [0.18.0] - 2026-10-15
 

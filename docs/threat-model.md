@@ -5,10 +5,10 @@ carries a file reference, so the next pass can re-verify it against the code rat
 against this document. Flags, environment variables and the config file are documented in
 [usage.md](usage.md).
 
-Last reviewed: 2026-11-04, against `0.18.0` ([build.zig.zon](../build.zig.zon)) and the
+Last reviewed: 2026-11-04, against `0.19.0` ([build.zig.zon](../build.zig.zon)) and the
 `Unreleased` section of [CHANGELOG.md](../CHANGELOG.md).
 
-This pass re-read the document against `0.18.0` and repaired every citation the
+This pass re-read the document against `0.19.0` and repaired every citation the
 `check-refs` gate flagged after the source moved: the stale line numbers were
 rewritten to the lines their symbols are defined on, and eight bare citations
 whose lines now hold only comments were paired with the symbol that actually

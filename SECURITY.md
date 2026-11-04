@@ -8,7 +8,7 @@ This matches the supported-version statements in
 [docs/usage.md](docs/usage.md#versioning) and the preamble of
 [CHANGELOG.md](CHANGELOG.md).
 
-The current release is `0.18.0`, as declared in `build.zig.zon`.
+The current release is `0.19.0`, as declared in `build.zig.zon`.
 
 ## Reporting a vulnerability
 
