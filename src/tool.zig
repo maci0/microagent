@@ -2521,6 +2521,9 @@ fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, writable
 
     const raw = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_edit_bytes)) catch |err|
         return readFailed(arena, path, err);
+    if (alreadyApplied(raw, old, new, all)) |done| {
+        return std.fmt.allocPrint(arena, "already applied {d} occurrence(s) in {s}", .{ done, shownPath(arena, path) });
+    }
     const edited = try applyEdit(arena, path, raw, old, new, all);
     const done = switch (edited) {
         .refused => |message| return message,
@@ -6846,13 +6849,13 @@ test "an edit issued twice leaves the file the first run left" {
     var args: std.json.ObjectMap = .empty;
     try args.put(arena, "path", .{ .string = "a.txt" });
 
-    // The ordinary edit: the second run finds no text to replace, so it is
-    // refused and the file keeps the first run's bytes.
+    // The ordinary edit: the second run is already applied, so it is skipped
+    // and the file keeps the first run's bytes.
     try args.put(arena, "old_string", .{ .string = "x" });
     try args.put(arena, "new_string", .{ .string = "y" });
     try cwd.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.txt", .data = "a x b" });
     try std.testing.expectEqualStrings("replaced 1 occurrence(s) in a.txt", try toolEdit(std.testing.io, arena, args, &.{}));
-    try std.testing.expect(std.mem.startsWith(u8, try toolEdit(std.testing.io, arena, args, &.{}), "error: old_string not found"));
+    try std.testing.expectEqualStrings("already applied 1 occurrence(s) in a.txt", try toolEdit(std.testing.io, arena, args, &.{}));
     try std.testing.expectEqualStrings("a y b", try cwd.tmp.dir.readFileAlloc(std.testing.io, "a.txt", arena, .limited(64)));
 
     // The nesting shape, refused on the first run rather than applied and
