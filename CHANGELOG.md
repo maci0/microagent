@@ -19,6 +19,13 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-11-04
+
+### Changed
+
+- Update the linter setup action to setup-uv 10.3.0.
+- Correct the security policy version and threat-model citations.
+
 ## [0.19.1] - 2026-11-04
 
 ### Fixed
@@ -27,10 +34,6 @@ release, and `microagent update` moves you to it.
   `HttpConnectionClosing` when checking for or downloading releases.
 
 ## [0.19.0] - 2026-11-04
-
-### Added
-
-- Add `SECURITY.md` defining project vulnerability reporting policy and response procedures.
 
 ### Fixed
 
@@ -42,7 +45,6 @@ release, and `microagent update` moves you to it.
   platform-dependent allocator-capacity assertion on macOS.
 - Build with Homebrew's Zig layout on macOS by discovering the compiler's
   library directory instead of assuming it sits beside the executable.
-- Fix threat-model citations to align with source lines and pass reference validation.
 
 ## [0.18.0] - 2026-10-15
 
@@ -3330,7 +3332,8 @@ First release.
   `aarch64-macos` with a checksum sidecar each, and refuses a tag that does not name the version in
   `build.zig.zon`.
 
-[Unreleased]: https://github.com/maci0/microagent/compare/v0.19.1...HEAD
+[Unreleased]: https://github.com/maci0/microagent/compare/v0.20.0...HEAD
+[0.20.0]: https://github.com/maci0/microagent/compare/v0.19.1...v0.20.0
 [0.19.1]: https://github.com/maci0/microagent/compare/v0.19.0...v0.19.1
 [0.19.0]: https://github.com/maci0/microagent/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/maci0/microagent/compare/v0.17.0...v0.18.0
