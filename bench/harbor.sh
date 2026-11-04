@@ -188,11 +188,14 @@ fi
 # still want, and this script is not the thing that decides which runs are
 # worth keeping.
 new_job() {
-	base="$1-$(date +%H%M%S)-$$"
+	# UTC (`date -u`), not host-local time: a job name for the same instant is
+	# the same in every TZ, and a DST fall-back repeating a local hour cannot
+	# make a second run reuse a name the collision check then had to repair.
+	base="$1-$(date -u +%H%M%S)-$$"
 	n=0
 	while [ -e "$jobs_dir/$base" ] && [ "$n" -lt 100 ]; do
 		n=$((n + 1))
-		base="$1-$(date +%H%M%S)-$$-$n"
+		base="$1-$(date -u +%H%M%S)-$$-$n"
 	done
 	printf '%s' "$base"
 }

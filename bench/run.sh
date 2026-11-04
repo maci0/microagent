@@ -53,7 +53,10 @@ timeout_s="${BENCH_TIMEOUT:-600}"
 # Naming the run is half of that; `record_run_row` is the other half, and it
 # keeps one run to one row per (agent, task), so the group a reader takes is a
 # set of measurements rather than a count of how many times each was taken.
-run_id="${BENCH_RUN_ID:-$(date +%Y%m%dT%H%M%S)-$$}"
+# The stamp is UTC (`date -u`), not host-local time: the same instant run in
+# different TZ values names the same `run`, and a DST fall-back that repeats a
+# local hour cannot make two distinct invocations collide on one name.
+run_id="${BENCH_RUN_ID:-$(date -u +%Y%m%dT%H%M%S)-$$}"
 
 # Keep row strings escaped and numeric columns typed, including error rows, and
 # write the row once per (run, agent, task): `bench/rows.sh` says why a repeat

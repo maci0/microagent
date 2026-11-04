@@ -46,7 +46,10 @@ work_root="${GAUNTLET_WORK:-$root/.scratch/gauntlet}"
 # Naming the run is half of that; `record_run_row` is the other half, and it
 # keeps one run to one row per agent, so the group a reader takes is a set of
 # measurements rather than a count of how many times each was taken.
-run_id="${GAUNTLET_RUN_ID:-$(date +%Y%m%dT%H%M%S)-$$}"
+# The stamp is UTC (`date -u`), not host-local time: the same instant run in
+# different TZ values names the same `run`, and a DST fall-back that repeats a
+# local hour cannot make two distinct invocations collide on one name.
+run_id="${GAUNTLET_RUN_ID:-$(date -u +%Y%m%dT%H%M%S)-$$}"
 command -v python3 >/dev/null 2>&1 || {
 	printf '%s\n' 'bench/gauntlet.sh: python3 is required to record JSON rows' >&2
 	exit 2
