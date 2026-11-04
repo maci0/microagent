@@ -19,6 +19,11 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+### Fixed
+
+- Build with Homebrew's Zig layout on macOS by discovering the compiler's
+  library directory instead of assuming it sits beside the executable.
+
 ## [0.18.0] - 2026-10-15
 
 ### Added

@@ -194,7 +194,14 @@ pub fn build(b: *std.Build) void {
 /// Patch only our cached library, using its existing child cleanup routine.
 /// Remove this workaround when the pinned toolchain closes and reaps that path.
 fn fixedSpawnLibrary(b: *std.Build) std.Build.LazyPath {
-    const lib_dir = b.pathJoin(&.{ std.fs.path.dirname(b.graph.zig_exe).?, "lib" });
+    // Homebrew separates bin/zig from lib/zig; use the compiler's own
+    // installation discovery for both packaged and archive toolchains.
+    const cwd = std.zig.getResolvedCwd(b.graph.io, b.allocator) catch
+        @panic("cannot resolve the build directory");
+    const library = std.zig.findZigLibDirFromSelfExe(b.allocator, b.graph.io, cwd, b.graph.zig_exe) catch
+        @panic("cannot find Zig's library directory");
+    defer library.handle.close(b.graph.io);
+    const lib_dir = library.path orelse cwd;
     const threaded_path = b.pathJoin(&.{ lib_dir, "std/Io/Threaded.zig" });
     const source = std.Io.Dir.cwd().readFileAlloc(b.graph.io, threaded_path, b.allocator, .unlimited) catch
         @panic("cannot read Zig's process spawn implementation");
