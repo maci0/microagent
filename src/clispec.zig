@@ -677,3 +677,119 @@ test "-o is stripped before a subcommand and stops at --" {
         try std.testing.expectEqual(case.len, stripped.argv.len);
     }
 }
+
+const strip_output_corpus = [_][]const u8{
+    "",
+    "bin",
+    "bin\x00-o\x00json\x00schema",
+    "bin\x00--output=json\x00schema",
+    "bin\x00--output=yaml\x00schema",
+    "bin\x00--output=\x00schema",
+    "bin\x00-o\x00json\x00--\x00-o\x00json",
+    "bin\x00--model\x00-o\x00task",
+    "bin\x00--\x00-o\x00json",
+    "bin\x00-o",
+    "bin\x00-o\x00\x00schema",
+    "bin\x00-o\x00json\x00update\x00--check",
+    "bin\x00--output=text\x00update\x00--check",
+    "bin\x00-o\x00JSON",
+    "bin\x00-o\x00auto\x00schema",
+    "bin\x00-o\x00json\x00schema\x00extra",
+    "bin\x00--model=x\x00--output=json\x00help",
+    "bin\x00-o\x00jso\x00n",
+    "bin\x00-o\x00json\x00schema\x00",
+    "\x00",
+    "bin\x00\xff\xfe\x00-o\x00json",
+    "bin\x00-o\x00\xc3\xa9",
+    "bin\x00--output=json\x00--\x00--output=text",
+    "bin\x00--model\x00--output=json\x00task",
+    "bin\x00--output=json\x00--model\x00-o\x00task",
+};
+
+test "a fuzzed argv is stripped the way its entries spell it" {
+    try std.testing.fuzz({}, fuzzStripOutput, .{ .corpus = &strip_output_corpus });
+}
+
+fn takesValue(name: []const u8) bool {
+    return std.mem.eql(u8, name, "--model") or std.mem.eql(u8, name, "-p");
+}
+
+fn fuzzStripOutput(_: void, smith: *std.testing.Smith) !void {
+    const gpa = std.testing.allocator;
+    var raw: [4 * 1024]u8 = undefined;
+    const bytes: []const u8 = if (smith.in) |seed| seed else raw[0..smith.slice(&raw)];
+
+    var state = std.heap.ArenaAllocator.init(gpa);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    var argv: std.ArrayList([]const u8) = .empty;
+    try argv.append(arena, "bin");
+    var rest = bytes;
+    while (std.mem.indexOfScalar(u8, rest, 0)) |at| {
+        try argv.append(arena, rest[0..at]);
+        rest = rest[at + 1 ..];
+        if (rest.len == 0) break;
+    }
+    if (rest.len != 0) try argv.append(arena, rest);
+
+    const stripped = try stripOutput(arena, argv.items, takesValue);
+
+    try std.testing.expect(stripped.argv.len >= 1);
+    try std.testing.expectEqualStrings(argv.items[0], stripped.argv[0]);
+    try std.testing.expect(stripped.argv.len <= argv.items.len);
+
+    if (stripped.failure != null) {
+        const msg = stripped.failure.?;
+        try std.testing.expect(std.mem.indexOf(u8, msg, "unknown output format") != null or std.mem.indexOf(u8, msg, "-o needs a format") != null);
+        if (std.mem.indexOf(u8, msg, "unknown output format '")) |at| {
+            const start = at + "unknown output format '".len;
+            const end = std.mem.indexOfScalarPos(u8, msg, start, '\'') orelse msg.len;
+            const value = msg[start..end];
+            try std.testing.expect(parseMode(value) == null);
+        }
+        return;
+    }
+
+    const mode_name: []const u8 = switch (stripped.mode) {
+        .auto => "auto",
+        .text => "text",
+        .json => "json",
+    };
+    try std.testing.expect(parseMode(mode_name) == stripped.mode);
+
+    var ended = false;
+    var i: usize = 1;
+    while (i < stripped.argv.len) {
+        const arg = stripped.argv[i];
+        if (!ended and std.mem.eql(u8, arg, "--")) {
+            ended = true;
+            i += 1;
+            continue;
+        }
+        if (ended) {
+            i += 1;
+            continue;
+        }
+        if (i > 1) {
+            const prev = stripped.argv[i - 1];
+            const prev_name = flagName(prev);
+            if (takesValue(prev_name) and !valueJoined(prev)) {
+                i += 1;
+                continue;
+            }
+        }
+        try std.testing.expect(outputSpec(arg) == null);
+        const name = flagName(arg);
+        if (takesValue(name) and !valueJoined(arg)) {
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+
+    const again = try stripOutput(arena, argv.items, takesValue);
+    try std.testing.expectEqual(stripped.mode, again.mode);
+    try std.testing.expectEqual(stripped.argv.len, again.argv.len);
+    try std.testing.expect((stripped.failure == null) == (again.failure == null));
+}
