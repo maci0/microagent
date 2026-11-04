@@ -10156,6 +10156,18 @@ fn runAcp(init: std.process.Init) !u8 {
                     acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
                     continue;
                 };
+                aw.writer.writeAll(",\"configOptions\":") catch {
+                    acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
+                    continue;
+                };
+                const model_options = acp_mod.configOptionsJson(fa, session.opts.model) catch {
+                    acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
+                    continue;
+                };
+                aw.writer.writeAll(model_options) catch {
+                    acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
+                    continue;
+                };
                 aw.writer.writeAll("}") catch {
                     acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
                     continue;
@@ -10275,7 +10287,11 @@ fn runAcp(init: std.process.Init) !u8 {
                     continue;
                 }
             }
-            acpResult(&conn, request.id.?, acp_mod.session_state_json) catch {};
+            const state = acp_mod.sessionStateJson(fa, session.opts.model) catch {
+                acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
+                continue;
+            };
+            acpResult(&conn, request.id.?, state) catch {};
             continue;
         }
 
@@ -10296,7 +10312,58 @@ fn runAcp(init: std.process.Init) !u8 {
                 acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
                 continue;
             };
-            acpResult(&conn, request.id.?, acp_mod.session_state_json) catch {};
+            const state = acp_mod.sessionStateJson(fa, session.opts.model) catch {
+                acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
+                continue;
+            };
+            acpResult(&conn, request.id.?, state) catch {};
+            continue;
+        }
+
+        if (std.mem.eql(u8, request.method, "session/set_config_option")) {
+            const params = request.params orelse {
+                acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
+                continue;
+            };
+            const sid = acp_mod.stringField(params, "sessionId") catch {
+                acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
+                continue;
+            };
+            const session = conn.sessions.get(sid) orelse {
+                acpUnknownSession(&conn, request.id, sid);
+                continue;
+            };
+            const config_id = acp_mod.stringField(params, "configId") catch {
+                acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
+                continue;
+            };
+            const value = params.object.get("value") orelse {
+                acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
+                continue;
+            };
+            if (value != .string) {
+                acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
+                continue;
+            }
+            if (std.mem.eql(u8, config_id, "model")) {
+                if (!std.mem.eql(u8, value.string, session.opts.model)) {
+                    acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
+                    continue;
+                }
+            } else if (std.mem.eql(u8, config_id, "mode")) {
+                if (!std.mem.eql(u8, value.string, "code")) {
+                    acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
+                    continue;
+                }
+            } else {
+                acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
+                continue;
+            }
+            const state = acp_mod.configOptionsResultJson(fa, session.opts.model) catch {
+                acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
+                continue;
+            };
+            acpResult(&conn, request.id.?, state) catch {};
             continue;
         }
 

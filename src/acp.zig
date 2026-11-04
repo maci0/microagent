@@ -311,10 +311,31 @@ pub const modes_json =
     \\{"currentModeId":"code","availableModes":[{"id":"code","name":"Code","description":"Read, edit and run commands with the configured tools"}]}
 ;
 
-/// The optional session state fields a new, resumed or loaded session returns.
-pub const session_state_json =
-    \\{"modes":{"currentModeId":"code","availableModes":[{"id":"code","name":"Code","description":"Read, edit and run commands with the configured tools"}]}}
-;
+/// The `configOptions` a session advertises. The model option is what makes an
+/// ACP client's model selector show the model this session will actually call;
+/// without it a client that only reads `configOptions` reports no models.
+pub fn configOptionsJson(allocator: std.mem.Allocator, model: []const u8) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    const w = &aw.writer;
+    try w.writeAll("[{\"id\":\"mode\",\"name\":\"Session Mode\",\"description\":\"Controls whether the agent may edit and run tools\",\"category\":\"mode\",\"type\":\"select\",\"currentValue\":\"code\",\"options\":[{\"value\":\"code\",\"name\":\"Code\",\"description\":\"Read, edit and run commands with the configured tools\"}]},{\"id\":\"model\",\"name\":\"Model\",\"description\":\"The model this session sends to the provider\",\"category\":\"model\",\"type\":\"select\",\"currentValue\":");
+    try chat.writeJsonString(w, model);
+    try w.writeAll(",\"options\":[{\"value\":");
+    try chat.writeJsonString(w, model);
+    try w.writeAll(",\"name\":");
+    try chat.writeJsonString(w, model);
+    try w.writeAll(",\"description\":\"The model named by the operator configuration\"}]}]");
+    return aw.toOwnedSlice();
+}
+
+pub fn configOptionsResultJson(allocator: std.mem.Allocator, model: []const u8) ![]u8 {
+    const options = try configOptionsJson(allocator, model);
+    return std.fmt.allocPrint(allocator, "{{\"configOptions\":{s}}}", .{options});
+}
+
+pub fn sessionStateJson(allocator: std.mem.Allocator, model: []const u8) ![]u8 {
+    const options = try configOptionsJson(allocator, model);
+    return std.fmt.allocPrint(allocator, "{{\"modes\":{s},\"configOptions\":{s}}}", .{ modes_json, options });
+}
 
 /// The prompt capabilities: text, resource_link and embedded text resources.
 pub const prompt_capabilities_json =

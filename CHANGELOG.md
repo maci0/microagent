@@ -19,6 +19,14 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+## [0.22.1] - 2026-11-05
+
+### Fixed
+
+- ACP sessions now advertise a `model` session config option, so clients that
+  build their model list from `configOptions` detect the configured model
+  instead of reporting no models.
+
 ## [0.22.0] - 2026-11-04
 
 ### Added
@@ -3348,7 +3356,8 @@ First release.
   `aarch64-macos` with a checksum sidecar each, and refuses a tag that does not name the version in
   `build.zig.zon`.
 
-[Unreleased]: https://github.com/maci0/microagent/compare/v0.22.0...HEAD
+[Unreleased]: https://github.com/maci0/microagent/compare/v0.22.1...HEAD
+[0.22.1]: https://github.com/maci0/microagent/compare/v0.22.0...v0.22.1
 [0.22.0]: https://github.com/maci0/microagent/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/maci0/microagent/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/maci0/microagent/compare/v0.19.1...v0.20.0
