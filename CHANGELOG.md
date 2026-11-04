@@ -19,6 +19,13 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+## [0.19.1] - 2026-11-04
+
+### Fixed
+
+- Send the updater HTTP GET request before reading its response, fixing
+  `HttpConnectionClosing` when checking for or downloading releases.
+
 ## [0.19.0] - 2026-11-04
 
 ### Fixed
@@ -3318,7 +3325,8 @@ First release.
   `aarch64-macos` with a checksum sidecar each, and refuses a tag that does not name the version in
   `build.zig.zon`.
 
-[Unreleased]: https://github.com/maci0/microagent/compare/v0.19.0...HEAD
+[Unreleased]: https://github.com/maci0/microagent/compare/v0.19.1...HEAD
+[0.19.1]: https://github.com/maci0/microagent/compare/v0.19.0...v0.19.1
 [0.19.0]: https://github.com/maci0/microagent/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/maci0/microagent/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/maci0/microagent/compare/v0.16.0...v0.17.0
