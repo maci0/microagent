@@ -666,7 +666,7 @@ lint-python:
 
 lint-yaml:
 	@test -n "$(YAML_SOURCES)" || { echo "no tracked .yml or .yaml file to lint" >&2; exit 1; }
-	yamllint -c .yamllint $(YAML_SOURCES)
+	yamllint -c .yamllint --strict $(YAML_SOURCES)
 
 # The Markdown, which no other target here reads: zig fmt has no opinion on a
 # prose file, and the three linters above each cover one language that is not
