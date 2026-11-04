@@ -539,6 +539,7 @@ fn exchange(
         .privileged_headers = auth_headers,
     });
     defer request.deinit();
+    try request.sendBodiless();
     var redirect_buffer: [8 * 1024]u8 = undefined;
     var response = try request.receiveHead(&redirect_buffer);
     head_len.* = @intCast(@min(response.head.bytes.len, head.len));
@@ -1982,4 +1983,61 @@ test "update: the binary is replaced only when the sidecar vouches for the downl
 
     try installIfVerified(io, exe, "abc", good, asset_base);
     try expectFile(tmp.dir, "microagent", "abc");
+}
+
+test "update: exchange sends a GET and reads the response body" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try address.listen(io, .{});
+    defer listener.deinit(io);
+    var url_buf: [128]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/release", .{listener.socket.address.getPort()});
+    var client: std.http.Client = .{ .allocator = gpa, .io = io };
+    defer client.deinit();
+    var capped: Capped = undefined;
+    try capped.start(gpa, 1024);
+    defer capped.body.deinit();
+    var head: [max_head_bytes]u8 = undefined;
+    var head_len: usize = 0;
+
+    const Server = struct {
+        fn serve(server: *std.Io.net.Server, server_io: std.Io) !void {
+            const stream = try server.accept(server_io);
+            defer stream.close(server_io);
+            var read_buf: [4096]u8 = undefined;
+            var reader = stream.reader(server_io, &read_buf);
+            try std.testing.expectEqualStrings("GET /release HTTP/1.1\r\n", try reader.interface.takeDelimiterInclusive('\n'));
+            while (true) {
+                const line = try reader.interface.takeDelimiterInclusive('\n');
+                if (std.mem.eql(u8, line, "\r\n")) break;
+            }
+            var write_buf: [1024]u8 = undefined;
+            var writer = stream.writer(server_io, &write_buf);
+            try writer.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\nrelease");
+            try writer.interface.flush();
+        }
+    };
+    const Event = union(enum) {
+        served: anyerror!void,
+        fetched: anyerror!std.http.Client.FetchResult,
+        expired: std.Io.Cancelable!void,
+    };
+    var slots: [3]Event = undefined;
+    var select: std.Io.Select(Event) = .init(io, &slots);
+    defer select.cancelDiscard();
+    try select.concurrent(.served, Server.serve, .{ &listener, io });
+    try select.concurrent(.fetched, exchange, .{ &client, &capped, &head, &head_len, url, null });
+    // A missing send must fail the test instead of blocking both peers forever.
+    try select.concurrent(.expired, std.Io.Timeout.sleep, .{ net.durationMs(5000), io });
+    for (0..2) |_| {
+        switch (try select.await()) {
+            .served => |result| try result,
+            .fetched => |result| try std.testing.expectEqual(std.http.Status.ok, (try result).status),
+            .expired => return error.UpdateExchangeTimedOut,
+        }
+    }
+    try std.testing.expectEqualStrings("release", capped.body.written());
 }
