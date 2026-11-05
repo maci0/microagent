@@ -19,6 +19,14 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+## [0.22.2] - 2026-11-06
+
+### Fixed
+
+- ACP now accepts `auto` as the default session mode, so Paseo no longer
+  rejects its default mode for the microagent provider. `code` remains a
+  valid explicit mode.
+
 ## [0.22.1] - 2026-11-05
 
 ### Fixed
@@ -3356,7 +3364,8 @@ First release.
   `aarch64-macos` with a checksum sidecar each, and refuses a tag that does not name the version in
   `build.zig.zon`.
 
-[Unreleased]: https://github.com/maci0/microagent/compare/v0.22.1...HEAD
+[Unreleased]: https://github.com/maci0/microagent/compare/v0.22.2...HEAD
+[0.22.2]: https://github.com/maci0/microagent/compare/v0.22.1...v0.22.2
 [0.22.1]: https://github.com/maci0/microagent/compare/v0.22.0...v0.22.1
 [0.22.0]: https://github.com/maci0/microagent/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/maci0/microagent/compare/v0.20.0...v0.21.0

@@ -303,12 +303,13 @@ pub const session_capabilities_json =
     \\{"close":{},"delete":{},"list":{},"resume":{}}
 ;
 
-/// The one operating mode this agent has. It is not a permission mode: the
-/// agent always runs the tools the operator enabled, and the ACP client does
-/// not gate them. Advertising it lets a mode-aware client show a correct
-/// current state and call `session/set_mode` idempotently.
+/// The operating modes this agent answers to. `auto` is the default Paseo and
+/// other clients send when they have no preference; it is the same behavior as
+/// `code`, which is kept as an explicit name. Neither is a permission mode:
+/// the agent always runs the tools the operator enabled, and the ACP client
+/// does not gate them.
 pub const modes_json =
-    \\{"currentModeId":"code","availableModes":[{"id":"code","name":"Code","description":"Read, edit and run commands with the configured tools"}]}
+    \\{"currentModeId":"auto","availableModes":[{"id":"auto","name":"Auto","description":"Read, edit and run commands with the configured tools"},{"id":"code","name":"Code","description":"Read, edit and run commands with the configured tools"}]}
 ;
 
 /// The `configOptions` a session advertises. The model option is what makes an

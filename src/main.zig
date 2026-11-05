@@ -10351,7 +10351,7 @@ fn runAcp(init: std.process.Init) !u8 {
                     continue;
                 }
             } else if (std.mem.eql(u8, config_id, "mode")) {
-                if (!std.mem.eql(u8, value.string, "code")) {
+                if (!std.mem.eql(u8, value.string, "auto") and !std.mem.eql(u8, value.string, "code")) {
                     acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
                     continue;
                 }
@@ -10376,7 +10376,7 @@ fn runAcp(init: std.process.Init) !u8 {
                 acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
                 continue;
             };
-            if (!std.mem.eql(u8, mode, "code")) {
+            if (!std.mem.eql(u8, mode, "auto") and !std.mem.eql(u8, mode, "code")) {
                 acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
                 continue;
             }
