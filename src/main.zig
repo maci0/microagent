@@ -263,6 +263,9 @@ const Options = struct {
     /// refused rather than sent to an endpoint nobody chose.
     base_url: []const u8 = "",
     api_key: []const u8 = "",
+    /// The config file's `headers`, sent on every provider request after the
+    /// ones this client sets itself.
+    headers: []const [2][]const u8 = &.{},
     max_turns: usize = max_turns_default,
     /// Sent as `max_tokens`, the ceiling on one response's generated tokens.
     max_tokens: u32 = default_max_tokens,
@@ -688,6 +691,7 @@ fn runMain(init: std.process.Init) !u8 {
     var msgs: std.ArrayList(u8) = .empty;
     defer msgs.deinit(gpa);
     opts.deny_commands = loaded.deny_commands;
+    opts.headers = loaded.headers;
     opts.disabled_tools = loaded.disabled_tools;
     opts.sandbox = loaded.sandbox;
     if (opts.sandbox.enabled) {
@@ -2409,6 +2413,7 @@ const LoadedConfig = struct {
     base_url: []const u8,
     api_key: []const u8,
     reasoning_effort: []const u8,
+    headers: []const [2][]const u8,
     /// The skill directories the config file named, or null when it named
     /// none, which is how the caller tells "use the default root" from "the
     /// file turned skills off".
@@ -2437,6 +2442,7 @@ fn fromConfig(parsed: config_mod.Config, source: ?[]const u8) LoadedConfig {
         .base_url = parsed.base_url,
         .api_key = parsed.api_key,
         .reasoning_effort = parsed.reasoning_effort,
+        .headers = parsed.headers,
         .skills = parsed.skills,
         .mcp = parsed.mcp,
         .deny_commands = parsed.deny_commands,
@@ -3819,6 +3825,9 @@ const Endpoint = struct {
     auth: std.http.Client.Request.Headers,
     /// OpenCode routes all turns in one conversation using this stable ID.
     session_id: ?[]const u8 = null,
+    /// The body's type, the stream accept, the OpenCode session when there is
+    /// one, then the config file's `headers`, every turn of the run.
+    extra: []const std.http.Header = &.{},
 };
 
 fn isOpenCode(arena: std.mem.Allocator, uri: std.Uri) !bool {
@@ -3839,8 +3848,16 @@ fn endpoint(io: Io, arena: std.mem.Allocator, opts: Options) !Endpoint {
     uri.path = .{ .percent_encoded = try std.fmt.allocPrint(arena, "{s}/chat/completions", .{std.mem.trimEnd(u8, uri.path.percent_encoded, "/")}) };
     uri.fragment = null;
     const url = try std.fmt.allocPrint(arena, "{f}", .{uri});
+    var extra: std.ArrayList(std.http.Header) = .empty;
+    try extra.appendSlice(arena, &.{
+        .{ .name = "content-type", .value = "application/json" },
+        .{ .name = "accept", .value = "text/event-stream" },
+    });
+    if (session_id) |id| try extra.append(arena, .{ .name = "x-opencode-session", .value = id });
+    for (opts.headers) |header| try extra.append(arena, .{ .name = header[0], .value = header[1] });
     return .{
         .uri = uri,
+        .extra = extra.items,
         // What the notes below name, and what the userinfo a base url may carry
         // never reaches: the run's log is not the place for a password.
         .shown_url = displayUrl(arena, url),
@@ -4095,17 +4112,12 @@ fn streamChatOnce(
             r.deinit();
             req_slot = null;
         }
-        const extra_headers = [_]std.http.Header{
-            .{ .name = "content-type", .value = "application/json" },
-            .{ .name = "accept", .value = "text/event-stream" },
-            .{ .name = "x-opencode-session", .value = ep.session_id orelse "" },
-        };
         const req = openChatRequest(client, uri, .{
             .redirect_behavior = .unhandled,
             // The key and the identity ride in one header block, built once per
             // run: `authHeaders` is where both are spelled.
             .headers = auth_headers,
-            .extra_headers = extra_headers[0..if (ep.session_id == null) @as(usize, 2) else 3],
+            .extra_headers = ep.extra,
         }, opts.stall_timeout_s) catch |err| {
             if (worthAnotherAttempt(.opened, err) and waitBeforeRetry(io, arena, shown_url, attempt, "opening the request to", err, budget)) continue;
             return err;
@@ -10028,6 +10040,7 @@ fn runAcp(init: std.process.Init) !u8 {
     net.loadCaBundle(&client, io, gpa, opts.ca_bundle, arena);
 
     opts.deny_commands = loaded.deny_commands;
+    opts.headers = loaded.headers;
     opts.disabled_tools = loaded.disabled_tools;
     opts.sandbox = loaded.sandbox;
     if (opts.sandbox.enabled) {

@@ -476,6 +476,21 @@ for a level, or `thinking.type = "disabled"` for `none`; other endpoints receive
 or `reasoning.enabled = false`. If the provider rejects optional reasoning or temperature fields
 with HTTP 400, the existing fallback reports the rejection and retries without those settings.
 
+`headers` is an inline table of extra headers sent on every provider request, for an upstream
+that needs one the client would otherwise not send, such as a Grok CLI proxy that refuses a
+request without `x-grok-client-version`:
+
+```toml
+headers = { "x-grok-client-version" = "1.0.77" }
+```
+
+It exists only in the file: there is no flag or variable. Names are HTTP tokens and values hold no
+control character other than tab. A name the client already sends (`Authorization`, `User-Agent`,
+`Content-Type`, `Accept`, `Content-Length`, `Transfer-Encoding`, `Host`, `Connection`,
+`Accept-Encoding`, `x-opencode-session`) or one repeated in any case refuses the whole table: the
+problem is named on stderr and the run goes on with no extra headers, so the key cannot be replaced
+or sent twice. The headers go only to `base_url`, never to an MCP server.
+
 `model` defaults to `deepseek/deepseek-v4-flash` when no source names one. `base_url` and `api_key`
 have no default: a run that names neither is refused before the first request, with the message
 naming the flag, the variable and the config key. `base_url` is checked the way the flag is, so a

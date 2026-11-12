@@ -125,7 +125,9 @@ microagent "fix the failing test and run it"
 ```
 
 All three may also be written in the config file (`model`, `base_url`, `api_key`); a flag beats the
-variable, which beats the file. There is no default provider and no key file.
+variable, which beats the file. There is no default provider and no key file. A router that needs
+an extra request header gets it from the file's `headers` table, e.g.
+`headers = { "x-grok-client-version" = "1.0.77" }`.
 
 For OpenCode Zen, set `MICROAGENT_BASE_URL=https://opencode.ai/zen/v1`; for OpenCode Go,
 use `https://opencode.ai/zen/go/v1`. Set `MICROAGENT_API_KEY` to your OpenCode API key and

@@ -38,6 +38,10 @@
 # which beats this setting. Leave unset to use the provider's default.
 # reasoning_effort = "high"
 
+# Extra headers on every provider request, file only. A header the client sets
+# itself (Authorization, User-Agent, Content-Type, Accept, ...) refuses the table.
+# headers = { "x-grok-client-version" = "1.0.77" }
+
 # Text appended to the system prompt after a blank line, at most 16 KB. A basic
 # string ("..." with the escapes \b \t \n \f \r \" \\ \uXXXX \UXXXXXXXX), a
 # literal string ('...') in which nothing is an escape, or

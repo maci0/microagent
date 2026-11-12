@@ -40,7 +40,7 @@
 //! Only the subset of TOML those need is read: `key = value`, a quoted or bare
 //! string, `true` or `false`, an integer for a timeout, an array of strings, a
 //! `[[mcp]]` array of tables, `[tools.<name>]` tables, and an inline table of
-//! strings for `env`. `system_prompt_extra` alone also takes a multi-line string,
+//! strings for `env` and `headers`. `system_prompt_extra` alone also takes a multi-line string,
 //! and an array or an inline table may run over as many lines as it takes, the
 //! way TOML allows it.
 //! Dates, floats, nested tables and other dotted keys have nowhere to go, so
@@ -226,6 +226,9 @@ pub const Config = struct {
     api_key: []const u8 = "",
     /// Optional reasoning level, overridden by the environment and CLI.
     reasoning_effort: []const u8 = "",
+    /// Extra headers sent on every provider request, name then value, in the
+    /// order written. Never one in `reserved_provider_headers`.
+    headers: []const [2][]const u8 = &.{},
     /// The skill directories the file named, or null when it named none and
     /// the default root applies. An empty list is a file that turned skills
     /// off, which is not the same statement as a file that did not mention
@@ -565,7 +568,8 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8) Config {
 }
 
 /// A key at the top of the file, outside any table: `system_prompt_extra`,
-/// `agents_files`, `model`, `base_url`, `api_key`, `skills` and `deny_commands`.
+/// `agents_files`, `model`, `base_url`, `api_key`, `reasoning_effort`, `headers`,
+/// `skills` and `deny_commands`.
 /// `lines` is what
 /// follows this one, for the value that runs over several.
 fn topKey(config: *Config, arena: std.mem.Allocator, lines: *Lines, key: []const u8, value_text: []const u8) void {
@@ -590,6 +594,11 @@ fn topKey(config: *Config, arena: std.mem.Allocator, lines: *Lines, key: []const
     if (std.mem.eql(u8, key, "base_url")) return topString(arena, config, key, value_text, &config.base_url);
     if (std.mem.eql(u8, key, "api_key")) return topString(arena, config, key, value_text, &config.api_key);
     if (std.mem.eql(u8, key, "reasoning_effort")) return topString(arena, config, key, value_text, &config.reasoning_effort);
+    if (std.mem.eql(u8, key, "headers")) {
+        config.headers = providerHeaders(arena, value_text) orelse
+            return config.note(.{ .key = key, .kind = .bad_value });
+        return;
+    }
     if (std.mem.eql(u8, key, "skills")) {
         const dirs = stringArray(arena, value_text) orelse
             return config.note(.{ .key = key, .kind = .bad_value });
@@ -1070,6 +1079,31 @@ fn stringArray(arena: std.mem.Allocator, raw: []const u8) ?[]const []const u8 {
 /// block cannot carry, so passing it on reaches `Environ.Map.put`, which
 /// asserts on exactly those bytes and takes the whole run down with it.
 fn inlineTable(arena: std.mem.Allocator, raw: []const u8) ?[]const [2][]const u8 {
+    return inlineTableOf(arena, raw, mcp_mod.validEnvName);
+}
+
+/// The headers the provider request already carries. A table naming one would
+/// send it twice or replace the credential, so it is refused instead.
+const reserved_provider_headers = [_][]const u8{
+    "authorization",   "user-agent",         "content-type", "accept",
+    "content-length",  "transfer-encoding",  "host",         "connection",
+    "accept-encoding", "x-opencode-session",
+};
+
+/// `headers`: an inline table of header names and values. Null when a name is
+/// not a token, a value holds a control byte other than tab (which would end
+/// the header line), a name is reserved, or a name repeats in another case.
+fn providerHeaders(arena: std.mem.Allocator, raw: []const u8) ?[]const [2][]const u8 {
+    const pairs = inlineTableOf(arena, raw, mcp_mod.validHeaderName) orelse return null;
+    for (pairs, 0..) |pair, i| {
+        for (pair[1]) |c| if ((c < 0x20 and c != '\t') or c == 0x7f) return null;
+        for (reserved_provider_headers) |name| if (std.ascii.eqlIgnoreCase(pair[0], name)) return null;
+        for (pairs[0..i]) |earlier| if (std.ascii.eqlIgnoreCase(pair[0], earlier[0])) return null;
+    }
+    return pairs;
+}
+
+fn inlineTableOf(arena: std.mem.Allocator, raw: []const u8, comptime validKey: fn ([]const u8) bool) ?[]const [2][]const u8 {
     const text = std.mem.trim(u8, stripComments(arena, raw) orelse return null, " \t");
     if (text.len < 2 or text[0] != '{' or text[text.len - 1] != '}') return null;
     const parts = splitQuoted(arena, text[1 .. text.len - 1], ',') orelse return null;
@@ -1086,7 +1120,7 @@ fn inlineTable(arena: std.mem.Allocator, raw: []const u8) ?[]const [2][]const u8
         // a table nobody wrote. A quoted value may, because the separator is
         // inside the quotes and `indexOutsideQuotes` already stepped over it.
         if (value.len == value_text.len and std.mem.indexOfScalar(u8, value_text, '=') != null) return null;
-        if (!mcp_mod.validEnvName(key)) return null;
+        if (!validKey(key)) return null;
         if (std.mem.indexOfScalar(u8, value, 0) != null) return null;
         out.append(arena, .{ key, value }) catch return null;
     }
@@ -1242,6 +1276,54 @@ test "agents_files names the repository instructions, and an empty list turns th
     try std.testing.expectEqual(@as(?Problem, null), at_limit.problem);
     try std.testing.expectEqual(@as(usize, 1), at_limit.agents_files.?.len);
     try std.testing.expectEqual(max_agents_path_bytes, at_limit.agents_files.?[0].len);
+}
+
+test "headers is an inline table of provider request headers" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    const set = parse(arena, "headers = { \"x-grok-client-version\" = \"1.0.77\", X-Team = 'a b' }  # routed\n");
+    try std.testing.expectEqual(@as(?Problem, null), set.problem);
+    try std.testing.expectEqual(@as(usize, 2), set.headers.len);
+    try std.testing.expectEqualStrings("x-grok-client-version", set.headers[0][0]);
+    try std.testing.expectEqualStrings("1.0.77", set.headers[0][1]);
+    try std.testing.expectEqualStrings("X-Team", set.headers[1][0]);
+    try std.testing.expectEqualStrings("a b", set.headers[1][1]);
+
+    const multi = parse(arena, "headers = {\n  A = \"1\",\n  B = \"2\",\n}\nmodel = \"m\"\n");
+    try std.testing.expectEqual(@as(?Problem, null), multi.problem);
+    try std.testing.expectEqual(@as(usize, 2), multi.headers.len);
+    try std.testing.expectEqualStrings("m", multi.model);
+
+    try std.testing.expectEqual(@as(usize, 0), parse(arena, "headers = {}\n").headers.len);
+
+    // A name a header line cannot carry, a value with a byte that ends the
+    // line, a header this client already sets, or the same name twice: the
+    // whole table is refused and named, never sent in part.
+    for ([_][]const u8{
+        "headers = { \"x y\" = \"v\" }\n",
+        "headers = { \"x:y\" = \"v\" }\n",
+        "headers = { X = \"a\\nb\" }\n",
+        "headers = { X = \"a\\rb\" }\n",
+        "headers = { Authorization = \"Bearer x\" }\n",
+        "headers = { content-type = \"text/plain\" }\n",
+        "headers = { USER-AGENT = \"x\" }\n",
+        "headers = { Host = \"x\" }\n",
+        "headers = { x-opencode-session = \"x\" }\n",
+        "headers = { X = \"1\", x = \"2\" }\n",
+        "headers = \"x\"\n",
+        "headers = { X = \"open }\n",
+    }) |text| {
+        const bad = parse(arena, text);
+        const problem = bad.problem orelse {
+            std.debug.print("accepted: {s}\n", .{text});
+            return error.TestUnexpectedResult;
+        };
+        try std.testing.expectEqualStrings("headers", problem.key);
+        try std.testing.expectEqual(Problem.Kind.bad_value, bad.problem.?.kind);
+        try std.testing.expectEqual(@as(usize, 0), bad.headers.len);
+    }
 }
 
 test "the config sets system_prompt_extra and leaves absent or bad keys alone" {

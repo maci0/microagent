@@ -34,6 +34,8 @@ class Provider(BaseHTTPRequestHandler):
 
     seen: ClassVar[list[dict[str, Any]]] = []
     paths: ClassVar[list[str]] = []
+    # The request headers of each POST, lower-cased names, in arrival order.
+    headers: ClassVar[list[dict[str, str]]] = []
     empty = False
     trailing_newline = True
     bad_call = False
@@ -80,6 +82,7 @@ class Provider(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         Provider.paths.append(self.path)
+        Provider.headers.append({k.lower(): v for k, v in self.headers.items()})
         Provider.seen.append(json.loads(self.rfile.read(int(self.headers["content-length"]))))
         if Provider.response_bytes:
             self.send_response(200)
@@ -185,6 +188,7 @@ def invoke(
 ) -> subprocess.CompletedProcess[str]:
     Provider.seen.clear()
     Provider.paths.clear()
+    Provider.headers.clear()
     # A wholly synthetic environment keeps user credentials and settings out.
     env = {
         "PATH": os.environ.get("PATH", ""),
@@ -599,6 +603,22 @@ def check_reasoning_config(binary: Path, root: Path, url: str) -> None:
     expect(result.returncode == 0 and "reasoning" not in Provider.seen[0], result)
 
 
+def check_provider_headers(binary: Path, root: Path, url: str) -> None:
+    """`headers` rides on every provider request; a reserved name refuses the table."""
+    Provider.reset()
+    path = root / "headers.toml"
+    path.write_text('headers = { "x-grok-client-version" = "1.0.77", X-Team = "core" }\n')
+    result = invoke(binary, root, url, ["provider headers"], "", MICROAGENT_CONFIG=str(path))
+    expect(result.returncode == 0 and len(Provider.headers) == 1, result)
+    sent = Provider.headers[0]
+    expect(sent.get("x-grok-client-version") == "1.0.77" and sent.get("x-team") == "core", sent)
+    expect(sent.get("authorization") == "Bearer test", sent)
+    path.write_text('headers = { Authorization = "Bearer stolen" }\n')
+    result = invoke(binary, root, url, ["reserved header"], "", MICROAGENT_CONFIG=str(path))
+    expect("headers" in result.stderr, result)
+    expect(all(h.get("authorization") == "Bearer test" for h in Provider.headers), Provider.headers)
+
+
 def check_tool_table_keys(binary: Path, root: Path, url: str) -> None:
     """A key that only a preset table takes is named with the table it went in.
 
@@ -769,6 +789,7 @@ if __name__ == "__main__":
             check_endpoint_paths(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_opencode(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_reasoning_config(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
+            check_provider_headers(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_tool_table_keys(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_compressed_error(binary, Path(temp))
             check_harbor_numbers(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
