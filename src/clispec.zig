@@ -164,13 +164,6 @@ fn stdoutPretty(io: std.Io) bool {
     return std.Io.File.stdout().isTty(io) catch false;
 }
 
-fn emit(io: std.Io, arena: std.mem.Allocator, pretty: bool, write_body: *const fn (*Doc) anyerror!void) !void {
-    var aw: std.Io.Writer.Allocating = .init(arena);
-    var doc: Doc = .{ .w = &aw.writer, .pretty = pretty };
-    try write_body(&doc);
-    try net.writeOut(io, aw.written());
-}
-
 pub fn writeError(io: std.Io, kind: []const u8, message: []const u8, hint: []const u8) void {
     var storage: [4096]u8 = undefined;
     var w: std.Io.Writer = .fixed(&storage);
@@ -195,21 +188,31 @@ pub fn writeVersion(io: std.Io) !void {
     try net.writeOut(io, w.buffered());
 }
 
-pub fn writeSetup(io: std.Io, arena: std.mem.Allocator, changed: bool, path: []const u8) !void {
-    const pretty = stdoutPretty(io);
+pub fn setupJson(arena: std.mem.Allocator, changed: bool, path: []const u8, pretty: bool) ![]u8 {
+    // The arguments travel with the call rather than through fields of a
+    // function-scoped struct. Such a struct is one per compilation, so a field
+    // written by one call and read by its body is one slot every caller
+    // shares: two setups writing at once would each print the other's path.
     const Body = struct {
-        var changed_bit: bool = false;
-        var path_text: []const u8 = "";
-        fn body(doc: *Doc) !void {
+        changed_bit: bool,
+        path_text: []const u8,
+        fn body(ctx: *const anyopaque, doc: *Doc) !void {
+            const self: *const @This() = @ptrCast(@alignCast(ctx));
             try doc.beginRoot();
-            try doc.fieldBool("changed", changed_bit);
-            try doc.fieldStr("path", path_text);
+            try doc.fieldBool("changed", self.changed_bit);
+            try doc.fieldStr("path", self.path_text);
             try doc.endRoot();
         }
     };
-    Body.changed_bit = changed;
-    Body.path_text = path;
-    try emit(io, arena, pretty, Body.body);
+    const body: Body = .{ .changed_bit = changed, .path_text = path };
+    var aw: std.Io.Writer.Allocating = .init(arena);
+    var doc: Doc = .{ .w = &aw.writer, .pretty = pretty };
+    try Body.body(&body, &doc);
+    return aw.written();
+}
+
+pub fn writeSetup(io: std.Io, arena: std.mem.Allocator, changed: bool, path: []const u8) !void {
+    try net.writeOut(io, try setupJson(arena, changed, path, stdoutPretty(io)));
 }
 
 pub const UpdateStatus = struct {
@@ -222,33 +225,76 @@ pub const UpdateStatus = struct {
     path: ?[]const u8,
 };
 
-pub fn writeUpdateStatus(io: std.Io, arena: std.mem.Allocator, status: UpdateStatus) !void {
-    const pretty = stdoutPretty(io);
+pub fn updateStatusJson(arena: std.mem.Allocator, status: UpdateStatus, pretty: bool) ![]u8 {
+    // The status travels with the call, for the same reason `setupJson` keeps
+    // its arguments off a function-scoped struct: a field of one is a single
+    // slot shared by every caller, and two status lines writing at once would
+    // each report the other's tag.
     const Body = struct {
-        var held: UpdateStatus = .{
-            .tag = "",
-            .page = "",
-            .running = "",
-            .relation = "",
-            .current = false,
-            .changed = false,
-            .path = null,
-        };
-        fn body(doc: *Doc) !void {
+        held: UpdateStatus,
+        fn body(ctx: *const anyopaque, doc: *Doc) !void {
+            const self: *const @This() = @ptrCast(@alignCast(ctx));
             try doc.beginRoot();
-            try doc.fieldStr("tag", held.tag);
-            try doc.fieldStr("page", held.page);
-            try doc.fieldStr("running", held.running);
-            try doc.fieldStr("relation", held.relation);
-            try doc.fieldBool("current", held.current);
-            try doc.fieldBool("changed", held.changed);
-            if (held.path) |path| try doc.fieldStr("path", path) else try doc.field("path");
-            if (held.path == null) try doc.w.writeAll("null");
+            try doc.fieldStr("tag", self.held.tag);
+            try doc.fieldStr("page", self.held.page);
+            try doc.fieldStr("running", self.held.running);
+            try doc.fieldStr("relation", self.held.relation);
+            try doc.fieldBool("current", self.held.current);
+            try doc.fieldBool("changed", self.held.changed);
+            if (self.held.path) |path| try doc.fieldStr("path", path) else try doc.field("path");
+            if (self.held.path == null) try doc.w.writeAll("null");
             try doc.endRoot();
         }
     };
-    Body.held = status;
-    try emit(io, arena, pretty, Body.body);
+    const body: Body = .{ .held = status };
+    var aw: std.Io.Writer.Allocating = .init(arena);
+    var doc: Doc = .{ .w = &aw.writer, .pretty = pretty };
+    try Body.body(&body, &doc);
+    return aw.written();
+}
+
+pub fn writeUpdateStatus(io: std.Io, arena: std.mem.Allocator, status: UpdateStatus) !void {
+    try net.writeOut(io, try updateStatusJson(arena, status, stdoutPretty(io)));
+}
+
+test "concurrent status lines each carry the call that wrote them" {
+    const io = std.testing.io;
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    var setup_out: ?[]u8 = null;
+    var status_out: ?[]u8 = null;
+    var gate: std.Io.Event = .unset;
+    const Pair = struct {
+        fn setup(io_: std.Io, gate_: *std.Io.Event, allocator: std.mem.Allocator, out: *?[]u8) void {
+            gate_.wait(io_) catch return;
+            out.* = setupJson(allocator, true, "/tmp/one", false) catch null;
+        }
+        fn status(io_: std.Io, gate_: *std.Io.Event, allocator: std.mem.Allocator, out: *?[]u8) void {
+            gate_.wait(io_) catch return;
+            out.* = updateStatusJson(allocator, .{
+                .tag = "v9",
+                .page = "https://example.test/v9",
+                .running = "v1",
+                .relation = "behind",
+                .current = false,
+                .changed = true,
+                .path = "/bin/microagent",
+            }, false) catch null;
+        }
+    };
+    var tasks: std.Io.Group = .init;
+    defer tasks.cancel(io);
+    try tasks.concurrent(io, Pair.setup, .{ io, &gate, arena, &setup_out });
+    try tasks.concurrent(io, Pair.status, .{ io, &gate, arena, &status_out });
+    gate.set(io);
+    try tasks.await(io);
+    const setup_line = setup_out orelse return error.TestUnexpectedResult;
+    const status_line = status_out orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.indexOf(u8, setup_line, "\"path\":\"/tmp/one\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, setup_line, "v9") == null);
+    try std.testing.expect(std.mem.indexOf(u8, status_line, "\"tag\":\"v9\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, status_line, "/tmp/one") == null);
 }
 
 pub fn schemaJson(arena: std.mem.Allocator, filter: []const u8, pretty: bool) ![]u8 {

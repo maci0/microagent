@@ -3943,16 +3943,19 @@ fn streamChatWithinBudget(
     if (sink) |s| if (s.isCancelled()) return error.Cancelled;
 
     const Wait = struct {
-        fn cancelled(s: *acp_mod.Sink) Io.Cancelable!void {
+        fn cancelled(s: *acp_mod.Sink, poll_io: Io) Io.Cancelable!void {
             // A prompt may be cancelled while the provider is silent and the
             // read is blocked. Poll the flag on a short clock so the select
             // below can cancel the in-flight request, rather than waiting for
             // the provider's next byte or the stall timeout.
+            // `poll_io` is an argument rather than a field of this struct: the
+            // struct is one per compilation, so a field written here and read
+            // from the task would be one slot shared by every prompt that is
+            // in flight at once.
             while (!s.isCancelled()) {
-                try net.durationMs(25).sleep(s_io);
+                try net.durationMs(25).sleep(poll_io);
             }
         }
-        var s_io: Io = undefined;
     };
 
     const Outcome = union(enum) {
@@ -3976,8 +3979,7 @@ fn streamChatWithinBudget(
         try select.concurrent(.expired, Budget.sleep, .{ budget, io });
     }
     if (sink) |s| {
-        Wait.s_io = io;
-        try select.concurrent(.cancelled, Wait.cancelled, .{s});
+        try select.concurrent(.cancelled, Wait.cancelled, .{ s, io });
     }
     return switch (try select.await()) {
         .answered => |answer| answer,
