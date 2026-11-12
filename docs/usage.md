@@ -979,12 +979,15 @@ is worth stating plainly because nothing else in the tree implies it. There is n
 queue and no object storage: the working tree a run edits and the config file under
 `~/.microagent` are the operator's to back up, not this program's.
 
-**Each record is flushed to disk before the run carries on.** A record is written, synced, and
-only then does the run move to the next turn, so a record a monitor
+**Each record is flushed to disk before the run carries on.** A record is written, the file is
+synced, and then the directory that holds the log is synced too, so the name is durable along
+with the bytes. Only then does the run move to the next turn, so a record a monitor
 ([toktop](https://github.com/maci0/toktop)) has already counted survives an unclean stop; the
-price is one disk round trip per response, against seconds of provider time. A flush that fails
+price is two disk round trips per response, against seconds of provider time. A flush that fails
 is named on stderr and the run keeps appending rather than dropping a store whose bytes are
-already on disk: what is at risk is the guarantee, not the data.
+already on disk: what is at risk is the guarantee, not the data. The directory sync is what
+makes a log created this run survive too: the file sync covers the bytes, and the name that
+points at them lives in the directory.
 
 **There is no backup and no restore procedure, because there is nothing to restore from.** The
 log is an append-only record of counters, a working directory and a model name, never prompt or

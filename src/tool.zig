@@ -2502,6 +2502,13 @@ pub fn writeFileAtomic(io: Io, dir: std.Io.Dir, path: []const u8, bytes: []const
     // source file.
     try af.file.sync(io);
     try af.replace(io);
+    // The rename published the name; the name lives in the parent directory,
+    // which the file sync above does not cover. Without this, a power loss
+    // after a write the tool already reported can lose the file entirely: the
+    // old inode is gone with the rename and the new directory entry never
+    // reached disk. The bytes are durable before the rename, so a directory
+    // sync that fails here is reported as the write's own failure.
+    try net.syncDir(io, dir, target);
 }
 
 fn toolEdit(io: Io, arena: std.mem.Allocator, args: std.json.ObjectMap, writable_roots: []const []const u8) ![]const u8 {

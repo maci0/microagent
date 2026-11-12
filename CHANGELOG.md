@@ -28,6 +28,16 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- A write this program reports as done now survives an unclean stop with its
+  name intact, not only its bytes. The session log, an installed binary, the
+  first-run config template, and a file `write`, `edit` or `multi_edit` saved
+  were synced and then published by a rename or a link, and nothing synced the
+  directory that holds the new name. A power loss in that gap dropped the name
+  while the old file was already replaced, so a log a monitor had counted, a
+  binary `update` had just installed, or a source file the tool said it wrote
+  came back missing. The parent directory is now synced after the file, and a
+  directory that cannot be synced is named rather than reported as success.
+
 - ACP's `mode` session config option now reports `auto` as its current value
   and lists both `auto` and `code`, matching the modes a session advertises
   and the values `session/set_mode` accepts.

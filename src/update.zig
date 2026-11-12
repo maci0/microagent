@@ -576,10 +576,16 @@ fn replaceBinary(io: std.Io, exe: []const u8, bytes: []const u8) !void {
     // with the name in place and nothing behind it, which is a working
     // invocation that fails to exec: the one repair an operator least expects
     // to need after a successful update. The flush costs one disk round trip
-    // once per update and nothing at all in a run that never updates, which is
-    // why it sits here and not on the path every tool call takes.
+    // once per update.
     try af.file.sync(io);
     try af.replace(io);
+    // The rename published the name, and that name lives in the directory that
+    // holds the binary rather than in the file the flush above covered. A
+    // power loss in that gap loses the directory entry while the old inode is
+    // already replaced, so the invocation comes back missing entirely. The
+    // bytes are durable before the rename, so this is the last step the
+    // install can fail at.
+    try net.syncDir(io, dir, target);
 }
 
 /// The one gate between a download and the running binary: `exe` is replaced only when `sidecar`

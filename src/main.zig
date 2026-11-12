@@ -2790,6 +2790,16 @@ fn writeDefaultConfig(io: Io, arena: std.mem.Allocator, source: ConfigSource) vo
             return;
         },
     };
+    // The link published the name, and that name lives in the directory rather
+    // than in the file the flush above covered. A power loss before the
+    // directory reaches disk loses the template the run just told the operator
+    // was written, and the next run writes it again only if it notices the
+    // name is gone. The bytes are already durable, so a directory that cannot
+    // be synced is named and the file is left where the link put it.
+    net.syncDir(io, std.Io.Dir.cwd(), path) catch |err| {
+        net.note(io, arena, "microagent: config {s}: the template was written but its directory could not be flushed ({s}); it may be lost if this machine stops uncleanly\n", .{ shown, @errorName(err) });
+        return;
+    };
     net.note(io, arena, "microagent: config {s}: no file there, so the commented template was written; edit it to configure the run\n", .{shown});
 }
 

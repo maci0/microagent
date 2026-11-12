@@ -826,8 +826,20 @@ fn write(io: Io, arena: std.mem.Allocator, session: *?Session, record: Record) v
         // disk. It is the one failure here that does not close the store: what
         // would be lost is the guarantee, not the data, and dropping the file
         // would turn "this record may not survive a power cut" into "this record
-        // and every record after it are gone".
+        // and every record after it are gone". The directory is not synced
+        // below, because the bytes it would publish are not durable either.
         net.note(io, arena, "microagent: the session log under {s} could not be flushed to disk ({s}); records in it may be lost if this machine stops uncleanly\n", .{ shown, @errorName(err) });
+        return;
+    };
+    // The file sync above covers the bytes, not the directory entry that names them.
+    // A log created this run is a new name, and a name lives in the directory:
+    // a power loss after the file sync and before the directory reaches disk
+    // loses the whole log, the record the monitor already counted included.
+    // The same failure costs the same as the file sync, a note and a kept log,
+    // because the bytes are on disk and the next record syncs the directory
+    // again. A directory that cannot be synced at all is not an error.
+    net.syncDir(io, std.Io.Dir.cwd(), s.dir) catch |err| {
+        net.note(io, arena, "microagent: the session log under {s} could not be recorded in its directory ({s}); records in it may be lost if this machine stops uncleanly\n", .{ shown, @errorName(err) });
     };
 }
 

@@ -439,6 +439,77 @@ pub fn resolveSymlinkTarget(
     return error.SymlinkLoop;
 }
 
+/// The directory entry `dir` holds for `sub_path`, pushed to disk.
+///
+/// `File.sync` covers the file's own bytes and its own inode, and its own
+/// contract says it does not cover the directory entry that names them. A
+/// rename or a link publishes that entry, and the entry lives in the parent
+/// directory: until the parent is synced, a power loss or a kernel panic can
+/// lose the name while the bytes are already on disk, so a file the caller was
+/// told was written comes back missing, and an append the caller was told was
+/// recorded comes back as a name that was never created. The file sync has to
+/// happen first, so this only ever publishes bytes that are already durable.
+///
+/// `sub_path` is a relative path, as every caller here passes one. Its last
+/// component is the entry and everything before it is the directory that holds
+/// the entry, so a file two levels down syncs the directory it sits in rather
+/// than the directory the caller opened. A bare name has no directory of its
+/// own and the entry is in `dir` itself.
+///
+/// There is no directory sync in `std.Io`, so this is the syscall. A Linux
+/// build links no libc, which is why the call goes through `std.posix.system`
+/// rather than through libc's `fsync`: the two spellings are the same operation
+/// and only one of them links here. macOS keeps its syscall ABI private and
+/// every program there links libSystem, so the libc spelling is the one that
+/// exists. Windows and WASI have no POSIX `fsync` of a directory descriptor
+/// this can reach, and the file sync before this call is the whole of the
+/// guarantee there.
+///
+/// `INVAL` and a read-only filesystem are a directory that cannot be synced,
+/// not a failure of the write: a filesystem with no durable directory entries
+/// has nothing for this call to do, and reporting it would turn a successful
+/// write into a note on every record. Anything else is a real failure and the
+/// caller decides whether the write still stands.
+pub fn syncDir(io: Io, dir: Io.Dir, sub_path: []const u8) Io.File.SyncError!void {
+    if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return;
+    const parent = std.fs.path.dirname(sub_path) orelse ".";
+    const flags: std.posix.O = switch (builtin.os.tag) {
+        .linux => .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true },
+        else => .{ .CLOEXEC = true, .DIRECTORY = true },
+    };
+    const fd = std.posix.openat(dir.handle, parent, flags, 0) catch |err| return switch (err) {
+        error.AccessDenied => error.AccessDenied,
+        error.NoSpaceLeft => error.NoSpaceLeft,
+        else => error.Unexpected,
+    };
+    defer closeFd(fd);
+    switch (std.posix.errno(std.posix.system.fsync(fd))) {
+        .SUCCESS => {},
+        .INVAL, .ROFS => {},
+        .IO => return error.InputOutput,
+        .NOSPC => return error.NoSpaceLeft,
+        .DQUOT => return error.DiskQuota,
+        .ACCES => return error.AccessDenied,
+        else => return error.Unexpected,
+    }
+    _ = io;
+}
+
+/// Closes a descriptor this module opened for itself.
+///
+/// `std.posix` has no `close` in this Zig, so the call is the platform's own.
+/// Linux goes through the syscall because this build links no libc there;
+/// everywhere else the libc spelling is the one that links, and the two are
+/// the same operation. `close` cannot fail in a way the caller can act on, so
+/// the result is dropped.
+fn closeFd(fd: std.posix.fd_t) void {
+    if (builtin.os.tag == .linux) {
+        _ = std.posix.system.close(fd);
+    } else {
+        _ = std.c.close(fd);
+    }
+}
+
 /// How many links a path may hold before the answer is a cycle rather than a
 /// file. Two links naming each other, or a link into a directory of links, would
 /// otherwise spin here. The bound is this module's own and the pruning and the
