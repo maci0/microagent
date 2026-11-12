@@ -9939,10 +9939,11 @@ fn acpReaderThread(mailbox: *AcpMailbox) void {
     var input = std.Io.File.stdin().readerStreaming(mailbox.io, &input_storage);
     var pending: std.ArrayList(u8) = .empty;
     defer pending.deinit(mailbox.gpa);
+    var scanned: usize = 0;
     var arena = std.heap.ArenaAllocator.init(mailbox.gpa);
     defer arena.deinit();
     while (true) {
-        const frame = acpReadFrame(mailbox.io, &input.interface, mailbox.gpa, &pending) catch {
+        const frame = acpReadFrame(mailbox.io, &input.interface, mailbox.gpa, &pending, &scanned, null) catch {
             mailbox.finish();
             return;
         } orelse {
@@ -10481,20 +10482,32 @@ const acp_usage =
 /// the reader's buffer: chunks are accumulated until the newline arrives, so a
 /// prompt carrying a file is not cut at 64 KiB. The ceiling is the same 16 MiB
 /// one model response answers to.
-fn acpReadFrame(io: Io, reader: *std.Io.Reader, gpa: std.mem.Allocator, pending: *std.ArrayList(u8)) !?[]u8 {
+///
+/// `scanned` is how much of `pending` has already been searched for a newline.
+/// A prompt carrying a file arrives in 64 KiB reads, and searching the whole
+/// buffer from the front on every one of them re-reads a 16 MiB frame about
+/// 128 times. `net.nextLineEnd` is the cursor the provider stream and the
+/// ranged read already keep, and it is lowered by the bytes the frame consumed.
+///
+/// `searched`, when not null, counts the bytes each scan looked at. The reader
+/// thread passes null; the test that pins the scan at one look per byte passes
+/// its counter. A restart-from-the-front scan cannot be told apart from this
+/// one by the frames it returns, so the count is the only thing that pins it.
+fn acpReadFrame(io: Io, reader: *std.Io.Reader, gpa: std.mem.Allocator, pending: *std.ArrayList(u8), scanned: *usize, searched: ?*usize) !?[]u8 {
     _ = io;
     while (true) {
-        if (std.mem.indexOfScalar(u8, pending.items, '\n')) |end| {
+        const was = scanned.*;
+        if (net.nextLineEnd(pending.items, scanned)) |end| {
+            if (searched) |count| count.* += scanned.* - was;
             const line = std.mem.trimEnd(u8, pending.items[0..end], "\r");
             // The caller parses before the next read. Hand back a stable copy
             // so the parse does not point into a buffer that moves.
             const copy = try gpa.dupe(u8, line);
             errdefer gpa.free(copy);
-            const rest = pending.items[end + 1 ..];
-            std.mem.copyForwards(u8, pending.items[0..rest.len], rest);
-            pending.items.len = rest.len;
+            net.dropPending(pending, scanned, end + 1);
             return copy;
         }
+        if (searched) |count| count.* += scanned.* - was;
         if (pending.items.len > stream_mod.max_response_bytes) return error.StreamTooLarge;
         try pending.ensureUnusedCapacity(gpa, 64 * 1024);
         var slices = [1][]u8{pending.unusedCapacitySlice()};
@@ -10506,10 +10519,73 @@ fn acpReadFrame(io: Io, reader: *std.Io.Reader, gpa: std.mem.Allocator, pending:
             if (pending.items.len == 0) return null;
             const copy = try gpa.dupe(u8, std.mem.trimEnd(u8, pending.items, "\r"));
             pending.clearRetainingCapacity();
+            scanned.* = 0;
             return copy;
         }
         pending.items.len += n;
     }
+}
+
+// A frame larger than one read used to be searched for its newline from the
+// front on every read, so a prompt carrying a file was re-read once per chunk.
+// One reader per byte is the split that made that quadratic, and the cursor
+// has to survive it: the second frame is the bytes the first one did not take.
+test "an ACP frame split one byte per read keeps the bytes past its newline" {
+    const gpa = std.testing.allocator;
+    const first = "{\"method\":\"a\"}";
+    const second = "{\"method\":\"b\"}";
+    var wire: [first.len + 1 + second.len + 1]u8 = undefined;
+    @memcpy(wire[0..first.len], first);
+    wire[first.len] = '\n';
+    @memcpy(wire[first.len + 1 ..][0..second.len], second);
+    wire[wire.len - 1] = '\n';
+
+    // One byte per `readVec`, and nothing buffered: `readVec` serves a buffered
+    // byte before the stream behind it, so a buffer here would hand the first
+    // byte over as its own read.
+    const OneByte = struct {
+        rest: []const u8,
+        reader: std.Io.Reader,
+
+        fn readVec(r: *std.Io.Reader, data: [][]u8) std.Io.Reader.Error!usize {
+            const self: *@This() = @alignCast(@fieldParentPtr("reader", r));
+            if (self.rest.len == 0) return error.EndOfStream;
+            if (data[0].len == 0) return 0;
+            data[0][0] = self.rest[0];
+            self.rest = self.rest[1..];
+            return 1;
+        }
+
+        fn stream(_: *std.Io.Reader, _: *std.Io.Writer, _: std.Io.Limit) std.Io.Reader.StreamError!usize {
+            return error.EndOfStream;
+        }
+    };
+    var source: OneByte = .{
+        .rest = &wire,
+        .reader = .{ .vtable = &.{ .readVec = OneByte.readVec, .stream = OneByte.stream }, .buffer = &.{}, .seek = 0, .end = 0 },
+    };
+
+    var pending: std.ArrayList(u8) = .empty;
+    defer pending.deinit(gpa);
+    var scanned: usize = 0;
+
+    var frames: [2][]u8 = undefined;
+    var got: usize = 0;
+    defer for (frames[0..got]) |frame| gpa.free(frame);
+    var looked: usize = 0;
+    while (got < frames.len) {
+        const frame = try acpReadFrame(std.testing.io, &source.reader, gpa, &pending, &scanned, &looked) orelse break;
+        frames[got] = frame;
+        got += 1;
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), got);
+    // One look per byte of the wire. A scan that restarts at the front on
+    // every one-byte read looks at each byte once per byte ahead of it.
+    try std.testing.expectEqual(wire.len, looked);
+    try std.testing.expectEqualStrings(first, frames[0]);
+    try std.testing.expectEqualStrings(second, frames[1]);
+    try std.testing.expectEqual(@as(usize, 0), pending.items.len);
 }
 
 /// Starts one ACP session: switches the process to the client's cwd (the
