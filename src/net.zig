@@ -864,11 +864,26 @@ pub fn urlCarriesKey(url: []const u8) bool {
 }
 
 /// Whether a host names this machine and no other.
+///
+/// The subdomain check is a label boundary, not a byte suffix: a byte above
+/// ASCII is not a letter DNS folds, and `Å.localhost` is a different name from
+/// `x.localhost`. A byte suffix would read the first as the second.
 pub fn isLoopbackHost(host: []const u8) bool {
     if (std.ascii.eqlIgnoreCase(host, "localhost")) return true;
-    if (std.ascii.endsWithIgnoreCase(host, ".localhost")) return true;
+    if (asciiLabelSuffix(host, "localhost")) return true;
     if (isIpv4Loopback(host)) return true;
     return std.mem.eql(u8, std.mem.trim(u8, host, "[]"), "::1");
+}
+
+/// Whether `host` is a subdomain of `name`: a dot, then `name` as the final
+/// label, and every label in front of it made of ASCII. DNS folds the 26
+/// letters and nothing else, so a label holding a byte above ASCII is a
+/// different name: `Å.localhost` is not a subdomain of `localhost`, and
+/// neither is `gateÅway.localhost`.
+pub fn asciiLabelSuffix(host: []const u8, name: []const u8) bool {
+    if (host.len <= name.len or host[host.len - name.len - 1] != '.') return false;
+    for (host) |c| if (c > 0x7f) return false;
+    return std.ascii.eqlIgnoreCase(host[host.len - name.len ..], name);
 }
 
 const max_ipv4_octet: u16 = 255;
@@ -1226,6 +1241,8 @@ test "a key is only sent over a scheme that keeps it off the wire" {
         .{ .url = "http://localhost:1234/v1", .carries = true },
         .{ .url = "http://gateway.localhost:1234/v1", .carries = true },
         .{ .url = "http://LOCALHOST/v1", .carries = true },
+        .{ .url = "http://\xc3\x85.localhost:1234/v1", .carries = false },
+        .{ .url = "http://gate\xc3\xa5way.localhost/v1", .carries = false },
         .{ .url = "http://127.0.0.1:8080/v1", .carries = true },
         .{ .url = "http://127.1.2.3/v1", .carries = true },
         .{ .url = "http://[::1]:8080/v1", .carries = true },

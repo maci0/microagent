@@ -131,9 +131,12 @@ fn hostTrusted(host: []const u8) bool {
     var lower: [max_host_len]u8 = undefined;
     if (host.len == 0 or host.len > lower.len) return false;
     const h = std.ascii.lowerString(&lower, host);
+    // A label boundary, not a byte suffix: `Å.github.com` is a host DNS does
+    // not fold into a subdomain of `github.com`, and the asset it names is not
+    // one this binary fetched from GitHub.
     return std.mem.eql(u8, h, "github.com") or
-        std.mem.endsWith(u8, h, ".github.com") or
-        std.mem.endsWith(u8, h, ".githubusercontent.com");
+        net.asciiLabelSuffix(h, "github.com") or
+        net.asciiLabelSuffix(h, "githubusercontent.com");
 }
 
 /// https, no userinfo, whitespace or backslash, an optional numeric port, and a
@@ -874,6 +877,12 @@ test "update: only a github host is fetched from, however the url spells it" {
         "https://githubusercontent.com/x",
         "https://evil.githubusercontent.com.evil.com/x",
         "https://github.com.evil.com/maci0/microagent",
+        // A byte above ASCII is not a letter DNS folds, so a label holding one
+        // is not a subdomain of github.com and the asset it names is not one
+        // this binary fetched from GitHub.
+        "https://\xc3\x85.github.com/x",
+        "https://evil\xc3\x85.github.com/x",
+        "https://\xc3\x85.githubusercontent.com/x",
         "https://objects.githubusercontent.com.evil.com/x",
         "https://notgithub.com/x",
         "https://github.co/x",
@@ -923,13 +932,29 @@ fn githubHostByLabels(host: []const u8) bool {
     if (std.ascii.eqlIgnoreCase(host, "github.com")) return true;
     // `*.github.com`: at least one label in front of `github` `com`.
     // `*.githubusercontent.com`: at least one in front of `githubusercontent` `com`.
+    // DNS folds the 26 ASCII letters and nothing else, so a label holding a
+    // byte above ASCII is a different name: `Å.github.com` is not a subdomain
+    // of `github.com`, and a check that reads it as one trusts a host the
+    // resolver does not send to GitHub.
     var labels = std.mem.splitBackwardsScalar(u8, host, '.');
     const last = labels.next() orelse return false;
-    if (!std.ascii.eqlIgnoreCase(last, "com")) return false;
+    if (!asciiDnsLabel(last, "com")) return false;
     const owner = labels.next() orelse return false;
-    if (std.ascii.eqlIgnoreCase(owner, "github")) return labels.next() != null;
-    if (!std.ascii.eqlIgnoreCase(owner, "githubusercontent")) return false;
+    if (asciiDnsLabel(owner, "github")) return labels.next() != null;
+    if (!asciiDnsLabel(owner, "githubusercontent")) return false;
     return labels.next() != null;
+}
+
+/// Whether `label` is exactly `want`, folded the way DNS folds a label: the 26
+/// ASCII letters, and a byte above ASCII is a different character rather than a
+/// letter in another case.
+fn asciiDnsLabel(label: []const u8, want: []const u8) bool {
+    if (label.len != want.len) return false;
+    for (label, want) |got, expected| {
+        if (got > 0x7f) return false;
+        if (std.ascii.toLower(got) != expected) return false;
+    }
+    return true;
 }
 
 // The url a release body spells is the second half of the trust chain:

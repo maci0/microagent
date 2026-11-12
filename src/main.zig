@@ -5190,7 +5190,7 @@ fn fuzzBaseUrl(_: void, smith: *std.testing.Smith) !void {
         if (host.len > lower.len) return error.TestUnexpectedResult;
         const h = std.ascii.lowerString(&lower, host);
         if (std.mem.eql(u8, std.mem.trim(u8, h, "[]"), "::1")) return;
-        if (std.mem.eql(u8, h, "localhost") or std.mem.endsWith(u8, h, ".localhost")) return;
+        if (std.mem.eql(u8, h, "localhost") or net.asciiLabelSuffix(h, "localhost")) return;
         // A dotted quad, and `127` is the whole of the range: a name that only
         // begins with it is a host somebody else can point anywhere.
         var octets: usize = 0;

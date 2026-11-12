@@ -1391,10 +1391,12 @@ fn terseForServer(server: *const Server, tool: []const u8) ?Terse {
         .http => |h| h,
         .stdio => return null,
     };
-    const host = http.uri.host orelse return null;
-    return terseFor(switch (host) {
-        .raw, .percent_encoded => |text| text,
-    }, tool);
+    // Decoded, for the same reason `fillPresetTools` decodes: the table names
+    // the host the request is sent to, not the percent-encoded spelling the
+    // component stores.
+    var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
+    const host = (http.uri.host orelse return null).toRaw(&host_buf) catch return null;
+    return terseFor(host, tool);
 }
 
 test "the compact preset tools are valid schemas for exactly the tools they name" {
@@ -1504,6 +1506,18 @@ test "a preset with no key is offered without a handshake, and one with a key is
     try std.testing.expectEqual(@as(usize, 1), keyed.items.len);
     try std.testing.expect(!keyed.items[0].lazy);
     try std.testing.expectEqual(@as(usize, 0), keyed.items[0].tools.len);
+
+    // The host is matched after percent-decoding: `mcp%2egrep%2eapp` is the
+    // same host the table names, and the encoded spelling is what a config
+    // that wrote the dots as escapes stores.
+    var encoded: std.ArrayList(Server) = .empty;
+    openRemote(io, arena, &client, .{
+        .name = "grep",
+        .url = "https://mcp%2egrep%2eapp/mcp",
+    }, "test", &encoded);
+    try std.testing.expectEqual(@as(usize, 1), encoded.items.len);
+    try std.testing.expect(encoded.items[0].lazy);
+    try std.testing.expect(encoded.items[0].tools.len > 0);
 }
 
 /// Whether the name a tool is offered under fits the provider's limit once
@@ -1577,9 +1591,12 @@ fn fillPresetTools(io: Io, arena: std.mem.Allocator, server: *Server, client_ver
         .http => |h| h,
         .stdio => return false,
     };
-    const host = switch (http.uri.host orelse return false) {
-        .raw, .percent_encoded => |text| text,
-    };
+    // The stored component keeps its percent-encoding, and `presetForHost`
+    // compares the host the request is sent to: `mcp%2egrep%2eapp` is
+    // `mcp.grep.app` once decoded, and the encoded spelling matches nothing in
+    // the table.
+    var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
+    const host = (http.uri.host orelse return false).toRaw(&host_buf) catch return false;
     const preset = presetForHost(host) orelse return false;
     var tools: std.ArrayList(Tool) = .empty;
     for (terse_tools) |entry| {
