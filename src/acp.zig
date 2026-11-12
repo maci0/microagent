@@ -318,7 +318,10 @@ pub const modes_json =
 pub fn configOptionsJson(allocator: std.mem.Allocator, model: []const u8) ![]u8 {
     var aw: std.Io.Writer.Allocating = .init(allocator);
     const w = &aw.writer;
-    try w.writeAll("[{\"id\":\"mode\",\"name\":\"Session Mode\",\"description\":\"Controls whether the agent may edit and run tools\",\"category\":\"mode\",\"type\":\"select\",\"currentValue\":\"code\",\"options\":[{\"value\":\"code\",\"name\":\"Code\",\"description\":\"Read, edit and run commands with the configured tools\"}]},{\"id\":\"model\",\"name\":\"Model\",\"description\":\"The model this session sends to the provider\",\"category\":\"model\",\"type\":\"select\",\"currentValue\":");
+    // `auto` is the current mode `modes` reports, and `code` is the other
+    // mode `session/set_mode` accepts. Omitting either leaves a client that
+    // reads only `configOptions` disagreeing with the session's own mode.
+    try w.writeAll("[{\"id\":\"mode\",\"name\":\"Session Mode\",\"description\":\"Controls whether the agent may edit and run tools\",\"category\":\"mode\",\"type\":\"select\",\"currentValue\":\"auto\",\"options\":[{\"value\":\"auto\",\"name\":\"Auto\",\"description\":\"Read, edit and run commands with the configured tools\"},{\"value\":\"code\",\"name\":\"Code\",\"description\":\"Read, edit and run commands with the configured tools\"}]},{\"id\":\"model\",\"name\":\"Model\",\"description\":\"The model this session sends to the provider\",\"category\":\"model\",\"type\":\"select\",\"currentValue\":");
     try chat.writeJsonString(w, model);
     try w.writeAll(",\"options\":[{\"value\":");
     try chat.writeJsonString(w, model);
@@ -578,6 +581,16 @@ test "ACP initialize advertises version, capabilities and the binary's own versi
     try std.testing.expect(std.mem.indexOf(u8, bytes, "\"protocolVersion\":1") != null);
     try std.testing.expect(std.mem.indexOf(u8, bytes, "\"loadSession\":false") != null);
     try std.testing.expect(std.mem.indexOf(u8, bytes, "\"version\":\"9.9.9\"") != null);
+}
+
+test "ACP config options name the same modes the session advertises" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const bytes = try configOptionsJson(arena.allocator(), "model-x");
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"currentValue\":\"auto\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"value\":\"auto\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"value\":\"code\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"currentValue\":\"model-x\"") != null);
 }
 
 pub fn parseRequest(allocator: std.mem.Allocator, frame: []const u8) !Request {

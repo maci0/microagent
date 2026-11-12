@@ -26,6 +26,12 @@ release, and `microagent update` moves you to it.
   for a Grok CLI proxy. A name the client already sends, a repeated
   name, or a value with a control byte refuses the table.
 
+### Fixed
+
+- ACP's `mode` session config option now reports `auto` as its current value
+  and lists both `auto` and `code`, matching the modes a session advertises
+  and the values `session/set_mode` accepts.
+
 ## [0.22.2] - 2026-11-06
 
 ### Fixed
