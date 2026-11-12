@@ -37,6 +37,9 @@
 # is the default and must be one of them; with no model the first is. A
 # --model or MICROAGENT_MODEL outside the list joins its front.
 # models = ["deepseek/deepseek-v4-flash", "kimi-k2.6"]
+# Add the provider's own GET <base_url>/models list to the ACP selector, asked
+# once at the first session; a failure keeps the list above.
+# discover_models = true
 
 # Optional reasoning level for models that support it: minimal, low, medium,
 # high, or none to disable. A CLI flag beats MICROAGENT_REASONING_EFFORT,

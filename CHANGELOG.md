@@ -19,6 +19,17 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+### Added
+
+- The config key `discover_models`, which adds the provider's `GET /models`
+  ids to the ACP model list once, when a client opens its first session. A
+  failure keeps the configured list and is named on stderr.
+
+### Changed
+
+- The ACP model option describes each entry as "A model this session may
+  switch to", since a discovered one was not named by the configuration.
+
 ## [0.23.0] - 2026-11-13
 
 ### Added

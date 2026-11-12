@@ -2394,6 +2394,7 @@ const LoadedConfig = struct {
     /// The provider settings the file named, empty when it named none.
     model: []const u8,
     models: []const []const u8,
+    discover_models: bool,
     base_url: []const u8,
     api_key: []const u8,
     reasoning_effort: []const u8,
@@ -2424,6 +2425,7 @@ fn fromConfig(parsed: config_mod.Config, source: ?[]const u8) LoadedConfig {
         .agents_files = parsed.agents_files,
         .model = parsed.model,
         .models = parsed.models,
+        .discover_models = parsed.discover_models,
         .base_url = parsed.base_url,
         .api_key = parsed.api_key,
         .reasoning_effort = parsed.reasoning_effort,
@@ -2506,6 +2508,175 @@ test "the run's model and the list a client may switch among" {
     // The file contradicting itself is refused, not resolved by guessing.
     opts = .{};
     try std.testing.expectError(error.ModelNotListed, resolveModels(arena, &opts, false, "c", &listed));
+}
+
+/// The most a provider's model list may weigh. A router that lists a few
+/// hundred models with their metadata answers in well under a megabyte.
+const max_models_body_bytes: usize = 4 * 1024 * 1024;
+/// The most ids discovery adds; past this the selector stops being one.
+const max_discovered_models: usize = 512;
+/// The longest model id discovery accepts.
+const max_model_id_bytes: usize = 256;
+/// The whole of one discovery: connect, head and body.
+const discover_timeout_ms: u64 = 10_000;
+/// Nesting past this is not a model list.
+const max_models_json_depth: usize = 64;
+
+/// A provider's model id as a selector may show it: printable ASCII without
+/// spaces, the spelling every OpenAI-compatible router uses.
+fn validModelId(id: []const u8) bool {
+    if (id.len == 0 or id.len > max_model_id_bytes) return false;
+    for (id) |c| if (c <= ' ' or c > '~') return false;
+    return true;
+}
+
+fn listsModel(ids: []const []const u8, id: []const u8) bool {
+    for (ids) |have| if (std.mem.eql(u8, have, id)) return true;
+    return false;
+}
+
+/// The ids in an OpenAI-compatible `GET /models` answer,
+/// `{"data":[{"id":"..."}, ...]}`, sorted. The answer is the provider's, so an
+/// entry without a valid id is dropped, a repeat is named once, and the count
+/// stops at `max_discovered_models`.
+fn parseModelIds(arena: std.mem.Allocator, body: []const u8) ![]const []const u8 {
+    var scanner = std.json.Scanner.initCompleteInput(arena, body);
+    defer scanner.deinit();
+    while (try scanner.next() != .end_of_document) {
+        if (scanner.stackHeight() > max_models_json_depth) return error.InvalidModelList;
+    }
+    const value = try std.json.parseFromSliceLeaky(std.json.Value, arena, body, .{});
+    if (value != .object) return error.InvalidModelList;
+    const data = value.object.get("data") orelse return error.InvalidModelList;
+    if (data != .array) return error.InvalidModelList;
+    var ids: std.ArrayList([]const u8) = .empty;
+    for (data.array.items) |item| {
+        if (ids.items.len == max_discovered_models) break;
+        if (item != .object) continue;
+        const id = item.object.get("id") orelse continue;
+        if (id != .string or !validModelId(id.string) or listsModel(ids.items, id.string)) continue;
+        try ids.append(arena, id.string);
+    }
+    std.mem.sort([]const u8, ids.items, {}, struct {
+        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lessThan);
+    return ids.items;
+}
+
+test "a provider's model list is read for valid ids, once each, sorted" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    const ids = try parseModelIds(arena,
+        \\{"object":"list","data":[{"id":"grok/grok-4.7","owned_by":"x"},{"id":"a/b"},
+        \\{"id":"a/b"},{"id":""},{"id":"has space"},{"id":7},{"name":"no id"},"bare",
+        \\{"id":"tab\there"},{"id":"nvidia/nemotron:free"}]}
+    );
+    try std.testing.expectEqual(@as(usize, 3), ids.len);
+    try std.testing.expectEqualStrings("a/b", ids[0]);
+    try std.testing.expectEqualStrings("grok/grok-4.7", ids[1]);
+    try std.testing.expectEqualStrings("nvidia/nemotron:free", ids[2]);
+    try std.testing.expectEqual(@as(usize, 0), (try parseModelIds(arena, "{\"data\":[]}")).len);
+    for ([_][]const u8{ "[]", "{}", "{\"data\":{}}", "{\"data\":", "not json", "" }) |bad| {
+        if (parseModelIds(arena, bad)) |_| {
+            std.debug.print("accepted: {s}\n", .{bad});
+            return error.TestUnexpectedResult;
+        } else |_| {}
+    }
+    const deep = try arena.alloc(u8, 2 * (max_models_json_depth + 1));
+    @memset(deep[0 .. deep.len / 2], '[');
+    @memset(deep[deep.len / 2 ..], ']');
+    try std.testing.expectError(error.InvalidModelList, parseModelIds(arena, deep));
+    var many: std.Io.Writer.Allocating = .init(arena);
+    try many.writer.writeAll("{\"data\":[");
+    for (0..max_discovered_models + 10) |i| try many.writer.print("{s}{{\"id\":\"m{d}\"}}", .{ if (i == 0) "" else ",", i });
+    try many.writer.writeAll("]}");
+    try std.testing.expectEqual(max_discovered_models, (try parseModelIds(arena, many.written())).len);
+    const long_id = try arena.alloc(u8, max_model_id_bytes + 1);
+    @memset(long_id, 'x');
+    const long = try std.fmt.allocPrint(arena, "{{\"data\":[{{\"id\":\"{s}\"}}]}}", .{long_id});
+    try std.testing.expectEqual(@as(usize, 0), (try parseModelIds(arena, long)).len);
+}
+
+/// The list an ACP session may switch among once discovery answered: the
+/// configured list (or `model` alone) in its own order, then each discovered
+/// id it did not already name.
+fn withDiscovered(arena: std.mem.Allocator, model: []const u8, models: []const []const u8, found: []const []const u8) ![]const []const u8 {
+    var list: std.ArrayList([]const u8) = .empty;
+    try list.appendSlice(arena, if (models.len == 0) &.{model} else models);
+    for (found) |id| if (!listsModel(list.items, id)) try list.append(arena, id);
+    return list.items;
+}
+
+test "discovered models follow the configured list and the default stays first among its own" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    const alone = try withDiscovered(arena, "z", &.{}, &.{ "a", "z" });
+    try std.testing.expectEqual(@as(usize, 2), alone.len);
+    try std.testing.expectEqualStrings("z", alone[0]);
+    try std.testing.expectEqualStrings("a", alone[1]);
+    const listed = try withDiscovered(arena, "b", &.{ "c", "b" }, &.{ "a", "b" });
+    try std.testing.expectEqual(@as(usize, 3), listed.len);
+    try std.testing.expectEqualStrings("c", listed[0]);
+    try std.testing.expectEqualStrings("a", listed[2]);
+}
+
+/// One `GET <base_url>/models` with the run's key and the config's `headers`,
+/// body capped at `max_models_body_bytes`. A redirect is an error, as it is for
+/// a turn, so the key never follows one.
+fn fetchModels(client: *std.http.Client, arena: std.mem.Allocator, uri: std.Uri, headers: std.http.Client.Request.Headers, extra: []const std.http.Header) anyerror![]u8 {
+    var request = try client.request(.GET, uri, .{
+        .redirect_behavior = .unhandled,
+        .headers = headers,
+        .extra_headers = extra,
+    });
+    defer request.deinit();
+    try request.sendBodiless();
+    var redirect_buffer: [8 * 1024]u8 = undefined;
+    var response = try request.receiveHead(&redirect_buffer);
+    if (response.head.status != .ok) return error.HttpStatusNotOk;
+    const buffer = try arena.alloc(u8, max_models_body_bytes);
+    var body: std.Io.Writer = .fixed(buffer);
+    var transfer: [64 * 1024]u8 = undefined;
+    var decompress: std.http.Decompress = undefined;
+    var decompress_buffer: [std.compress.flate.max_window_len]u8 = undefined;
+    const reader = response.readerDecompressing(&transfer, &decompress, &decompress_buffer);
+    _ = reader.streamRemaining(&body) catch |err| switch (err) {
+        error.ReadFailed => return response.bodyErr().?,
+        error.WriteFailed => return error.ModelListTooLarge,
+    };
+    return body.buffered();
+}
+
+/// The provider's models joined to the session's list, or the list unchanged
+/// with one line on stderr saying why. Discovery never stops a session.
+fn discoverModels(io: Io, client: *std.http.Client, arena: std.mem.Allocator, opts: Options) error{OutOfMemory}![]const []const u8 {
+    const shown = displayUrl(arena, opts.base_url);
+    const answer: anyerror![]const []const u8 = discovered: {
+        if (opts.base_url.len == 0 or opts.api_key.len == 0) {
+            net.note(io, arena, "microagent: acp: discover_models needs a base url and an API key; the session offers the configured models\n", .{});
+            return opts.models;
+        }
+        var uri = std.Uri.parse(opts.base_url) catch break :discovered error.InvalidUrl;
+        uri.path = .{ .percent_encoded = try std.fmt.allocPrint(arena, "{s}/models", .{std.mem.trimEnd(u8, uri.path.percent_encoded, "/")}) };
+        uri.fragment = null;
+        var extra: std.ArrayList(std.http.Header) = .empty;
+        try extra.append(arena, .{ .name = "accept", .value = "application/json" });
+        for (opts.headers) |header| try extra.append(arena, .{ .name = header[0], .value = header[1] });
+        const headers = try authHeaders(arena, opts.api_key);
+        const body = net.withDeadline(io, net.durationMs(discover_timeout_ms), fetchModels, .{ client, arena, uri, headers, extra.items }) catch |err|
+            break :discovered err;
+        break :discovered parseModelIds(arena, body);
+    };
+    const found = answer catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        net.note(io, arena, "microagent: acp: could not discover models from {s} ({s}); the session offers the configured models\n", .{ shown, @errorName(err) });
+        return opts.models;
+    };
+    return withDiscovered(arena, opts.model, opts.models, found);
 }
 
 /// Everything the config file said, from the TOML named by --config,
@@ -10133,6 +10304,7 @@ fn runAcp(init: std.process.Init) !u8 {
 
     opts.deny_commands = loaded.deny_commands;
     opts.headers = loaded.headers;
+    var discover_pending = loaded.discover_models;
     opts.disabled_tools = loaded.disabled_tools;
     opts.sandbox = loaded.sandbox;
     if (opts.sandbox.enabled) {
@@ -10238,6 +10410,12 @@ fn runAcp(init: std.process.Init) !u8 {
                 acpErrorFor(&conn, request, err);
                 continue;
             };
+            // Once per process, on the first session, so `initialize` never
+            // waits on the provider.
+            if (discover_pending) {
+                discover_pending = false;
+                opts.models = try discoverModels(io, &client, arena, opts);
+            }
             if (acpStartSession(io, &conn, &client, init.environ_map, &opts, arena, new_session, skill_block, loaded.system_prompt_extra, loaded.agents_files)) |session| {
                 conn.sessions.put(gpa, session.id, session) catch {
                     acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");

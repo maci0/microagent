@@ -205,6 +205,9 @@ pub const Config = struct {
     /// The model ids an ACP client may switch the session among, empty for
     /// only `model`. Each is non-empty and named once.
     models: []const []const u8 = &.{},
+    /// Ask the provider's `GET <base_url>/models` for more ids to add to
+    /// `models` when an ACP client opens its first session.
+    discover_models: bool = false,
     base_url: []const u8 = "",
     api_key: []const u8 = "",
     /// Optional reasoning level, overridden by the environment and CLI.
@@ -551,7 +554,7 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8) Config {
 }
 
 /// A key at the top of the file, outside any table: `system_prompt_extra`,
-/// `agents_files`, `model`, `models`, `base_url`, `api_key`, `reasoning_effort`,
+/// `agents_files`, `model`, `models`, `discover_models`, `base_url`, `api_key`, `reasoning_effort`,
 /// `headers`, `skills` and `deny_commands`.
 /// `lines` is what
 /// follows this one, for the value that runs over several.
@@ -582,6 +585,11 @@ fn topKey(config: *Config, arena: std.mem.Allocator, lines: *Lines, key: []const
             for (ids[0..i]) |earlier| if (std.mem.eql(u8, earlier, id)) return config.note(.{ .key = key, .kind = .bad_value });
         }
         config.models = ids;
+        return;
+    }
+    if (std.mem.eql(u8, key, "discover_models")) {
+        config.discover_models = parseBool(value_text) orelse
+            return config.note(.{ .key = key, .kind = .bad_value });
         return;
     }
     if (std.mem.eql(u8, key, "base_url")) return topString(arena, config, key, value_text, &config.base_url);
@@ -1374,6 +1382,21 @@ test "models is an array of model ids, each named once" {
         try std.testing.expectEqual(Problem.Kind.bad_value, problem.kind);
         try std.testing.expectEqual(@as(usize, 0), bad.models.len);
     }
+}
+
+test "discover_models is a boolean, off unless the file says true" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    try std.testing.expect(!parse(arena, "model = \"a\"\n").discover_models);
+    const on = parse(arena, "discover_models = true # ask the provider\n");
+    try std.testing.expect(on.problem == null and on.discover_models);
+    try std.testing.expect(!parse(arena, "discover_models = false\n").discover_models);
+    const bad = parse(arena, "discover_models = \"yes\"\n");
+    try std.testing.expectEqualStrings("discover_models", bad.problem.?.key);
+    try std.testing.expectEqual(Problem.Kind.bad_value, bad.problem.?.kind);
+    try std.testing.expect(!bad.discover_models);
 }
 
 test "the config sets system_prompt_extra and leaves absent or bad keys alone" {

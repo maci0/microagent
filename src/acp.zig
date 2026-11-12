@@ -344,7 +344,7 @@ pub fn configOptionsJson(allocator: std.mem.Allocator, model: []const u8, models
         try chat.writeJsonString(w, id);
         try w.writeAll(",\"name\":");
         try chat.writeJsonString(w, id);
-        try w.writeAll(",\"description\":\"A model named by the operator configuration\"}");
+        try w.writeAll(",\"description\":\"A model this session may switch to\"}");
     }
     try w.writeAll("]}]");
     return aw.toOwnedSlice();

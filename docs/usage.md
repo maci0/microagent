@@ -508,6 +508,15 @@ repeated refuses the list, which is named on stderr. ACP sessions advertise ever
 default. Per-model `base_url`, `api_key` or `headers` are not built: every listed model goes to the
 one provider.
 
+`discover_models = true` adds the provider's own list. When an ACP client opens its first session,
+microagent sends one `GET <base_url>/models` with the key and the `headers` table and adds each
+`data[].id` the configured list (or `model` alone) does not already name, sorted, after it. The
+default stays `model`, first among its own list. The answer is the provider's: an id longer than
+256 bytes or holding a space or control byte is dropped, a repeat is named once, at most 512 are
+added, and a body over 4 MiB or nested past 64 levels is refused. Discovery is given 10 seconds;
+a failure, a status other than 200 or a missing base url or key leaves the configured list and
+names the reason once on stderr. A terminal run does not ask, since it only uses the default.
+
 `model` defaults to `deepseek/deepseek-v4-flash` when no source names one. `base_url` and `api_key`
 have no default: a run that names neither is refused before the first request, with the message
 naming the flag, the variable and the config key. `base_url` is checked the way the flag is, so a

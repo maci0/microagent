@@ -36,6 +36,10 @@ class Provider(BaseHTTPRequestHandler):
     paths: ClassVar[list[str]] = []
     # The request headers of each POST, lower-cased names, in arrival order.
     headers: ClassVar[list[dict[str, str]]] = []
+    # The request headers of each GET, kept apart so a POST count stays one.
+    get_headers: ClassVar[list[dict[str, str]]] = []
+    # The `GET /models` answer; None answers 404.
+    models_body: ClassVar[bytes | None] = None
     empty = False
     trailing_newline = True
     bad_call = False
@@ -69,6 +73,23 @@ class Provider(BaseHTTPRequestHandler):
         cls.response_calls = False
         cls.reasoning_content = None
         cls.tool_call_args = ""
+        cls.get_headers = []
+        cls.models_body = None
+
+    def do_GET(self) -> None:
+        Provider.paths.append(self.path)
+        Provider.get_headers.append({k.lower(): v for k, v in self.headers.items()})
+        body = Provider.models_body
+        if body is None or not self.path.endswith("/models"):
+            self.send_response(404)
+            self.send_header("content-length", "0")
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     @staticmethod
     def tool_call_frame() -> dict[str, Any]:
@@ -719,6 +740,38 @@ def check_acp_models(binary: Path, root: Path, url: str) -> None:
     expect(result.returncode == 2 and not Provider.seen and "models" in result.stderr, result)
 
 
+def check_acp_discover_models(binary: Path, root: Path, url: str) -> None:
+    """`discover_models` adds the provider's `GET /models` ids to the selector, once."""
+    Provider.reset()
+    path = root / "discover.toml"
+    path.write_text('model = "b"\nmodels = ["b", "a"]\ndiscover_models = true\nheaders = { X-Team = "core" }\n')
+    listed = [{"id": "z"}, {"id": "a"}, {"id": "bad id"}, {"id": "y"}]
+    Provider.models_body = json.dumps({"object": "list", "data": listed}).encode()
+    client = AcpClient(binary, root, url, MICROAGENT_CONFIG=str(path))
+    try:
+        client.call("initialize", {"protocolVersion": 1})
+        expect(not Provider.get_headers, "discovery ran before the first session")
+        for _ in range(2):
+            model = model_option(client.call("session/new", {"cwd": str(root), "mcpServers": []})["result"])
+            options = [o["value"] for o in model["options"]]
+            expect(model["currentValue"] == "b" and options == ["b", "a", "y", "z"], model)
+    finally:
+        client.close()
+    expect(len(Provider.get_headers) == 1, Provider.get_headers)
+    sent = Provider.get_headers[0]
+    expect(sent.get("authorization") == "Bearer test" and sent.get("x-team") == "core", sent)
+
+    # A provider that cannot list its models leaves the configured list.
+    Provider.models_body = None
+    client = AcpClient(binary, root, url, MICROAGENT_CONFIG=str(path))
+    try:
+        client.call("initialize", {"protocolVersion": 1})
+        model = model_option(client.call("session/new", {"cwd": str(root), "mcpServers": []})["result"])
+        expect([o["value"] for o in model["options"]] == ["b", "a"], model)
+    finally:
+        client.close()
+
+
 def check_tool_table_keys(binary: Path, root: Path, url: str) -> None:
     """A key that only a preset table takes is named with the table it went in.
 
@@ -891,6 +944,7 @@ if __name__ == "__main__":
             check_reasoning_config(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_provider_headers(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_acp_models(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
+            check_acp_discover_models(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_tool_table_keys(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_compressed_error(binary, Path(temp))
             check_harbor_numbers(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
