@@ -23,9 +23,12 @@ setup: `lint-requirements.in`, `lint-requirements.txt`, `ruff.toml`,
 Zig 0.17.0 or newer, the minimum declared as `.minimum_zig_version` in
 [build.zig.zon](build.zig.zon). There is no dependency to install, no service to
 start and no configuration to copy: a clone plus a Zig toolchain builds and
-tests. A newer Zig requires review of the library patch below; `make check` wants exactly 0.17.0,
-the version CI installs and the release assets are built with. `make
-zig-version` runs that check alone. 0.17.0 is also the newest stable release;
+tests. A newer Zig builds and tests this tree: `make zig-version`, which `make check` runs
+first, refuses only a compiler older than that minimum and names a newer one without stopping.
+The release assets are the exception, because a compiler decides their bytes. CI builds them
+with exactly 0.17.0, and `make release-assets`, `make musl`, `make install`,
+`make check-asset-run` and `make check-reproducible` each refuse any other compiler through
+`make zig-release-version`, so a rehearsal built here is the binary the tag publishes. 0.17.0 is also the newest stable release;
 [docs/performance.md](docs/performance.md#the-toolchain) says why there is no
 compiler upgrade or build flag to take for speed.
 
@@ -101,7 +104,7 @@ make lint                   # the pin checks, shellcheck, ruff, yamllint and Mar
 make lint-ci                # shellcheck over the run: steps, and the workflow refs and runner semantics, on their own
 make check-asset-run        # the published asset for this host, cross-built and started
 make instructions CHECK=--check   # retired instructions per unit, and a band it must stay inside
-make check-unreleased       # the [Unreleased] entry has the five sections, once each, in order
+make check-unreleased       # the [Unreleased] entry's shape, and that a source change has one
 make check-changelog-history # the 0.y bump rule over every released section, oldest first
 ```
 
@@ -121,9 +124,12 @@ binary it then starts). These are the checks
 jobs, on the same Zig version, less `preflight` and `zig-version`, which ask a
 laptop what is missing and what a runner's setup actions already installed, and
 more the one step the test job adds, `check-asset-run`, below. The shared
-setup-zig action installs the version `make required-zig-version` prints, and
-`make zig-version` tells a laptop on a different compiler so rather than
-assuming. The workflow calls the same targets
+setup-zig action installs the version `make required-zig-version` prints.
+`make zig-version` refuses a compiler older than that minimum, which is the one
+case where the build stops inside the compiler rather than on the code, and it
+names a newer compiler without refusing it: the tests do not depend on the
+bytes a compiler emits, and the targets that publish those bytes ask
+`make zig-release-version` for the exact one instead. The workflow calls the same targets
 rather than repeating their commands, so a step added to `check` is a step CI
 runs.
 
@@ -350,8 +356,14 @@ refuses one.
 
 `make check-unreleased` runs in `make check` and in the push workflow, and
 checks the entry's shape while it is under `[Unreleased]`: the five sections,
-each at most once, in that order. Whether a change is worth an entry is the
-writer's call. `make check-changelog` checks the same shape on the entry a tag
+each at most once, in that order. It also checks that there is an entry.
+`check-changelog-entry.sh` diffs this tree against the upstream of the branch
+(HEAD, when the checkout has none) and refuses it when a file under `src/`,
+`build.zig`, `Makefile`, `scripts/`, `bench/`, `integrations/`, `.github/` or a
+linter manifest changed and `[Unreleased]` holds no bullet. A change to the
+changelog, the prose or the review notes is not that, and a change that
+describes nothing a consumer meets is the exception: say so in the pull request
+rather than in the changelog. `make check-changelog` checks the same shape on the entry a tag
 names, after the heading has become a version and the author no longer sees
 it. `make check-unreleased` runs `make check-changelog-links`, and so does
 `make check-release` over the whole file before a tag. That check holds the

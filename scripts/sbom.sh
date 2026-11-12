@@ -43,7 +43,7 @@ set -eu
 # rather than being written into the document, since a Tool creator a scanner
 # cannot read is no record of anything. The Makefile reads this out of
 # build.zig.zon, the same pin setup-zig installs on every runner and
-# `zig-version` gates `release-assets` against, so the document names the
+# `zig-release-version` gates `release-assets` against, so the document names the
 # toolchain that produced the files beside it rather than whatever compiler was
 # on the machine that generated it.
 case "${ZIG_VERSION:-}" in

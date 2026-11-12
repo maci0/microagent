@@ -17,7 +17,7 @@ export TZ := UTC
 
 .PHONY: test-cli
 
-.PHONY: default help preflight version build musl test watch test-sanitize fmt fmt-check fmt-python lint lint-versions lint-versions-selftest lint-lock lint-ci check-sbom check-refs zig-version required-zig-version release-targets check-assets check-asset-run check-binary check-changelog check-changelog-links check-changelog-sections check-unreleased check-changelog-history check-readme check-help check-man check-release check-reproducible lint-shell lint-python lint-yaml lint-md check bench gauntlet instructions overhead install release-assets checksums check-checksums sbom sha256-of clean
+.PHONY: default help preflight version build musl test watch test-sanitize fmt fmt-check fmt-python lint lint-versions lint-versions-selftest lint-lock lint-ci check-sbom check-refs zig-version zig-release-version required-zig-version release-targets check-assets check-asset-run check-binary check-changelog check-changelog-links check-changelog-sections check-unreleased check-changelog-history check-readme check-help check-man check-release check-reproducible lint-shell lint-python lint-yaml lint-md check bench gauntlet instructions overhead install release-assets checksums check-checksums sbom sha256-of clean
 
 # The Harbor adapter's directory, the one place that path is written down.
 # lint-lock.sh and lint-versions.sh both take it as an argument rather than
@@ -180,7 +180,8 @@ help:
 	  'lint-versions-selftest check lint-versions refuses each drift it exists to catch, restoring the tree' \
 	  'lint-lock             check each manifest pins exactly, and each lock carries those pins, a hash each, and nothing else' \
 	  'check-sbom            run the release inventory over stand-in assets and check what a scanner reads' \
-	  'zig-version           check the local zig against the version the release is built with' \
+	  'zig-version           refuse a zig older than build.zig.zon requires, and name a newer one' \
+	  'zig-release-version  refuse a zig other than the one the release assets are built with' \
 	  'bench AGENTS=...      three coding tasks through each harness' \
 	  'gauntlet AGENTS=...   the same gauntlet review on a fresh clone, per harness' \
 	  'instructions [CHECK=--check]  retired instructions per unit, against bench/instructions.baseline' \
@@ -195,7 +196,7 @@ help:
 	  'check-changelog [VERSION=...]  the changelog entry a tag would publish, its shape, and the 0.y policy on it' \
 	  'check-changelog-sections  the five Keep a Changelog headings, once each, in order' \
 	  'check-changelog-history  the 0.y bump policy over every released section, oldest first' \
-	  'check-unreleased      the [Unreleased] entry has the five sections, once each, in order' \
+	  'check-unreleased      the [Unreleased] entry has the five sections, once each, in order, and a source change has one' \
 	  'check-changelog-sections SECTION=...  the same five-section shape under one named heading' \
 	  'check-changelog-links  every heading has the compare link its version implies' \
 	  'check-readme      the README installs and names the version build.zig.zon declares' \
@@ -277,15 +278,15 @@ endif
 # is made beside it and renamed: a copy interrupted halfway leaves a truncated
 # binary that the next Harbor run uploads into every container and fails in,
 # which reads as a broken agent rather than a broken build.
-# The gate `check` runs is not enough on its own, because the two targets here
-# are the ones that put a binary on a machine: `zig-version` only reaches them
-# through `check`, and both are runnable on their own. A different zig decides
-# the bytes, and nothing downstream can see it: the assets still pass
-# `check-assets`, and a rebuild of them with the same wrong compiler still
-# passes `check-reproducible`, which compares two builds rather than a build
-# against a pin. The dependency is what makes a rehearsal on a laptop the same
+# `zig-version` is not enough on its own here, because it names a newer compiler
+# and continues: a test result does not depend on the bytes the compiler emits.
+# These targets put a binary on a machine, and a different zig decides those
+# bytes. Nothing downstream can see it: the assets still pass `check-assets`,
+# and a rebuild of them with the same wrong compiler still passes
+# `check-reproducible`, which compares two builds rather than a build against a
+# pin. `zig-release-version` is what makes a rehearsal on a laptop the same
 # bytes the tag publishes, which is the claim CONTRIBUTING.md makes.
-musl: zig-version
+musl: zig-release-version
 	$(ZIG) build -Dtarget=$(MUSL_ARCH)-linux-musl -Doptimize=$(OPT) --prefix $(CROSS_PREFIX)/$(MUSL_ARCH)-linux-musl
 	cp $(CROSS_PREFIX)/$(MUSL_ARCH)-linux-musl/bin/microagent $(MUSL_BINARY).tmp
 	mv $(MUSL_BINARY).tmp $(MUSL_BINARY)
@@ -472,20 +473,52 @@ lint-lock:
 	@sh scripts/lint-lock.sh lint-requirements.in lint-requirements.txt
 	@sh scripts/lint-lock.sh $(HARBOR_DIR)/requirements.txt $(HARBOR_DIR)/requirements.lock
 
-# A different zig is a different compiler, and a compiler decides the bytes:
-# codegen, inlining and linker layout all move between releases. setup-zig
-# installs `.minimum_zig_version` on every runner, so CI has always built the
-# release assets with that exact version, and a laptop on a newer one compiles
-# an asset no checksum ever described. A newer zig is not refused by the build
-# (the field is a minimum, and a contributor on one should still be able to
-# work), so the gate asks for the release version by name and says which it is.
+# Two different questions, asked by the one target both used to share.
+#
+# A compiler older than `.minimum_zig_version` cannot build this tree at all:
+# the build stops inside the compiler, on a language feature the sources use,
+# and the message names the feature rather than the version. `make check` asks
+# it here so the answer is the version, and a newer compiler is not that
+# failure. The field is a minimum, and a contributor whose toolchain is past it
+# can still build and test; refusing them is how a green tree used to be
+# unreachable from the one command CONTRIBUTING.md says to run before a push.
+#
+# The bytes are the other question. Codegen, inlining and linker layout all
+# move between releases, and setup-zig installs `.minimum_zig_version` on every
+# runner, so a laptop on any other compiler cross-builds an asset no checksum
+# ever described. The build does not refuse that compiler (the field is a
+# minimum), which is why the targets that put a binary on a machine ask for the
+# release version by name below, and why this one does not: a test suite is not
+# a published asset.
 zig-version:
 	@set -eu; \
 	want="$$($(MAKE) --no-print-directory required-zig-version)"; \
 	test -n "$$want" || { echo "build.zig.zon has no .minimum_zig_version to check against" >&2; exit 1; }; \
 	have="$$($(ZIG) version)"; \
+	case "$$have" in \
+	  "$$want" | "$$want"-*) ;; \
+	  *) \
+	    older="$$(printf '%s\n%s\n' "$$want" "$$have" | awk -F'[-.]' '{ printf "%09d%09d%09d %s\n", $$1, $$2, $$3, $$0 }' | sort | head -n 1 | cut -d' ' -f2-)"; \
+	    if [ "$$older" != "$$want" ]; then \
+	      echo "zig $$have, and build.zig.zon requires $$want or newer: this compiler is older than the sources, so the build stops inside it rather than on the code" >&2; \
+	      exit 1; \
+	    fi; \
+	    echo "note: zig $$have, where the release assets are built with $$want: a different compiler produces a different binary, so 'make release-assets' here would not be the one the tag publishes" >&2 ;; \
+	esac
+
+# The exact compiler, asked of the targets that publish bytes rather than of
+# the ones that run tests. `zig-version` names a newer compiler and continues,
+# because a test result does not depend on the bytes the compiler emits; an
+# asset does, and `check-reproducible` compares two builds rather than a build
+# against a pin, so the same wrong compiler passes it. The dependency is what
+# makes a rehearsal on a laptop the same bytes the tag publishes.
+zig-release-version:
+	@$(MAKE) --no-print-directory zig-version
+	@set -eu; \
+	want="$$($(MAKE) --no-print-directory required-zig-version)"; \
+	have="$$($(ZIG) version)"; \
 	[ "$$have" = "$$want" ] || { \
-	  echo "zig $$have, the release assets are built with $$want: a different compiler produces a different binary, so 'make release-assets' here would not be the one the tag publishes" >&2; \
+	  echo "zig $$have, the release assets are built with $$want: a different compiler produces a different binary, so this build would not be the one the tag publishes" >&2; \
 	  exit 1; }
 
 # The file list comes from git rather than from a hand-written glob: a glob
@@ -783,7 +816,7 @@ DESTDIR ?=
 # published and no checksum describes. `check` reached this only as one step
 # among the gate's, and a contributor reading the README runs `make install`
 # on its own.
-install: zig-version build
+install: zig-release-version build
 	install -d -m 755 $(DESTDIR)$(BINDIR)
 	install -m755 $(BIN) $(DESTDIR)$(BINDIR)/microagent.tmp
 	mv -f $(DESTDIR)$(BINDIR)/microagent.tmp $(DESTDIR)$(BINDIR)/microagent
@@ -900,6 +933,8 @@ check-changelog-sections:
 check-unreleased:
 	@$(MAKE) --no-print-directory check-changelog-sections SECTION=Unreleased
 	@$(MAKE) --no-print-directory check-changelog-links
+	@sh scripts/check-changelog-entry-selftest.sh
+	@sh scripts/check-changelog-entry.sh
 
 # The changelog rules release.yml enforces on the tag, and the 0.y policy
 # CONTRIBUTING.md states, runnable before the tag exists. They were shell inside
@@ -1237,7 +1272,7 @@ check-binary: build
 # rather than trusted: a matrix row that drifts from uname would then run one
 # asset on a runner meant to check another, and the run would pass on the wrong
 # binary.
-check-asset-run: zig-version
+check-asset-run: zig-release-version
 	@test -n "$(HOST_TARGET)" || { \
 	  echo "this host ($(HOST_OS) $(MUSL_ARCH)) is not one the release publishes an asset for:" >&2; \
 	  echo "there is no published target to build and run here, so nothing was checked" >&2; \
@@ -1274,7 +1309,7 @@ check-asset-run: zig-version
 # target whose output is published, and a compiler other than the pinned one
 # produces an asset no checksum ever described, reproducibly enough to pass
 # check-reproducible.
-release-assets: zig-version
+release-assets: zig-release-version
 	rm -rf dist
 	mkdir -p dist
 	@set -eu; for target in $(RELEASE_TARGETS); do \
@@ -1321,7 +1356,7 @@ release-assets: zig-version
 # naming no toolchain describes binaries a consumer cannot rebuild: the
 # compiler decides the bytes, and it is the one input to these assets that no
 # checksum, no asset name and no pin in either manifest records. The pin is the
-# same one setup-zig installs on every runner and `zig-version` gates
+# same one setup-zig installs on every runner and `zig-release-version` gates
 # `release-assets` against, so the document names the toolchain that produced
 # the files beside it rather than whatever compiler was on the machine that
 # generated it.
@@ -1498,7 +1533,7 @@ check-checksums:
 # publishes. The runners install the pinned version through setup-zig, so the
 # check costs them one `zig version`; on a laptop it is the difference between
 # a reproducibility result about the release and one about whatever the host had.
-check-reproducible: zig-version
+check-reproducible: zig-release-version
 	@set -eu; \
 	test -n "$(RELEASE_TARGETS)" || { echo "no RELEASE_TARGETS to check" >&2; exit 1; }; \
 	sum=$$($(SHA256_CMD)); \
