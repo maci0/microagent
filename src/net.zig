@@ -883,13 +883,15 @@ pub fn retryBackoffMs(attempt: u32, max_wait_ms: u64) u64 {
 }
 
 /// Statuses worth another attempt: the server is busy, not the request wrong.
-/// A 409 is in the set because that is how the OpenAI-shaped providers spell
-/// "this turn is already being worked on"; a GET that draws one is no more
-/// wrong than the POST that does. 404 is not: it names something that is not
-/// published, and asking again for the same name changes nothing.
+/// 404 is not: it names something that is not published, and asking again for
+/// the same name changes nothing. 409 is not either: that is how the
+/// OpenAI-shaped providers spell "this turn is already being worked on", and
+/// re-POSTing it is a second billable completion of the same turn. A GET that
+/// draws one is no more worth repeating than the POST that does, so the status
+/// is refused for both rather than split per method.
 pub fn retryableStatus(status: std.http.Status) bool {
     return switch (@backingInt(status)) {
-        408, 409, 425, 429 => true,
+        408, 425, 429 => true,
         else => @backingInt(status) >= 500,
     };
 }
@@ -1188,13 +1190,13 @@ test "a key is only sent over a scheme that keeps it off the wire" {
 // answered and refuses. 404 is the one exclusion, and it is pinned here
 // because it is deliberate rather than an oversight.
 test "only a busy or a broken server is asked again" {
-    for ([_]std.http.Status{ .request_timeout, .conflict, .too_early, .too_many_requests, .internal_server_error, .bad_gateway, .service_unavailable, .gateway_timeout }) |status| {
+    for ([_]std.http.Status{ .request_timeout, .too_early, .too_many_requests, .internal_server_error, .bad_gateway, .service_unavailable, .gateway_timeout }) |status| {
         std.testing.expect(retryableStatus(status)) catch |err| {
             std.debug.print("status {d}\n", .{@backingInt(status)});
             return err;
         };
     }
-    for ([_]std.http.Status{ .ok, .created, .bad_request, .unauthorized, .payment_required, .forbidden, .not_found, .method_not_allowed, .not_acceptable, .upgrade_required, .unprocessable_entity }) |status| {
+    for ([_]std.http.Status{ .ok, .created, .bad_request, .unauthorized, .payment_required, .forbidden, .not_found, .conflict, .method_not_allowed, .not_acceptable, .upgrade_required, .unprocessable_entity }) |status| {
         std.testing.expect(!retryableStatus(status)) catch |err| {
             std.debug.print("status {d}\n", .{@backingInt(status)});
             return err;

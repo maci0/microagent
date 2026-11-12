@@ -7182,14 +7182,14 @@ test "a refused value is reported against where it came from, flag or variable" 
 // change to what a billable request is worth repeating, and three examples of
 // each side is not enough to see it happen. `net` names the whole set, and this
 // test is the one that says the run agrees with it rather than with a sample.
-test "only weather-shaped statuses are retried" {
-    for ([_]std.http.Status{ .request_timeout, .conflict, .too_early, .too_many_requests, .internal_server_error, .bad_gateway, .service_unavailable, .gateway_timeout }) |status| {
+test "only weather-shaped statuses are retried, and a 409 is not one" {
+    for ([_]std.http.Status{ .request_timeout, .too_early, .too_many_requests, .internal_server_error, .bad_gateway, .service_unavailable, .gateway_timeout }) |status| {
         std.testing.expect(net.retryableStatus(status)) catch |err| {
             std.debug.print("the run would not retry {d}\n", .{@backingInt(status)});
             return err;
         };
     }
-    for ([_]std.http.Status{ .ok, .created, .bad_request, .unauthorized, .payment_required, .forbidden, .not_found, .method_not_allowed }) |status| {
+    for ([_]std.http.Status{ .ok, .created, .bad_request, .unauthorized, .payment_required, .forbidden, .not_found, .conflict, .method_not_allowed }) |status| {
         std.testing.expect(!net.retryableStatus(status)) catch |err| {
             std.debug.print("the run would retry {d}\n", .{@backingInt(status)});
             return err;

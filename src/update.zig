@@ -1719,13 +1719,13 @@ test "update: a refusal that names a wait is spent on that wait" {
 // gives up on a server that was only busy. Two examples of each are not enough
 // to notice either, and this test's whole job is to notice.
 test "update: a download retries the statuses and errors the run retries on" {
-    for ([_]std.http.Status{ .request_timeout, .conflict, .too_early, .too_many_requests, .internal_server_error, .bad_gateway, .service_unavailable, .gateway_timeout }) |status| {
+    for ([_]std.http.Status{ .request_timeout, .too_early, .too_many_requests, .internal_server_error, .bad_gateway, .service_unavailable, .gateway_timeout }) |status| {
         std.testing.expect(net.retryableStatus(status)) catch |err| {
             std.debug.print("update would not retry {d}\n", .{@backingInt(status)});
             return err;
         };
     }
-    for ([_]std.http.Status{ .ok, .bad_request, .unauthorized, .payment_required, .forbidden, .not_found, .method_not_allowed }) |status| {
+    for ([_]std.http.Status{ .ok, .bad_request, .unauthorized, .payment_required, .forbidden, .not_found, .conflict, .method_not_allowed }) |status| {
         std.testing.expect(!net.retryableStatus(status)) catch |err| {
             std.debug.print("update would retry {d}\n", .{@backingInt(status)});
             return err;
