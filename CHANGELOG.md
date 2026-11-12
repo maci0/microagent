@@ -43,6 +43,11 @@ release, and `microagent update` moves you to it.
   run's arena, which never hands memory back, so a long run talking to a remote
   server kept every request's worth until it ended.
 
+- The session log now records `stream_error`, the line a provider put in a
+  frame when it abandoned a stream that still carries choices. It was the one
+  of the four stream strings the record left out, so a reader of the log could
+  not tell that turn from one the provider finished.
+
 - ACP's `mode` session config option now reports `auto` as its current value
   and lists both `auto` and `code`, matching the modes a session advertises
   and the values `session/set_mode` accepts.

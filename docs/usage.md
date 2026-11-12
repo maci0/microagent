@@ -936,11 +936,11 @@ it. The store keeps the 200 most recent runs and prunes older ones, and it drops
 days whatever the count says, so a machine that runs rarely does not keep every run it has ever done.
 
 ```json
-{"ts":1790608347342,"cwd":"~/Desktop/Projects/microagent","model":"deepseek/deepseek-v4-flash","finish_reason":"stop","served_model":"deepseek/deepseek-v4-flash-0726","fingerprint":"fp_9c1e","elapsed_ms":1448,"usage":{"prompt_tokens":998,"cached_tokens":896,"completion_tokens":19,"reasoning_tokens":16,"total_tokens":1017}}
+{"ts":1790608347342,"cwd":"~/Desktop/Projects/microagent","model":"deepseek/deepseek-v4-flash","finish_reason":"stop","served_model":"deepseek/deepseek-v4-flash-0726","fingerprint":"fp_9c1e","stream_error":"","elapsed_ms":1448,"usage":{"prompt_tokens":998,"cached_tokens":896,"completion_tokens":19,"reasoning_tokens":16,"total_tokens":1017}}
 ```
 
 ```json
-{"ts":1790608351204,"cwd":"~/Desktop/Projects/microagent","model":"deepseek/deepseek-v4-flash","finish_reason":"","served_model":"","fingerprint":"","error":"ConnectionRefused","elapsed_ms":902,"usage":{"prompt_tokens":0,"cached_tokens":0,"completion_tokens":0,"reasoning_tokens":0,"total_tokens":0}}
+{"ts":1790608351204,"cwd":"~/Desktop/Projects/microagent","model":"deepseek/deepseek-v4-flash","finish_reason":"","served_model":"","fingerprint":"","stream_error":"","error":"ConnectionRefused","elapsed_ms":902,"usage":{"prompt_tokens":0,"cached_tokens":0,"completion_tokens":0,"reasoning_tokens":0,"total_tokens":0}}
 ```
 
 | key | meaning |
@@ -949,6 +949,7 @@ days whatever the count says, so a machine that runs rarely does not keep every 
 | `cwd` | the directory the run works in, behind a `~` and relative to the home when it is under it, so the record carries no account name; a directory outside the home is recorded whole |
 | `finish_reason` | why the provider stopped. `length` means the response was cut at `--max-tokens` and the run says so on stderr; the empty string is a stream that carried no reason, and every value on a record carrying `error`. |
 | `model` / `served_model` / `fingerprint` | what the run asked for, what the provider says answered, and the weights fingerprint it reported. A gateway routes a name to whichever snapshot it holds that week, so two runs are comparable only when these match. Empty when the stream named none. |
+| `stream_error` | what the provider said went wrong in the middle of the stream, in the one line the run prints on stderr. The frames around it still carry choices, so this is the field that tells a stream the provider abandoned from one that ran to its end. The empty string is a stream that reported no failure, and every value on a record carrying `error`. |
 | `error` | why the provider call never answered, on a record for a turn that failed rather than a turn that returned. Absent from a record for a turn that returned. |
 | `elapsed_ms` | the model's time on this response, for tokens per second without tool time mixed in. Measured on a clock that stops while the machine is suspended (`--budget`, by contrast, counts suspend: it bounds wall time). |
 

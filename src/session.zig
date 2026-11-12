@@ -854,7 +854,7 @@ const session_record_scaffolding_bytes = 512;
 /// answered, beside the one the run asked for; and the model time it took. The
 /// keys are the OpenAI-shaped ones toktop already reads by name.
 ///
-/// A turn that has no `Record.response` writes the empty string for the three
+/// A turn that has no `Record.response` writes the empty string for the four
 /// fields a stream fills and an `error` beside them, so the line is the same
 /// object a monitor already parses rather than a second shape it has to learn.
 fn sessionRecord(
@@ -874,7 +874,7 @@ fn sessionRecord(
     try chat.writeJsonString(w, cwd);
     try w.writeAll(",\"model\":");
     try chat.writeJsonString(w, model);
-    // A turn with no response is a call that never answered, so the three fields
+    // A turn with no response is a call that never answered, so the four fields
     // a stream fills are the empty strings and the reason sits beside them.
     const result = record.response;
     if (result) |r| {
@@ -893,8 +893,14 @@ fn sessionRecord(
         try chat.writeJsonString(w, r.served_model);
         try w.writeAll(",\"fingerprint\":");
         try chat.writeJsonString(w, r.fingerprint);
+        // What the provider said went wrong mid-stream. The frames around it
+        // still carry choices, so a record that reads only those is a turn the
+        // provider finished; this is the field that says it stopped instead.
+        // The empty string is a stream that reported no failure.
+        try w.writeAll(",\"stream_error\":");
+        try chat.writeJsonString(w, r.stream_error);
     } else {
-        try w.writeAll(",\"finish_reason\":\"\",\"served_model\":\"\",\"fingerprint\":\"\"");
+        try w.writeAll(",\"finish_reason\":\"\",\"served_model\":\"\",\"fingerprint\":\"\",\"stream_error\":\"\"");
     }
     if (record.failure.len != 0) {
         try w.writeAll(",\"error\":");
@@ -916,11 +922,11 @@ fn sessionRecord(
     return jb.items();
 }
 
-/// The bytes the three stream strings add to the reservation above, or zero
+/// The bytes the four stream strings add to the reservation above, or zero
 /// for a turn that never got one.
 fn streamStringBytes(result: ?*const chat.ChatResult) usize {
     const r = result orelse return 0;
-    return r.finish_reason.len + r.served_model.len + r.fingerprint.len;
+    return r.finish_reason.len + r.served_model.len + r.fingerprint.len + r.stream_error.len;
 }
 
 test "the session directory is the variable, trimmed, and empty means off" {
@@ -972,12 +978,14 @@ test "session record carries one response's counters, cwd and model time" {
     result.finish_reason = try arena.dupe(u8, "stop");
     result.served_model = try arena.dupe(u8, "deepseek/deepseek-v4-flash-0726");
     result.fingerprint = try arena.dupe(u8, "fp_9c1e");
+    result.stream_error = try arena.dupe(u8, "rate_limit: slow down");
 
     const line = try sessionRecord(arena, 1759000000000, "/home/me/proj", "deepseek/deepseek-v4-flash", .{ .elapsed_ms = 1234, .response = &result });
     try std.testing.expectEqualStrings(
         "{\"ts\":1759000000000,\"cwd\":\"/home/me/proj\",\"model\":\"deepseek/deepseek-v4-flash\"," ++
             "\"finish_reason\":\"stop\"," ++
             "\"served_model\":\"deepseek/deepseek-v4-flash-0726\",\"fingerprint\":\"fp_9c1e\"," ++
+            "\"stream_error\":\"rate_limit: slow down\"," ++
             "\"elapsed_ms\":1234,\"usage\":{\"prompt_tokens\":910,\"cached_tokens\":832," ++
             "\"completion_tokens\":18,\"reasoning_tokens\":0,\"total_tokens\":928}}\n",
         line,
@@ -985,7 +993,7 @@ test "session record carries one response's counters, cwd and model time" {
 }
 
 // A turn the provider never answered is a line of the same shape, because a
-// monitor walks one store and parses one object per line. The three fields a
+// monitor walks one store and parses one object per line. The four fields a
 // stream fills are the empty strings a stream that carried none would write, so
 // only `error` says what happened, and the counters are the zeros the run was
 // never charged for.
@@ -1000,7 +1008,7 @@ test "a turn that never got a response is a record with the reason and no counte
     });
     try std.testing.expectEqualStrings(
         "{\"ts\":1759000000000,\"cwd\":\"/home/me/proj\",\"model\":\"deepseek/deepseek-v4-flash\"," ++
-            "\"finish_reason\":\"\",\"served_model\":\"\",\"fingerprint\":\"\"," ++
+            "\"finish_reason\":\"\",\"served_model\":\"\",\"fingerprint\":\"\",\"stream_error\":\"\"," ++
             "\"error\":\"ConnectionRefused\"," ++
             "\"elapsed_ms\":900,\"usage\":{\"prompt_tokens\":0,\"cached_tokens\":0," ++
             "\"completion_tokens\":0,\"reasoning_tokens\":0,\"total_tokens\":0}}\n",
@@ -1029,7 +1037,7 @@ test "session record escapes a directory that needs it" {
     try std.testing.expectEqualStrings(
         "{\"ts\":1,\"cwd\":\"/tmp/a\\\"b\\\\c\",\"model\":\"m\"," ++
             "\"finish_reason\":\"\"," ++
-            "\"served_model\":\"\",\"fingerprint\":\"\"," ++
+            "\"served_model\":\"\",\"fingerprint\":\"\",\"stream_error\":\"\"," ++
             "\"elapsed_ms\":5,\"usage\":{\"prompt_tokens\":0,\"cached_tokens\":0," ++
             "\"completion_tokens\":4,\"reasoning_tokens\":0,\"total_tokens\":0}}\n",
         line,
@@ -2135,15 +2143,17 @@ fn fuzzSessionRecord(_: void, smith: *std.testing.Smith) !void {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    // The five strings, split out of the same bytes so one seed reaches all of
+    // The six strings, split out of the same bytes so one seed reaches all of
     // them at once, and a cut inside any one of them.
     const third = text.len / 3;
     const cwd = text[0..third];
     const model = text[third .. 2 * third];
     const tail = text[2 * third ..];
-    const finish_reason = try arena.dupe(u8, tail[0 .. tail.len / 3]);
-    const served_model = try arena.dupe(u8, tail[tail.len / 3 .. 2 * tail.len / 3]);
-    const fingerprint = try arena.dupe(u8, tail[2 * tail.len / 3 ..]);
+    const quarter = tail.len / 4;
+    const finish_reason = try arena.dupe(u8, tail[0..quarter]);
+    const served_model = try arena.dupe(u8, tail[quarter .. 2 * quarter]);
+    const fingerprint = try arena.dupe(u8, tail[2 * quarter .. 3 * quarter]);
+    const stream_error = try arena.dupe(u8, tail[3 * quarter ..]);
 
     // The numbers the provider chose, at the ends a count reaches: a stamp and
     // a duration are both read back by a monitor and summed, so a counter that
@@ -2165,6 +2175,7 @@ fn fuzzSessionRecord(_: void, smith: *std.testing.Smith) !void {
         .finish_reason = finish_reason,
         .served_model = served_model,
         .fingerprint = fingerprint,
+        .stream_error = stream_error,
     };
 
     const line = try sessionRecord(arena, ts_ms, cwd, model, .{ .elapsed_ms = elapsed_ms, .response = &result });
@@ -2190,6 +2201,9 @@ fn fuzzSessionRecord(_: void, smith: *std.testing.Smith) !void {
     try expectSameString(obj, "served_model", served_model);
     try expectSameString(obj, "fingerprint", fingerprint);
     try expectSameString(obj, "finish_reason", finish_reason);
+    // A stream the provider abandoned still carries choices, so the record is
+    // the only place a reader can tell it from one that ran to its end.
+    try expectSameString(obj, "stream_error", stream_error);
     const usage = obj.get("usage").?.object;
     try std.testing.expectEqual(@as(i64, 1), usage.get("prompt_tokens").?.integer);
     try std.testing.expectEqual(@as(i64, 2), usage.get("cached_tokens").?.integer);
