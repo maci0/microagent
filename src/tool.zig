@@ -2272,7 +2272,12 @@ fn readLines(io: Io, arena: std.mem.Allocator, path: []const u8, offset: usize, 
 
     var buf: std.ArrayList(u8) = .empty;
     // The bytes of a line the last read cut in half, moved to the front each
-    // time a new one lands behind them.
+    // time a new one lands behind them. Lines already counted and not asked for
+    // are dropped the moment they end, so a window deep in a file holds one
+    // partial line rather than every line that came before it: a read of the
+    // last few lines of a file at the cap otherwise copied the whole prefix
+    // forward on every read, a second full pass over bytes the answer never
+    // uses.
     var rest: std.ArrayList(u8) = .empty;
     var line: usize = 0;
     var taken: usize = 0;
@@ -2325,6 +2330,14 @@ fn readLines(io: Io, arena: std.mem.Allocator, path: []const u8, offset: usize, 
             // moves the start. Anything else would drop bytes the line is made
             // of, and truncate it.
             start = pos + 1;
+            // A line the range did not keep is bytes the answer will never
+            // hold, and leaving it in `rest` makes the next read shift the
+            // whole prefix forward. Dropping it here, once the line is
+            // counted, keeps the buffer to the line still arriving.
+            if (line < offset) {
+                net.dropPending(&rest, &scanned, start);
+                start = 0;
+            }
         }
         // Nothing was consumed on a read that completed no line, which `dropPending`
         // leaves alone rather than shifting the whole pending line onto itself:
