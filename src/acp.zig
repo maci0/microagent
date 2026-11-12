@@ -315,7 +315,8 @@ pub const modes_json =
 /// The `configOptions` a session advertises. The model option is what makes an
 /// ACP client's model selector show the model this session will actually call;
 /// without it a client that only reads `configOptions` reports no models.
-pub fn configOptionsJson(allocator: std.mem.Allocator, model: []const u8) ![]u8 {
+/// `models` is every id the session may switch to, empty for `model` alone.
+pub fn configOptionsJson(allocator: std.mem.Allocator, model: []const u8, models: []const []const u8) ![]u8 {
     var aw: std.Io.Writer.Allocating = .init(allocator);
     const w = &aw.writer;
     // `auto` is the current mode `modes` reports, and `code` is the other
@@ -323,21 +324,27 @@ pub fn configOptionsJson(allocator: std.mem.Allocator, model: []const u8) ![]u8 
     // reads only `configOptions` disagreeing with the session's own mode.
     try w.writeAll("[{\"id\":\"mode\",\"name\":\"Session Mode\",\"description\":\"Controls whether the agent may edit and run tools\",\"category\":\"mode\",\"type\":\"select\",\"currentValue\":\"auto\",\"options\":[{\"value\":\"auto\",\"name\":\"Auto\",\"description\":\"Read, edit and run commands with the configured tools\"},{\"value\":\"code\",\"name\":\"Code\",\"description\":\"Read, edit and run commands with the configured tools\"}]},{\"id\":\"model\",\"name\":\"Model\",\"description\":\"The model this session sends to the provider\",\"category\":\"model\",\"type\":\"select\",\"currentValue\":");
     try chat.writeJsonString(w, model);
-    try w.writeAll(",\"options\":[{\"value\":");
-    try chat.writeJsonString(w, model);
-    try w.writeAll(",\"name\":");
-    try chat.writeJsonString(w, model);
-    try w.writeAll(",\"description\":\"The model named by the operator configuration\"}]}]");
+    try w.writeAll(",\"options\":[");
+    const ids: []const []const u8 = if (models.len == 0) &.{model} else models;
+    for (ids, 0..) |id, i| {
+        if (i != 0) try w.writeAll(",");
+        try w.writeAll("{\"value\":");
+        try chat.writeJsonString(w, id);
+        try w.writeAll(",\"name\":");
+        try chat.writeJsonString(w, id);
+        try w.writeAll(",\"description\":\"A model named by the operator configuration\"}");
+    }
+    try w.writeAll("]}]");
     return aw.toOwnedSlice();
 }
 
-pub fn configOptionsResultJson(allocator: std.mem.Allocator, model: []const u8) ![]u8 {
-    const options = try configOptionsJson(allocator, model);
+pub fn configOptionsResultJson(allocator: std.mem.Allocator, model: []const u8, models: []const []const u8) ![]u8 {
+    const options = try configOptionsJson(allocator, model, models);
     return std.fmt.allocPrint(allocator, "{{\"configOptions\":{s}}}", .{options});
 }
 
-pub fn sessionStateJson(allocator: std.mem.Allocator, model: []const u8) ![]u8 {
-    const options = try configOptionsJson(allocator, model);
+pub fn sessionStateJson(allocator: std.mem.Allocator, model: []const u8, models: []const []const u8) ![]u8 {
+    const options = try configOptionsJson(allocator, model, models);
     return std.fmt.allocPrint(allocator, "{{\"modes\":{s},\"configOptions\":{s}}}", .{ modes_json, options });
 }
 
@@ -669,11 +676,28 @@ test "ACP initialize advertises version, capabilities and the binary's own versi
 test "ACP config options name the same modes the session advertises" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const bytes = try configOptionsJson(arena.allocator(), "model-x");
+    const bytes = try configOptionsJson(arena.allocator(), "model-x", &.{});
     try std.testing.expect(std.mem.indexOf(u8, bytes, "\"currentValue\":\"auto\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, bytes, "\"value\":\"auto\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, bytes, "\"value\":\"code\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, bytes, "\"currentValue\":\"model-x\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"value\":\"model-x\"") != null);
+}
+
+test "ACP model option lists every configured model with the current one selected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const bytes = try configOptionsJson(arena.allocator(), "b", &.{ "a", "b", "c" });
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), bytes, .{});
+    const model = parsed.array.items[1].object;
+    try std.testing.expectEqualStrings("model", model.get("id").?.string);
+    try std.testing.expectEqualStrings("b", model.get("currentValue").?.string);
+    const options = model.get("options").?.array.items;
+    try std.testing.expectEqual(@as(usize, 3), options.len);
+    for (options, [_][]const u8{ "a", "b", "c" }) |option, want| {
+        try std.testing.expectEqualStrings(want, option.object.get("value").?.string);
+        try std.testing.expectEqualStrings(want, option.object.get("name").?.string);
+    }
 }
 
 pub fn parseRequest(allocator: std.mem.Allocator, frame: []const u8) !Request {

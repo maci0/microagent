@@ -222,6 +222,9 @@ pub const Config = struct {
     /// written in the clear, so a file inside a workspace the model can read is
     /// not a place to put one.
     model: []const u8 = "",
+    /// The model ids an ACP client may switch the session among, empty for
+    /// only `model`. Each is non-empty and named once.
+    models: []const []const u8 = &.{},
     base_url: []const u8 = "",
     api_key: []const u8 = "",
     /// Optional reasoning level, overridden by the environment and CLI.
@@ -568,8 +571,8 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8) Config {
 }
 
 /// A key at the top of the file, outside any table: `system_prompt_extra`,
-/// `agents_files`, `model`, `base_url`, `api_key`, `reasoning_effort`, `headers`,
-/// `skills` and `deny_commands`.
+/// `agents_files`, `model`, `models`, `base_url`, `api_key`, `reasoning_effort`,
+/// `headers`, `skills` and `deny_commands`.
 /// `lines` is what
 /// follows this one, for the value that runs over several.
 fn topKey(config: *Config, arena: std.mem.Allocator, lines: *Lines, key: []const u8, value_text: []const u8) void {
@@ -591,6 +594,16 @@ fn topKey(config: *Config, arena: std.mem.Allocator, lines: *Lines, key: []const
         return;
     }
     if (std.mem.eql(u8, key, "model")) return topString(arena, config, key, value_text, &config.model);
+    if (std.mem.eql(u8, key, "models")) {
+        const ids = stringArray(arena, value_text) orelse
+            return config.note(.{ .key = key, .kind = .bad_value });
+        if (quotesEmptyString(arena, value_text)) return config.note(.{ .key = key, .kind = .bad_value });
+        for (ids, 0..) |id, i| {
+            for (ids[0..i]) |earlier| if (std.mem.eql(u8, earlier, id)) return config.note(.{ .key = key, .kind = .bad_value });
+        }
+        config.models = ids;
+        return;
+    }
     if (std.mem.eql(u8, key, "base_url")) return topString(arena, config, key, value_text, &config.base_url);
     if (std.mem.eql(u8, key, "api_key")) return topString(arena, config, key, value_text, &config.api_key);
     if (std.mem.eql(u8, key, "reasoning_effort")) return topString(arena, config, key, value_text, &config.reasoning_effort);
@@ -1069,6 +1082,18 @@ fn stringArray(arena: std.mem.Allocator, raw: []const u8) ?[]const []const u8 {
     return out.items;
 }
 
+/// Whether an array `stringArray` accepts names a quoted empty string, which
+/// it skips like the gap a trailing comma leaves.
+fn quotesEmptyString(arena: std.mem.Allocator, raw: []const u8) bool {
+    const text = std.mem.trim(u8, stripComments(arena, raw) orelse return false, " \t");
+    const parts = splitQuoted(arena, text[1 .. text.len - 1], ',') orelse return false;
+    for (parts) |part| {
+        const item = unquote(arena, part) orelse return false;
+        if (item.len == 0 and std.mem.trim(u8, part, " \t\r\n").len != 0) return true;
+    }
+    return false;
+}
+
 /// An inline table of strings: `{ K = "v", J = "w" }`. Null when the text is
 /// not one, which is how `env` is refused rather than silently dropped.
 ///
@@ -1337,6 +1362,37 @@ test "headers is an inline table of provider request headers" {
         try std.testing.expectEqualStrings("headers", problem.key);
         try std.testing.expectEqual(Problem.Kind.bad_value, bad.problem.?.kind);
         try std.testing.expectEqual(@as(usize, 0), bad.headers.len);
+    }
+}
+
+test "models is an array of model ids, each named once" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    const set = parse(arena, "model = \"b\"\nmodels = [\"a\", 'b'] # the selector\n");
+    try std.testing.expect(set.problem == null);
+    try std.testing.expectEqualStrings("b", set.model);
+    try std.testing.expectEqual(@as(usize, 2), set.models.len);
+    try std.testing.expectEqualStrings("a", set.models[0]);
+    try std.testing.expectEqualStrings("b", set.models[1]);
+    try std.testing.expectEqual(@as(usize, 0), parse(arena, "models = []\n").models.len);
+
+    // An empty id or one named twice is a list nobody meant; the whole list
+    // is refused and named rather than offered in part.
+    for ([_][]const u8{
+        "models = [\"a\", \"\"]\n",
+        "models = [\"a\", \"a\"]\n",
+        "models = \"a\"\n",
+    }) |text| {
+        const bad = parse(arena, text);
+        const problem = bad.problem orelse {
+            std.debug.print("accepted: {s}\n", .{text});
+            return error.TestUnexpectedResult;
+        };
+        try std.testing.expectEqualStrings("models", problem.key);
+        try std.testing.expectEqual(Problem.Kind.bad_value, problem.kind);
+        try std.testing.expectEqual(@as(usize, 0), bad.models.len);
     }
 }
 

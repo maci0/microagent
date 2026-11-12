@@ -25,6 +25,9 @@ release, and `microagent update` moves you to it.
   provider request, e.g. `headers = { "x-grok-client-version" = "1.0.77" }`
   for a Grok CLI proxy or fastrouter's Grok preset. A name the client already sends, a repeated
   name, or a value with a control byte refuses the table.
+- The config key `models`, the model ids an ACP client may switch a session
+  among through the `model` config option; `model` is the default and must be
+  listed, and a `--model` or `MICROAGENT_MODEL` outside the list joins it.
 
 ### Fixed
 
@@ -1424,7 +1427,7 @@ release, and `microagent update` moves you to it.
 
 - Every `src/path:line` citation in `docs/threat-model.md` names the line its
   symbol is defined on. 126 pointed somewhere else, `clip` at
-  `src/main.zig:1075` against a definition on line 1270 among them, and nine
+  `src/main.zig:1078` against a definition on line 1270 among them, and nine
   named updater functions the 0.6.0 rewrite of `microagent update` deleted:
   `fetchAsset`, `fetchBody`, `fetchInto`, `fetchesAsset`, `decide`,
   `replaceVerified`, `replaceExecutable`, `validRepo`, `repoPartOk` and

@@ -19,7 +19,7 @@ from pathlib import Path
 from socketserver import BaseRequestHandler, ThreadingTCPServer
 from threading import Thread
 from types import ModuleType
-from typing import Any, ClassVar
+from typing import IO, Any, ClassVar
 from unittest.mock import patch
 
 
@@ -619,6 +619,106 @@ def check_provider_headers(binary: Path, root: Path, url: str) -> None:
     expect(all(h.get("authorization") == "Bearer test" for h in Provider.headers), Provider.headers)
 
 
+class AcpClient:
+    """`microagent acp` as a subprocess, one JSON-RPC frame per line."""
+
+    def __init__(self, binary: Path, root: Path, url: str, *args: str, **extra_env: str) -> None:
+        env = {
+            "PATH": os.environ.get("PATH", ""),
+            "MICROAGENT_API_KEY": "test",
+            "MICROAGENT_BASE_URL": url,
+            "MICROAGENT_CONFIG": "",
+            "MICROAGENT_SKILLS": "",
+            "MICROAGENT_SESSION_DIR": str(root / "sessions"),
+            **extra_env,
+        }
+        # because: the explicitly supplied local binary is the program under test
+        self.proc = subprocess.Popen(  # noqa: S603
+            [str(binary), "acp", *args],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            env=env,
+            cwd=root,
+        )
+        if self.proc.stdin is None or self.proc.stdout is None:
+            raise RuntimeError("acp started without pipes")
+        self.stdin: IO[bytes] = self.proc.stdin
+        self.stdout: IO[bytes] = self.proc.stdout
+        self.stdout_fd = self.proc.stdout.fileno()
+        # Raw reads into this buffer, because `select` cannot see a line a
+        # buffered reader already pulled off the pipe.
+        self.pending = b""
+        self.next_id = 0
+
+    def line(self, method: str) -> bytes:
+        while b"\n" not in self.pending:
+            ready, _, _ = select.select([self.stdout_fd], [], [], 10)
+            expect(bool(ready), f"no reply to {method}")
+            chunk = os.read(self.stdout_fd, 65536)
+            expect(bool(chunk), f"acp exited before answering {method}")
+            self.pending += chunk
+        line, self.pending = self.pending.split(b"\n", 1)
+        return line
+
+    def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        """The reply to one request; notifications in between are skipped."""
+        self.next_id += 1
+        frame = {"jsonrpc": "2.0", "id": self.next_id, "method": method, "params": params}
+        self.stdin.write((json.dumps(frame) + "\n").encode())
+        self.stdin.flush()
+        while True:
+            reply: dict[str, Any] = json.loads(self.line(method))
+            if reply.get("id") == self.next_id:
+                return reply
+
+    def close(self) -> None:
+        self.stdin.close()
+        self.proc.wait(timeout=10)
+        self.stdout.close()
+
+
+def model_option(result: dict[str, Any]) -> dict[str, Any]:
+    return next(o for o in result["configOptions"] if o["id"] == "model")
+
+
+def check_acp_models(binary: Path, root: Path, url: str) -> None:
+    """`models` is the ACP model selector and `model` its default."""
+    Provider.reset()
+    path = root / "models.toml"
+    path.write_text('model = "b"\nmodels = ["a", "b"]\n')
+    Provider.seen.clear()
+    client = AcpClient(binary, root, url, MICROAGENT_CONFIG=str(path))
+    try:
+        client.call("initialize", {"protocolVersion": 1})
+        new = client.call("session/new", {"cwd": str(root), "mcpServers": []})["result"]
+        model = model_option(new)
+        expect(model["currentValue"] == "b" and [o["value"] for o in model["options"]] == ["a", "b"], model)
+        session = new["sessionId"]
+        switched = client.call("session/set_config_option", {"sessionId": session, "configId": "model", "value": "a"})
+        expect(model_option(switched["result"])["currentValue"] == "a", switched)
+        refused = client.call("session/set_config_option", {"sessionId": session, "configId": "model", "value": "c"})
+        expect(refused.get("error", {}).get("code") == -32602, refused)
+        prompt = [{"type": "text", "text": "which model"}]
+        client.call("session/prompt", {"sessionId": session, "prompt": prompt})
+        expect(bool(Provider.seen) and Provider.seen[0]["model"] == "a", Provider.seen)
+    finally:
+        client.close()
+
+    # A model the operator chose joins the front of the list.
+    client = AcpClient(binary, root, url, "--model", "z", MICROAGENT_CONFIG=str(path))
+    try:
+        client.call("initialize", {"protocolVersion": 1})
+        model = model_option(client.call("session/new", {"cwd": str(root), "mcpServers": []})["result"])
+        expect(model["currentValue"] == "z" and [o["value"] for o in model["options"]] == ["z", "a", "b"], model)
+    finally:
+        client.close()
+
+    # The file's model missing from its own list stops the run before any request.
+    path.write_text('model = "c"\nmodels = ["a", "b"]\n')
+    result = invoke(binary, root, url, ["contradiction"], "", MICROAGENT_CONFIG=str(path))
+    expect(result.returncode == 2 and not Provider.seen and "models" in result.stderr, result)
+
+
 def check_tool_table_keys(binary: Path, root: Path, url: str) -> None:
     """A key that only a preset table takes is named with the table it went in.
 
@@ -790,6 +890,7 @@ if __name__ == "__main__":
             check_opencode(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_reasoning_config(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_provider_headers(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
+            check_acp_models(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_tool_table_keys(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_compressed_error(binary, Path(temp))
             check_harbor_numbers(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
