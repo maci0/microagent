@@ -1349,8 +1349,13 @@ fn componentNamesCredential(path: []const u8) bool {
 /// uses -- and the rule is stated once here rather than in both, so a
 /// directory added to the table above reaches both halves of the check.
 fn componentIsCredential(name: []const u8) bool {
+    // The same fold `isCredentialName` uses, not an ASCII one. A caseless
+    // filesystem resolves `.ſecrets` to the same directory `.secrets` is and
+    // `.ſsh` to `.ssh`, and the byte-length guard beside an ASCII compare
+    // refused neither: the long s is two bytes where the `s` it folds to is
+    // one, so the lengths never matched and the name was read as ordinary.
     for (credential_dirs) |dir| {
-        if (name.len == dir.len and std.ascii.eqlIgnoreCase(name, dir)) return true;
+        if (eqlIgnoreCase(name, dir)) return true;
     }
     return isCredentialName(name);
 }
@@ -4945,6 +4950,14 @@ test "a name rule folds Unicode case, not only ASCII, and still reads a bad byte
     // few bytes of the whole string.
     try std.testing.expect(isCredentialPath("certs/server.\u{212a}ey"));
     try std.testing.expect(isCredentialPath("home/u/.ssh/ID_R\u{017f}A"));
+    // The directory tables fold the same way the leaf names do. `.ſecrets` is
+    // the directory `.secrets` is on a caseless filesystem, and `.ſsh` is
+    // `.ssh`: the long s folds to `s`, and a compare that also demanded equal
+    // byte lengths saw a different length and let the directory through.
+    try std.testing.expect(isCredentialPath(".\u{017f}ecrets/openrouter"));
+    try std.testing.expect(isCredentialPath("home/u/.\u{017f}sh/config"));
+    try std.testing.expect(isCredentialPath(".SSH/config"));
+    try std.testing.expect(!isCredentialPath(".\u{017f}shx/config"));
     // The folds go one way: `U+017F` is not an `s` to a filesystem that spells
     // it the long way, so a name that is only a long-s is still a name of its
     // own and is not a credential.
