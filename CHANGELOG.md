@@ -19,6 +19,8 @@ release, and `microagent update` moves you to it.
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-11-13
+
 ### Added
 
 - The config key `discover_models`, which adds the provider's `GET /models`
@@ -3427,7 +3429,8 @@ First release.
   `aarch64-macos` with a checksum sidecar each, and refuses a tag that does not name the version in
   `build.zig.zon`.
 
-[Unreleased]: https://github.com/maci0/microagent/compare/v0.23.0...HEAD
+[Unreleased]: https://github.com/maci0/microagent/compare/v0.24.0...HEAD
+[0.24.0]: https://github.com/maci0/microagent/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/maci0/microagent/compare/v0.22.2...v0.23.0
 [0.22.2]: https://github.com/maci0/microagent/compare/v0.22.1...v0.22.2
 [0.22.1]: https://github.com/maci0/microagent/compare/v0.22.0...v0.22.1
