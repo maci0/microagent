@@ -67,9 +67,10 @@ jobs:
       # `make install` ships docs/microagent.1 next to the binary, so the page
       # carries the version of the tag it was packaged with, and this is the
       # check that says it names the version build.zig.zon declares and
-      # documents every flag `--help` lists. `make check` runs it, and neither
-      # workflow did, so a tag could publish a binary whose page describes an
-      # older interface. `check-release` above already gates the tag on the
+      # documents every flag `--help` lists. `make check` runs it and ci.yml's
+      # test job runs it on a push, but a tag push matches no branch filter, so
+      # this step is what stops a tag publishing a binary whose page describes
+      # an older interface. `check-release` above already gates the tag on the
       # README, which is the same question about a different file.
       - name: the man page documents the flags this build lists
         run: make check-man
@@ -156,7 +157,10 @@ jobs:
             fi
             echo "release ${GITHUB_REF_NAME} is a draft an earlier run left behind; finishing it"
             gh release upload "${GITHUB_REF_NAME}" dist/microagent-* --clobber
-            gh release edit "${GITHUB_REF_NAME}" --draft=false
+            # The notes too. The draft carries the notes file the run that
+            # created it wrote, and a rerun after a changelog correction would
+            # otherwise publish those. The assets above are already this run's.
+            gh release edit "${GITHUB_REF_NAME}" --notes-file release-notes.md --draft=false
             exit 0
           fi
           # The changelog section is the release note, so a consumer reads what

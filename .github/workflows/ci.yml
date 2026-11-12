@@ -73,10 +73,11 @@ jobs:
 
       # `make check` runs this, and CONTRIBUTING.md asks a contributor for the
       # same entry. This workflow does not run `make check` whole, because the
-      # linters it needs are installed in the lint job's own step, so without a
-      # step here the rule gates a laptop and not a push, and the first person
-      # to read a malformed [Unreleased] section as rendered is whoever pulls
-      # the release. Awk only, so it needs nothing setup-zig installed.
+      # linters it needs are installed in the lint job's own step, so this step
+      # is what puts the rule on a push rather than on a laptop alone. The
+      # first person to read a malformed [Unreleased] section as rendered would
+      # otherwise be whoever pulls the release. Awk only, so it needs nothing
+      # setup-zig installed.
       - name: the unreleased changelog entry is well formed
         run: make check-unreleased
 
@@ -99,16 +100,17 @@ jobs:
       # The man page and `--help` are two renderings of one interface, and
       # `make install` ships the page next to the binary, so a flag added to the
       # help and left out of the page packages a binary whose page documents an
-      # older one. `make check` runs this and neither workflow did, so it gated
-      # a laptop and not a push. The same target a version bump has to satisfy.
+      # older one. `make check` runs this, and so does this job, so a push is
+      # refused for the same reason a laptop is. The same target a version bump
+      # has to satisfy.
       - name: the man page documents the flags this build lists
         run: make check-man
 
       # docs/usage.md opens with a copy of the built-in `--help`, and a copy is
       # only worth having if it is the copy: a flag, an exit status or a default
       # that moves in src/main.zig leaves the page most readers open describing
-      # the previous release. `make check` runs this and neither workflow did, so
-      # it gated a laptop and not a push.
+      # the previous release. `make check` runs this, and so does this job, so a
+      # push is refused for the same reason a laptop is.
       - name: the usage reference quotes this build's help
         run: make check-help
 
