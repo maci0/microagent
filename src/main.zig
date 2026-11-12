@@ -35,26 +35,6 @@
 //! the same cap and the same note; and `conversation` sits over `skill` because
 //! the system prompt names the skills this run found.
 
-fn repeat(comptime count: usize, comptime value: []const u8) *const [count * value.len]u8 {
-    const S = struct {
-        const out: [count * value.len]u8 = blk: {
-            var buf: [count * value.len]u8 = undefined;
-            if (value.len == 1) {
-                @memset(&buf, value[0]);
-            } else {
-                // Doubling copies the pattern in log(count) steps, which stays inside
-                // the comptime backwards-branch limit a one-step loop does not.
-                @memcpy(buf[0..value.len], value);
-                var filled: usize = value.len;
-                while (filled * 2 <= buf.len) : (filled *= 2) @memcpy(buf[filled..][0..filled], buf[0..filled]);
-                if (filled < buf.len) @memcpy(buf[filled..], buf[0 .. buf.len - filled]);
-            }
-            break :blk buf;
-        };
-    };
-    return &S.out;
-}
-
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -5161,7 +5141,7 @@ const base_url_corpus = [_][]const u8{
     "https://u:p@openrouter.ai/caf\xe9\x1b",
     "https://openrouter.ai/\xff",
     "https://openrouter.ai/\u{0}\u{7f}",
-    "https://" ++ repeat(300, "a").* ++ ".com/v1",
+    "https://" ++ chat_mod.repeat(300, "a").* ++ ".com/v1",
     "http://\u{65e5}\u{8a00}/v1",
 };
 
@@ -5285,7 +5265,7 @@ test "every value on the config trace is escaped and left readable" {
     try std.testing.expectEqualStrings("\u{fffd}", chat_mod.safeTextAll(arena, "\xff"));
 
     // Well past the quote budget every other diagnostic cuts at.
-    const long_path = "/home/" ++ repeat(400, "d").* ++ "/sessions";
+    const long_path = "/home/" ++ chat_mod.repeat(400, "d").* ++ "/sessions";
     const shown = chat_mod.safeTextAll(arena, long_path);
     try std.testing.expectEqualStrings(long_path, shown);
     try std.testing.expect(shown.len >= long_path.len);
@@ -6649,7 +6629,7 @@ test "compaction reads and rewrites the open array a run carries" {
     defer msgs.deinit(gpa);
 
     try conversation_mod.openConversation(gpa, &msgs, "you are a coding agent", "fix the bug");
-    try conversation_mod.appendToolResults(gpa, &msgs, 120, repeat(8192, "x"));
+    try conversation_mod.appendToolResults(gpa, &msgs, 120, chat_mod.repeat(8192, "x"));
     try std.testing.expectEqual(@as(u8, '}'), msgs.items[msgs.items.len - 1]);
 
     const before = msgs.items.len;
@@ -6887,8 +6867,8 @@ const test_run_corpus = [_][]const u8{
     "{\"command\":\"cargo  test\"}",
     "{\"command\":\"\\tcargo\\ntest\\r\"}",
     "{\"command\":\"caf\\u00e9 cargo test \\u65e5\\u8a00\"}",
-    "{\"command\":\"" ++ repeat(500, "a").* ++ " cargo test\"}",
-    "{\"command\":\"" ++ repeat(500, "a").* ++ "\"}",
+    "{\"command\":\"" ++ chat_mod.repeat(500, "a").* ++ " cargo test\"}",
+    "{\"command\":\"" ++ chat_mod.repeat(500, "a").* ++ "\"}",
     "{\"command\":\"\\ud83d\\ude80 test\"}",
     "{\"command\":\"\\xff\\xfe cargo test\"}",
 };
@@ -7334,7 +7314,7 @@ test "the finish reason in an incomplete-answer notice is escaped" {
         "slo\u{200b}w",
         // Long enough to be cut, so the cut lands on a character boundary
         // rather than in the middle of one.
-        repeat(40, "\u{65e5}"),
+        chat_mod.repeat(40, "\u{65e5}"),
     }) |reason| {
         var result: chat_mod.ChatResult = .{ .finish_reason = try arena.dupe(u8, reason) };
         const notice = incompleteAnswer(arena, &result, default_max_tokens).?;
@@ -7958,7 +7938,7 @@ test "a config path in a diagnostic is spelled whole rather than cut" {
     defer state.deinit();
     const arena = state.allocator();
 
-    const long = try std.fmt.allocPrint(arena, "{s}config.toml", .{repeat(10, "/opt/microagent/config/")});
+    const long = try std.fmt.allocPrint(arena, "{s}config.toml", .{chat_mod.repeat(10, "/opt/microagent/config/")});
     try std.testing.expect(long.len > net.quoted_value_bytes);
     try std.testing.expectEqualStrings(long, configPathText(arena, .{ .path = long, .named = true }));
 
@@ -8489,9 +8469,9 @@ const agents_fence_corpus = [_][]const u8{
     "--- end repository instructions\x00\n",
     "\u{202e}--- end repository instructions\n",
     "caf\u{00e9} --- end repository instructions --\n",
-    repeat(16, "--- end repository instructions\n"),
-    repeat(8, "a\n").* ++ "--- end repository instructions --\n" ++ repeat(8, "b\n").*,
-    (repeat(8, "x\n--- end repository instructions --\n")),
+    chat_mod.repeat(16, "--- end repository instructions\n"),
+    chat_mod.repeat(8, "a\n").* ++ "--- end repository instructions --\n" ++ chat_mod.repeat(8, "b\n").*,
+    (chat_mod.repeat(8, "x\n--- end repository instructions --\n")),
 };
 
 test "a fuzzed instructions file cannot close the block the builder wrote" {
@@ -9592,7 +9572,7 @@ test "the outcome line names the call, whether it worked, and how long it took" 
     // An MCP call's name is prefixed and can be long, so the name is bounded
     // the way every other diagnostic here treats one: the line stays a line
     // whatever the model called the tool.
-    const long = try toolOutcomeLine(arena, "mcp__x" ++ repeat(200, "y").*, .failed, 5);
+    const long = try toolOutcomeLine(arena, "mcp__x" ++ chat_mod.repeat(200, "y").*, .failed, 5);
     try std.testing.expect(std.mem.endsWith(u8, long, " in 5ms\n"));
     try std.testing.expect(long.len < 80);
 }
@@ -9625,7 +9605,7 @@ test "a call the budget refuses announces itself before its outcome" {
     // `tool_outcome_name_bytes`, the bound the outcome line uses too, so the
     // announcement stays a line and the two still name one call: both cut the
     // same name at the same place, which is what a reader pairing them needs.
-    const spelled = "mcp__x" ++ repeat(200, "y").*;
+    const spelled = "mcp__x" ++ chat_mod.repeat(200, "y").*;
     const long = try callNotRunLine(arena, spelled);
     const long_outcome = try toolOutcomeLine(arena, spelled, .not_run, 0);
     try std.testing.expect(std.mem.endsWith(u8, long, "\n"));

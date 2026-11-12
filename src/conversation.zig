@@ -8,26 +8,6 @@
 //! over `net` and `chat` for the escaping and the value types every part of
 //! the body is written from.
 
-fn repeat(comptime count: usize, comptime value: []const u8) *const [count * value.len]u8 {
-    const S = struct {
-        const out: [count * value.len]u8 = blk: {
-            var buf: [count * value.len]u8 = undefined;
-            if (value.len == 1) {
-                @memset(&buf, value[0]);
-            } else {
-                // Doubling copies the pattern in log(count) steps, which stays inside
-                // the comptime backwards-branch limit a one-step loop does not.
-                @memcpy(buf[0..value.len], value);
-                var filled: usize = value.len;
-                while (filled * 2 <= buf.len) : (filled *= 2) @memcpy(buf[filled..][0..filled], buf[0..filled]);
-                if (filled < buf.len) @memcpy(buf[filled..], buf[0 .. buf.len - filled]);
-            }
-            break :blk buf;
-        };
-    };
-    return &S.out;
-}
-
 const std = @import("std");
 const Io = std.Io;
 
@@ -481,7 +461,7 @@ test "a result a marker cannot shrink is left as it stands" {
 
     const gpa = std.testing.allocator;
     // One result a byte over the marker size, which the second pass asks for.
-    const content = repeat((min_marker_bytes + 1), "y");
+    const content = chat_mod.repeat((min_marker_bytes + 1), "y");
     var msgs: std.ArrayList(u8) = .empty;
     defer msgs.deinit(gpa);
     try msgs.appendSlice(gpa, "[{\"role\":\"user\",\"content\":\"look\"},");
@@ -508,7 +488,7 @@ test "a second compaction pass leaves the first pass's markers as they are" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const blob = repeat(8192, "x");
+    const blob = chat_mod.repeat(8192, "x");
     var msgs: std.ArrayList(u8) = .empty;
     defer msgs.deinit(gpa);
     try msgs.appendSlice(gpa, "[{\"role\":\"user\",\"content\":\"look\"},");
@@ -543,7 +523,7 @@ test "a result that reads like a marker is elided rather than skipped" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const blob = "[earlier tool output elided: 5 bytes] and then the file dump" ++ repeat(8192, "x").*;
+    const blob = "[earlier tool output elided: 5 bytes] and then the file dump" ++ chat_mod.repeat(8192, "x").*;
     var msgs: std.ArrayList(u8) = .empty;
     defer msgs.deinit(gpa);
     try msgs.appendSlice(gpa, "[{\"role\":\"user\",\"content\":\"look\"},");
@@ -565,7 +545,7 @@ test "compaction can reuse the conversation buffer when further growth is unavai
     var msgs: std.ArrayList(u8) = .empty;
     defer msgs.deinit(gpa);
     try openConversation(gpa, &msgs, "system", "task");
-    try appendToolResults(gpa, &msgs, 80, repeat(8192, "x"));
+    try appendToolResults(gpa, &msgs, 80, chat_mod.repeat(8192, "x"));
     try msgs.append(gpa, ']');
     try msgs.shrinkAndFreePrecise(gpa, msgs.items.len);
     msgs.items.len -= 1;
@@ -591,7 +571,7 @@ test "compaction elides old tool output and keeps the recent turns" {
     var msgs: std.ArrayList(u8) = .empty;
     defer msgs.deinit(gpa);
 
-    const blob = repeat(8192, "x");
+    const blob = chat_mod.repeat(8192, "x");
     try openConversation(gpa, &msgs, "you are a coding agent", "fix the bug");
     try appendToolResults(gpa, &msgs, 120, blob);
     const before = msgs.items.len;
@@ -715,7 +695,7 @@ test "a conversation of small tool results is still bounded" {
     var msgs: std.ArrayList(u8) = .empty;
     defer msgs.deinit(gpa);
 
-    const blob = repeat(1024, "x");
+    const blob = chat_mod.repeat(1024, "x");
     try openConversation(gpa, &msgs, "you are a coding agent", "fix the bug");
     try appendToolResults(gpa, &msgs, 500, blob);
     const before = msgs.items.len;
@@ -763,7 +743,7 @@ test "a conversation with nothing to elide is not re-parsed every turn" {
     // anything to replace and the conversation is well past the soft limit.
     try openConversation(gpa, &msgs, "you are a coding agent", "fix the bug");
     var i: usize = 0;
-    while (i < 100) : (i += 1) try appendMessage(gpa, &msgs, "assistant", repeat(8192, "x"));
+    while (i < 100) : (i += 1) try appendMessage(gpa, &msgs, "assistant", chat_mod.repeat(8192, "x"));
     const before = msgs.items.len;
     try std.testing.expect(before > conversation_soft_limit);
 
@@ -774,13 +754,13 @@ test "a conversation with nothing to elide is not re-parsed every turn" {
 
     // Still over the soft limit, but below the floor: the turn is skipped
     // rather than paying the parse again.
-    try appendMessage(gpa, &msgs, "assistant", repeat(8192, "y"));
+    try appendMessage(gpa, &msgs, "assistant", chat_mod.repeat(8192, "y"));
     try compactMessages(std.testing.io, gpa, &msgs, scratch_state.allocator(), &floor);
     try std.testing.expect(msgs.items.len > before);
     try std.testing.expectEqual(before + conversation_soft_limit, floor);
 
     // Past the floor, a tool result big enough to elide is picked up again.
-    while (msgs.items.len <= floor) try appendMessage(gpa, &msgs, "tool", repeat(8192, "z"));
+    while (msgs.items.len <= floor) try appendMessage(gpa, &msgs, "tool", chat_mod.repeat(8192, "z"));
     const grown = msgs.items.len;
     try compactMessages(std.testing.io, gpa, &msgs, scratch_state.allocator(), &floor);
     try std.testing.expectEqual(conversation_soft_limit, floor);
@@ -809,7 +789,7 @@ test "compaction leaves the cached prefix byte-identical" {
     var msgs: std.ArrayList(u8) = .empty;
     defer msgs.deinit(gpa);
 
-    const blob = repeat(8192, "x");
+    const blob = chat_mod.repeat(8192, "x");
     // Characters a JSON round trip could re-spell: quote, backslash, newline,
     // a control byte, and a non-ASCII byte.
     try openConversation(gpa, &msgs, "you are a coding agent: \"a\\b\"\n\u{7} caf\u{00e9}", "fix the bug");
@@ -853,11 +833,11 @@ const compact_corpus = [_][]const u8{
     "caf\u{00e9} \u{65e5}\u{1f600}",
     "deploy/\u{202e}gnp.exe",
     "\xff\xfe\xc3",
-    repeat(32, "\""),
+    chat_mod.repeat(32, "\""),
     "[earlier tool output elided: 0 bytes]",
     "[earlier tool output elided: 4096 bytes]",
-    repeat(4096, "x"),
-    repeat(8192, "y"),
+    chat_mod.repeat(4096, "x"),
+    chat_mod.repeat(8192, "y"),
 };
 
 test "a fuzzed conversation is elided only where the run may elide it" {
@@ -888,7 +868,7 @@ const body_corpus = [_][]const u8{
     "\"",
     "\\",
     "\"\"\"\"",
-    repeat(32, "\""),
+    chat_mod.repeat(32, "\""),
     "\n\r\t\u{8}\u{0}\u{1}\u{1b}\u{7f}",
     "\\u0041\\n",
     "caf\u{00e9} \u{65e5}\u{8a00} \u{1f600}",
@@ -897,8 +877,8 @@ const body_corpus = [_][]const u8{
     "\u{0}",
     "a\u{0}b",
     "} ] , { : ",
-    repeat(1024, "x"),
-    repeat(16, "\"\n{1b}{0}\\\""),
+    chat_mod.repeat(1024, "x"),
+    chat_mod.repeat(16, "\"\n{1b}{0}\\\""),
 };
 
 test "a fuzzed message is a message the provider can read back" {
@@ -1109,7 +1089,7 @@ test "a conversation that cannot be compacted is sent as it stands" {
     var msgs: std.ArrayList(u8) = .empty;
     defer msgs.deinit(gpa);
     try openConversation(gpa, &msgs, "you are a coding agent", "fix the bug");
-    try appendToolResults(gpa, &msgs, 120, repeat(8192, "x"));
+    try appendToolResults(gpa, &msgs, 120, chat_mod.repeat(8192, "x"));
     try std.testing.expect(msgs.items.len > conversation_soft_limit);
     // What a truncated write would leave: a buffer past the limit that is not
     // the message array it is supposed to be.

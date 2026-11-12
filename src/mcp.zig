@@ -30,26 +30,6 @@
 //! that blocks once it has logged a few kilobytes. Nothing here reads it, so
 //! there is no capture for it to fill.
 
-fn repeat(comptime count: usize, comptime value: []const u8) *const [count * value.len]u8 {
-    const S = struct {
-        const out: [count * value.len]u8 = blk: {
-            var buf: [count * value.len]u8 = undefined;
-            if (value.len == 1) {
-                @memset(&buf, value[0]);
-            } else {
-                // Doubling copies the pattern in log(count) steps, which stays inside
-                // the comptime backwards-branch limit a one-step loop does not.
-                @memcpy(buf[0..value.len], value);
-                var filled: usize = value.len;
-                while (filled * 2 <= buf.len) : (filled *= 2) @memcpy(buf[filled..][0..filled], buf[0..filled]);
-                if (filled < buf.len) @memcpy(buf[filled..], buf[0 .. buf.len - filled]);
-            }
-            break :blk buf;
-        };
-    };
-    return &S.out;
-}
-
 const std = @import("std");
 const Io = std.Io;
 
@@ -1554,7 +1534,7 @@ test "MCP tool names include the server prefix in the provider name limit" {
     var state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer state.deinit();
     const arena = state.allocator();
-    const answer = try std.json.parseFromSliceLeaky(std.json.Value, arena, "{\"tools\":[{\"name\":\"" ++ repeat(54, "x").* ++ "\"},{\"name\":\"" ++ repeat(55, "x").* ++ "\"}]}", .{});
+    const answer = try std.json.parseFromSliceLeaky(std.json.Value, arena, "{\"tools\":[{\"name\":\"" ++ chat.repeat(54, "x").* ++ "\"},{\"name\":\"" ++ chat.repeat(55, "x").* ++ "\"}]}", .{});
     const server: Server = .{ .name = "srv", .run_arena = arena, .transport = .{ .stdio = undefined }, .tools = &.{} };
     const tools = buildTools(io, arena, arena, &server, answer).?;
     try std.testing.expectEqual(@as(usize, 1), tools.len);
@@ -1563,12 +1543,12 @@ test "MCP tool names include the server prefix in the provider name limit" {
     // limit is what the predicate measures and the name is what is sent, so a
     // name the predicate accepted is held to being the length that was
     // measured. 54 is the last tool that fits behind a three-byte server name.
-    try std.testing.expect(exposedNameFits("srv", repeat(54, "x")));
-    try std.testing.expect(!exposedNameFits("srv", repeat(55, "x")));
+    try std.testing.expect(exposedNameFits("srv", chat.repeat(54, "x")));
+    try std.testing.expect(!exposedNameFits("srv", chat.repeat(55, "x")));
     try std.testing.expectEqual(tools[0].exposed.len, tool_prefix.len + "srv".len + exposed_name_separator_bytes + 54);
     var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
     defer client.deinit();
-    var preset: Server = .{ .name = repeat(56, "s"), .run_arena = arena, .tools = &.{}, .transport = .{ .http = .{
+    var preset: Server = .{ .name = chat.repeat(56, "s"), .run_arena = arena, .tools = &.{}, .transport = .{ .http = .{
         .client = &client,
         .uri = try std.Uri.parse(Preset.context7.url()),
         .timeout_ms = 1000,
@@ -2489,7 +2469,7 @@ test "a schema over the ceiling is replaced, and one under it is the server's ow
     const big_arena = big_state.allocator();
     const big = try std.fmt.allocPrint(big_arena,
         \\{{"type":"object","properties":{{"s":{{"type":"string","description":"{s}"}}}}}}
-    , .{repeat((max_schema_bytes + 1024), "x")});
+    , .{chat.repeat((max_schema_bytes + 1024), "x")});
     const omitted = try schemaJson(arena, try std.json.parseFromSliceLeaky(std.json.Value, big_arena, big, .{}));
     try std.testing.expectEqualStrings(omitted_schema_json, omitted);
     try std.testing.expect(omitted.len < max_schema_bytes);
@@ -2732,8 +2712,8 @@ test "a name is half of an exposed tool name only when it can be spelled" {
     // The bound is on the bytes, not the characters: the name is written into
     // the schema and read back off the wire, and a 65-byte name that was 33
     // characters is still past what a tool name may hold.
-    try std.testing.expect(validName(repeat(64, "a")));
-    try std.testing.expect(!validName(repeat(65, "a")));
+    try std.testing.expect(validName(chat.repeat(64, "a")));
+    try std.testing.expect(!validName(chat.repeat(65, "a")));
 }
 
 test "an oversized non-object MCP error keeps only its capped diagnostic" {
@@ -2755,9 +2735,9 @@ test "an oversized non-object MCP error keeps only its capped diagnostic" {
 }
 
 test "deeply nested MCP answers are refused before serialization in every transport" {
-    const nested = repeat(300, "[").* ++ "0" ++ repeat(300, "]").*;
+    const nested = chat.repeat(300, "[").* ++ "0" ++ chat.repeat(300, "]").*;
     const frames = [_][]const u8{
-        "{\"id\":1,\"result\":{\"structuredContent\":" ++ repeat(255, "[").* ++ "0" ++ repeat(255, "]").* ++ "}}",
+        "{\"id\":1,\"result\":{\"structuredContent\":" ++ chat.repeat(255, "[").* ++ "0" ++ chat.repeat(255, "]").* ++ "}}",
         "{\"id\":1,\"result\":{\"structuredContent\":" ++ nested ++ "}}",
         "{\"id\":1,\"result\":{\"tools\":[{\"name\":\"nested\",\"inputSchema\":{\"p\":" ++ nested ++ "}}]}}",
         "{\"id\":1,\"error\":" ++ nested ++ "}",
@@ -2796,10 +2776,10 @@ test "deeply nested MCP answers are refused before serialization in every transp
     defer state.deinit();
     const arena = state.allocator();
     var server: Server = .{ .name = "nested", .run_arena = arena, .transport = undefined, .tools = &.{} };
-    const at_limit = "{\"id\":1,\"result\":{\"structuredContent\":" ++ repeat(254, "[").* ++ "0" ++ repeat(254, "]").* ++ "}}";
+    const at_limit = "{\"id\":1,\"result\":{\"structuredContent\":" ++ chat.repeat(254, "[").* ++ "0" ++ chat.repeat(254, "]").* ++ "}}";
     const accepted = (try server.answerFor(arena, at_limit, 1)).?;
-    try std.testing.expectEqualStrings(repeat(254, "[").* ++ "0" ++ repeat(254, "]").*, try resultText(arena, "nested", accepted));
-    const brackets = "{\"id\":1,\"result\":{\"structuredContent\":\"" ++ repeat(300, "[").* ++ "\"}}";
+    try std.testing.expectEqualStrings(chat.repeat(254, "[").* ++ "0" ++ chat.repeat(254, "]").*, try resultText(arena, "nested", accepted));
+    const brackets = "{\"id\":1,\"result\":{\"structuredContent\":\"" ++ chat.repeat(300, "[").* ++ "\"}}";
     _ = try server.answerFor(arena, brackets, 1);
     try std.testing.expect(!server.dead);
 }
@@ -2811,18 +2791,18 @@ test "deeply nested MCP answers are refused before serialization in every transp
 // direction that would let one through is a count below a depth, and a brace
 // inside a string is the case that makes a count differ from a depth at all.
 test "the frame depth bound a byte count stands in for is never tighter than the depth" {
-    const nested = repeat((max_frame_depth + 1), "[").* ++ "0" ++ repeat((max_frame_depth + 1), "]").*;
+    const nested = chat.repeat((max_frame_depth + 1), "[").* ++ "0" ++ chat.repeat((max_frame_depth + 1), "]").*;
     // Deep enough that the walk refuses it, and the count must agree.
     try std.testing.expect(Server.mayExceedFrameDepth(nested));
     // A frame at the ceiling parses, and the count must not send it to the walk.
-    const at_limit = "{\"id\":1,\"result\":{\"structuredContent\":" ++ repeat((max_frame_depth - 2), "[").* ++ "0" ++ repeat((max_frame_depth - 2), "]").* ++ "}}";
+    const at_limit = "{\"id\":1,\"result\":{\"structuredContent\":" ++ chat.repeat((max_frame_depth - 2), "[").* ++ "0" ++ chat.repeat((max_frame_depth - 2), "]").* ++ "}}";
     try std.testing.expect(!Server.mayExceedFrameDepth(at_limit));
     // Braces that are text rather than structure: the count counts them and the
     // walk does not, so the count sends this frame to the walk, and the walk
     // accepts it. The bound is loose here and never tight, which is the
     // direction that has to hold: a count below a depth would let a reply past
     // the ceiling through to the parse.
-    const text_braces = "{\"id\":1,\"result\":{\"structuredContent\":\"" ++ repeat(max_frame_depth, "{").* ++ "\"}}";
+    const text_braces = "{\"id\":1,\"result\":{\"structuredContent\":\"" ++ chat.repeat(max_frame_depth, "{").* ++ "\"}}";
     try std.testing.expect(Server.mayExceedFrameDepth(text_braces));
     var state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer state.deinit();
@@ -3156,9 +3136,9 @@ const call_corpus = [_][]const u8{
     "\u{0}",
     "{\"a\":\"\u{0}\"}",
     "\"\\ud800\"",
-    repeat(16, "{\"a\":"),
-    repeat(32, "{\"a\":1,").* ++ "\"b\":2}",
-    "{\"text\":\"" ++ repeat(4096, "x").* ++ "\"}",
+    chat.repeat(16, "{\"a\":"),
+    chat.repeat(32, "{\"a\":1,").* ++ "\"b\":2}",
+    "{\"text\":\"" ++ chat.repeat(4096, "x").* ++ "\"}",
 };
 
 test "a fuzzed tool call reaches the server as the arguments the model wrote" {
@@ -3380,7 +3360,7 @@ test "a text result cut at the cap keeps whole characters" {
     // One character wider than the room the cap leaves after the note the
     // result over the cap is given, so the cut lands inside it whichever way
     // the two ends of the cap fall.
-    const filler = repeat((tool_mod.max_tool_output - 1), "a");
+    const filler = chat.repeat((tool_mod.max_tool_output - 1), "a");
     const body = try std.fmt.allocPrint(arena,
         \\{{"content":[{{"type":"text","text":"{s}"}}]}}
     , .{filler ++ "\u{65e5}\u{65e5}\u{65e5}"});
@@ -3398,7 +3378,7 @@ test "a text result cut at the cap keeps whole characters" {
     const emoji_arena = emoji_state.allocator();
     const emoji = try std.fmt.allocPrint(emoji_arena,
         \\{{"content":[{{"type":"text","text":"{s}"}}]}}
-    , .{repeat((tool_mod.max_tool_output - 2), "b").* ++ "\u{1f600}\u{1f600}"});
+    , .{chat.repeat((tool_mod.max_tool_output - 2), "b").* ++ "\u{1f600}\u{1f600}"});
     const cut_emoji = try resultText(arena, "srv", try std.json.parseFromSliceLeaky(std.json.Value, emoji_arena, emoji, .{}));
     try std.testing.expect(cut_emoji.len <= tool_mod.max_tool_output);
     try std.testing.expect(std.unicode.utf8ValidateSlice(cut_emoji));
@@ -3419,11 +3399,11 @@ test "a structured result over the cap is cut, marked, and named for its size" {
     // saying so would be the run lying about a result it kept.
     const small = try std.fmt.allocPrint(arena,
         \\{{"structuredContent":{{"n":1,"s":"{s}"}}}}
-    , .{repeat(1024, "x")});
+    , .{chat.repeat(1024, "x")});
     const kept = try resultText(arena, "srv", try std.json.parseFromSliceLeaky(std.json.Value, arena, small, .{}));
     try std.testing.expect(kept.len <= tool_mod.max_tool_output);
     try std.testing.expect(std.mem.indexOf(u8, kept, "tool output truncated") == null);
-    try std.testing.expect(std.mem.indexOf(u8, kept, repeat(1024, "x")) != null);
+    try std.testing.expect(std.mem.indexOf(u8, kept, chat.repeat(1024, "x")) != null);
 
     // Over it, and the value is built here rather than spelled out, so the
     // test says which size it wrote rather than carrying it.
@@ -3432,7 +3412,7 @@ test "a structured result over the cap is cut, marked, and named for its size" {
     const big_arena = big_state.allocator();
     const big = try std.fmt.allocPrint(big_arena,
         \\{{"structuredContent":{{"s":"{s}"}}}}
-    , .{repeat((tool_mod.max_tool_output * 40), "y")});
+    , .{chat.repeat((tool_mod.max_tool_output * 40), "y")});
     var output_state = std.heap.ArenaAllocator.init(gpa);
     defer output_state.deinit();
     const cut = try resultText(output_state.allocator(), "srv", try std.json.parseFromSliceLeaky(std.json.Value, big_arena, big, .{}));
@@ -3483,10 +3463,10 @@ test "a remote entry's url, key variable and key header are held to what they ca
     // reach the wire beside the entry's url. A name past it is refused rather
     // than truncated, so a server that answers nothing names the entry's own
     // field instead of an arbitrary prefix of it.
-    try std.testing.expect(validEnvName(repeat(64, "A")));
-    try std.testing.expect(!validEnvName(repeat(65, "A")));
-    try std.testing.expect(validHeaderName(repeat(64, "A")));
-    try std.testing.expect(!validHeaderName(repeat(65, "A")));
+    try std.testing.expect(validEnvName(chat.repeat(64, "A")));
+    try std.testing.expect(!validEnvName(chat.repeat(65, "A")));
+    try std.testing.expect(validHeaderName(chat.repeat(64, "A")));
+    try std.testing.expect(!validHeaderName(chat.repeat(65, "A")));
 }
 
 // What a config table, a server's `tools/list` answer and the environment all
@@ -3508,8 +3488,8 @@ const entry_name_corpus = [_][]const u8{
     "",
     " ",
     "a",
-    repeat(64, "A"),
-    repeat(65, "A"),
+    chat.repeat(64, "A"),
+    chat.repeat(65, "A"),
     "EXA_API_KEY",
     "x-api-key",
     "a__b",
@@ -3922,7 +3902,7 @@ const FakeMcp = struct {
             .repeated_cursor, .catalog_oversize, .invalid_cursor, .failed_page => unreachable,
             .call_accepted => try self.reply(out, "202 Accepted", "Content-Type: application/json\r\n", call_frame),
             .call_error_status => try self.reply(out, "400 Bad Request", "Content-Type: application/json\r\n", "{\"jsonrpc\":\"2.0\",\"id\":3,\"error\":{\"code\":-32602,\"message\":\"bad args\"}}"),
-            .call_deep_refusal => try self.reply(out, "400 Bad Request", "Content-Type: application/json\r\n", "{\"error\":" ++ (repeat(300, "[").*) ++ "0" ++ (repeat(300, "]").*) ++ "}"),
+            .call_deep_refusal => try self.reply(out, "400 Bad Request", "Content-Type: application/json\r\n", "{\"error\":" ++ (chat.repeat(300, "[").*) ++ "0" ++ (chat.repeat(300, "]").*) ++ "}"),
             .call_compressed => try self.replyDeflated(out, "200 OK", "application/json", call_frame),
             .call_error_status_compressed => try self.replyDeflated(out, "400 Bad Request", "application/json", "{\"jsonrpc\":\"2.0\",\"id\":3,\"error\":{\"code\":-32602,\"message\":\"bad args\"}}"),
             .unauthorized => unreachable,

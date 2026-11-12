@@ -2,26 +2,6 @@
 //! folding of each one into the response a turn is built from, under the response and
 //! tool-call ceilings. The network read loop that feeds it lives in `main.zig`.
 
-fn repeat(comptime count: usize, comptime value: []const u8) *const [count * value.len]u8 {
-    const S = struct {
-        const out: [count * value.len]u8 = blk: {
-            var buf: [count * value.len]u8 = undefined;
-            if (value.len == 1) {
-                @memset(&buf, value[0]);
-            } else {
-                // Doubling copies the pattern in log(count) steps, which stays inside
-                // the comptime backwards-branch limit a one-step loop does not.
-                @memcpy(buf[0..value.len], value);
-                var filled: usize = value.len;
-                while (filled * 2 <= buf.len) : (filled *= 2) @memcpy(buf[filled..][0..filled], buf[0..filled]);
-                if (filled < buf.len) @memcpy(buf[filled..], buf[0 .. buf.len - filled]);
-            }
-            break :blk buf;
-        };
-    };
-    return &S.out;
-}
-
 const std = @import("std");
 
 const chat_mod = @import("chat.zig");
@@ -1009,7 +989,7 @@ test "the response ceiling is exact, and lands on a code point boundary" {
     defer sink.deinit();
     const arena = sink.run.allocator();
     // A first delta that leaves one byte of room, then one that does not fit.
-    try sink.feed(try contentFrame(arena, repeat((max_response_bytes - 1), "x")));
+    try sink.feed(try contentFrame(arena, chat_mod.repeat((max_response_bytes - 1), "x")));
     try std.testing.expectEqual(max_response_bytes - 1, sink.result.content.items.len);
 
     try sink.feed(try contentFrame(arena, cjk));
@@ -1024,7 +1004,7 @@ test "the response ceiling is exact, and lands on a code point boundary" {
     var roomy = FrameSink.init(gpa);
     defer roomy.deinit();
     const roomy_arena = roomy.run.allocator();
-    try roomy.feed(try contentFrame(roomy_arena, repeat((max_response_bytes - 6), "x")));
+    try roomy.feed(try contentFrame(roomy_arena, chat_mod.repeat((max_response_bytes - 6), "x")));
     try roomy.feed(try contentFrame(roomy_arena, cjk));
     try std.testing.expectEqual(max_response_bytes, roomy.result.content.items.len);
     try std.testing.expect(std.unicode.utf8ValidateSlice(roomy.result.content.items));
@@ -1043,7 +1023,7 @@ test "streamed arguments stop at the ceiling on a code point boundary" {
 
     // A run one byte short of a three-byte character, so the ceiling falls
     // where a plain byte count would take half of one.
-    const text = try std.mem.concat(arena, u8, &.{ repeat((max_response_bytes - 1), "x"), "\\u672c" });
+    const text = try std.mem.concat(arena, u8, &.{ chat_mod.repeat((max_response_bytes - 1), "x"), "\\u672c" });
 
     try sink.feed(try argsFrame(arena, text));
     try std.testing.expectEqual(max_response_bytes - 1, sink.calls.items[0].args.items.len);
@@ -1595,7 +1575,7 @@ test "arguments for rejected tool calls still consume the response byte allowanc
     var state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer state.deinit();
     const arena = state.allocator();
-    const chunk = repeat(65536, "x");
+    const chunk = chat_mod.repeat(65536, "x");
     const frame = try std.fmt.allocPrint(arena, "{{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":{d},\"function\":{{\"arguments\":\"{s}\"}}}}]}}}}]}}", .{ max_tool_calls, chunk });
     var sink = FrameSink.init(std.testing.allocator);
     defer sink.deinit();

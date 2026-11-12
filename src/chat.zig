@@ -10,7 +10,15 @@
 //! release tag, a session directory and a path pasted back are all bytes this
 //! program did not choose, and they are normalized once.
 
-fn repeat(comptime count: usize, comptime value: []const u8) *const [count * value.len]u8 {
+const std = @import("std");
+const Io = std.Io;
+
+/// A string of `count` copies of `value`, built once at compile time. Tests
+/// across the tree need the same long input, and one copy of the helper is
+/// what keeps them from each carrying their own. It lives on this leaf because
+/// every other module already imports it, so none of them imports a module
+/// above itself to reach a test fixture.
+pub fn repeat(comptime count: usize, comptime value: []const u8) *const [count * value.len]u8 {
     const S = struct {
         const out: [count * value.len]u8 = blk: {
             var buf: [count * value.len]u8 = undefined;
@@ -29,9 +37,6 @@ fn repeat(comptime count: usize, comptime value: []const u8) *const [count * val
     };
     return &S.out;
 }
-
-const std = @import("std");
-const Io = std.Io;
 
 /// `args` grows in place as the provider streams the arguments in fragments.
 /// It is a buffer, not a string that is re-spelled per fragment: a large

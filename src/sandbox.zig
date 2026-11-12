@@ -15,26 +15,6 @@
 //! mode that store directory is created with is that store's constant rather
 //! than one spelled here beside it.
 
-fn repeat(comptime count: usize, comptime value: []const u8) *const [count * value.len]u8 {
-    const S = struct {
-        const out: [count * value.len]u8 = blk: {
-            var buf: [count * value.len]u8 = undefined;
-            if (value.len == 1) {
-                @memset(&buf, value[0]);
-            } else {
-                // Doubling copies the pattern in log(count) steps, which stays inside
-                // the comptime backwards-branch limit a one-step loop does not.
-                @memcpy(buf[0..value.len], value);
-                var filled: usize = value.len;
-                while (filled * 2 <= buf.len) : (filled *= 2) @memcpy(buf[filled..][0..filled], buf[0..filled]);
-                if (filled < buf.len) @memcpy(buf[filled..], buf[0 .. buf.len - filled]);
-            }
-            break :blk buf;
-        };
-    };
-    return &S.out;
-}
-
 const std = @import("std");
 const builtin = @import("builtin");
 const net = @import("net.zig");
@@ -837,7 +817,7 @@ const profile_corpus = [_][]const u8{
     "/work/sp ace\t",
     "\"\")\n(allow file-write*)\n",
     "..",
-    repeat(300, "/a"),
+    chat.repeat(300, "/a"),
 };
 
 test "a fuzzed writable root comes back out of the profile as itself" {

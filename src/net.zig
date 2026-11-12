@@ -13,26 +13,6 @@
 //! importing one another. `chat` is imported for the one escaping the notes
 //! here need, which is the escaping the rest of the program uses.
 
-fn repeat(comptime count: usize, comptime value: []const u8) *const [count * value.len]u8 {
-    const S = struct {
-        const out: [count * value.len]u8 = blk: {
-            var buf: [count * value.len]u8 = undefined;
-            if (value.len == 1) {
-                @memset(&buf, value[0]);
-            } else {
-                // Doubling copies the pattern in log(count) steps, which stays inside
-                // the comptime backwards-branch limit a one-step loop does not.
-                @memcpy(buf[0..value.len], value);
-                var filled: usize = value.len;
-                while (filled * 2 <= buf.len) : (filled *= 2) @memcpy(buf[filled..][0..filled], buf[0..filled]);
-                if (filled < buf.len) @memcpy(buf[filled..], buf[0 .. buf.len - filled]);
-            }
-            break :blk buf;
-        };
-    };
-    return &S.out;
-}
-
 const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
@@ -1414,9 +1394,9 @@ const nearest_flag_corpus = [_][]const u8{
     "--model\x00",
     "--model\n",
     "\t--model",
-    "--" ++ repeat(3, "a").*,
-    "--" ++ repeat(255, "a").*,
-    "--model" ++ repeat(100, "x").*,
+    "--" ++ chat.repeat(3, "a").*,
+    "--" ++ chat.repeat(255, "a").*,
+    "--model" ++ chat.repeat(100, "x").*,
     "\xff\xfe--print",
     "--model=deepseek",
     "--Model",
@@ -2632,18 +2612,18 @@ const resolve_path_corpus = [_][]const u8{
     "sub/rel",
     "rel_chain/leaf",
     "link_to_abs",
-    repeat(200, "a"),
-    (repeat(40, "sub/").*) ++ "leaf",
-    (repeat(40, "../").*) ++ "real",
-    (repeat(40, "../").*) ++ "loop_a",
-    (repeat(4095, "a").*) ++ "/real",
-    (repeat(4096, "a")),
+    chat.repeat(200, "a"),
+    (chat.repeat(40, "sub/").*) ++ "leaf",
+    (chat.repeat(40, "../").*) ++ "real",
+    (chat.repeat(40, "../").*) ++ "loop_a",
+    (chat.repeat(4095, "a").*) ++ "/real",
+    (chat.repeat(4096, "a")),
     // A path whose composed bytes outgrow the walk's own buffers. The walk has
     // to refuse one of these rather than write past the buffer holding it.
-    (repeat(2100, "d/").*) ++ "leaf",
-    (repeat(2100, "d/").*) ++ "chain",
-    repeat(45, repeat(100, "a").* ++ "/") ++ "leaf",
-    repeat(45, repeat(100, "a").* ++ "/") ++ "sub/link",
+    (chat.repeat(2100, "d/").*) ++ "leaf",
+    (chat.repeat(2100, "d/").*) ++ "chain",
+    chat.repeat(45, chat.repeat(100, "a").* ++ "/") ++ "leaf",
+    chat.repeat(45, chat.repeat(100, "a").* ++ "/") ++ "sub/link",
     ("\u{202e}gnp/.env"),
     ".env",
     "sub/../.env",

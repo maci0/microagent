@@ -5,26 +5,6 @@
 //! everything below is reached by a model-supplied name and model-supplied
 //! arguments, so it is capped, reaped and reported from one place.
 
-fn repeat(comptime count: usize, comptime value: []const u8) *const [count * value.len]u8 {
-    const S = struct {
-        const out: [count * value.len]u8 = blk: {
-            var buf: [count * value.len]u8 = undefined;
-            if (value.len == 1) {
-                @memset(&buf, value[0]);
-            } else {
-                // Doubling copies the pattern in log(count) steps, which stays inside
-                // the comptime backwards-branch limit a one-step loop does not.
-                @memcpy(buf[0..value.len], value);
-                var filled: usize = value.len;
-                while (filled * 2 <= buf.len) : (filled *= 2) @memcpy(buf[filled..][0..filled], buf[0..filled]);
-                if (filled < buf.len) @memcpy(buf[filled..], buf[0 .. buf.len - filled]);
-            }
-            break :blk buf;
-        };
-    };
-    return &S.out;
-}
-
 const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
@@ -596,14 +576,14 @@ const capture_corpus = [_][]const u8{
     "\xff\xfe\xc3\x80",
     "\xe6\x97",
     "\xe6\x97\xa5",
-    repeat(32, "\""),
-    repeat(1024, "x"),
-    repeat((max_tool_output - 1), "x"),
-    repeat(max_tool_output, "x"),
-    repeat((max_tool_output + 1), "x"),
-    repeat((max_tool_output + 500), "x"),
-    repeat((max_tool_output / 3 + 8), "\u{65e5}"),
-    repeat(300, "a").* ++ "\u{1f600}",
+    chat.repeat(32, "\""),
+    chat.repeat(1024, "x"),
+    chat.repeat((max_tool_output - 1), "x"),
+    chat.repeat(max_tool_output, "x"),
+    chat.repeat((max_tool_output + 1), "x"),
+    chat.repeat((max_tool_output + 500), "x"),
+    chat.repeat((max_tool_output / 3 + 8), "\u{65e5}"),
+    chat.repeat(300, "a").* ++ "\u{1f600}",
 };
 
 test "a fuzzed subprocess capture stays under the cap with every note whole" {
@@ -638,7 +618,7 @@ fn fuzzCaptureResult(_: void, smith: *std.testing.Smith) !void {
     const reason: ?[]const u8 = switch (flags >> 3 & 3) {
         0 => null,
         1 => "error: the command could not be run",
-        else => "error: " ++ (repeat((max_tool_output / 2), "why ").*),
+        else => "error: " ++ (chat.repeat((max_tool_output / 2), "why ").*),
     };
     const term: ?std.process.Child.Term = if (want_term) switch (flags >> 5 & 3) {
         0 => .{ .exited = 0 },
@@ -3795,12 +3775,12 @@ const read_lines_corpus = [_][]const u8{
     "a\n\nb\n",
     "no newline anywhere",
     "\x00\n\x00\x00",
-    "head\n" ++ repeat((read_chunk - 5), "z").* ++ "\ntail",
-    "head\n" ++ repeat((read_chunk - 4), "z").* ++ "\ntail",
-    "head\n" ++ repeat((read_chunk - 3), "z").* ++ "\ntail",
-    "head\n" ++ repeat((read_chunk * 2 + 1), "z").* ++ "\ntail\n",
-    "head\n" ++ repeat((read_chunk - 1), "z").* ++ "\n" ++ repeat((read_chunk - 1), "y").* ++ "\n",
-    (repeat(2000, "line\n")),
+    "head\n" ++ chat.repeat((read_chunk - 5), "z").* ++ "\ntail",
+    "head\n" ++ chat.repeat((read_chunk - 4), "z").* ++ "\ntail",
+    "head\n" ++ chat.repeat((read_chunk - 3), "z").* ++ "\ntail",
+    "head\n" ++ chat.repeat((read_chunk * 2 + 1), "z").* ++ "\ntail\n",
+    "head\n" ++ chat.repeat((read_chunk - 1), "z").* ++ "\n" ++ chat.repeat((read_chunk - 1), "y").* ++ "\n",
+    (chat.repeat(2000, "line\n")),
     "caf\u{00e9}\n\u{65e5}\u{672c}\u{8a9e}\n\u{1f680}\n",
     "\xff\xfe\n\xc3\n",
     " {\"a\":1}\n {\"b\":2}\n",
@@ -3887,9 +3867,9 @@ test "lines longer than a read come back whole, whatever they straddle" {
 
     // One line per read-chunk boundary, one that straddles three of them, and
     // a last line with no newline: the three shapes a cursor can lose.
-    const short = repeat(16, "a");
-    const straddling = repeat((read_chunk * 3 + 7), "b");
-    const unterminated = repeat((read_chunk + 1), "c");
+    const short = chat.repeat(16, "a");
+    const straddling = chat.repeat((read_chunk * 3 + 7), "b");
+    const unterminated = chat.repeat((read_chunk + 1), "c");
     var raw: std.ArrayList(u8) = .empty;
     try raw.appendSlice(arena, short);
     try raw.append(arena, '\n');
@@ -3980,7 +3960,7 @@ test "the tool gutter stays one line whatever the model sent" {
     // beside a full-budget detail. Only the detail is the model's own bytes,
     // so only the detail is cut, and the line still ends exactly once.
     var long_args: std.json.ObjectMap = .empty;
-    try long_args.put(arena, "command", .{ .string = repeat(300, "日") });
+    try long_args.put(arena, "command", .{ .string = chat.repeat(300, "日") });
     for (chat.tools()) |tool| {
         try std.testing.expect(tool.name().len <= 40);
         const long_line = try toolCallLine(arena, &buf, tool, long_args, false);
@@ -4035,7 +4015,7 @@ const call_corpus = [_][]const u8{
     "{\"path\":\"src/main.zig\",\"offset\":0,\"limit\":1}",
     "{\"path\":\"src/main.zig\",\"offset\":-1,\"limit\":\"12\"}",
     "{\"pattern\":\"fn main\",\"lang\":\"zig\"}",
-    "{\"pattern\":\"" ++ repeat(40, "日本").* ++ "\"}",
+    "{\"pattern\":\"" ++ chat.repeat(40, "日本").* ++ "\"}",
     "{\"cmd\":\"log\",\"limit\":400}",
     "{\"cmd\":\"log\",\"limit\":0}",
     "{\"cmd\":\"log\",\"limit\":-5}",
@@ -4059,8 +4039,8 @@ const call_corpus = [_][]const u8{
     "{\"command\":\"caf\\u00e9 \\u65e5\\u8a00 \\ud83d\\ude80\"}",
     "{\"command\":\"line1\\nline2\\r\\nline3\"}",
     "{\"command\":\"\\u2028\\u2029\"}",
-    "{\"command\":\"" ++ repeat(500, "a").* ++ "\"}",
-    "{\"command\":\"" ++ repeat(500, "日").* ++ "\"}",
+    "{\"command\":\"" ++ chat.repeat(500, "a").* ++ "\"}",
+    "{\"command\":\"" ++ chat.repeat(500, "日").* ++ "\"}",
 };
 
 test "a fuzzed tool call leaves one gutter line and limits inside their ceilings" {
@@ -4250,9 +4230,9 @@ test "a capped tool result says how much was dropped" {
     const whole = try toolResult(arena, "one line");
     try std.testing.expectEqualStrings("one line", whole);
 
-    const big = repeat((max_tool_output + 500), "x");
+    const big = chat.repeat((max_tool_output + 500), "x");
     const cut = try toolResult(arena, big);
-    try std.testing.expect(std.mem.startsWith(u8, cut, repeat(max_tool_output, "x")));
+    try std.testing.expect(std.mem.startsWith(u8, cut, chat.repeat(max_tool_output, "x")));
     try std.testing.expect(std.mem.endsWith(u8, cut, "truncated at 24576 of 25076 bytes]"));
 }
 
@@ -4266,10 +4246,10 @@ test "the note an MCP result carries is this one, and it survives its own cut" {
     // paths. The room the note is held back from is what keeps the note intact
     // when the text beside it was cut first, which is the order `mcp` uses and
     // the order `toolResult` does not, so the note is checked both ways here.
-    const big = repeat((max_tool_output + 500), "y");
+    const big = chat.repeat((max_tool_output + 500), "y");
     const note = "... [tool output truncated at 24576 of 25076 bytes]";
     const capped = try truncationNote(arena, chat.clamp(big, max_tool_output - truncation_note_room), max_tool_output, big.len);
-    try std.testing.expect(std.mem.startsWith(u8, capped, repeat((max_tool_output - truncation_note_room), "y")));
+    try std.testing.expect(std.mem.startsWith(u8, capped, chat.repeat((max_tool_output - truncation_note_room), "y")));
     try std.testing.expect(std.mem.endsWith(u8, capped, note));
     // The path `toolResult` takes: the text clamped to the cap, then the note
     // appended past it, so the two spellings are read off the same two results.
@@ -4303,7 +4283,7 @@ test "a cut inside a character still names the cap it was cut at" {
     // little leaves both assertions above saying the same thing.
     const kept = cut[0 .. cut.len - marker.len];
     try std.testing.expectEqual(max_tool_output - 1, kept.len);
-    try std.testing.expect(std.mem.startsWith(u8, kept, repeat((max_tool_output - 1), "x")));
+    try std.testing.expect(std.mem.startsWith(u8, kept, chat.repeat((max_tool_output - 1), "x")));
     // The euro sign straddles the cap, so the kept bytes stop before its lead
     // byte and the `z` behind it is dropped with the rest.
     try std.testing.expect(std.unicode.utf8ValidateSlice(kept));
@@ -4679,9 +4659,9 @@ const terminal_corpus = [_][]const u8{
     "\xff\xfe",
     "{\"error\":{\"message\":\"rate limit\"}}",
     "<html>\n<head><title>502</title></head>\n</html>",
-    repeat(20, "\x1b[31m"),
-    repeat(20, "\u{009b}"),
-    repeat(8, "mixed \xff caf\u{00e9} \u{009b} \n text"),
+    chat.repeat(20, "\x1b[31m"),
+    chat.repeat(20, "\u{009b}"),
+    chat.repeat(8, "mixed \xff caf\u{00e9} \u{009b} \n text"),
 };
 
 test "a fuzzed error body leaves nothing a terminal acts on" {
@@ -4926,9 +4906,9 @@ const credential_path_corpus = [_][]const u8{
     ".env\u{0301}",
     "id_r\u{017f}a",
     "certs/server.\u{212a}ey",
-    repeat(200, "a"),
-    (repeat(32, "dir/").*) ++ ".env",
-    (repeat(32, "../").*) ++ "x",
+    chat.repeat(200, "a"),
+    (chat.repeat(32, "dir/").*) ++ ".env",
+    (chat.repeat(32, "../").*) ++ "x",
 };
 
 test "a name rule folds Unicode case, not only ASCII, and still reads a bad byte" {
@@ -6290,9 +6270,9 @@ const blame_corpus = [_][]const u8{
     "caf\u{00e9} (Marcel W. Wysocki 2026-09-29 23:23:33 +0800  1) main",
     "\u{1f469}\u{200d}\u{1f4bb} (\u{200b} 2026-09-30 03:29:32 +0800 1) ",
     "abc1234 (Rosa Fixture 2026-09-30 03:29:32 +0800 1) \xff\xfe",
-    repeat(8, "abc1234 (Rosa Fixture 2026-09-30 03:29:32 +0800 1) x\n"),
-    repeat(16, "abc1234 (Name 2026-09-30 03:29:32 +0800 "),
-    (repeat(8, "abc1234 (Name 2026-09-30 03:29:32 +0800 1) x\n").*) ++ "abc1234 (Name",
+    chat.repeat(8, "abc1234 (Rosa Fixture 2026-09-30 03:29:32 +0800 1) x\n"),
+    chat.repeat(16, "abc1234 (Name 2026-09-30 03:29:32 +0800 "),
+    (chat.repeat(8, "abc1234 (Name 2026-09-30 03:29:32 +0800 1) x\n").*) ++ "abc1234 (Name",
     // A name is not ASCII: the date, the zone and the number beside it are, and
     // the cut is counted back from those rather than forward from the name, so a
     // name of two or three bytes to the character has to leave them where they
@@ -6728,7 +6708,7 @@ test "a child that outruns the capture cap keeps its first bytes instead of fail
     }, cap, net.durationMs(30_000), null, null);
     try std.testing.expectEqual(cap, noisy.stdout.len);
     try std.testing.expect(noisy.partial().atCaptureLimit());
-    try std.testing.expectEqualStrings(repeat(8, "a"), noisy.stdout[0..8]);
+    try std.testing.expectEqualStrings(chat.repeat(8, "a"), noisy.stdout[0..8]);
     // The child still ran to its own end, so the status is the command's.
     switch (noisy.term) {
         .exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
@@ -6769,8 +6749,8 @@ test "both pipes past the cap drain together, so the child never wedges" {
     }, cap, net.durationMs(30_000), null, null);
     try std.testing.expectEqual(cap, noisy.stdout.len);
     try std.testing.expectEqual(cap, noisy.stderr.len);
-    try std.testing.expectEqualStrings(repeat(8, "a"), noisy.stdout[0..8]);
-    try std.testing.expectEqualStrings(repeat(8, "b"), noisy.stderr[0..8]);
+    try std.testing.expectEqualStrings(chat.repeat(8, "a"), noisy.stdout[0..8]);
+    try std.testing.expectEqualStrings(chat.repeat(8, "b"), noisy.stderr[0..8]);
 }
 
 test "a truncated tool result keeps whole codepoints" {
@@ -7017,7 +6997,7 @@ const ast_rewrite_corpus = [_][]const u8{
     "fn $NAME() {}\nfn $NAME() -> void {}",
     "return $X\nreturn [$X] // $X\n",
     "日$X\n日[$X]",
-    repeat(8, "foo($A)"),
+    chat.repeat(8, "foo($A)"),
     "$A$B$C\n[$A$B$C]",
 };
 
@@ -8426,7 +8406,7 @@ test "todo keeps a bounded, printable text for each item" {
         "1. [pending] ".len + max_todo_text_bytes + "\n0 of 1 done".len,
         result.len,
     );
-    try std.testing.expectEqualStrings(repeat(max_todo_text_bytes, "a"), result["1. [pending] ".len..][0..max_todo_text_bytes]);
+    try std.testing.expectEqualStrings(chat.repeat(max_todo_text_bytes, "a"), result["1. [pending] ".len..][0..max_todo_text_bytes]);
     // No escape byte reaches the model's next turn or the operator's screen
     // through it, and the tail the escaper cut is not in the line either.
     try std.testing.expect(std.mem.indexOfScalar(u8, result, 0x1b) == null);

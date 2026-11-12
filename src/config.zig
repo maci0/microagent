@@ -53,26 +53,6 @@
 //! leading byte order mark is dropped, so a file an editor saved with one
 //! reads by its first key rather than by a key spelled with U+FEFF.
 
-fn repeat(comptime count: usize, comptime value: []const u8) *const [count * value.len]u8 {
-    const S = struct {
-        const out: [count * value.len]u8 = blk: {
-            var buf: [count * value.len]u8 = undefined;
-            if (value.len == 1) {
-                @memset(&buf, value[0]);
-            } else {
-                // Doubling copies the pattern in log(count) steps, which stays inside
-                // the comptime backwards-branch limit a one-step loop does not.
-                @memcpy(buf[0..value.len], value);
-                var filled: usize = value.len;
-                while (filled * 2 <= buf.len) : (filled *= 2) @memcpy(buf[filled..][0..filled], buf[0..filled]);
-                if (filled < buf.len) @memcpy(buf[filled..], buf[0 .. buf.len - filled]);
-            }
-            break :blk buf;
-        };
-    };
-    return &S.out;
-}
-
 const std = @import("std");
 
 const chat = @import("chat.zig");
@@ -1267,12 +1247,12 @@ test "agents_files names the repository instructions, and an empty list turns th
     // longer than any path is too.
     const bare_string = parse(arena, "agents_files = \"AGENTS.md\"\n");
     try std.testing.expectEqualStrings("agents_files", bare_string.problem.?.key);
-    const long = parse(arena, std.fmt.allocPrint(arena, "agents_files = [\"{s}\"]\n", .{repeat(max_agents_path_bytes + 1, "a")}) catch unreachable);
+    const long = parse(arena, std.fmt.allocPrint(arena, "agents_files = [\"{s}\"]\n", .{chat.repeat(max_agents_path_bytes + 1, "a")}) catch unreachable);
     try std.testing.expectEqualStrings("agents_files", long.problem.?.key);
 
     // The accepting side of the same bound, because a comparison that moved by
     // one byte refuses a path the length is there to allow.
-    const at_limit = parse(arena, std.fmt.allocPrint(arena, "agents_files = [\"{s}\"]\n", .{repeat(max_agents_path_bytes, "a")}) catch unreachable);
+    const at_limit = parse(arena, std.fmt.allocPrint(arena, "agents_files = [\"{s}\"]\n", .{chat.repeat(max_agents_path_bytes, "a")}) catch unreachable);
     try std.testing.expectEqual(@as(?Problem, null), at_limit.problem);
     try std.testing.expectEqual(@as(usize, 1), at_limit.agents_files.?.len);
     try std.testing.expectEqual(max_agents_path_bytes, at_limit.agents_files.?[0].len);
@@ -1432,17 +1412,17 @@ test "system_prompt_extra past its bound is refused" {
     defer state.deinit();
     const arena = state.allocator();
 
-    const fits = try std.fmt.allocPrint(arena, "system_prompt_extra = \"{s}\"\n", .{repeat(max_system_prompt_extra_bytes, "a")});
+    const fits = try std.fmt.allocPrint(arena, "system_prompt_extra = \"{s}\"\n", .{chat.repeat(max_system_prompt_extra_bytes, "a")});
     const at_limit = parse(arena, fits);
     try std.testing.expect(at_limit.problem == null);
     try std.testing.expectEqual(max_system_prompt_extra_bytes, at_limit.system_prompt_extra.len);
 
-    const over = try std.fmt.allocPrint(arena, "system_prompt_extra = \"{s}\"\n", .{repeat((max_system_prompt_extra_bytes + 1), "a")});
+    const over = try std.fmt.allocPrint(arena, "system_prompt_extra = \"{s}\"\n", .{chat.repeat((max_system_prompt_extra_bytes + 1), "a")});
     const refused = parse(arena, over);
     try std.testing.expectEqual(Problem.Kind.bad_value, refused.problem.?.kind);
     try std.testing.expectEqualStrings("", refused.system_prompt_extra);
 
-    const multi = try std.fmt.allocPrint(arena, "system_prompt_extra = \"\"\"\n{s}\"\"\"\n", .{repeat((max_system_prompt_extra_bytes + 1), "a")});
+    const multi = try std.fmt.allocPrint(arena, "system_prompt_extra = \"\"\"\n{s}\"\"\"\n", .{chat.repeat((max_system_prompt_extra_bytes + 1), "a")});
     try std.testing.expectEqual(Problem.Kind.bad_value, parse(arena, multi).problem.?.kind);
 }
 
