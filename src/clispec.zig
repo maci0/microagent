@@ -39,7 +39,7 @@ pub const schema_usage =
     \\
 ;
 
-const CommandKind = enum { schema, help, setup, update };
+const CommandKind = enum { schema, help, setup, update, acp };
 
 /// The invocable commands. `schema` walks this table, so a command added only
 /// in the writer or only here cannot drift from the other.
@@ -48,6 +48,7 @@ const commands = [_]struct { name: []const u8, kind: CommandKind }{
     .{ .name = "help", .kind = .help },
     .{ .name = "setup", .kind = .setup },
     .{ .name = "update", .kind = .update },
+    .{ .name = "acp", .kind = .acp },
 };
 
 pub fn commandName(kind: CommandKind) []const u8 {
@@ -315,7 +316,7 @@ fn writeDocument(doc: *Doc, filter: []const u8) !void {
     try doc.fieldStr("clispec", "0.3");
     try doc.fieldStr("name", "microagent");
     try doc.fieldStr("version", version);
-    try doc.fieldStr("description", "Tiny OpenAI-compatible coding agent. The default invocation is microagent [flags] \"<prompt>\" and is not a named subcommand: a bare word other than help, schema, setup, or update is the task. That run's stdout is the model's text plus one {\"type\":\"usage\"} line per response, and -o does not re-encode it. A retry is not safe, because the run edits the tree and calls tools, and there is no idempotency key.");
+    try doc.fieldStr("description", "Tiny OpenAI-compatible coding agent. The default invocation is microagent [flags] \"<prompt>\" and is not a named subcommand: a bare word other than help, schema, setup, update, or acp is the task. That run's stdout is the model's text plus one {\"type\":\"usage\"} line per response, and -o does not re-encode it. A retry is not safe, because the run edits the tree and calls tools, and there is no idempotency key.");
     try doc.field("output");
     try doc.beginObj();
     try doc.fieldStr("tty", "text");
@@ -334,6 +335,7 @@ fn writeDocument(doc: *Doc, filter: []const u8) !void {
             .help => try writeHelpCommand(doc),
             .setup => try writeSetupCommand(doc),
             .update => try writeUpdateCommand(doc),
+            .acp => try writeAcpCommand(doc),
         }
     }
     try doc.endArr();
@@ -454,7 +456,7 @@ fn writeHelpCommand(doc: *Doc) !void {
     try doc.beginElemObj();
     try doc.fieldStr("name", "command");
     try doc.fieldStr("type", "string");
-    try doc.fieldStr("description", "setup, update, or schema. Omitted, the top-level usage text.");
+    try doc.fieldStr("description", "setup, update, schema, or acp. Omitted, the top-level usage text.");
     try doc.endObj();
     try doc.endArr();
     try writeKinds(doc, &.{"usage"});
@@ -508,6 +510,20 @@ fn writeUpdateCommand(doc: *Doc) !void {
         .{ .name = "path", .typ = "string", .nullable = true, .desc = "Installed path, or null when nothing was replaced." },
     });
     try writeKinds(doc, &.{ "usage", "failure" });
+    try doc.endObj();
+}
+
+fn writeAcpCommand(doc: *Doc) !void {
+    try doc.beginElemObj();
+    try doc.fieldStr("name", "acp");
+    try doc.fieldStr("description", "Serve the Agent Client Protocol v1 on stdin and stdout until the client closes stdin, then exit 0. Frames are JSON-RPC, not this program's -o envelope, and -o does not change them. A terminal is not required. A retry is not safe: a session edits the tree and calls tools, and there is no idempotency key.");
+    try doc.fieldStr("effects", "non_idempotent");
+    try doc.fieldStr("output_kind", "opaque");
+    try doc.fieldStr("media_type", "application/json");
+    try doc.field("args");
+    try doc.beginArr();
+    try doc.endArr();
+    try writeKinds(doc, &.{ "usage", "config", "failure", "interrupted" });
     try doc.endObj();
 }
 
@@ -686,6 +702,26 @@ test "schema is one document and a command path filters it" {
     };
     try std.testing.expectEqual(@as(usize, 1), one_cmds.items.len);
     try std.testing.expectError(error.NoMatch, schemaJson(arena, "nope", false));
+
+    var saw_acp = false;
+    for (listed.items) |item| {
+        const cmd = switch (item) {
+            .object => |o| o,
+            else => return error.TestUnexpectedResult,
+        };
+        const name = switch (cmd.get("name") orelse return error.TestUnexpectedResult) {
+            .string => |s| s,
+            else => return error.TestUnexpectedResult,
+        };
+        if (!std.mem.eql(u8, name, "acp")) continue;
+        saw_acp = true;
+        const effects = switch (cmd.get("effects") orelse return error.TestUnexpectedResult) {
+            .string => |s| s,
+            else => return error.TestUnexpectedResult,
+        };
+        try std.testing.expectEqualStrings("non_idempotent", effects);
+    }
+    try std.testing.expect(saw_acp);
 }
 
 test "-o is stripped before a subcommand and stops at --" {
