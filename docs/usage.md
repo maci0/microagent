@@ -478,7 +478,8 @@ with HTTP 400, the existing fallback reports the rejection and retries without t
 
 `headers` is an inline table of extra headers sent on every provider request, for an upstream
 that needs one the client would otherwise not send, such as a Grok CLI proxy that refuses a
-request without `x-grok-client-version`:
+request without `x-grok-client-version`, or a router such as fastrouter's Grok preset, which forwards
+`x-grok-client-version` only when the client supplies it:
 
 ```toml
 headers = { "x-grok-client-version" = "1.0.77" }

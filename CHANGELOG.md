@@ -23,7 +23,7 @@ release, and `microagent update` moves you to it.
 
 - The config key `headers`, an inline table of extra headers sent on every
   provider request, e.g. `headers = { "x-grok-client-version" = "1.0.77" }`
-  for a Grok CLI proxy. A name the client already sends, a repeated
+  for a Grok CLI proxy or fastrouter's Grok preset. A name the client already sends, a repeated
   name, or a value with a control byte refuses the table.
 
 ### Fixed

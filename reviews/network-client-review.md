@@ -57,7 +57,7 @@ fragment with no network surface to read.
    same way: the chat request and the remote MCP request (`exchange` in
    `src/mcp.zig`) each set `.redirect_behavior = .unhandled`, while the
    download's `exchange` in `src/update.zig` opens the request itself and passes
-   `.redirect_behavior = @enumFromInt(default_redirects)`, the allowance a
+   `.redirect_behavior = @fromBackingInt(@intCast(default_redirects))`, the allowance a
    payload-less GET gets by default — an asset is answered by a `302` to the
    release CDN, so following one is a requirement of the download. The download
    therefore relies
