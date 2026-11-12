@@ -492,6 +492,22 @@ control character other than tab. A name the client already sends (`Authorizatio
 problem is named on stderr and the run goes on with no extra headers, so the key cannot be replaced
 or sent twice. The headers go only to `base_url`, never to an MCP server.
 
+`models` is an array of model ids an ACP client may switch a session among, all served by the one
+`base_url`:
+
+```toml
+model  = "grok/grok-4.7"
+models = ["grok/grok-4.7", "grok/grok-4.6"]
+```
+
+`model` is the default and must be in the list; a file naming one outside it stops the run before
+a request. With no `model`, the first entry is the default. A `--model` or `MICROAGENT_MODEL`
+outside the list joins its front, because the operator chose it for this run. An empty id or one
+repeated refuses the list, which is named on stderr. ACP sessions advertise every entry in the
+`model` config option and `session/set_config_option` accepts only those; a terminal run uses the
+default. Per-model `base_url`, `api_key` or `headers` are not built: every listed model goes to the
+one provider.
+
 `model` defaults to `deepseek/deepseek-v4-flash` when no source names one. `base_url` and `api_key`
 have no default: a run that names neither is refused before the first request, with the message
 naming the flag, the variable and the config key. `base_url` is checked the way the flag is, so a

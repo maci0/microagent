@@ -33,6 +33,11 @@
 # Use your OpenCode API key and a Chat Completions model ID, e.g. "kimi-k2.6",
 # without "opencode/" or "opencode-go/". See docs/usage.md#opencode-zen-and-go.
 
+# The models an ACP client may switch a session among, all on base_url. model
+# is the default and must be one of them; with no model the first is. A
+# --model or MICROAGENT_MODEL outside the list joins its front.
+# models = ["deepseek/deepseek-v4-flash", "kimi-k2.6"]
+
 # Optional reasoning level for models that support it: minimal, low, medium,
 # high, or none to disable. A CLI flag beats MICROAGENT_REASONING_EFFORT,
 # which beats this setting. Leave unset to use the provider's default.

@@ -238,6 +238,9 @@ const Options = struct {
     prompt: []const u8 = "",
     repl: bool = false,
     model: []const u8 = default_model,
+    /// Every model an ACP session may switch to, `model` among them; empty
+    /// for `model` alone.
+    models: []const []const u8 = &.{},
     /// The OpenAI-compatible endpoint. Empty until the config file, the
     /// environment or the command line names one, and a run with none is
     /// refused rather than sent to an endpoint nobody chose.
@@ -620,7 +623,7 @@ fn runMain(init: std.process.Init) !u8 {
     if (toolConfigError(arena, loaded)) |msg| return configError(io, "{s}", .{msg});
     // The file is the weakest of the three sources, so it answers only where
     // neither the flag nor a variable did.
-    if (!opts.from_flag.contains(.model) and env_model == null and loaded.model.len != 0) opts.model = loaded.model;
+    try applyModels(io, arena, &opts, opts.from_flag.contains(.model) or env_model != null, loaded);
     if (opts.reasoning_effort == null and loaded.reasoning_effort.len != 0) {
         if (reasoningEffort(&err_buf, "config key reasoning_effort", loaded.reasoning_effort, &opts.reasoning_effort)) |msg|
             return configError(io, "{s}", .{msg});
@@ -2390,6 +2393,7 @@ const LoadedConfig = struct {
     agents_files: ?[]const []const u8,
     /// The provider settings the file named, empty when it named none.
     model: []const u8,
+    models: []const []const u8,
     base_url: []const u8,
     api_key: []const u8,
     reasoning_effort: []const u8,
@@ -2419,6 +2423,7 @@ fn fromConfig(parsed: config_mod.Config, source: ?[]const u8) LoadedConfig {
         .system_prompt_extra = parsed.system_prompt_extra,
         .agents_files = parsed.agents_files,
         .model = parsed.model,
+        .models = parsed.models,
         .base_url = parsed.base_url,
         .api_key = parsed.api_key,
         .reasoning_effort = parsed.reasoning_effort,
@@ -2431,6 +2436,76 @@ fn fromConfig(parsed: config_mod.Config, source: ?[]const u8) LoadedConfig {
         .sandbox = parsed.sandbox,
         .source = source,
     };
+}
+
+/// Settles the run's model and the list an ACP session may switch among. The
+/// flag and the variable have already set `opts.model` when `from_operator`;
+/// otherwise the file answers with its `model`, or the first of its `models`
+/// when it names no `model`. A model the operator chose joins the front of
+/// the list. The file's `model` missing from its own `models` is a
+/// contradiction only the operator can settle, so it is refused.
+fn resolveModels(arena: std.mem.Allocator, opts: *Options, from_operator: bool, model: []const u8, models: []const []const u8) error{ OutOfMemory, ModelNotListed }!void {
+    if (!from_operator) {
+        if (model.len != 0) {
+            opts.model = model;
+        } else if (models.len != 0) {
+            opts.model = models[0];
+        }
+    }
+    if (models.len == 0) return;
+    for (models) |id| if (std.mem.eql(u8, id, opts.model)) {
+        opts.models = models;
+        return;
+    };
+    if (!from_operator) return error.ModelNotListed;
+    opts.models = try std.mem.concat(arena, []const u8, &.{ &.{opts.model}, models });
+}
+
+/// `resolveModels` for a run, stopping it when the file contradicts itself.
+fn applyModels(io: Io, arena: std.mem.Allocator, opts: *Options, from_operator: bool, loaded: LoadedConfig) error{OutOfMemory}!void {
+    resolveModels(arena, opts, from_operator, loaded.model, loaded.models) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.ModelNotListed => configError(io, "config key model '{s}' is not one of the config key models", .{chat_mod.safeText(arena, loaded.model, net.quoted_value_bytes)}),
+    };
+}
+
+test "the run's model and the list a client may switch among" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    const listed = [_][]const u8{ "a", "b" };
+
+    // No list: the file's model applies where the operator named none.
+    var opts: Options = .{};
+    try resolveModels(arena, &opts, false, "f", &.{});
+    try std.testing.expectEqualStrings("f", opts.model);
+    try std.testing.expectEqual(@as(usize, 0), opts.models.len);
+
+    // The file's model is the default among its own list.
+    opts = .{};
+    try resolveModels(arena, &opts, false, "b", &listed);
+    try std.testing.expectEqualStrings("b", opts.model);
+    try std.testing.expectEqual(@as(usize, 2), opts.models.len);
+
+    // A list with no model: the first entry is the default, not the built-in.
+    opts = .{};
+    try resolveModels(arena, &opts, false, "", &listed);
+    try std.testing.expectEqualStrings("a", opts.model);
+
+    // A model the operator chose joins the front of the list.
+    opts = .{ .model = "z" };
+    try resolveModels(arena, &opts, true, "b", &listed);
+    try std.testing.expectEqualStrings("z", opts.model);
+    try std.testing.expectEqual(@as(usize, 3), opts.models.len);
+    try std.testing.expectEqualStrings("z", opts.models[0]);
+    try std.testing.expectEqualStrings("b", opts.models[2]);
+    opts = .{ .model = "b" };
+    try resolveModels(arena, &opts, true, "", &listed);
+    try std.testing.expectEqual(@as(usize, 2), opts.models.len);
+
+    // The file contradicting itself is refused, not resolved by guessing.
+    opts = .{};
+    try std.testing.expectError(error.ModelNotListed, resolveModels(arena, &opts, false, "c", &listed));
 }
 
 /// Everything the config file said, from the TOML named by --config,
@@ -10028,7 +10103,7 @@ fn runAcp(init: std.process.Init) !u8 {
 
     const loaded = loadConfig(io, init, arena, opts.config);
     if (toolConfigError(arena, loaded)) |msg| return configError(io, "{s}", .{msg});
-    if (!opts.from_flag.contains(.model) and env_model == null and loaded.model.len != 0) opts.model = loaded.model;
+    try applyModels(io, arena, &opts, opts.from_flag.contains(.model) or env_model != null, loaded);
     if (opts.reasoning_effort == null and loaded.reasoning_effort.len != 0) {
         if (reasoningEffort(&err_buf, "config key reasoning_effort", loaded.reasoning_effort, &opts.reasoning_effort)) |msg|
             return configError(io, "{s}", .{msg});
@@ -10194,7 +10269,7 @@ fn runAcp(init: std.process.Init) !u8 {
                     acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
                     continue;
                 };
-                const model_options = acp_mod.configOptionsJson(fa, session.opts.model, session.mode) catch {
+                const model_options = acp_mod.configOptionsJson(fa, session.opts.model, session.opts.models, session.mode) catch {
                     acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
                     continue;
                 };
@@ -10321,7 +10396,7 @@ fn runAcp(init: std.process.Init) !u8 {
                     continue;
                 }
             }
-            const state = acp_mod.sessionStateJson(fa, session.opts.model, session.mode) catch {
+            const state = acp_mod.sessionStateJson(fa, session.opts.model, session.opts.models, session.mode) catch {
                 acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
                 continue;
             };
@@ -10346,7 +10421,7 @@ fn runAcp(init: std.process.Init) !u8 {
                 acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
                 continue;
             };
-            const state = acp_mod.sessionStateJson(fa, session.opts.model, session.mode) catch {
+            const state = acp_mod.sessionStateJson(fa, session.opts.model, session.opts.models, session.mode) catch {
                 acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
                 continue;
             };
@@ -10380,10 +10455,16 @@ fn runAcp(init: std.process.Init) !u8 {
                 continue;
             }
             if (std.mem.eql(u8, config_id, "model")) {
-                if (!std.mem.eql(u8, value.string, session.opts.model)) {
+                // The session keeps the configured slice, not the frame's
+                // copy, which is freed with the frame.
+                const listed: []const []const u8 = if (session.opts.models.len == 0) &.{session.opts.model} else session.opts.models;
+                const chosen = for (listed) |id| {
+                    if (std.mem.eql(u8, id, value.string)) break id;
+                } else {
                     acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
                     continue;
-                }
+                };
+                session.opts.model = chosen;
             } else if (std.mem.eql(u8, config_id, "mode")) {
                 if (!std.mem.eql(u8, value.string, "auto") and !std.mem.eql(u8, value.string, "code")) {
                     acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
@@ -10394,7 +10475,7 @@ fn runAcp(init: std.process.Init) !u8 {
                 acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
                 continue;
             }
-            const state = acp_mod.configOptionsResultJson(fa, session.opts.model, session.mode) catch {
+            const state = acp_mod.configOptionsResultJson(fa, session.opts.model, session.opts.models, session.mode) catch {
                 acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
                 continue;
             };
