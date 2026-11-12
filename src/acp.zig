@@ -511,6 +511,89 @@ test "JSON-RPC requests preserve IDs and reject invalid envelopes" {
     try std.testing.expectError(error.InvalidRequest, parseRequest(a, "{\"jsonrpc\":\"2.0\",\"method\":\"x\",\"params\":false}"));
 }
 
+// A client frame is the one input on this connection that arrives from a
+// process this run did not start, and `parseRequest` is the first thing that
+// reads it. The corpus covers the envelopes a client actually sends and the
+// ones a truncated or wrong one spells: a request, a notification, a null id,
+// an array of params, a version that is not 2.0, a method carrying a NUL, an
+// id or a params member of a type the envelope does not allow, a frame that is
+// not an object, and one that stops mid-token. `std.testing.fuzz` runs this
+// corpus on every `zig build test`, and through the fuzzer's mutations when
+// the test binary is built in fuzz mode.
+const request_corpus = [_][]const u8{
+    "",
+    "{",
+    "[]",
+    "null",
+    "\"initialize\"",
+    "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}",
+    "{\"jsonrpc\":\"2.0\",\"id\":\"abc\",\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"s\",\"prompt\":[]}}",
+    "{\"jsonrpc\":\"2.0\",\"method\":\"session/cancel\",\"params\":{\"sessionId\":\"s\"}}",
+    "{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"session/new\",\"params\":null}",
+    "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"x\",\"params\":[]}",
+    "{\"jsonrpc\":\"1.0\",\"id\":1,\"method\":\"x\"}",
+    "{\"jsonrpc\":\"2.0\",\"id\":true,\"method\":\"x\"}",
+    "{\"jsonrpc\":\"2.0\",\"method\":\"x\",\"params\":false}",
+    "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"has\\u0000nul\"}",
+    "{\"jsonrpc\":\"2.0\",\"id\":1}",
+    "{\"method\":\"x\"}",
+    "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"x\",\"params\":{\"a\":[1,{\"b\":[]}]}}",
+    "{\"jsonrpc\":\"2.0\",\"id\":-7,\"method\":\"session/set_mode\",\"params\":{\"modeId\":\"code\"}}",
+    "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"x\"}{\"jsonrpc\":\"2.0\"}",
+};
+
+test "a fuzzed client frame is a request only when its envelope says so" {
+    try std.testing.fuzz({}, fuzzRequest, .{ .corpus = &request_corpus });
+}
+
+fn fuzzRequest(_: void, smith: *std.testing.Smith) !void {
+    var scratch: [4 * 1024]u8 = undefined;
+    const frame: []const u8 = if (smith.in) |seed| seed else scratch[0..smith.slice(&scratch)];
+
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+
+    const parsed = parseRequest(arena, frame) catch |err| switch (err) {
+        // Both are a frame this run declines to answer, and a crash is what
+        // the fuzzer is here to see: an out-of-memory is the arena failing,
+        // which is not a property of the frame.
+        error.InvalidRequest, error.SyntaxError, error.UnexpectedEndOfInput, error.FrameTooDeep => return,
+        else => return err,
+    };
+
+    // A frame the parser accepts is one object whose version, method, id and
+    // params are exactly the members it read, so a second reading of the same
+    // bytes has to name the same request. The two readings share no scanner:
+    // `parseRequest` walks the document once for depth and once to build the
+    // value, and this walks the object the second build returned.
+    const again = try std.json.parseFromSliceLeaky(std.json.Value, arena, frame, .{});
+    const object = switch (again) {
+        .object => |o| o,
+        else => return error.TestUnexpectedResult,
+    };
+    const version = object.get("jsonrpc") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(version == .string and std.mem.eql(u8, version.string, "2.0"));
+    const method = object.get("method") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(method == .string and std.mem.indexOfScalar(u8, method.string, 0) == null);
+    try std.testing.expectEqualStrings(method.string, parsed.method);
+    if (object.get("id")) |id| switch (id) {
+        .string, .integer, .null => try std.testing.expect(parsed.id != null),
+        else => return error.TestUnexpectedResult,
+    } else try std.testing.expect(parsed.id == null);
+    if (object.get("params")) |params| switch (params) {
+        .object, .array, .null => try std.testing.expect(parsed.params != null),
+        else => return error.TestUnexpectedResult,
+    } else try std.testing.expect(parsed.params == null);
+
+    // The same bytes read twice name the same request: the parser holds no
+    // state across calls, and a frame it accepted once is one it accepts again.
+    const twice = try parseRequest(arena, frame);
+    try std.testing.expectEqualStrings(parsed.method, twice.method);
+    try std.testing.expectEqual(parsed.id == null, twice.id == null);
+    try std.testing.expectEqual(parsed.params == null, twice.params == null);
+}
+
 test "ACP session accepts stdio MCP servers and rejects invalid input" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
