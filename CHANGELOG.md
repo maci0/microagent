@@ -32,6 +32,12 @@ release, and `microagent update` moves you to it.
   and lists both `auto` and `code`, matching the modes a session advertises
   and the values `session/set_mode` accepts.
 
+- A `409` is no longer retried. The run and `microagent update` both retried
+  it alongside `408`, `425`, `429` and the `5xx`s, but a `409` is how a
+  provider says this turn is already being worked on, so the retry sent a
+  second billable completion of the same request. It now fails at once, the
+  way `401` and `404` do.
+
 ## [0.22.2] - 2026-11-06
 
 ### Fixed
