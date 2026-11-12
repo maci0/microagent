@@ -1291,6 +1291,15 @@ test "headers is an inline table of provider request headers" {
     try std.testing.expectEqualStrings("X-Team", set.headers[1][0]);
     try std.testing.expectEqualStrings("a b", set.headers[1][1]);
 
+    // Tab is the one control byte a header value may carry: it does not end the
+    // line, and the rule above refuses every other one. A value written with it
+    // comes back with the tab in it, so a change that drops the exception
+    // refuses a value the file was allowed to set.
+    const tabbed = parse(arena, "headers = { X = \"a\\tb\" }\n");
+    try std.testing.expect(tabbed.problem == null);
+    try std.testing.expectEqual(@as(usize, 1), tabbed.headers.len);
+    try std.testing.expectEqualStrings("a\tb", tabbed.headers[0][1]);
+
     const multi = parse(arena, "headers = {\n  A = \"1\",\n  B = \"2\",\n}\nmodel = \"m\"\n");
     try std.testing.expectEqual(@as(?Problem, null), multi.problem);
     try std.testing.expectEqual(@as(usize, 2), multi.headers.len);
@@ -1306,6 +1315,11 @@ test "headers is an inline table of provider request headers" {
         "headers = { \"x:y\" = \"v\" }\n",
         "headers = { X = \"a\\nb\" }\n",
         "headers = { X = \"a\\rb\" }\n",
+        // DEL is the control byte above 0x20, and a backspace is a control byte
+        // other than the two line endings. Both end a header line the same way,
+        // and neither is the tab the rule exempts, so each refuses the table.
+        "headers = { X = \"a\\u007fb\" }\n",
+        "headers = { X = \"a\\bb\" }\n",
         "headers = { Authorization = \"Bearer x\" }\n",
         "headers = { content-type = \"text/plain\" }\n",
         "headers = { USER-AGENT = \"x\" }\n",
