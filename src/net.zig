@@ -948,18 +948,35 @@ pub fn retryBackoffMs(attempt: u32, max_wait_ms: u64) u64 {
     return @min(retry_backoff_base_ms *| (@as(u64, 1) << shift), max_wait_ms);
 }
 
-/// Statuses worth another attempt: the server is busy, not the request wrong.
+/// Statuses worth another attempt of a request the server did not accept.
 /// 404 is not: it names something that is not published, and asking again for
 /// the same name changes nothing. 409 is not either: that is how the
 /// OpenAI-shaped providers spell "this turn is already being worked on", and
 /// re-POSTing it is a second billable completion of the same turn. A GET that
 /// draws one is no more worth repeating than the POST that does, so the status
 /// is refused for both rather than split per method.
+///
+/// 408, 425 and 429 are in the set because a GET can be asked again for free.
+/// A POST the provider already parsed is not one of those: by the time the
+/// status is in hand the body is on the wire, and each of the three means the
+/// provider received it. `retryablePostStatus` is the half of this set that is
+/// safe to send a second time.
 pub fn retryableStatus(status: std.http.Status) bool {
     return switch (@backingInt(status)) {
         408, 425, 429 => true,
-        else => @backingInt(status) >= 500,
+        else => retryablePostStatus(status),
     };
+}
+
+/// Statuses worth sending a POST again. A 5xx is the server failing before it
+/// produced anything, which is the same shape as an error frame that arrives
+/// with nothing behind it: nothing was generated, so the turn is asked again.
+/// 408, 425 and 429 are not, because each one is an answer to a request the
+/// provider has already accepted, and the completion behind it may already have
+/// been generated and billed. Re-sending that body is a second bill, so the
+/// turn is given up the way a lost response head is.
+pub fn retryablePostStatus(status: std.http.Status) bool {
+    return @backingInt(status) >= 500;
 }
 
 /// The longest `Retry-After` the agent run will sit out. A provider asking for
@@ -1256,7 +1273,10 @@ test "a key is only sent over a scheme that keeps it off the wire" {
 // The statuses and the transport errors decide whether a turn is asked again,
 // and a set that grows by accident retries a request the server has already
 // answered and refuses. 404 is the one exclusion, and it is pinned here
-// because it is deliberate rather than an oversight.
+// because it is deliberate rather than an oversight. 408, 425 and 429 are the
+// other one: they are worth repeating for a GET, and they are exactly the
+// statuses a POST must not be sent again on, because each is an answer to a
+// body the provider has already accepted.
 test "only a busy or a broken server is asked again" {
     for ([_]std.http.Status{ .request_timeout, .too_early, .too_many_requests, .internal_server_error, .bad_gateway, .service_unavailable, .gateway_timeout }) |status| {
         std.testing.expect(retryableStatus(status)) catch |err| {
@@ -1276,6 +1296,21 @@ test "only a busy or a broken server is asked again" {
     try std.testing.expect(retryableStatus(@fromBackingInt(@intCast(599))));
     try std.testing.expect(retryableStatus(@fromBackingInt(@intCast(600))));
     try std.testing.expect(!retryableStatus(@fromBackingInt(@intCast(499))));
+
+    // A POST is the half of the set that bills. The 5xx range is worth sending
+    // again, because the server failed before it produced anything; the three
+    // statuses above it are not, because each one means the provider already
+    // has the body. The ends of the range are named here too, so a predicate
+    // that drifts back to the GET's set fails here rather than in the run.
+    for ([_]std.http.Status{ .request_timeout, .too_early, .too_many_requests }) |status| {
+        try std.testing.expect(retryableStatus(status));
+        try std.testing.expect(!retryablePostStatus(status));
+    }
+    try std.testing.expect(retryablePostStatus(@fromBackingInt(@intCast(500))));
+    try std.testing.expect(retryablePostStatus(@fromBackingInt(@intCast(599))));
+    try std.testing.expect(retryablePostStatus(@fromBackingInt(@intCast(600))));
+    try std.testing.expect(!retryablePostStatus(@fromBackingInt(@intCast(499))));
+    try std.testing.expect(!retryablePostStatus(.conflict));
 }
 
 // The schedule the two network paths share. Saturating at both ends, because

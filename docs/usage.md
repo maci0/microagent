@@ -1010,11 +1010,11 @@ changing the variable.
 
 ## Failure handling
 
-- **Transient failures retry.** A 408, 425, 429, any 5xx, or a connection that dies before the
-  request reached the provider is retried twice, with 1 s and 2 s of backoff (or the provider's
-  `Retry-After`, capped at 120 s), before the run exits non-zero. A 409 is not: that is how a
-  provider spells that this turn is already being worked on, and sending it again would be a second
-  billable completion of the same turn. Any other rejection (401, 404) fails
+- **Transient failures retry.** Any 5xx, or a connection that dies before the
+  request reached the provider, is retried twice, with 1 s and 2 s of backoff (or the provider's
+  `Retry-After`, capped at 120 s), before the run exits non-zero. A 408, 425, 429 or 409 is not:
+  each of those is the provider answering a request it has already accepted, and sending the turn
+  again would be a second billable completion of the same turn. Any other rejection (401, 404) fails
   at once. A 400 does too, with one exception: when reasoning effort or temperature is set,
   the request is sent once more without the optional reasoning and temperature fields, since some
   providers refuse those fields rather than the request.

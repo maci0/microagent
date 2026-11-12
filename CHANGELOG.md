@@ -28,6 +28,14 @@ release, and `microagent update` moves you to it.
 
 ### Fixed
 
+- A turn the provider has already accepted is no longer sent again. A 408, 425
+  or 429 was retried the way a 5xx is, but each of those is an answer to a
+  request the provider has parsed, so the retry was a second billable
+  completion of the same turn. The turn now ends there, the way a lost response
+  head does. A 5xx is still retried, because that is the server failing before
+  it produced anything, and `microagent update` still retries all three,
+  because a release download is a GET.
+
 - A write this program reports as done now survives an unclean stop with its
   name intact, not only its bytes. The session log, an installed binary, the
   first-run config template, and a file `write`, `edit` or `multi_edit` saved

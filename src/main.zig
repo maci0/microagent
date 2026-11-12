@@ -4156,7 +4156,14 @@ fn streamChatOnce(
                 net.note(io, arena, "microagent: {s} refused the optional request fields (HTTP 400); retrying once without them\n", .{shown_url});
                 continue;
             }
-            if (net.retryableStatus(response.head.status) and attempt < max_attempts) {
+            // `retryablePostStatus` rather than `retryableStatus`: the body is
+            // already on the wire by the time a status is in hand, and a 408,
+            // 425 or 429 is the provider answering a request it has accepted.
+            // Sending it again is a second billable completion of the same
+            // turn, so those end the turn the way a lost response head does.
+            // A 5xx is the server failing before it produced anything, which is
+            // the same shape as an error frame with nothing behind it.
+            if (net.retryablePostStatus(response.head.status) and attempt < max_attempts) {
                 // A rate limit carries the wait the provider wants, and its own
                 // backoff is the wrong one to spend: this run's schedule is 1 s
                 // and 2 s, the two waits between three attempts, and a provider
@@ -7170,19 +7177,29 @@ test "a refused value is reported against where it came from, flag or variable" 
 }
 
 // The agent run's half of the same set `net` holds: this loop decides whether a
-// turn is asked again, so a name added to or dropped from `retryableStatus` is a
-// change to what a billable request is worth repeating, and three examples of
-// each side is not enough to see it happen. `net` names the whole set, and this
-// test is the one that says the run agrees with it rather than with a sample.
+// turn is asked again, so a name added to or dropped from `retryablePostStatus`
+// is a change to what a billable request is worth repeating, and three examples
+// of each side is not enough to see it happen. `net` names the whole set, and
+// this test is the one that says the run agrees with it rather than with a
+// sample. The 408, 425 and 429 that `retryableStatus` still retries are a GET's
+// answer, not this one's: the body is on the wire by the time the status
+// arrives, and each of the three is the provider answering a request it has
+// already accepted.
 test "only weather-shaped statuses are retried, and a 409 is not one" {
-    for ([_]std.http.Status{ .request_timeout, .too_early, .too_many_requests, .internal_server_error, .bad_gateway, .service_unavailable, .gateway_timeout }) |status| {
-        std.testing.expect(net.retryableStatus(status)) catch |err| {
+    for ([_]std.http.Status{ .internal_server_error, .bad_gateway, .service_unavailable, .gateway_timeout }) |status| {
+        std.testing.expect(net.retryablePostStatus(status)) catch |err| {
             std.debug.print("the run would not retry {d}\n", .{@backingInt(status)});
             return err;
         };
     }
+    for ([_]std.http.Status{ .request_timeout, .too_early, .too_many_requests }) |status| {
+        std.testing.expect(!net.retryablePostStatus(status)) catch |err| {
+            std.debug.print("the run would re-send a turn the provider already accepted ({d})\n", .{@backingInt(status)});
+            return err;
+        };
+    }
     for ([_]std.http.Status{ .ok, .created, .bad_request, .unauthorized, .payment_required, .forbidden, .not_found, .conflict, .method_not_allowed }) |status| {
-        std.testing.expect(!net.retryableStatus(status)) catch |err| {
+        std.testing.expect(!net.retryablePostStatus(status)) catch |err| {
             std.debug.print("the run would retry {d}\n", .{@backingInt(status)});
             return err;
         };
