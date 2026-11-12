@@ -38,6 +38,11 @@ release, and `microagent update` moves you to it.
   came back missing. The parent directory is now synced after the file, and a
   directory that cannot be synced is named rather than reported as success.
 
+- An HTTP MCP server no longer keeps one copy of its request headers and one
+  copy of each response body for the rest of the run. Both were grown from the
+  run's arena, which never hands memory back, so a long run talking to a remote
+  server kept every request's worth until it ended.
+
 - ACP's `mode` session config option now reports `auto` as its current value
   and lists both `auto` and `code`, matching the modes a session advertises
   and the values `session/set_mode` accepts.

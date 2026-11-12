@@ -558,27 +558,31 @@ pub const Server = struct {
         try writeFrame(jb.writer(), id, method, params_json);
         const body = jb.items();
 
+        // The header list dies with the request. `run_arena` is the run's
+        // allocator and an arena, so a list grown there on every call keeps
+        // its storage until the run ends: one request's headers a request,
+        // for every server this run talks to.
         var extra: std.ArrayList(std.http.Header) = .empty;
-        defer extra.deinit(self.run_arena);
-        try extra.append(self.run_arena, .{ .name = "content-type", .value = "application/json" });
-        try extra.append(self.run_arena, .{ .name = "accept", .value = "application/json, text/event-stream" });
+        defer extra.deinit(scratch);
+        try extra.append(scratch, .{ .name = "content-type", .value = "application/json" });
+        try extra.append(scratch, .{ .name = "accept", .value = "application/json, text/event-stream" });
         if (http.negotiated_version) |selected| {
-            try extra.append(self.run_arena, .{ .name = "mcp-protocol-version", .value = selected });
+            try extra.append(scratch, .{ .name = "mcp-protocol-version", .value = selected });
         }
         if (http.session_id.len != 0) {
-            try extra.append(self.run_arena, .{ .name = "mcp-session-id", .value = http.session_id });
+            try extra.append(scratch, .{ .name = "mcp-session-id", .value = http.session_id });
         }
         // Not a `privileged` header: this client never writes those. Nothing
         // is redirected, so the key goes to the one host the entry names.
         if (http.key_value.len != 0) {
-            try extra.append(self.run_arena, .{ .name = http.key_header, .value = http.key_value });
+            try extra.append(scratch, .{ .name = http.key_header, .value = http.key_value });
         }
         // Directly configured headers. The key pair above is already in this
         // list when the caller described it that way; a client that sends an
         // Authorization header through `headers` must not have it sent twice.
         for (http.headers) |header| {
             if (http.key_value.len != 0 and std.ascii.eqlIgnoreCase(header[0], http.key_header)) continue;
-            try extra.append(self.run_arena, .{ .name = header[0], .value = header[1] });
+            try extra.append(scratch, .{ .name = header[0], .value = header[1] });
         }
 
         var req = try http.client.request(.POST, http.uri, .{
@@ -656,8 +660,14 @@ pub const Server = struct {
         id: u64,
         stopped_early: *bool,
     ) !std.json.Value {
+        // Both buffers are grown from `scratch`, which for a remote call is
+        // the run's arena. An arena never hands back what it grew, so a list
+        // that is not freed keeps its storage until the run ends: one
+        // response body a request, for every server this run talks to.
         var pending: std.ArrayList(u8) = .empty;
+        defer pending.deinit(scratch);
         var event: std.ArrayList(u8) = .empty;
+        defer event.deinit(scratch);
         var data_seen = false;
         var scanned: usize = 0;
         var total: usize = 0;
