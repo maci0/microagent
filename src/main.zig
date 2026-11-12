@@ -9687,6 +9687,9 @@ fn dispatchMain(init: std.process.Init) !u8 {
 const AcpSession = struct {
     id: []const u8,
     cwd: []const u8,
+    /// `auto` or `code`. Both run the same tools; the field is what
+    /// `session/set_mode` and `session/set_config_option` report back.
+    mode: []const u8 = "auto",
     /// Every root the client declared. Kept for a future permission check and
     /// for reporting; `cwd` remains the base relative paths resolve against.
     roots: []const []const u8,
@@ -9768,10 +9771,14 @@ fn acpNotify(conn: *AcpConn, method: []const u8, params_json: []const u8) !void 
     try acpWrite(conn, aw.written());
 }
 
-fn acpResult(conn: *AcpConn, id: std.json.Value, result_json: []const u8) !void {
+fn acpResult(conn: *AcpConn, id: ?std.json.Value, result_json: []const u8) !void {
+    // A missing id is a notification. JSON-RPC forbids a response, and
+    // unwrapping the id would crash the connection on a method that is
+    // otherwise handled. An explicit JSON null stays a request.
+    const request_id = id orelse return;
     var aw: std.Io.Writer.Allocating = .init(conn.gpa);
     defer aw.deinit();
-    try acp_mod.writeResult(&aw.writer, id, result_json);
+    try acp_mod.writeResult(&aw.writer, request_id, result_json);
     try acpWrite(conn, aw.written());
 }
 
@@ -10120,13 +10127,13 @@ fn runAcp(init: std.process.Init) !u8 {
                 acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
                 continue;
             };
-            acpResult(&conn, request.id.?, result) catch {};
+            acpResult(&conn, request.id, result) catch {};
             initialized = true;
             continue;
         }
 
         if (std.mem.eql(u8, request.method, "authenticate")) {
-            acpResult(&conn, request.id.?, "{}") catch {};
+            acpResult(&conn, request.id, "{}") catch {};
             continue;
         }
 
@@ -10158,7 +10165,11 @@ fn runAcp(init: std.process.Init) !u8 {
                     acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
                     continue;
                 };
-                aw.writer.writeAll(acp_mod.modes_json) catch {
+                const modes = acp_mod.modesJson(fa, session.mode) catch {
+                    acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
+                    continue;
+                };
+                aw.writer.writeAll(modes) catch {
                     acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
                     continue;
                 };
@@ -10166,7 +10177,7 @@ fn runAcp(init: std.process.Init) !u8 {
                     acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
                     continue;
                 };
-                const model_options = acp_mod.configOptionsJson(fa, session.opts.model) catch {
+                const model_options = acp_mod.configOptionsJson(fa, session.opts.model, session.mode) catch {
                     acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
                     continue;
                 };
@@ -10178,7 +10189,7 @@ fn runAcp(init: std.process.Init) !u8 {
                     acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
                     continue;
                 };
-                acpResult(&conn, request.id.?, aw.written()) catch {};
+                acpResult(&conn, request.id, aw.written()) catch {};
             } else |err| {
                 acpErrorFor(&conn, request, err);
             }
@@ -10206,7 +10217,7 @@ fn runAcp(init: std.process.Init) !u8 {
                 acpErrorFor(&conn, request, err);
                 continue;
             };
-            acpResult(&conn, request.id.?, stop) catch {};
+            acpResult(&conn, request.id, stop) catch {};
             continue;
         }
 
@@ -10225,7 +10236,7 @@ fn runAcp(init: std.process.Init) !u8 {
                 session_mod.close(io, &session.log);
                 session.msgs.deinit(gpa);
             }
-            acpResult(&conn, request.id.?, "{}") catch {};
+            acpResult(&conn, request.id, "{}") catch {};
             continue;
         }
 
@@ -10248,7 +10259,7 @@ fn runAcp(init: std.process.Init) !u8 {
                 acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
                 continue;
             };
-            acpResult(&conn, request.id.?, listing) catch {};
+            acpResult(&conn, request.id, listing) catch {};
             continue;
         }
 
@@ -10267,7 +10278,7 @@ fn runAcp(init: std.process.Init) !u8 {
                 session_mod.close(io, &session.log);
                 session.msgs.deinit(gpa);
             }
-            acpResult(&conn, request.id.?, "{}") catch {};
+            acpResult(&conn, request.id, "{}") catch {};
             continue;
         }
 
@@ -10293,11 +10304,11 @@ fn runAcp(init: std.process.Init) !u8 {
                     continue;
                 }
             }
-            const state = acp_mod.sessionStateJson(fa, session.opts.model) catch {
+            const state = acp_mod.sessionStateJson(fa, session.opts.model, session.mode) catch {
                 acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
                 continue;
             };
-            acpResult(&conn, request.id.?, state) catch {};
+            acpResult(&conn, request.id, state) catch {};
             continue;
         }
 
@@ -10318,11 +10329,11 @@ fn runAcp(init: std.process.Init) !u8 {
                 acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
                 continue;
             };
-            const state = acp_mod.sessionStateJson(fa, session.opts.model) catch {
+            const state = acp_mod.sessionStateJson(fa, session.opts.model, session.mode) catch {
                 acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
                 continue;
             };
-            acpResult(&conn, request.id.?, state) catch {};
+            acpResult(&conn, request.id, state) catch {};
             continue;
         }
 
@@ -10361,21 +10372,30 @@ fn runAcp(init: std.process.Init) !u8 {
                     acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
                     continue;
                 }
+                session.mode = if (std.mem.eql(u8, value.string, "code")) "code" else "auto";
             } else {
                 acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
                 continue;
             }
-            const state = acp_mod.configOptionsResultJson(fa, session.opts.model) catch {
+            const state = acp_mod.configOptionsResultJson(fa, session.opts.model, session.mode) catch {
                 acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
                 continue;
             };
-            acpResult(&conn, request.id.?, state) catch {};
+            acpResult(&conn, request.id, state) catch {};
             continue;
         }
 
         if (std.mem.eql(u8, request.method, "session/set_mode")) {
             const params = request.params orelse {
                 acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
+                continue;
+            };
+            const sid = acp_mod.stringField(params, "sessionId") catch {
+                acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
+                continue;
+            };
+            const session = conn.sessions.get(sid) orelse {
+                acpUnknownSession(&conn, request.id, sid);
                 continue;
             };
             const mode = acp_mod.stringField(params, "modeId") catch {
@@ -10386,7 +10406,8 @@ fn runAcp(init: std.process.Init) !u8 {
                 acpError(&conn, request.id, acp_mod.ErrorCode.invalid_params, "Invalid params");
                 continue;
             }
-            acpResult(&conn, request.id.?, "{}") catch {};
+            session.mode = if (std.mem.eql(u8, mode, "code")) "code" else "auto";
+            acpResult(&conn, request.id, "{}") catch {};
             continue;
         }
 
