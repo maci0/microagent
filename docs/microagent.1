@@ -356,7 +356,9 @@ already documents itself.
 .I ~/.microagent/sessions
 Per-response JSONL session log, or
 .BR MICROAGENT_SESSION_DIR .
-An empty directory writes no log.
+An empty
+.B MICROAGENT_SESSION_DIR
+writes no log; an empty directory is created if it is missing and then written.
 .TP
 .I ~/.microagent/skills
 Skill directories, each holding a

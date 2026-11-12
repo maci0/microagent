@@ -113,13 +113,14 @@ make check-changelog-history # the 0.y bump rule over every released section, ol
 ### The gate
 
 `make check` runs, in order: `preflight`, `zig-version`,
-`check-unreleased`, `check-changelog-history`, `check-readme`, `check-help`, `check-man`, `fmt-check`, `lint`
-(`lint-versions`, `lint-lock`, `check-sbom`, shellcheck over the tracked scripts
+`check-unreleased`, `check-changelog-history`, `check-readme`, `check-man`, `check-help`, `fmt-check`, `lint`
+(`lint-versions`, `lint-versions-selftest`, `lint-lock`, `check-sbom`, shellcheck over the tracked scripts
 and over the `run:` steps in the workflows, with a shellcheck directive that
 silences nothing refused in both, `ruff check`, `ruff format --check`,
 yamllint, the Markdown check and `check-refs`), `zig build test`,
-`zig build test-sanitize`, and `check-binary` (a `ReleaseSmall` build whose
-binary it then starts). These are the checks
+`zig build test-sanitize`, `check-binary` (a `ReleaseSmall` build whose
+binary it then starts) and `check-asset-run` (the published asset for this
+host, cross-built and started). These are the checks
 [.github/workflows/ci.yml](.github/workflows/ci.yml) runs in its test and lint
 jobs, on the same Zig version, less `preflight` and `zig-version`, which ask a
 laptop what is missing and what a runner's setup actions already installed, and
