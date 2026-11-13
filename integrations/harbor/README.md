@@ -16,16 +16,19 @@ make musl
 
 The [Makefile](../../Makefile) runs `zig build -Dtarget=<host arch>-linux-musl
 -Doptimize=ReleaseSmall` and copies the binary to
-`microagent-<host arch>-linux-musl` next to the adapter, the name the adapter's
-`binary_path()` looks for. The architecture is the host's own, read with
-`uname -m`: Harbor runs the task container on the host's architecture, so
-Apple silicon and arm64 Linux hosts need `aarch64`, and an `x86_64` binary does
-not execute in their containers. Pick another with `make musl
-MUSL_ARCH=<arch>`, or pass a binary of any architecture through
-`MICROAGENT_BINARY`. Neither file is committed.
+`microagent-<host arch>-linux-musl` next to the adapter, the name `binary_path()`
+looks for. The architecture is the host's own (`uname -m`, with `amd64` and
+`arm64` folded to `x86_64` and `aarch64`). Harbor runs the task container on
+that architecture, so an `x86_64` binary does not execute in an arm64
+container. Pick another with `make musl MUSL_ARCH=<arch>`, or pass any binary
+through `MICROAGENT_BINARY`. Neither file is committed.
 
-The binary is statically linked, about 0.9 MB, with no runtime dependencies:
-it runs in `python:slim`, bare `ubuntu` and distroless images alike.
+The binary is statically linked and links no libc (sizes by build mode are in
+[docs/benchmark.md](../../docs/benchmark.md#binary-size-and-source)). The
+adapter's setup runs `test`, `wc` and `chmod` through the image's shell. Inside
+the run, the `bash` tool needs `/bin/sh`, `search` needs `rg`, `ast` needs
+`ast-grep` and `git` needs `git`; a missing program fails only its own tool,
+with an install hint.
 
 ## Run
 
@@ -44,15 +47,34 @@ PYTHONPATH=$PWD/integrations/harbor ~/harbor-venv/bin/harbor run \
   --jobs-dir ~/harbor-jobs -n 2
 ```
 
-`aider/aider-polyglot`, `datacurve/deep-swe-1-1`, `terminal-bench@2.0`, `swebench-verified@1.0`, `swebenchpro@1.0`,
-and the rest of Harbor's registry work the same way; only the dataset name
-changes. The registry's newer datasets prefix their task ids with the dataset's namespace
-(`terminal-bench/<task>`, `datacurve/<task>`), and `-i <task>` alone matches none of them.
-`bench/harbor.sh tb4` and `bench/harbor.sh deepswe` run the fixed samples of the first two, against
-opencode as well; see [docs/benchmark.md](../../docs/benchmark.md#terminal-bench-40).
+`aider/aider-polyglot`, `datacurve/deep-swe-1-1`, `terminal-bench@2.0` and
+`swebench-verified@1.0` work the same way; only the dataset name changes.
+`swebenchpro@1.0` is in Harbor's registry and is not a `bench/harbor.sh` target.
+Newer datasets prefix task ids (`terminal-bench/<task>`, `datacurve/<task>`,
+`aider/<task>`), and `-i <task>` alone matches none of them. `bench/harbor.sh`
+runs the fixed samples (`tb4`, `polyglot`, `deepswe`, `tb2`, `swebench`),
+microagent then opencode; see
+[docs/benchmark.md](../../docs/benchmark.md#terminal-bench-40).
 
-DeepSWE tasks give the agent no network, so a run has to let the provider through with
-`--allow-agent-host <provider host>`; `bench/harbor.sh` does that from `MICROAGENT_BASE_URL`.
+DeepSWE tasks give the agent no network, so a run has to let the provider
+through with `--allow-agent-host <provider host>`. `bench/harbor.sh` does that
+from `MICROAGENT_BASE_URL` (OpenRouter unless `PROVIDER` or that variable says
+otherwise). The script's per-benchmark caps, which override the adapter
+defaults below when those variables are unset:
+
+| `bench/harbor.sh` | in-container cap | requested budget | timeout multiplier |
+| --- | --- | --- | --- |
+| `tb2` | 880 s | 790 s | none |
+| `tb4` | 3480 s | 3100 s | 0.125 (3600 s of the 8 h task limit) |
+| `polyglot` | 870 s | 500 s | 0.5 (of 1800 s) |
+| `deepswe` | 5000 s | 4600 s | none |
+| `swebench` | 2900 s | 2700 s | none |
+
+The adapter caps each requested budget at the in-container cap minus 360 s.
+At these defaults, the effective TB2 budget is 520 s and SWE-bench is 2540 s;
+the other requested budgets fit without reduction.
+
+A kimi arm exists and needs `PROVIDER=deepseek` or `PROVIDER=nvidia`.
 
 Harbor itself is pinned in [requirements.txt](requirements.txt), because the
 adapter subclasses its agent API, and a score is comparable only against the
@@ -69,12 +91,12 @@ command that regenerates the lock is in the comment at the top of
 | --- | --- |
 | `MICROAGENT_API_KEY` | provider key, passed to the container process only. It is required, and a host without it is told so before the container starts |
 | `MICROAGENT_BASE_URL` | OpenAI-compatible endpoint (default OpenRouter); https, or http on loopback, because the key goes to it in the clear, and a url the binary refuses stops the run here |
-| `MICROAGENT_CONFIG` | set by the adapter, not read from the host: the container gets a config that turns the four remote tool presets off, so a scored run has no web access beyond the provider |
+| `MICROAGENT_CONFIG` | set by the adapter, not read from the host: the container gets a config that turns the four remote tool presets off, disabling those remote tools; other network access depends on the task environment |
 | `MICROAGENT_BUDGET_SECONDS` | elapsed-time budget inside the container, read from the monotonic clock (default 600), capped at `MICROAGENT_AGENT_TIMEOUT_SEC` less 360 s |
-| `MICROAGENT_MAX_TURNS` | `--max-turns` passed to the binary (default 1200, above the binary's own 1000) |
+| `MICROAGENT_MAX_TURNS` | `--max-turns` passed to the binary (default 1200; the binary's own default is 1000) |
 | `MICROAGENT_REASONING_EFFORT` | `minimal`, `low`, `medium`, `high` or `none`; reasoning models otherwise spend the whole budget thinking. A level the binary does not have stops the run here |
 | `MICROAGENT_MAX_TOKENS` | generation ceiling passed to the binary (its own default when unset); a low account balance is answered with `402 ... you can only afford N`, and asking for less is the only lever |
-| `MICROAGENT_MAX_SPEND_TOKENS` | billed-token ceiling passed to the binary (no ceiling when unset), which warns on stderr once 80% of it is spent. The only ceiling here counted in what the provider bills, so it is the one that bounds a whole trial set rather than a single run |
+| `MICROAGENT_MAX_SPEND_TOKENS` | billed-token ceiling passed to the binary (no ceiling when unset), which warns on stderr once 80% of it is spent. Applies independently to each trial; it does not impose an aggregate sweep budget |
 | `MICROAGENT_STALL_TIMEOUT` | seconds the response socket may stay silent before the read fails, passed to the binary (its own 120 s default when unset). Raise it for a provider slow to a first token on a large prompt: NVIDIA NIM took over two minutes on one, and the run died of the default rather than of its own answer |
 | `MICROAGENT_CA_BUNDLE` | PEM file to upload as the container's trust store, else `SSL_CERT_FILE`, else the host's system store |
 | `MICROAGENT_AGENT_TIMEOUT_SEC` | hard cap on the in-container process (default 1500), and the ceiling the budget is derived from |
@@ -97,10 +119,10 @@ naming the variable:
   anything but loopback;
 - control characters inside `MICROAGENT_API_KEY` or `MICROAGENT_BASE_URL`.
 
-`MICROAGENT_MAX_TURNS` is passed as `--max-turns`, and the binary reads the
-same name itself, so either route ends at the same ceiling.
 Accepted numbers are forwarded as decimal digits, including when Python reads
-an underscore, a leading plus or non-ASCII digits in the host value.
+an underscore, a leading plus or non-ASCII digits in the host value. The
+adapter passes the host value as `--max-turns`; it does not export
+`MICROAGENT_MAX_TURNS` into the container.
 
 ### The budget cap
 
@@ -137,24 +159,21 @@ set, it probes the host's trust store at the usual distribution and Homebrew
 paths, and warns at setup when none of those holds a PEM. The container then
 keeps its own trust store; a bare image has none, so the first request dies as
 `TlsInitializationFailed` with nothing in the job log connecting it to the
-host.
+host. The host path is usually a symlink into `ca-certificates/extracted`,
+which `docker cp` would copy as a dangling link, so the adapter uploads the
+file it resolves to.
 
-## Two things the containers forced
-
-### CA store
-
-Bare images have no CA store, and microagent's TLS then fails before its first
-request with `TlsInitializationFailed`. The adapter uploads the host's CA bundle
-and passes `MICROAGENT_CA_BUNDLE`; the host path is usually a symlink into
-`ca-certificates/extracted`, which `docker cp` would copy as a dangling link, so
-the adapter resolves it first.
+## What the containers forced
 
 ### Reasoning
 
-Reasoning models burn the entire per-task timeout thinking. Measured on
-Terminal-Bench 2 `log-summary-date-ranges` with deepseek-v4-flash: with reasoning
-on, 12-minute gauntlet reviews timed out with zero files changed; with
-`MICROAGENT_REASONING_EFFORT=none`, the same work landed in minutes.
+Reasoning models burn the entire per-task timeout thinking. In the
+[gauntlet reviews](../../docs/benchmark.md#usefulness), deepseek-v4-flash
+without `--reasoning-effort` and with `--reasoning-effort low` used its whole
+12 minutes and changed no files. With reasoning off, the
+[five-task Terminal-Bench 2 set](../../docs/benchmark.md#five-task-set) solved
+`log-summary-date-ranges` in 47 s. These are different tasks, so they are the
+reason the Run example sets `none`, not a controlled comparison.
 
 ## Results
 

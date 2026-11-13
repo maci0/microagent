@@ -4,20 +4,21 @@ This file measures the harness, not the model: how long the binary takes to star
 spends before the model says anything, and whether the loop it drives finishes a task. Model latency
 dominates wall time in any loop, so the harness numbers are the ones worth comparing.
 
-Machine: x86_64 Linux, Zig 0.16.0 (the streaming profile names its CPU, an AMD Ryzen 9 9950X). Each
-section names the script, test or tool its numbers came from; none was produced by hand. The startup
-and task numbers come from `bench/overhead.sh` and `bench/run.sh` as committed. Those scripts also run
-on macOS: elapsed time is read from `perl`'s `Time::HiRes` `CLOCK_MONOTONIC` wherever perl is
-installed, on both platforms, and only a Linux host without perl falls back to `/proc/uptime`. The two
-are not the same quantity — `/proc/uptime` counts time spent in suspend and `CLOCK_MONOTONIC` does
-not — so a number read from the fallback on a laptop that suspended mid-run includes the suspend,
-and it is not comparable with one read from `CLOCK_MONOTONIC`. A host with neither source reports
-no-clock rather than a wall-clock figure, and the run
-ceiling, process-group cleanup and JSON result records require Python 3. Cleanup uses the same
-standard-library runner on both
-platforms. An interrupted command receives the signal and has up to five seconds to flush its logs
-before group cleanup. Overhead rows whose prompt failed report the exit status instead of a timing.
-Task and gauntlet runs keep their logs in separate directories, printed on stderr at startup.
+Machine: x86_64 Linux (the streaming profile names its CPU, an AMD Ryzen 9 9950X). The memory,
+binary-size, startup and streaming figures were built with Zig 0.16.0, before the tree required Zig
+0.17.0 (`minimum_zig_version` in `build.zig.zon`, from v0.17.0); each is dated in its section and
+none is re-measured here. Each section names the script, test or tool its numbers came from. The
+startup table is `perf stat` and the memory figures are `bench/maxrss.py`; the one-request and task
+numbers come from `bench/overhead.sh` and `bench/run.sh` as committed. Those scripts also run on
+macOS: elapsed time is read from `perl`'s `Time::HiRes` `CLOCK_MONOTONIC` wherever perl is
+installed, and only a Linux host without perl falls back to `/proc/uptime`. `/proc/uptime` counts
+time spent in suspend and `CLOCK_MONOTONIC` does not, so a fallback reading on a laptop that
+suspended mid-run includes the suspend and is not comparable with a `CLOCK_MONOTONIC` reading. A host with neither source reports
+no-clock rather than a wall-clock figure. The run ceiling, process-group cleanup and JSON result
+records require Python 3. Cleanup uses the same standard-library runner on both platforms. An
+interrupted command receives the signal and has up to five seconds to flush its logs before group
+cleanup. Overhead rows whose prompt failed report the exit status instead of a timing. Task and
+gauntlet runs keep their logs in separate directories, printed on stderr at startup.
 
 ## Contents
 
@@ -103,9 +104,9 @@ remains the 2026-09-29 measurement; the README uses the updated `ReleaseSmall` m
 
 ### Binary size and source
 
-`ls -l zig-out/bin/microagent` after each build of this tree. Each build overwrites `zig-out`, so
-the four were built and measured one after another. `build.zig` sets `.strip = optimize != .Debug`:
-release builds are stripped, Debug keeps its symbols.
+`ls -l zig-out/bin/microagent` after each build of `73abb04` (2026-10-01, Zig 0.16.0). Each build
+overwrites `zig-out`, so the four were built and measured one after another. `build.zig` sets
+`.strip = optimize != .Debug`: release builds are stripped, Debug keeps its symbols.
 
 | build | binary |
 | --- | --- |
@@ -116,24 +117,8 @@ release builds are stripped, Debug keeps its symbols.
 
 The file size and the resident set are related and not the same: the release modes differ by up to 1.8x
 in file size and by 1.3x to 2.7x in memory, and a large file that is never touched costs no memory.
-No runtime, no package manager, no node_modules, no Python. Thirteen files under `src/`, 34 037 lines
-(`wc -l src/*.zig`):
-
-| file | role |
-| --- | --- |
-| `main.zig` | the agent loop and its wiring |
-| `stream.zig` | folding one provider stream frame into the response, under the response and tool-call ceilings |
-| `conversation.zig` | the system prompt, the message array a run appends to, and its compaction |
-| `tool.zig` | every tool the model can call, and the process runner they share |
-| `chat.zig` | the value types a turn is made of, and the JSON writer request bodies and usage lines go through |
-| `session.zig` | the per-run JSONL session log |
-| `config.zig` | the config file: reply-style levels, skills and MCP servers |
-| `mcp.zig` | MCP servers: tools reached over a child process's stdin and stdout |
-| `skill.zig` | skills: instruction documents the model may load while it works |
-| `update.zig` | `microagent update`, the checksum-verified self-update |
-| `net.zig` | what the machine-facing modules share: CA bundle, deadlines, output sinks, retry policy |
-| `sandbox.zig` | the configurable workspace sandbox: Landlock and path confinement |
-| `copy.zig` | a word-at-a-time `memcpy` for the ReleaseSmall build, whose compiler runtime copies a byte at a time |
+No runtime, package manager, node_modules or Python is bundled.
+[CONTRIBUTING.md](../CONTRIBUTING.md#repository-layout) describes the source layout.
 
 ### Startup
 
@@ -154,9 +139,10 @@ so its spread is given:
 This table replaces a wall-clock one (hyperfine means, 1.4-2.5 ms for microagent). Wall clock at
 this scale measures the machine more than the binary: the same `--version` on the same binary took
 442 us and 1.7 ms in one earlier session, and this table was taken with a load average above 40, when
-no wall-clock figure would have been fair to any row. The microagent instruction counts are this
-tree, re-measured with the same `perf` on the machine the header names; the ReleaseSmall build spends 1.3x the
-instructions of ReleaseFast before it prints a byte; both are under a millisecond of CPU.
+no wall-clock figure would have been fair to any row. The microagent instruction counts were
+re-measured at `73abb04` (2026-10-01, Zig 0.16.0) with the same `perf` on the machine the header
+names; the ReleaseSmall build spends 1.3x the instructions of ReleaseFast before it prints a byte;
+both are under a millisecond of CPU.
 
 A gauntlet loop starts an agent once per review, so startup is per-review overhead. On a 60 s review,
 a millisecond is 0.002% of the loop; claude, codex and grok (8-28 ms of CPU) stay under 0.05%, and
@@ -171,21 +157,23 @@ than every other cost in this file combined.
 
 ### Un-cacheable request bytes
 
-Prompt caching keys on the exact byte prefix of a request, so a turn's body must be the previous
-turn's body plus the new messages. That holds only while nothing constant sits *behind* the growing
-array.
+A provider's prompt cache can reuse only an unchanged byte prefix of a request, so a turn's body
+must be the previous turn's body plus the new messages. That holds only while nothing constant sits
+*behind* the growing array. Whether the provider reuses the prefix is its own choice; see
+[usage](usage.md#prompt-cache).
 
-The tool schemas used to be written after `messages`. They are 4,306 bytes for the nine built-in
-tools (the length of `tools_json` in `src/main.zig`), and behind the conversation they fell outside
-the cacheable prefix on every turn of every run, so the provider re-read them each time:
+The tool schemas used to be written after `messages`, so the whole of `tools_json` in
+`src/main.zig` sat behind the conversation, outside the cacheable prefix, on every turn of every
+run, and the provider re-read it each time. At `73abb04` (2026-10-01) that was 4,306 bytes for the
+nine built-in tools; today's size is in [Harness prompt overhead](#harness-prompt-overhead).
 
 | | un-cacheable tail per turn |
 | --- | --- |
-| tool schemas written after `messages` | 4,306 bytes (~1,077 tokens) |
+| tool schemas written after `messages` (`73abb04`) | 4,306 bytes (~1,077 tokens) |
 | written before, as now | **2 bytes** |
 
-Over a 100-turn review that was 0.43 MB of repeated prefill, invisible to every counter in this file,
-because `cached_tokens` counts what was reused and never what was not.
+Over a 100-turn review that was 0.43 MB of repeated prefill, invisible to every counter in this
+file, because `cached_tokens` counts what was reused and never what was not.
 
 JSON member order is not significant, so the constant fields go first and `messages` ends the body.
 Two tests hold it there: consecutive bodies must share a prefix of header plus all messages so far,
@@ -193,26 +181,31 @@ and the schema must appear before the conversation.
 
 ### Harness prompt overhead
 
-The first request of a run, in bytes. Every row is derived from the tree (the prompt and schema
-constants), so it can be re-derived without paying for a
-run:
+Static request components in bytes, derived from this tree on 2026-11-13
+(no provider call). The default model is `deepseek/deepseek-v4-flash` and `max_tokens` is
+65536:
 
 | | bytes |
 | --- | --- |
 | system prompt, as the `{"role":"system","content":"..."}` object | 3,784 |
-| the nine tool schemas (`tools_json` in `src/main.zig`) | 4,306 |
-| the rest of the body: model, stream flags, `max_tokens`, JSON scaffolding | 123 |
-| **everything a request carries besides the conversation** | **8,213** |
+| the nine tool schemas (`tools_json` in `src/main.zig`) | 5,422 |
+| the rest of the body: model, stream flags, `max_tokens`, JSON scaffolding, `]}` | 134 |
+| **static subtotal** | **9,340** |
 
-That 8,213 is the entire fixed cost of a request, and the schemas are just over half of it. A
-`--reasoning-effort` adds the `reasoning` member to the last row, nothing else. The block is re-sent
-every turn and cached from the second turn on, so it is a prefix cost, not a per-turn one (see
-[Un-cacheable request bytes](#un-cacheable-request-bytes) for the part that is not).
+The 9,340-byte subtotal includes all built-ins and the stock system prompt. It excludes skills,
+MCP tools, `AGENTS.md`, the prompt addendum and optional request fields. A real request also
+includes a working-directory sentence whose size depends on the path. A config written from
+the shipped template supplies a non-empty addendum. These additions precede the conversation
+and affect the cacheable prefix.
 
-With the remote presets on, the eight preset tools (`terse_tools` in `src/mcp.zig`, used only for a
-preset's own host) ship compact descriptions and schemas. What they add to the body is a
-configuration rather than a constant of the tree: each is offered under `mcp__<server>__<tool>`, so
-its entry's length depends on the server names the config gives the presets.
+`--reasoning-effort` adds a provider-specific field; `--temperature` adds its own field.
+
+A remote server on one of the four preset hosts is offered the eight compact descriptions and
+schemas in `terse_tools` (`src/mcp.zig`): a keyless one straight from that table, a keyed one in
+place of what its `tools/list` reports for the same names (`terseForServer`). When each connects is
+in [Tool set](usage.md#tool-set). What they add to the body depends on configuration: each
+tool is offered under `mcp__<server>__<tool>`, so its entry's length depends on the server names the
+config gives them.
 
 An earlier figure of 933 tokens, read from a run's usage line, covered six of the nine tools; the
 bytes above replace it because they can be re-derived from the tree. Competitor CLIs in one-shot mode
@@ -285,15 +278,15 @@ look at it before a run dies on a provider timeout, not blind.
 One consequence is arithmetic, not a measurement: **the uncached bytes a run spends do not depend on
 the limit.** Compaction fires each time the conversation grows by half the limit and discards a
 prompt of about the limit, so the product is the conversation's growth whatever the limit is. Raising
-the limit buys back no uncached prefill; it only buys a larger cached prompt every turn. Eight
-compactions over roughly two megabytes of growth is about 1.6 times that growth, the figure the
-formula gives. The limit is therefore not a latency knob: it sets how much evidence the model keeps
-per token spent.
+the limit buys back no uncached prefill; it only buys a larger cached prompt every turn, whose cost
+in time and tokens only a live provider shows. Eight compactions over roughly two megabytes of
+growth is about 1.6 times that growth, the figure the formula gives. What the limit sets is how much
+evidence the model keeps per token spent.
 
 On the 23-task Terminal-Bench 2 sample ([below](#terminal-bench-2-23-task-sample)) the limit never
 fires: 16.5 M input tokens is about 66 MB of prompt, which spread over the turns those tasks took is
 72-143 KB per request (a range because the benchmark does not keep the turn count), against a 400 KB
-limit. The fixed 8,213 bytes is 6-11% of one request. That prompt is evidence the agent
+limit. The fixed cost of a request then was 8,213 bytes, 6-11% of one request. That prompt is evidence the agent
 accumulated, not fixed harness cost and not compaction; the limit is inert at benchmark scale and
 binds only on long runs.
 
@@ -423,7 +416,7 @@ The point of the harness. Registered as a custom agent in `~/.gauntlet/agents.js
 gauntlet -a microagent -r code-review --max-reviews 1 --once -C <scratch repo> -t 8m -y
 ```
 
-Two independent runs on scratch repositories:
+Four runs on scratch repositories:
 
 | run | reviews | result | wall | tokens | diff |
 | --- | --- | --- | --- | --- | --- |
@@ -432,8 +425,9 @@ Two independent runs on scratch repositories:
 | `calc.py` (empty-iterable crash) | code-review | passed | 1m04s | 3,012 reported | +2/-0 |
 | `wc.py` (missing CLI flag) | code-review | passed | 47s | 2,151 reported | +7/-1 |
 
-Both diffs were the correct fix, and gauntlet read the token counts from microagent's stdout usage
-lines with no `usage.roots` session-store entry configured.
+The first two diffs were checked as the correct fix; the last two rows record gauntlet's verdict
+only. gauntlet read every token count from microagent's stdout usage lines with no `usage.roots`
+session-store entry configured.
 
 ### Usefulness
 
@@ -454,10 +448,13 @@ Scenario: one review at a time against a clone of this repository, 12 minutes pe
 | **microagent** | stealth/space-bunny-alpha | n/a | error-review | **pass** | 1 | ok | 334 s / 335 s |
 | **microagent** | stealth/space-bunny-alpha | n/a | cli-review | **pass** | 1 | ok | 372 s |
 | microagent | deepseek/deepseek-v4-flash | 480 s | error-review | pass | **0** | n/a | 594 s |
+| microagent | deepseek/deepseek-v4-flash | not recorded | not recorded | pass | 1 | ok | 330 s |
 | kimi 2.1.1 | CLI default | n/a | error-review | pass | 1 | not run | 185 s |
 | kimi 2.1.1 | CLI default | n/a | cli-review | pass | 2 | ok | 144 s |
 
 Bold rows are one configuration; the three timeout rows ran *before* the system prompt was hardened.
+The 330 s row is the last record in `bench/gauntlet-results.jsonl` (added in `52462fc`), which
+carries no review name, budget or reasoning setting.
 
 - **gauntlet's "Passed" does not mean a diff landed.** deepseek's budgeted run passed with an
   untouched tree: the budget cut the loop, the model answered with prose, gauntlet saw a completed
@@ -466,8 +463,9 @@ Bold rows are one configuration; the three timeout rows ran *before* the system 
 - **The diffs are real work.** microagent's cli-review run added per-flag error messages in
   `src/main.zig` (+53/-13); kimi's did the same kind of thing across `src/main.zig` and `README.md`
   (+54/-21). Both patched trees build and pass 9/9 tests.
-- **Model choice dominates.** The same harness on the same review timed out three times on two
-  deepseek configurations and passed on bunny-alpha.
+- **Model choice dominates.** The same harness on the same review timed out on both
+  unbudgeted deepseek configurations and passed on bunny-alpha. The later deepseek pass in 330 s is a
+  configuration the record does not name, so it does not settle the comparison either way.
 
 Three defects and one behaviour problem came out of these runs, most important first:
 
@@ -502,8 +500,8 @@ maintenance release on 3.0 that removed eight tasks and revised eighteen. It is 
 `terminal-bench/terminal-bench@4.0.0` in Harbor's registry, run through the same adapter as
 Terminal-Bench 2, and `bench/harbor.sh tb4` drives it. Every task has an 8 hour agent timeout, which
 the script scales to 3600 s for both harnesses (`--agent-timeout-multiplier 0.125`) so that a task
-neither harness can solve does not run for hours; the in-container cap is 3480 s and the working
-budget 3100 s.
+neither harness can solve does not run for hours. The in-container cap and working budget per
+dataset are in the [adapter README](../integrations/harbor/README.md#run).
 
 The sample is every third of the 66 tasks, sorted by name, fixed before any run:
 [bench/tb4-sample.txt](../bench/tb4-sample.txt), 22 tasks. Two of them, `fp8-rmsnorm-gemm` and
@@ -526,9 +524,9 @@ The quick one. [aider-polyglot](https://aider.chat/docs/leaderboards/) is 225 sm
 is the dataset `aider/aider-polyglot` in Harbor's registry, and `bench/harbor.sh polyglot` drives it
 through the same adapter. Where a Terminal-Bench 4.0 task can use a whole hour, a polyglot trial is
 minutes: one CPU, 4 GB, and an image that builds in about a minute. Every task allows 1800 s, which
-the script halves for both harnesses (`--agent-timeout-multiplier 0.5`); the in-container cap is 870 s
-and the working budget 500 s. Published aider results exist for the full set, which the other Harbor
-benchmarks here lack, but a sample is not the leaderboard: compare harnesses on the same sample.
+the script halves for both harnesses (`--agent-timeout-multiplier 0.5`). Published aider results
+exist for the full set, which the other Harbor benchmarks here lack, but a sample is not the
+leaderboard: compare harnesses on the same sample.
 
 The sample is every 11th of the 225 tasks, sorted by name, fixed before any run:
 [bench/polyglot-sample.txt](../bench/polyglot-sample.txt), 21 tasks (3 C++, 3 Go, 5 Java, 4
@@ -546,9 +544,9 @@ long-horizon engineering tasks written for the benchmark, across five languages 
 source repositories. Harbor's registry carries it as `datacurve/deep-swe-1-1`, 113 tasks, and
 `bench/harbor.sh deepswe` drives it. Each task gives the agent 5400 s and no network, so the script
 lets the provider's host through (`--allow-agent-host`, taken from `MICROAGENT_BASE_URL`, OpenRouter
-by default) and nothing else. The in-container cap is 5000 s and the working budget 4600 s. The
-verifier is separate from the agent's container and reports fail-to-pass and pass-to-pass counts
-beside the reward, which `integrations/harbor/summarize.py` reads as `reward`.
+by default) and nothing else. The verifier is separate from the agent's container and reports
+fail-to-pass and pass-to-pass counts beside the reward, which `integrations/harbor/summarize.py`
+reads as `reward`.
 
 The sample is every ninth of the 113 tasks, sorted by name, fixed before any run:
 [bench/deepswe-sample.txt](../bench/deepswe-sample.txt), 13 tasks. Task ids carry the prefix
@@ -672,8 +670,8 @@ ceiling at 150 turns and the budget at 2700 s (inside the task's own 3000 s agen
 | pylint-dev__pylint-4551 | 0.0 | 0.0 | 97 |
 | sympy__sympy-21379 | 0.0 | 0.0 | 75 |
 
-The default ceiling is now 100 (`max_turns_default` in `src/main.zig`), and the harbor adapter passes
-`MICROAGENT_MAX_TURNS` (150). The system prompt was rewritten to the order a bug fix needs: find the
+The default ceiling is now 1000 (`max_turns_default` in `src/main.zig`), and the harbor adapter passes
+`MICROAGENT_MAX_TURNS` (default 1200). The system prompt was rewritten to the order a bug fix needs: find the
 code and its tests, reproduce the failure, make the smallest change, re-run the test, check
 `git diff`. Deterministic tools behind that prompt: `search` (ripgrep), `ast` (ast-grep), `git`
 (status, diff, log, show, blame: fixed subcommands, capped output) and `read`/`edit`/`write`.
@@ -823,7 +821,7 @@ Pooled, microagent is 16/46 against 11/46, but only pass 1 is valid: pass 2 meas
 an adapter bug. A third pass is listed under [Not measured / open](#not-measured--open).
 
 Neither harness was tuned for the other's benchmark. opencode ships repo-aware tooling and a much
-larger prompt; microagent ships eight tools and a prompt of a few thousand bytes. That trade
+larger prompt; microagent ships nine built-in tools and a prompt of a few thousand bytes. That trade
 is visible in the token columns.
 
 ## Harness faults the benchmarks found
@@ -895,17 +893,19 @@ exception column.
 ## Reproducing
 
 ```sh
-zig build -Doptimize=ReleaseFast && make install
-export MICROAGENT_API_KEY=...      # or leave unset to read ~/.secrets/openrouter
+make OPT=ReleaseFast install      # needs exactly the Zig build.zig.zon names
+export MICROAGENT_API_KEY=...
+export MICROAGENT_BASE_URL=https://openrouter.ai/api/v1
 export MICROAGENT_MODEL=deepseek/deepseek-v4-flash
 sh bench/run.sh microagent kimi opencode
 sh bench/overhead.sh
-sh bench/gauntlet.sh microagent kimi
+GAUNTLET_TIMEOUT=12m GAUNTLET_VERIFY='zig build test' sh bench/gauntlet.sh microagent kimi
 ```
 
 `make bench`, `make overhead` and `make gauntlet` wrap those three, each building the binary and
-putting it on PATH first. `make instructions` checks retired instructions against
+putting it on PATH first. `make instructions CHECK=--check` checks retired instructions against
 `bench/instructions.baseline`. Harbor runs are driven by `bench/harbor.sh`; see
 [integrations/harbor/README.md](../integrations/harbor/README.md).
 
-Raw rows land in `bench/results.jsonl`.
+`make bench` appends raw rows to `bench/results.jsonl` and `make gauntlet` to
+`bench/gauntlet-results.jsonl`; `make overhead` prints a table and records nothing.

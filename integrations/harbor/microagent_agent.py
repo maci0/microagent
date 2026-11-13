@@ -68,9 +68,9 @@ HOST_CA_CANDIDATES = (
     "/usr/local/etc/ca-certificates/cert.pem",
 )
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
-# The turn ceiling, above the binary's own 100. Spelled once because setup
-# checks it and run passes it, and a default one of the two no longer knows
-# about is a run that is checked for one ceiling and given another.
+# The turn ceiling, above the binary's `max_turns_default` (a src/main.zig test
+# guards that). Spelled once: setup checks it and run passes it, so a default one
+# of the two missed is a run checked for one ceiling and given another.
 DEFAULT_MAX_TURNS = "1200"
 # Keep the agent's own budget under harbor's per-task agent timeout, so
 # microagent stops deliberately instead of being killed mid-turn.
@@ -219,8 +219,8 @@ def spend_ceiling() -> str | None:
     `--budget` both bound a run, but they bound it in the model's favour: a
     model that answers slowly and briefly can stay inside either one for hours
     of provider time, and a trial set is many such runs against one account.
-    This is the only ceiling here counted in what the provider bills, so it is
-    the one that stops a sweep rather than a single run."""
+    This is the only ceiling here counted in what the provider bills. Each
+    trial gets it separately; a sweep's total is not capped."""
     return optional_ceiling("MICROAGENT_MAX_SPEND_TOKENS")
 
 

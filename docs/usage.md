@@ -5,10 +5,11 @@ Everything a run reads and everything it writes. The [README](../README.md) is t
 - [Quick start](#quick-start)
 - [Flags and environment](#flags-and-environment)
 - [How values resolve](#how-values-resolve)
-- [Providers and keys](#providers-and-keys)
+- [Providers and keys](#providers-and-keys): [OpenCode Zen and Go](#opencode-zen-and-go)
+- [What leaves the machine](#what-leaves-the-machine)
 - [Prompt cache](#prompt-cache)
-- [Config file](#config-file): [provider settings](#provider-settings), [system prompt addendum](#system-prompt-addendum), [repository instructions](#repository-instructions), [skills](#skills), [MCP servers](#mcp-servers), [tool set](#tool-set), [command filter](#command-filter)
-- [Tools](#tools)
+- [Config file](#config-file): [provider settings](#provider-settings), [repository instructions](#repository-instructions), [system prompt addendum](#system-prompt-addendum), [skills](#skills), [MCP servers](#mcp-servers), [tool set](#tool-set), [command filter](#command-filter), [sandbox](#sandbox)
+- [Tools](#tools): [tool environment](#tool-environment)
 - [Output](#output): [stdout](#stdout), [exit status](#exit-status), [session log](#session-log), [what survives](#what-survives-and-how-to-get-it-back)
 - [Failure handling](#failure-handling)
 - [Driving it from gauntlet](#driving-it-from-gauntlet)
@@ -257,11 +258,11 @@ A flag wins over its environment variable, and the environment wins over the con
 value is checked where it is set, so a mistyped level, a ceiling of zero or a non-numeric budget is
 refused before the first request rather than becoming a 400 or an empty run.
 
-A flag wins over a variable the run could not use, because the flag is read after the environment
-and the value it sets is the one in force. `MICROAGENT_MAX_TURNS=0 microagent --max-turns 5` is a
-run with five turns; the variable is named on stderr and the run goes on. With no such flag the
-variable is the run's, and the message stops the run as a bad argument would. `--base-url` and
-`MICROAGENT_BASE_URL` have always worked this way: the url is checked where the run uses it.
+A flag also wins over a variable the run could not use, because the flag is read after the
+environment. `MICROAGENT_MAX_TURNS=0 microagent --max-turns 5` is a run with five turns; the
+variable is named on stderr and the run goes on. With no such flag the bad variable stops the run
+as a bad argument would. The base url follows the same rule, since it is checked where the run
+uses it.
 
 A variable set to an empty string is not a value:
 `MICROAGENT_MODEL`, `MICROAGENT_BASE_URL`, `MICROAGENT_REASONING_EFFORT`,
@@ -273,22 +274,14 @@ Three variables are the exception: `MICROAGENT_CONFIG`, `MICROAGENT_SESSION_DIR`
 `MICROAGENT_SKILLS` read empty as off, so no config file, no session log and no skills.
 
 Every variable is trimmed before it is read, `HOME` included, and one holding only whitespace reads
-as empty. A wrapper that fills the environment from a file exports that file's trailing newline, and
-untrimmed it would break each option differently: an api key becomes an `Authorization` header with
-a byte a header may not hold, a base url stops parsing, a session directory names a directory no
-monitor looks in, and a `HOME` ending in a newline moves every default path
-(`~/.microagent/config.toml`, the session store) somewhere that does not exist. An
-empty `HOME` is no home rather than a path off the root.
+as empty, so a trailing newline a wrapper exported from a file does not end up in a header, a url
+or a default path. An empty `HOME` is no home rather than a path off the root.
 
-`MDEBUG=1` prints the configuration the run resolved: model, base url (credentials in it redacted),
-the ceilings, the config file that was read and the size of its prompt addendum, the skill roots, whether
-the sandbox is on and how many roots it has, how many tools are off and how many commands are denied, and
-the name of the variable or file the api key came from. The key itself is never printed. Each option has
-up to three sources, and this is how you tell which one answered. The skill roots are named because
-`skills=0` on its own is the same line for a machine with no skills installed and one reading the
-wrong directories, and the sandbox line is the only place a run says whether `[sandbox] enabled` was in
-force: a machine refusing a write the config said was allowed is otherwise indistinguishable from one
-where it was refused for its own reasons.
+`MDEBUG=1` prints the configuration the run resolved, which is how you tell which of the up to three
+sources answered for each option: model, base url (credentials in it redacted), the ceilings, the
+config file that was read and the size of its prompt addendum, the skill roots, whether the sandbox
+is on and how many roots it has, how many tools are off and how many commands are denied, and the
+name of the variable or file the api key came from. The key itself is never printed.
 
 ## Providers and keys
 
@@ -297,14 +290,13 @@ Any OpenAI-compatible endpoint works: OpenRouter, DeepSeek, OpenAI, vLLM, LiteLL
 to end; see [benchmark.md](benchmark.md).
 
 The key is looked up in `--api-key`, then `MICROAGENT_API_KEY`, then `api_key` in the config file.
-There is no key file: the path the binary used to fall back to was one provider's, and a key belongs
-to the account that pays for the run.
+No key file is read.
 
-`--api-key` is the one source that is not private to this process: the whole command line is in the
-process table for as long as the run lasts, so any user on the machine can read the key out of it
-there. A variable, or a config file only its owner can read (`chmod 600`), is not, which is why those
-are the sources to reach for. A key in the config file is in the clear on disk, and it is in a file
-the `read` tool can open: keep the file out of any workspace the model is given, or use a variable.
+`--api-key` is the one source that is not private to this process: the command line is in the
+process table for as long as the run lasts, so any user on the machine can read the key there. Use
+a variable or a config file only its owner can read (`chmod 600`). A key in the config file is in
+the clear on disk, in a file the `read` tool can open: keep the file out of any workspace the model
+is given, or use a variable.
 
 The key goes to the base url in an `Authorization` header on every request. Two consequences:
 
@@ -360,31 +352,29 @@ follow-ups; authenticated calls require your OpenCode API key.
 
 ## What leaves the machine
 
-One run reaches the places below, and writes one thing down. This is the whole list; a reader who wants
-to know what their data does does not have to infer it from the code.
+This is the whole list of places one run reaches, and of what it writes down.
 
 **The provider.** Every turn re-sends the whole conversation to the base url: the task as typed, the
-system prompt, the text of every skill the config named, and every tool result so far. A tool result
-is whatever the tree held, so file contents, build logs, and whatever a `bash` command printed all go
-to whichever host the base url names, and they are re-sent on every later turn. The `git` tool is
-the one that reads what other people wrote, and it is held to what a coding task reads a commit for:
-`log` is `--oneline`, so a subject and a hash and no author; `show` asks git for the hash, the date
-and the subject rather than the `Author:` and `Commit:` header lines, so no name and no email address
-reaches the provider; `blame` keeps the hash, the date and the line number and has the name of
-whoever last touched the line cut out of every line, since the hash on the same line already answers
-that and `show` will read it. The credential guards under
-[Tools](#tools) keep key material out of a tool result, and the `git` format choices keep a person's
-name out of one. The request body contains the model name, tool schemas, `max_tokens`, optional
-reasoning and temperature settings, and the conversation, including retained assistant reasoning.
-Headers include authorization, content type, accepted response type and the program's user agent.
-OpenCode also receives a random `x-opencode-session` ID shared by the turns in one process.
-That ID contains no machine name, account name or other local identifier.
+system prompt, the text of every skill the model loaded, and every tool result so far. A tool result
+is whatever the tree held, so file contents, build logs and `bash` output all go to the host the base
+url names, and are re-sent on every later turn. The request body also carries the model name, tool
+schemas, `max_tokens`, optional reasoning and temperature settings, and retained assistant
+reasoning. Headers are authorization, content type, accepted response type, the user agent and
+every entry of the config's `headers` table; OpenCode also receives a random `x-opencode-session`
+ID shared by the turns in one process, which holds no machine name, account name or other local
+identifier. Under ACP with `discover_models = true`, the first session also sends one
+`GET <base_url>/models` with the same key and `headers` ([provider settings](#provider-settings)).
+
+The credential guards under [Tools](#tools) keep key material out of a tool result, and the `git`
+tool keeps names and email addresses out: `log` is `--oneline` (hash and subject), `show` asks for
+the hash, date and subject instead of the `Author:` and `Commit:` lines, and `blame` keeps the hash,
+date and line number with the name cut out.
 
 **GitHub.** `microagent update` and `microagent update --check` ask
 `https://api.github.com/repos/<owner>/<repo>/releases/latest` and the release page for the asset, so
 GitHub sees this machine's IP address and, in the `User-Agent`, the version. Nothing else in a run
-makes an outbound request: there is no telemetry, no analytics, no crash report, and no update check
-on a run that was not asked to update. See [Update](#update).
+contacts GitHub: there is no telemetry, no analytics, no crash report, and no update check on a run
+that was not asked to update. See [Update](#update).
 
 **MCP servers.** A configured local server is a child process on this machine. One call sends it the
 tool name and the model's arguments for that call, and nothing else: no conversation, no system
@@ -395,28 +385,19 @@ provider in turn. See [MCP servers](#mcp-servers).
 switched on, is an HTTPS endpoint somebody else runs. A call sends it the same tool name and
 arguments, and the handshake sends the client name and version (`microagent`, this build's
 version); the operator of the endpoint sees this machine's IP address, the query the model built and
-the key the entry names, when it names one. Nothing else of the run is sent. The sandbox does not
-confine this traffic. A preset is off unless the config names it, so a run with no config reaches
-none of those four endpoints; a query the model built out of the task is the operator's to send, and
-naming a preset is the one line that says it may go. The tools of a preset the config did name come
-from a table in this binary, so the run reaches its endpoint only when the model calls one of those
-tools, and
-every one of those tools is described to the model with the same sentence: put nothing in an argument
-that belongs to the repository under review, no code, no path, no file content, no repository name and
-nothing that names a person in it. The guidance is the whole of the control once a preset is on, since
-the arguments are the model's own words; a server the operator configured is a server they chose and
-describe
-themselves. The
-first call is what connects, initializes and asks for the server's own tool list, and a tool the
-server no longer offers is reported then. Set `enabled = false` in a `[tools.<name>]` table to make
-no request at all, and give a preset an `api_key_env` to have it connected at start instead, because
-a key can unlock tools the table does not name. A `url` server the config wrote is always connected
-at start: only its own `tools/list` can say what it offers. An endpoint that cannot be reached is
-named on stderr and its tools are left out of that call.
+the key the entry names, when it names one. Nothing else of the run is sent, and the sandbox does
+not confine this traffic.
+
+A preset is off unless the config enables it, so a run with no config reaches none of the four
+preset endpoints. Which remote servers are contacted at startup and which on the first tool call is
+set out under [tool set](#tool-set). Each preset tool tells the model to put nothing from the
+repository under review in an argument; that guidance is the whole of the control once a preset is
+on.
 
 **On disk.** The [session log](#session-log) is the only file a run keeps of itself, apart from the
-files its tools were asked to write. It holds counters and the working directory, never prompt or
-output text.
+files its tools were asked to write and the commented config template a run writes when it finds
+no file at the default path ([config file](#config-file)). The log holds counters and the working
+directory, never prompt or output text.
 
 ## Prompt cache
 
@@ -436,23 +417,26 @@ cache usage when it supplies that field; a missing field is reported as zero.
 
 ## Config file
 
-One TOML file carries the provider settings, the system prompt addendum, the skill roots, the MCP servers, the tool set, denied shell commands, and workspace sandbox settings. It is `--config`, else
+One TOML file carries the provider settings, the system prompt addendum, the skill roots, the MCP
+servers, the tool set, denied shell commands, and workspace sandbox settings. It is `--config`, else
 `MICROAGENT_CONFIG`, else `~/.microagent/config.toml`. A named path may start with `~` or `~/`, which
 is the home directory: a shell expands the tilde in a command line before the flag is read, but a
 value that came out of `MICROAGENT_CONFIG` never went through one, so microagent expands it here.
 [`config.example.toml`](../config.example.toml) is a commented template.
 
 A missing file means the defaults, and a run that finds nothing at the default path writes the
-commented template there (mode 0600, under `~/.microagent` at 0700) and names the path on stderr, so
-the next edit has a file to make. A path named by `--config` or `MICROAGENT_CONFIG` is never created,
-and a file that is already there is never touched. A file that cannot be read, is a directory, or is
-over the 64 KB
-cap is named on stderr and the run continues on the defaults. A value a key does not take, and a key the
-file format does not define, are reported on stderr with that key's default kept, so a misspelled
-`system_prompt_extra` cannot leave the default in force quietly. One spelling exists per setting:
-a key or table this file once accepted under another name (`caveman`, `ponytail`, `[style]`,
-`[commands]`, `command_filter`, `sandbox = true`) is reported the same way. A [`[tools.<name>]`](#tool-set) table the run
-cannot honor is the exception: it stops the run.
+commented template there (mode 600, under `~/.microagent` at mode 700) and names the path on
+stderr, so the next edit has a file to make. A path named by `--config` or `MICROAGENT_CONFIG` is
+never created, and a file that is already there is never touched. A file that cannot be read, is a
+directory, or is over the 64 KB cap is named on stderr and the run continues on the defaults. A
+value a key does not take, or a key the file format does not define, keeps that key's default, and
+the first such line is reported on stderr, so a misspelled `system_prompt_extra` cannot leave the
+default in force quietly. One spelling exists per setting: a key or table this file once accepted
+under another name (`caveman`, `ponytail`, `[style]`, `[commands]`, `command_filter`,
+`sandbox = true`) is reported the same way. Some mistakes stop the run instead, before the first
+request: a [`[tools.<name>]`](#tool-set) table the run cannot honor, and the
+[provider settings](#provider-settings) it refuses (a `model` outside `models`, a `reasoning_effort`
+that names no level, a `base_url` or `api_key` that fails its check).
 
 ### Provider settings
 
@@ -521,20 +505,16 @@ names the reason once on stderr. A terminal run does not ask, since it only uses
 have no default: a run that names neither is refused before the first request, with the message
 naming the flag, the variable and the config key. `base_url` is checked the way the flag is, so a
 value that is not a url, or a plain `http://` url that is not loopback, is refused. `api_key` is
-checked the same way from whichever of the three sources it came from: the key is written into an
-`Authorization` header, so one carrying a control character (a newline a wrapper exported from a file,
-a carriage return in a hand-edited config) is refused before the first request rather than splitting
-the header line. A config file that names one and is readable by any account beyond its owner is
-said on stderr by name: a file written at the umask's default, or committed with its bits, hands
-every other account on a shared machine the key, and the run otherwise says nothing about it. It is
-a note and not a refusal, so the run goes on with the key it read.
-`api_key` is a secret written in the clear, and the `read` tool can open the file: a variable or
-`--api-key` keeps it out of a file a model can read.
+checked the same way from whichever source it came from: one carrying a control character (a
+newline a wrapper exported, a carriage return in a hand-edited config) is refused before the first
+request rather than splitting the `Authorization` header line. A config file that names a key and
+is readable by any account beyond its owner is named on stderr; the run goes on with the key. See
+[Providers and keys](#providers-and-keys) for where a key is safest.
 
 ### Repository instructions
 
 `AGENTS.md` in the working directory is read when the run starts and appended to the system prompt,
-after anything `system_prompt_extra` adds and before the skills listing, between a `--- begin
+after the working-directory line and anything `system_prompt_extra` adds, and before the skills listing, between a `--- begin
 repository instructions: <path> ---` marker and a `--- end repository instructions ---` one. It is
 the convention every other coding agent reads, so a repository that carries one carries it for this
 run too: a run whose operator wants none sets `agents_files = []`, and a list names other paths, in
@@ -648,13 +628,13 @@ env     = { LOG = "debug" }
 
 `name` and one of `command` or `url` are required; a table missing both, or carrying both, is
 skipped and named on stderr by the server it declared, so a file with several tables says which one
-was dropped. Every local server is started before the first request and asked for its tool list, the remote ones are asked at the same time
-rather than one after another, and each tool is offered to
-the model as `mcp__<server>__<tool>` with the server's own `inputSchema`. The complete exposed
-name must fit the [Chat Completions API's 64-character limit](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create);
-oversized names are reported and skipped. Commands and arguments containing NUL bytes are
-rejected before spawning. A schema over 16 KB is
-replaced with an empty object schema that says so in its `description`, because a schema sits in the
+was dropped. Every local server is started before the first request and asked for its tool list,
+the remote ones the [tool set](#tool-set) does not defer are asked at the same time rather than one
+after another, and each tool is offered to the model as `mcp__<server>__<tool>` with the server's
+own `inputSchema`. The complete exposed name must fit the
+[Chat Completions API's 64-character limit](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create);
+oversized names are reported and skipped. Commands and arguments containing NUL bytes are rejected
+before spawning. A schema over 16 KB is replaced with an empty object schema that says so in its `description`, because a schema sits in the
 constant prefix of every request the run makes: a server that embeds a large `description`,
 `examples` or `enum` in one would write those megabytes into every turn of the run, for the whole
 run. A tool under the ceiling keeps the server's bytes exactly, in the order the server wrote them.
@@ -665,22 +645,19 @@ it was cut from.
 
 A server that cannot start, exits during the handshake, or refuses a call is reported on stderr and
 skipped: one broken entry costs that entry, not the run. An `env` key is a variable name, letters,
-digits and underscores, quoted or not. A key outside that form, or a value containing a NUL,
-is rejected, so that server is skipped and the line named rather
-than spawned. An `env` value is a secret written in the clear wherever it is a token, and it is the
-second place in the file that can happen, after the top-level `api_key`: a `command` server usually
-wants a token of its own, so `env = { GITHUB_TOKEN = "ghp_..." }` is the obvious way to hand one
-over, and it is committed to a repository by accident more easily than the provider key is. Keep the
-file mode 600 and out of any workspace the model is given, exactly as for `api_key`, or name the
-variable in the run's own environment and let the file carry only the name. The server's stderr is
-inherited, since
-that is where MCP servers write diagnostics, so what a server writes reaches the terminal
-unescaped and uncapped: unlike every other untrusted byte this program prints, it is not
-scrubbed, so a server that emits terminal escape sequences can repaint the terminal. Its
-environment is the scrubbed one tool subprocesses
-get plus the entry's `env`, so it never sees a provider key. Nor does it see the conversation: a
-call carries the tool name and the model's arguments for it and nothing else. [What leaves the
-machine](#what-leaves-the-machine) has the whole list.
+digits and underscores, quoted or not. A key outside that form, or a value containing a NUL, skips
+that server with the line named rather than spawning it.
+
+An `env` value holding a token is a secret in the clear, the second place the file can hold one
+after `api_key`, and the easier one to commit by accident (`env = { GITHUB_TOKEN = "ghp_..." }`).
+Keep the file mode 600 and out of any workspace the model is given. Prefer handing a server a
+variable from the run's environment; the credential variables a terminal run removes from it
+([tool environment](#tool-environment)) are the exception, and a server that needs one must be
+given it in `env`.
+
+The server inherits stderr, bypassing diagnostic escaping and output caps; terminal escape
+sequences can repaint the terminal. A call carries the tool name and model arguments, not the
+conversation.
 
 Server and tool names may hold only letters, digits, dash and underscore, and a name holding
 `__` is refused: the double underscore separates the three parts of an exposed name.
@@ -700,11 +677,11 @@ Every request is a `POST` to the url with `Content-Type: application/json` and
 `Accept: application/json, text/event-stream`, and the answer is read as a JSON body or as an event
 stream, whichever the server sends; notifications and server requests in a stream are ignored, and a
 stream that ends without the answer is an error. Every request carries `User-Agent: microagent/<version>`,
-the same one the provider call and `microagent update` send, so an operator reading a server's log
-sees which client is calling rather than the name of the library it was built with. After `initialize` the client sends
-`MCP-Protocol-Version` with the supported revision selected by the server (`2025-03-26` or
-`2025-06-18`), and echoes an `Mcp-Session-Id` the server assigned. Unsupported revisions and
-missing version strings fail initialization; stdio also supports `2024-11-05` and `2025-11-25`. Between
+the same one the provider call and `microagent update` send. `initialize` offers `2025-03-26` over HTTP and `2025-06-18` over stdio. An HTTP server
+must answer `2025-03-26` or `2025-06-18`; later HTTP requests send that revision as
+`MCP-Protocol-Version` and echo an `Mcp-Session-Id` the server assigned. A stdio server may also
+answer `2024-11-05` or `2025-11-25`, and stdio sends no version header. Any other revision, or
+none, fails initialization. Between
 requests the client keeps the tool table and that session id, and no connection of its own.
 
 Tool discovery follows opaque `nextCursor` values through every page, using the same handshake
@@ -715,15 +692,16 @@ tool names keep their first listing.
 | key | meaning |
 | --- | --- |
 | `url` | `https`, or `http` to this machine (`localhost`, `127.0.0.0/8`, `::1`). No `user:password@`. No redirect is followed. |
-| `api_key_env` | name of the environment variable holding the key. Unset or empty means no header, not an error. The key is never in the file, and the variable is removed from the environment tool subprocesses and local MCP servers get. |
+| `api_key_env` | name of the environment variable holding the key. Unset or empty means no header, not an error. The key is never in the file, and a terminal run removes the variable from the environment tool subprocesses and local MCP servers get ([tool environment](#tool-environment)). |
 | `api_key_header` | header the key travels in, default `Authorization`. In `Authorization` the value is `Bearer <key>`; in any other header it is the key as it is. |
 | `timeout` | seconds one request may take, from connecting to the last byte, 1 to 600, default 30. Also bounded by the run's own budget. |
 
 Not spoken: OAuth (a key is a static header), the standalone `GET` event stream for server-initiated
-messages, and ending the session with a `DELETE`. A response over 4 MB is an error rather than a cut. A server that does not answer in time is not
-asked again for the rest of the run. The keys of one form are refused on the other (`args` on a `url` table,
-`timeout` on a `command` table), and a bad value drops the entry with a line on stderr, so a server never runs without the key or the limit the
-file asked for. What a remote server returns is untrusted text like any tool result: see the
+messages, and ending the session with a `DELETE`. A response over 4 MiB is an error rather than a
+cut. A server that does not answer in time is not asked again for the rest of the run. The keys of
+one form are refused on the other (`args` on a `url` table, `timeout` on a `command` table), and a
+bad value drops the entry with a line on stderr, so a server never runs without the key or the
+limit the file asked for. What a remote server returns is untrusted text like any tool result: see the
 [threat model](threat-model.md).
 
 ### Tool set
@@ -752,12 +730,8 @@ built-in is left out of the tool schema sent to the model, its calls are answere
 for byte, as one with no `[tools]` table, so the provider's prompt cache is unaffected. At least one
 built-in must stay on.
 
-**Presets** are public MCP servers, and are off until the table says `enabled = true`. Their tools
-and schemas are in
-this binary, so a run that names one reaches it only when the model calls a tool from it; a call
-to a server that cannot be reached is answered with an error naming it, so a run with no network still
-works. Each is served by the same transport as a `url` table of the same name, so its tools reach the
-model as `mcp__<preset>__<tool>`:
+**Presets** are public MCP servers. Each is served by the same transport as a `url` table of the
+same name, so its tools reach the model as `mcp__<preset>__<tool>`:
 
 | preset | endpoint | tools |
 | --- | --- | --- |
@@ -766,8 +740,21 @@ model as `mcp__<preset>__<tool>`:
 | `grep_app` | `https://mcp.grep.app` | `mcp__grep_app__searchGitHub` |
 | `deepwiki` | `https://mcp.deepwiki.com/mcp` | `mcp__deepwiki__read_wiki_structure`, `mcp__deepwiki__read_wiki_contents`, `mcp__deepwiki__ask_wiki_question` |
 
-The tools are the ones each server lists, so a server that changes its list changes this one. A
-preset takes the same `url`, `api_key_env`, `api_key_header` and `timeout` as a `url` table (see
+When a remote server is first contacted depends on its key and its host, not on whether a preset
+or an `[[mcp]]` table declared it:
+
+- A `url` server with no resolved key whose host is one of the four above is offered from the tools
+  and schemas shipped in this binary. Its endpoint is first contacted when the model calls one of
+  them: that call connects, initializes and fetches the server's own tool list, and a tool the
+  server no longer offers is reported then.
+- Every other `url` server is connected and asked for its tool list at startup. That covers a
+  preset whose `api_key_env` resolves to a key, because a key can unlock tools the table does not
+  name, and a preset or table on any other host, since only that server's `tools/list` says what it
+  offers.
+
+An unreachable server is reported by name; the other tools remain available.
+
+A preset takes the same `url`, `api_key_env`, `api_key_header` and `timeout` as a `url` table (see
 [MCP servers](#mcp-servers)), all optional: none of the four needs a key today, and `api_key_env`
 is for a plan that has one. A preset and an `[[mcp]]` table of the same name would collide on tool
 names, so the second is skipped and named on stderr.
@@ -788,9 +775,7 @@ that is about one repository's own code says so in the task text.
 
 Every one of the eight descriptions ends with the same sentence, and it is the whole of the control:
 the arguments are the model's own words, so the model is told that a call leaves the machine and that
-nothing belonging to the repository under review goes in one. That covers the three that take text,
-where a snippet out of the tree would otherwise become a search term in somebody else's log, and
-`grep_app`, whose only argument is a literal pattern. A public repository the task itself names is a
+nothing belonging to the repository under review goes in one. A public repository the task itself names is a
 different thing from the tree under review and is what the DeepWiki tools are for: a repository name
 is how that wiki is addressed.
 
@@ -814,7 +799,11 @@ deny_commands = ["sudo", "su", "shutdown", "reboot"]
 
 Matching inspects command words and basenames (for example, denying `sudo` matches both `sudo apt install` and `/usr/bin/sudo ls` without false-positiving on safe names like `run_sudoku.py`), as well as multi-word sequences (such as `rm -rf`). Quoting inside a word is read out before the comparison, so `s'udo'`, `su"do"` and `su\do` are matched as the `sudo` a shell would run.
 
-The check is a word match over the command text, not a shell parse, so it is a guard against a model running a denied command by naming it, not a sandbox. A command that reaches the same program without spelling its name (`$(command -v sudo)`, `busybox sudo`, a copy of it renamed on `PATH`, or `sudo` reached through a variable) is not caught. `[sandbox] enabled = true` is what confines `bash` to writable roots, and it is off by default.
+The check is a word match over the command text, not a shell parse, so it is a guard against a
+model running a denied command by naming it, not a sandbox. A command that reaches the same program
+without spelling its name (a copy of it renamed on `PATH`, or `sudo` assembled in a variable) is not
+caught. `[sandbox] enabled = true` is what confines `bash` to writable roots, and it is off by
+default.
 
 ### Sandbox
 
@@ -832,10 +821,10 @@ The writable roots are always `.` (the working directory), `/tmp`, and the sessi
 
 `writable` on its own confines nothing: a file that declares it without `enabled = true` prints `microagent: config ...: [sandbox] writable names N path(s) the sandbox is not in force for, because enabled is not true` and runs unconfined.
 
-When enabled, writes outside the designated roots are blocked:
-- **Kernel-level Landlock enforcement:** On Linux (kernels 5.13+), Landlock LSM rules are applied to microagent before executing tasks. The root `/` is marked read-only, while designated roots (current working directory, `/tmp`, the session directory, `$TMPDIR` where it names a directory none of the others covers, and any configured `writable` paths) remain read-write. Landlock restrictions are inherited across `execve` by all child processes (including `bash`, MCP servers, and child build tools).
-- **Kernel-level Seatbelt enforcement:** On macOS, a Seatbelt profile (`sandbox_init`, the call behind `sandbox-exec`) denies file writes everywhere except the same roots (on this system `$TMPDIR` is under `/var/folders`, behind a symlink into `/private`, and is not covered by `/tmp`) and the devices `/dev/null`, `/dev/tty` and `/dev/dtracehelper`. Reads, the network and process creation stay allowed. Children inherit the profile as they inherit Landlock's rules. Apple deprecates the call but still uses it, and it is not in the tests that run on Linux: the profile text is, the enforcement on a Mac is not.
-- **When the kernel does not enforce it:** an older Linux kernel, or a Seatbelt refusal, prints `microagent: sandbox: the kernel sandbox could not be applied ...` at startup, and only the in-process check below applies. That check covers the tools that write, not `bash` or MCP servers.
+When enabled, writes outside those roots are blocked:
+- **Landlock (Linux 5.13+):** rules applied to microagent before the first task mark `/` read-only and the writable roots read-write. Every child process inherits them across `execve`: `bash`, MCP servers and the build tools they start.
+- **Seatbelt (macOS):** On macOS, a Seatbelt profile (`sandbox_init`, the call behind `sandbox-exec`) denies file writes everywhere except the same roots (on this system `$TMPDIR` is under `/var/folders`, behind a symlink into `/private`, and is not covered by `/tmp`) and the devices `/dev/null`, `/dev/tty` and `/dev/dtracehelper`. Reads, the network and process creation stay allowed. Children inherit the profile as they inherit Landlock's rules. Apple deprecates the call but still uses it, and it is not in the tests that run on Linux: the profile text is, the enforcement on a Mac is not.
+- **When the kernel does not enforce it:** in ordinary CLI runs, an older Linux kernel or a Seatbelt refusal prints `microagent: sandbox: the kernel sandbox could not be applied ...` at startup, and only the in-process check below applies. That check covers the tools that write, not `bash` or MCP servers. ACP currently discards the kernel-sandbox result and emits no equivalent fallback warning.
 - **When one root is refused:** a root the kernel will not open or will not grant prints `microagent: sandbox: <root> was not made writable (<errno>); writes under it are refused`, and the rest of the roots are applied as usual. A root the kernel refuses the read-only rule for `/` is not one of these: nothing is enforced at all and the run prints the "could not be applied" line above.
 - **In-process path checking:** The `write`, `edit` and `multi_edit` tools, and `ast` when it carries a `rewrite`, canonicalize their path and verify it resolves strictly within allowed roots before writing, returning `refused: path '...' is outside the sandbox writable roots`.
 
@@ -846,8 +835,8 @@ them off ([tool set](#tool-set)).
 
 | tool | what it does |
 | --- | --- |
-| `bash` | `/bin/sh -c`, so write POSIX sh: bash-only syntax (`[[ ]]`, arrays, `local`, `$'...'`, process substitution) fails on every platform this ships for. 120 s default timeout (the model may ask for up to 600 s), output capped at 24 KB. A command naming a credentials file or matching the command filter is refused, and the child inherits no provider credential. |
-| `read` | read a file, with optional line offset and limit. Refuses credentials (`.env`, key and keystore files, anything under `.secrets` or `.ssh`), including a symlink to one, and refuses `/proc/*/environ` and `/proc/*/cmdline`. |
+| `bash` | `/bin/sh -c`, so write POSIX sh: bash-only syntax (`[[ ]]`, arrays, `$'...'`, process substitution) works only where the host's `/bin/sh` happens to accept it. 120 s default timeout (the model may ask for up to 600 s), output capped at 24 KB. A command naming a credentials file or matching the command filter is refused, and in a terminal run the child inherits no provider credential ([tool environment](#tool-environment)). |
+| `read` | read a file, with optional line offset and limit. Refuses credentials (`.env`, key and keystore files, anything under `.secrets` or `.ssh`), including a symlink to one, and refuses any path under `/proc/` whose last component is `environ` or `cmdline`. |
 | `write` | create or overwrite a file, creating parents. Refuses a credentials path, a path outside sandbox roots when enabled, a call with no `content`, and `content` past the 64 MB ceiling `edit` holds the file it leaves behind to. |
 | `edit` | exact string replacement. Refuses a credentials path, a path outside sandbox roots when enabled, an ambiguous match unless `replace_all`, and an edit that would leave `old_string` matchable in the result, so a repeated call cannot apply the change twice. |
 | `multi_edit` | a list of `{path, old_string, new_string, replace_all}` replacements, in one file or across files, applied in order on the text the earlier ones left. Every edit is judged as `edit` judges it, and no file is written unless all are accepted, so a refusal names the edit and changes nothing; up to 64 edits per call. A file written part way says how many files had already landed. Sending the same batch again is safe and finishes the work: an edit already on disk is skipped and the rest are applied, and a file whose every edit was already applied is not rewritten. The summary says how much of the batch an earlier run had done. |
@@ -878,16 +867,28 @@ and `write` and `edit` refuse to replace one. The name is checked twice, on the 
 and on the path a symlink resolves to, so a link committed under an ordinary name does not leak the
 file it points at. The two `/proc` files that report a process's own environment and argument
 vector are refused by name as well, since `read /proc/self/environ` returned the run's own key
-under a path no name table could have caught. The run's own keys are removed structurally: every
-tool subprocess gets the environment minus the variables this binary sends in an `Authorization`
-header, so `bash: env` has nothing to print. What remains open is the name rule itself: a
-credential the tables do not recognize, and a path a command assembles at run time, are still read.
-See [threat-model.md](threat-model.md).
+under a path no name table could have caught. A terminal run also removes its own keys from every
+tool subprocess's environment, so `bash: env` has none to print; under ACP it does not
+([tool environment](#tool-environment)). What remains open is the name rule itself: a credential
+the tables do not recognize, and a path a command assembles at run time, are still read. See
+[threat-model.md](threat-model.md).
 
 **Tool calls run once.** The stream is delivered at least once, so a turn's tool calls are
 deduplicated by the id the provider gave them before anything runs: a relay that reconnects replays
 frames, and a replayed call is a `bash` run twice. The first delivery runs, the repeat is named on
 stderr, and two identical calls with different ids are two calls.
+
+### Tool environment
+
+Every tool subprocess and every local MCP server inherits the run's environment. A terminal run,
+one-shot or `--repl`, first removes the variables this binary sends as credentials:
+`MICROAGENT_API_KEY`, `GITHUB_TOKEN`, and each variable a remote server's `api_key_env` names. A
+local MCP server gets that environment plus its own `env` entries, so a server that needs one of
+those values must be given it there.
+
+`microagent acp` removes nothing: tools and MCP servers see the environment the client launched it
+with, so a `MICROAGENT_API_KEY` or `GITHUB_TOKEN` set there reaches them, and `bash: env` prints it
+into the conversation. The [threat model](threat-model.md) lists this as a known gap.
 
 ## Output
 
@@ -900,7 +901,8 @@ stdout carries the model's own text, one JSON usage line per response, and nothi
 ```
 
 Counters are cumulative for the run, which is the shape gauntlet's usage reader takes its maximum
-from. Tool activity goes to stderr as a one-line gutter (`⏺ read: src/main.zig`, the name in bold
+from. The model's text is written as the provider sent it, unescaped, so an escape sequence in it
+reaches a terminal. Tool activity goes to stderr as a one-line gutter (`⏺ read: src/main.zig`, the name in bold
 when stderr is a terminal and plain when it is a pipe or a file), with control
 characters in a path or command written as `\xNN` so a line stays one line.
 `NO_COLOR` set to anything but an empty string, or `TERM=dumb`, leaves the bold out even at a
@@ -921,10 +923,8 @@ operator reads.
 
 `cached_tokens` is the part of the prompt the provider served from its cache, read from whichever of
 `prompt_tokens_details.cached_tokens`, `prompt_cache_hit_tokens` or `cache_read_input_tokens` the
-endpoint sends. The conversation is re-sent every turn byte for byte (no message dropped, reordered
-or re-spelled, system prompt and tool schema fixed), so the prefix stays cacheable and a turn pays
-full price only for what it added. On a multi-turn run the counter should climb with the
-conversation.
+endpoint sends. Until a compaction (below), earlier messages are re-sent unchanged, so on a
+multi-turn run the counter should climb with the conversation; see [Prompt cache](#prompt-cache).
 
 Two bounds keep a long run from re-sending without limit:
 
@@ -944,7 +944,7 @@ Two bounds keep a long run from re-sending without limit:
 | 0 | the run finished |
 | 1 | the run failed |
 | 2 | wrong command line, or a config the run cannot start with: a bad value, a `[tools.<name>]` that names no tool, every built-in disabled |
-| 3 | stopped without an answer: `--max-turns`, `--max-spend-tokens` or `--budget` reached, the model asked the same tool call on three turns running, or the last response carried no text, was cut at `--max-tokens` or the response byte ceiling, or the provider stopped generating it. stdout is a prefix of the work, not an answer. |
+| 3 | stopped without an answer: `--max-turns`, `--max-spend-tokens` or `--budget` reached, three [repeat rounds](#failure-handling) in a row of the same non-writing tool calls, or the last response carried no text, was cut at `--max-tokens` or the response byte ceiling, or the provider stopped generating it. stdout is a prefix of the work, not an answer. |
 | 130 | interrupted (Ctrl+C or kill), taking the tool subprocess with it |
 
 A wrong flag prints the reason and the full help on stderr, so a script reading stdout gets nothing
@@ -957,8 +957,8 @@ a monitor can follow a run while it is going. A turn whose provider call never a
 of the same shape carrying the reason, so the log ends where the run ended rather than at the last
 response that arrived. `MICROAGENT_SESSION_DIR` moves the store and an empty
 value turns it off. A run that finds its name taken writes `-1`, `-2`, ... beside it rather than over
-it. The store keeps the 200 most recent runs and prunes older ones, and it drops any log older than 30
-days whatever the count says, so a machine that runs rarely does not keep every run it has ever done.
+it. The store keeps the 200 most recent runs and drops any log older than 30 days
+([pruning](#what-survives-and-how-to-get-it-back)).
 
 ```json
 {"ts":1790608347342,"cwd":"~/Desktop/Projects/microagent","model":"deepseek/deepseek-v4-flash","finish_reason":"stop","served_model":"deepseek/deepseek-v4-flash-0726","fingerprint":"fp_9c1e","stream_error":"","elapsed_ms":1448,"usage":{"prompt_tokens":998,"cached_tokens":896,"completion_tokens":19,"reasoning_tokens":16,"total_tokens":1017}}
@@ -970,8 +970,8 @@ days whatever the count says, so a machine that runs rarely does not keep every 
 
 | key | meaning |
 | --- | --- |
-| `usage` | this response's own counters, not the run's cumulative ones. Zero on a record carrying `error`, because no response was billed and none arrived. |
-| `cwd` | the directory the run works in, behind a `~` and relative to the home when it is under it, so the record carries no account name; a directory outside the home is recorded whole |
+| `usage` | this response's own counters, not the run's cumulative ones. Zero on a record carrying `error`, because no response arrived to report usage; a request sent in full may still have been billed. |
+| `cwd` | the directory the run works in, behind a `~` and relative to the home when it is under it, so the record carries no account name: `/home/you/Desktop/Projects/microagent` records as `~/Desktop/Projects/microagent`. A directory outside the home, or any directory when `HOME` is unset, is recorded whole. |
 | `finish_reason` | why the provider stopped. `length` means the response was cut at `--max-tokens` and the run says so on stderr; the empty string is a stream that carried no reason, and every value on a record carrying `error`. |
 | `model` / `served_model` / `fingerprint` | what the run asked for, what the provider says answered, and the weights fingerprint it reported. A gateway routes a name to whichever snapshot it holds that week, so two runs are comparable only when these match. Empty when the stream named none. |
 | `stream_error` | what the provider said went wrong in the middle of the stream, in the one line the run prints on stderr. The frames around it still carry choices, so this is the field that tells a stream the provider abandoned from one that ran to its end. The empty string is a stream that reported no failure, and every value on a record carrying `error`. |
@@ -983,37 +983,25 @@ and the rest of the run goes unrecorded. Nothing in the log is prompt or output 
 [toktop](https://github.com/maci0/toktop) reads this store by default, and the keys are the ordinary
 OpenAI ones plus `cwd`, so any reader of agent transcripts works.
 
-A log is created `0o600` and a store directory this run creates is `0o700`, so on a shared account
-the last 200 runs are readable by the account that made them alone. Neither mode is applied to a
-directory that already exists, so a store an operator pointed `MICROAGENT_SESSION_DIR` at keeps the
-mode they gave it. `cwd` is the one field that can name a person: a working directory under a home
-directory carries the account name in it, so the record keeps the part under the home and writes it
-behind a `~` — a run in `/home/you/Desktop/Projects/microagent` records as
-`~/Desktop/Projects/microagent`, and a reader can tell that from a whole path without asking the
-machine that wrote it. A directory outside the home is recorded whole, because there the components
-are the only part that tells two runs apart, and so is one under a run whose `HOME` is unset. Two
-runs in `~/src/a` and `~/src/b` are still two directories, and a run from `~/src/a` is still told
-apart from one in `~/work/a`: the field is there because a monitor reports the run by where it was,
-and the modes above are what keep the rest of the record to the account that made it. Deleting the store is
-`rm -r ~/.microagent/sessions`: nothing outside it holds anything from the run, and the binary never
-reads a log back.
+A log is created mode 600 and a store directory this run creates is mode 700, so on a shared
+machine only the account that made the runs can read them. Neither mode is applied to a directory
+that already exists, so a store `MICROAGENT_SESSION_DIR` points at keeps the mode it has.
+
+Deleting the store is `rm -r ~/.microagent/sessions`: nothing outside it holds anything from the
+run, and the binary never reads a log back.
 
 ### What survives, and how to get it back
 
-The session log is the only durable artifact this program keeps of itself, and its durability
-is worth stating plainly because nothing else in the tree implies it. There is no database, no
-queue and no object storage: the working tree a run edits and the config file under
+The session log is the only durable artifact this program keeps of itself. There is no database,
+no queue and no object storage: the working tree a run edits and the config file under
 `~/.microagent` are the operator's to back up, not this program's.
 
 **Each record is flushed to disk before the run carries on.** A record is written, the file is
-synced, and then the directory that holds the log is synced too, so the name is durable along
-with the bytes. Only then does the run move to the next turn, so a record a monitor
+synced, and then the directory that holds the log is synced, so a new log's name is durable along
+with its bytes. Only then does the run move to the next turn, so a record a monitor
 ([toktop](https://github.com/maci0/toktop)) has already counted survives an unclean stop; the
 price is two disk round trips per response, against seconds of provider time. A flush that fails
-is named on stderr and the run keeps appending rather than dropping a store whose bytes are
-already on disk: what is at risk is the guarantee, not the data. The directory sync is what
-makes a log created this run survive too: the file sync covers the bytes, and the name that
-points at them lives in the directory.
+is named on stderr and the run keeps appending: what is at risk is the guarantee, not the data.
 
 **There is no backup and no restore procedure, because there is nothing to restore from.** The
 log is an append-only record of counters, a working directory and a model name, never prompt or
@@ -1022,9 +1010,7 @@ The RPO for that trail is whatever the operator backs up themselves: to keep the
 machine loss, copy `~/.microagent/sessions`, and the config file beside it because it may hold an
 `api_key`, to your own backup. The RTO for restoring such a copy is a file copy: the store is
 JSONL a monitor reads directly, so putting the files back under `MICROAGENT_SESSION_DIR` is the
-whole restore, with no binary, no version match and no migration involved. Records are keyed by
-name and additive, so a log written by a later version stays readable and an older binary
-reading it ignores fields it does not know.
+whole restore, with no binary, no version match and no migration involved.
 
 **The store prunes itself, under two windows.** It keeps the 200 most recent logs and drops
 anything older than 30 days, on every run and without confirmation, oldest first. Both windows
@@ -1052,19 +1038,17 @@ changing the variable.
 - **Every request carries `max_tokens`**, so a model that fails to stop is not billed until something
   else stops it. `--max-turns` counts turns, not tokens, and a turn re-sends the whole conversation,
   so `--max-spend-tokens` is the ceiling on what a run spends.
-- **A run that asks the same question over and over stops.** Three turns in a row carrying the same
-  read-only tool call, with the same arguments and nothing new beside it, and the run ends there with
-  exit 3. A stuck model does not know it is stuck: the tool result is the bytes it read last turn, so
-  nothing in the conversation tells it to stop, and without this the only bound is a turn ceiling a
-  long way off. Calls that write are not counted, because a repeat of one of those is the same change
-  made twice rather than the same question asked again, and a turn of nothing but writes is not a
-  round of anything. A turn carrying any new call clears the count.
+- **Repeated non-writing calls stop a run.** Three consecutive repeat rounds end with exit 3.
+  A round repeats when every built-in non-writing call's name and arguments appeared in the
+  preceding turn; the first occurrence is not a repeat. A new non-writing call resets the count.
+  Writing calls and unknown tools are excluded. Write-only turns do not increment the count and
+  clear the saved call set.
 - **`--budget`** stops starting turns after the given seconds, then takes one last turn to land an
   edit, which may run up to 5 minutes past it. A turn cut off there is discarded, not half-applied.
   The deadline also cancels blocked DNS, TLS, request writes, response headers and stream reads.
   `--stall-timeout` bounds connection setup, request writes and silent response reads even with no budget.
-- **No session resume.** gauntlet's `--retries` covers a whole review, and a missing feature is
-  cheaper than a half-working one.
+- **No restoration across process restarts.** ACP can resume sessions retained by the current
+  connection. gauntlet's `--retries` reruns a whole review.
 
 ## Driving it from gauntlet
 
@@ -1107,9 +1091,11 @@ required.
 `microagent acp` serves the Agent Client Protocol (ACP) v1 on stdin and stdout. A client
 launches it as a subprocess, sends JSON-RPC 2.0 frames, and receives streamed
 `session/update` notifications and one result per prompt. Configuration, provider
-credentials, skills, tools and the session log resolve exactly as they do for a
-terminal run; the example below needs the same `MICROAGENT_API_KEY`,
-`MICROAGENT_BASE_URL` and `MICROAGENT_MODEL`.
+credentials, skills, tools and the session log resolve as they do for a terminal
+run, with two differences: tools and MCP servers inherit the environment
+unscrubbed ([tool environment](#tool-environment)), and a kernel sandbox that
+could not be applied is not reported ([sandbox](#sandbox)). The example below
+needs the same `MICROAGENT_API_KEY`, `MICROAGENT_BASE_URL` and `MICROAGENT_MODEL`.
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}
@@ -1117,12 +1103,14 @@ terminal run; the example below needs the same `MICROAGENT_API_KEY`,
 {"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"sess_...","prompt":[{"type":"text","text":"fix the failing test"}]}}
 ```
 
-The agent advertises `close`, `delete`, `list` and `resume` session capabilities,
-text, resource-link and embedded-text prompts, and both stdio and HTTP MCP
-servers. Model text arrives as `agent_message_chunk`, each tool call as
-`tool_call` followed by `tool_call_update` statuses (`in_progress`, then
-`completed` or `failed` with its output). A `session/cancel` notification stops
-the provider request and any tool call that has not started, and the outstanding
+The agent advertises `close`, `delete`, `list` and `resume` session
+capabilities, text, resource-link and embedded-text prompts, and both stdio and
+HTTP MCP servers. `session/load` also replays user and assistant text for a
+session held by this connection, although `loadSession` is advertised as false.
+Model text arrives as `agent_message_chunk`, each tool call as `tool_call`
+followed by `tool_call_update` statuses (`in_progress`, then `completed` or
+`failed` with its output). A `session/cancel` notification stops the provider
+request and any tool call that has not started, and the outstanding
 `session/prompt` answers `{"stopReason":"cancelled"}`. Prompts answer
 `end_turn`, `max_turn_requests`, `max_tokens`, `refusal` or `cancelled`.
 
@@ -1172,30 +1160,21 @@ The repository it installs from is the one this binary was built for, named by `
 Each release publishes `microagent-<tag>-<triple>` for `x86_64-linux-musl`, `aarch64-linux-musl`,
 `x86_64-macos` and `aarch64-macos`, each with a `.sha256` sidecar. Linux has one static asset per
 architecture that links no C library (`musl` in the name is only the target triple), so it runs on
-glibc and musl hosts alike and a `-gnu` build updates to it. Three of the four are started by CI
-on a runner of their own platform; `aarch64-linux-musl` is the exception, because GitHub publishes
-no arm64 Linux runner, so it is cross-compiled and its object format and rebuild are checked but it
-is never executed there. The download is checked
+glibc and musl hosts alike and a `-gnu` build updates to it. The download is checked
 against its sidecar, and the running binary is replaced atomically (following a symlink to the real
 file) only when the digest matches. A mismatch, a missing asset, or a release page that is not a
 GitHub https URL leaves the binary untouched. `GITHUB_TOKEN` lifts the anonymous API rate limit.
-A download that fails the way a later one could answer differently is tried again up to three times:
+A download that fails the way a later one could answer differently is attempted up to three times:
 a `408`, `425`, `429`, any `5xx`, or a connection that dies before the answer. A `409` is not
-retried: it says the request is already being served, and a second GET would be a second one. A refusal
-that names a `Retry-After` is waited out for exactly the wait it names, capped at 30 s so a person
-watching the command is not left staring at a run that has given up on their side; a refusal that
-names none falls back to the same capped backoff the agent run uses.
+retried. `Retry-After` is honored up to 30 s; without it, the request uses the agent run's backoff
+under the same cap.
 Exit 1 means the check or the install failed, 2 is a usage error; `microagent update --help`, or
 `microagent help update`, has the rest.
 
 ## Versioning
 
-The version is `build.zig.zon` and nothing else, and [CHANGELOG.md](../CHANGELOG.md) records what
-changed in each. Under `0.y`, the minor takes features, any change to what a run does by default,
-and anything removed; the patch takes fixes, and upgrading a patch must not change an existing
-invocation. The release workflow refuses a patch tag whose changelog section has an `Added`,
-`Changed`, `Removed` or `Security` entry, a section that is not the five Keep a Changelog headings
-once each in order, a compare link under a heading that does not match the versions around it, and any tag while
-`## [Unreleased]` still holds entries. A breaking change to the flags, the environment variables, or
-the stdout and session-log JSON gets a changelog entry naming the before and the after. Only the
-latest release is supported: a fix ships in the next release, with no backports.
+The version is `build.zig.zon` and nothing else. [CHANGELOG.md](../CHANGELOG.md) records what
+changed in each release, and its preamble states what a minor and a patch may change under `0.y`.
+The gates that hold a tag to that policy are in
+[CONTRIBUTING.md](../CONTRIBUTING.md#version-and-changelog), and
+[SECURITY.md](../SECURITY.md#supported-versions) says which releases are supported.

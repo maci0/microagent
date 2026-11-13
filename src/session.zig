@@ -732,8 +732,8 @@ pub fn writeRecord(io: Io, arena: std.mem.Allocator, session: *?Session, elapsed
 /// last line is the second response, and a reader counting records finds a run
 /// that ended where it was last heard from rather than one that failed there.
 /// The reason is this program's own `@errorName` text, and the counters are
-/// zero because no response was billed and none arrived; a monitor summing
-/// `usage` is unaffected, and one looking for the end of a run finds it.
+/// zero because no response arrived to report them (a request sent in full may
+/// still be billed); a monitor looking for the end of a run finds it.
 pub fn writeFailure(io: Io, arena: std.mem.Allocator, session: *?Session, elapsed_ms: u64, failure: []const u8) void {
     write(io, arena, session, .{ .elapsed_ms = elapsed_ms, .failure = failure });
 }

@@ -1,7 +1,6 @@
-.\" Man page for microagent. Every flag `microagent --help` and
-.\" `microagent update --help` list appears below, and `make check-man` checks
-.\" each one is here, so a flag cannot be added to the binary and left out of
-.\" this page. The ENVIRONMENT section is not checked: nothing reads it.
+.\" Man page for microagent. `make check-man` checks that every flag
+.\" `microagent --help` and `microagent update --help` list appears here, and
+.\" the unit suite checks that every environment variable the binary reads does.
 .TH MICROAGENT 1 "2026-11-13" "microagent 0.24.0" "User Commands"
 .SH NAME
 microagent \- tiny OpenAI-compatible coding agent
@@ -29,16 +28,14 @@ microagent \- tiny OpenAI-compatible coding agent
 .RI [ "setup | update | schema | acp" ]
 .SH DESCRIPTION
 .B microagent
-runs one non-interactive task of an OpenAI-compatible coding agent: it sends a
-task to a provider, calls the tools the model asks for until it stops, and
-writes the model's text to stdout. It is a single static binary that links no C
-library on Linux; the
-.BR search ", " ast " and " git
-tools run
-.BR rg ", " ast-grep " and " git
-from
-.BR PATH ,
-which a package should depend on.
+is a coding agent for any OpenAI-compatible provider. It sends a task to the
+provider, runs the tools the model asks for until it stops, and writes the
+model's text to stdout. A run takes one task;
+.B \-\-repl
+reads one per line, and
+.B acp
+serves editor and harness clients. It is a single static binary that links no
+C library on Linux.
 .PP
 The task is the bare argument, or the value of
 .BR \-\-print .
@@ -52,8 +49,8 @@ naming no subcommand is a usage error. A bare
 .B \-\-
 ends the flags, so a task beginning with a dash is passed after it. A bare
 .B update
-is the subcommand when it is the first argument, and a task of that name
-otherwise; it follows a flag or a
+as the first argument is the subcommand; a task of that name goes after a flag
+or a
 .BR \-\- .
 .PP
 A word that names no flag is answered with the one it is closest to, so
@@ -71,12 +68,20 @@ loader. The search, ast and git tools call
 and
 .BR git (1),
 so those three have to be on
-.BR PATH .
-Tools can be removed and MCP servers added in the config file; see
+.BR PATH ,
+and a package should depend on them. Tools can be removed and MCP servers added
+in the config file; see
 .B FILES
 and the full reference in
 .IR docs/usage.md .
 .SH OPTIONS
+Every long option that takes a value also takes it as
+.BI \-\-flag= value \fR;
+an option that takes none, like
+.BR \-\-help ,
+rejects a value. A flag takes precedence over its environment variable, even
+when that variable contains an invalid value. The environment takes precedence
+over the config file.
 .TP
 .B \-\-repl
 Read one prompt per line and keep conversation history. An optional argument
@@ -86,13 +91,6 @@ including its newline, must fit in 64 KiB. Turn, time and token spending
 ceilings reset for each prompt. Usage counters stay cumulative and responses
 share one session log. A failed or incomplete prompt ends the REPL with the
 usual exit status.
-Every long option that takes a value also takes it as
-.BI \-\-flag= value \fR;
-an option that takes none, like
-.BR \-\-help ,
-names no flag when a value is written on, and is a usage error.
-A flag wins over the environment variable for the same option, and over one the
-run could not use.
 .TP
 .BR \-p ", " \-\-print " " \fIprompt\fR
 Task to run, also accepted as a bare argument.
@@ -200,25 +198,24 @@ keep the text a command already prints, including when stdout is not a
 terminal, because that text is the pipe contract.
 .B json
 asks
-.BR schema ,
 .BR \-\-version ,
 .B setup
 and
 .B update
-for one JSON document, and a failure's last line on stderr is an error
+for one JSON document
+.RB ( schema
+prints one either way), and a failure's last line on stderr is an error
 envelope. The exit status is unchanged. The model's own stdout is not
-re-encoded. The API key is never printed; pass it with
-.B MICROAGENT_API_KEY
-or the config file.
-.B \-\-api\-key
-still works.
+re-encoded. The API key is never printed.
 .TP
 .BR \-h ", " \-\-help
 Print the built-in usage text and exit. Also reached by a bare
 .BR help .
 .TP
 .BR \-V ", " \-\-version
-Print the version and exit.
+Print the version and exit. With
+.BR "\-o json" ,
+one document of name and version.
 .SH SETUP SUBCOMMAND
 .B microagent setup
 creates a missing config from the embedded template, then asks about the
@@ -245,18 +242,12 @@ downloads
 and its
 .I .sha256
 sidecar from the latest GitHub release and replaces the running binary only
-when the digest matches. A refusal touches nothing.
+when the digest matches. A refusal touches nothing. stdout is one
+.I "Installed <tag> to <path>"
+line, or nothing when the build is already current.
 .TP
 .BR \-c ", " \-\-check
-Report the latest release as the release page URL on stdout, install nothing.
-.B \-o json
-prints one document instead, with
-.B changed
-false. An install that finds the build already current exits 0 and, with
-.B \-o json ,
-sets
-.B changed
-to false.
+Report the latest release page URL on stdout and install nothing.
 .TP
 .BR \-h ", " \-\-help
 Print the update usage text and exit. Also reached by
@@ -265,12 +256,36 @@ Print the update usage text and exit. Also reached by
 .BR \-V ", " \-\-version
 Print the version and exit.
 .PP
+.B \-o json
+replaces stdout with one document (tag, page, running, relation, current,
+changed, path);
+.B changed
+is false when nothing was installed.
 .B GITHUB_TOKEN
 is a bearer for api.github.com only, past the anonymous rate limit; the public
-asset hosts never see it. So does
-.BR MICROAGENT_CA_BUNDLE ,
-for the same reason it is a run option. Exit 0 checked, installed or current; 1
-failed; 2 usage error.
+asset hosts never see it.
+.B MICROAGENT_CA_BUNDLE
+and
+.B SSL_CERT_FILE
+apply as they do to a run. Exit 0 checked, installed or current; 1 failed; 2
+usage error.
+.SH SCHEMA SUBCOMMAND
+.B microagent schema
+prints the CLI Spec 0.3 document, with no config, no credentials and no network.
+A
+.I command
+path keeps that command and the paths that start with it.
+.SH ACP SUBCOMMAND
+.B microagent acp
+serves the Agent Client Protocol v1 on stdin and stdout for an editor or
+harness client. Configuration, credentials, skills, tools and the session log
+resolve as they do for a terminal run, with two differences: tool subprocesses
+and MCP servers inherit the environment unscrubbed, so a
+.B MICROAGENT_API_KEY
+or
+.B GITHUB_TOKEN
+set there reaches them, and a kernel sandbox that could not be applied is not
+reported.
 .SH ENVIRONMENT
 .TP
 .B MICROAGENT_MODEL
@@ -297,8 +312,10 @@ As above.
 .B GITHUB_TOKEN
 A bearer for api.github.com, for
 .B microagent update
-only, past the anonymous rate limit. The public asset hosts never see it, and a
-run only scrubs it: it is withheld from every tool subprocess a run starts.
+only, past the anonymous rate limit. The public asset hosts never see it. A
+terminal run withholds it from every tool subprocess it starts;
+.B microagent acp
+does not.
 .TP
 .BR MICROAGENT_CONFIG ", " MICROAGENT_SESSION_DIR ", " MICROAGENT_SKILLS
 These three take an empty value as off: no config file, no session log, no
@@ -313,8 +330,7 @@ Trimmed like every other variable; a
 .B HOME
 that is unset or holds only whitespace is no home rather than a path off the
 root, so those three settings fall to the names a
-.B MICROAGENT_CONFIG
-,
+.BR MICROAGENT_CONFIG ,
 .B MICROAGENT_SESSION_DIR
 or
 .B MICROAGENT_SKILLS
@@ -322,16 +338,17 @@ value gives, or to nothing at all.
 .TP
 .B MDEBUG
 Set to 1 to trace a stuck stream on stderr and print the configuration the run
-resolved: model, base url, ceilings, the config file read, the skill roots, and
-the name of the source the api key came from, never the key.
+resolved: model, base url, ceilings, the config file read, the skill roots, the
+sandbox, the tools turned off, and the name of the source the api key came
+from, never the key. 0, off, no, false and an empty value leave it off.
 .TP
 .BR NO_COLOR ", " TERM=dumb
 The tool gutter draws the tool name in bold on a terminal and in plain text
 everywhere else.
 .B NO_COLOR
 set to anything but an empty string, or
-.B TERM=dumb
-, leaves the bold out even at a terminal. The value of
+.BR TERM=dumb ,
+leaves the bold out even at a terminal. The value of
 .B NO_COLOR
 is not read, only the name, and an empty value is not a setting.
 .TP
@@ -348,17 +365,16 @@ gains nothing.
 .SH FILES
 .TP
 .I ~/.microagent/config.toml
-System prompt addendum, repository instructions, skills, MCP servers, tool
-set, sandbox and command filter. A first run that finds no config writes the
-shipped template here, so the keys are discovered by editing a file that
-already documents itself.
+Provider settings, system prompt addendum, repository instructions, skills, MCP
+servers, tool set, sandbox and command filter. A run that finds no config here
+writes the commented template in its place.
 .TP
 .I ~/.microagent/sessions
 Per-response JSONL session log, or
 .BR MICROAGENT_SESSION_DIR .
 An empty
 .B MICROAGENT_SESSION_DIR
-writes no log; an empty directory is created if it is missing and then written.
+writes no log; a missing directory is created.
 .TP
 .I ~/.microagent/skills
 Skill directories, each holding a
@@ -375,11 +391,15 @@ The run finished.
 The run failed.
 .TP
 .B 2
-The command line was wrong.
+The command line was wrong, or the config holds something the run cannot
+start with: a bad value, a
+.B [tools.<name>]
+table that names no tool, or every built-in tool disabled.
 .TP
 .B 3
-The run stopped without an answer, so the text on stdout is a prefix of the work
-rather than an answer.
+The run stopped without an answer (a turn, spend or time ceiling, a repeated
+tool call, or a last response with no text or cut short), so the text on stdout
+is a prefix of the work rather than an answer.
 .TP
 .B 130
 Interrupted by Ctrl+C or a signal, which takes the tool subprocess with it.

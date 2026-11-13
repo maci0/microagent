@@ -11,13 +11,13 @@ reasons unrelated to the code. `bench/instructions.sh --check` is the gate that 
 ## The short version
 
 The harness is not the bottleneck. A run is 47 s to 720 s, and the harness's own share is under 1%
-per turn: about 83,000 instructions before the first byte reaches the provider, and about 4,160 instructions
-per streamed frame. The model and the tool subprocesses are the run.
+per turn: about 83,000 instructions before the first byte reaches the provider, and about 4,100
+instructions per streamed content frame. The model and the tool subprocesses are the run.
 
 So the levers worth pulling are not in the CPU. They are in the bytes on the wire, in what the run
 waits for, and in what it holds resident, none of which a profiler or an instruction counter shows.
 
-What it holds resident is the headline: 0.6 MB at `--version`, 0.9 MB up to the first request,
+What it holds resident is the headline: 0.6 MB at `--version`, 0.9 MB for the first response,
 1.6 MB after 50,000 streamed frames, on the build that ships. The other agent CLIs hold 25 MB to
 326 MB at `--version`; the table, the method and the three build modes are in
 [docs/benchmark.md](benchmark.md#memory-footprint). The release build is `ReleaseSmall` because it
@@ -28,20 +28,25 @@ gate names the mode it counts in.
 ## Where the work goes
 
 Measured with `perf stat -e instructions`, median of three, net of a baseline binary. The
-per-frame, compaction, body and ranged-read rows are the ones `bench/instructions.baseline` gates,
-so a row here that moves is a gate that moved with it:
+per-frame, compaction, body and ranged-read rows are the committed
+`bench/instructions.baseline` snapshot (Zig 0.16.0, ReleaseFast, header of that file). They are not
+a fresh measurement on the Zig 0.17.0 the tree now requires. `bench/instructions.sh` gates each of
+these rows on its per-unit value inside a 10% band (`TOLERANCE`). The `--version` and
+pre-request rows are the "after" column of the change table below, not gated rows.
 
 | path | instructions | per unit |
 | --- | --- | --- |
 | process start, arg parse (`--version`) | 33,030 | n/a |
 | everything before the first request is sent | 82,786 | n/a |
-| a streamed content frame (47 B) | n/a | 4,160 |
-| a streamed tool-argument frame | n/a | 9,253 |
-| compaction of a 1 MB conversation | 31,049,215 | one call |
-| building the request body (the row measures 40 of them) | 2,764,260 | 69,106 |
-| a ranged read of a 512 KB line | 7,521,158 | one call |
+| a streamed content frame (47 B) | n/a | 4,065 |
+| a streamed tool-argument frame | n/a | 9,147 |
+| compaction of a 1 MB conversation | 31,047,373 | one call |
+| building the request body (the row measures 40 of them) | 2,764,240 | 69,106 |
+| a ranged read of a 512 KB line | 7,884,035 | one call |
 | the session log's share of a run (ReleaseFast) | 332,061 | once per run |
 | one more turn of the loop (ReleaseFast) | 47,552 | a tool call that runs nothing |
+
+The body's total is the baseline's per-unit count times 40.
 
 Against a 284 s review and roughly 20,000 frames, the streaming path is on the order of ten
 milliseconds of CPU in total. Changing it is not worth the risk.
@@ -49,14 +54,13 @@ milliseconds of CPU in total. Changing it is not worth the risk.
 Syscalls, which no instruction count carries: 17 for `--version`, 109 for the whole pre-request
 path, and nothing per turn beyond one session-log write and one stdout write per chunk.
 
-The turn and session rows use the same method (`perf stat -e instructions`, median of three,
-against a stub provider on loopback that always asks for a tool that does not exist) but on the
-shipped `-Doptimize=ReleaseFast` binary, not the Debug test binary the frame, compaction and
-ranged-read rows come from. Debug's checked arithmetic and debug allocator make these two about
-four times larger (194,762 and 1,290,450), so the two sets are not comparable and the Debug figures
-are not what a release build pays. The turn row is `--max-turns 101` minus `--max-turns 1`, divided
-over the hundred turns between them. The session row is a one-turn run with and without
-`MICROAGENT_SESSION_DIR=`.
+The turn and session rows use the same method (`perf stat -e instructions`, median of three, against
+a stub provider on loopback that always asks for a tool that does not exist) but on the ReleaseFast
+CLI; the gated rows above use ReleaseFast test binaries. Separate historical Debug measurements were
+194,762 instructions per turn and 1,290,450 for session logging, about four times larger. Those
+Debug figures are not what a release build pays. The turn row is `--max-turns 101` minus
+`--max-turns 1`, divided over the hundred turns between them. The session row is a one-turn run with
+and without `MICROAGENT_SESSION_DIR=`.
 
 A thousand turns on the same binary is 53.1 M instructions, 427 ms of wall (mostly the stub, which
 is Python), and peak RSS flat at 12.6 MB. The marginal turn barely moves as the conversation grows:
@@ -69,17 +73,18 @@ socket after each response is read.
 
 ## The toolchain
 
-The project pins Zig 0.17.0, the newest stable release: [the download
-index](https://ziglang.org/download/index.json) lists no 0.17.1, and `master` is 0.18.0-dev, which
-is not a release to build a release asset with. There is no compiler upgrade to take for
-performance until 0.18 ships. Measured here, `-mcpu=native` moves the hot paths by less than the
-run-to-run noise, so there is no build flag to reach for either.
+The tree builds on Zig 0.17.0 or newer (`minimum_zig_version` in `build.zig.zon`), and the release
+targets (`make install`, `make musl`, the release assets) refuse any compiler but exactly that
+version (`zig-release-version` in the Makefile). A newer stable release is the point at which a
+compiler upgrade is worth measuring again; `master` is not a release to build a release asset with.
+Measured here, `-mcpu=native` moves the hot paths by less than the run-to-run noise, so there is no
+build flag to reach for either.
 
 ## What was changed, and what it bought
 
 | | before | after | why |
 | --- | --- | --- | --- |
-| un-cacheable request bytes | 3,775 B/turn | **2 B/turn** | the tool schemas were written after `messages`, so they fell outside the cacheable prefix every turn |
+| un-cacheable request bytes | the whole tool schema per turn ([dated size](benchmark.md#un-cacheable-request-bytes)) | **2 B/turn** | the tool schemas were written after `messages`, so they fell outside the cacheable prefix every turn |
 | the constant half of the request, rebuilt per turn | once per turn | **once per run** | `bodyPrefix` is a pure function of `opts`, and nothing in the loop changes any of it, so every turn walked the tool schema again and copied every MCP tool's `inputSchema` into a fresh turn-arena buffer |
 | a repeated call `id` and `name` in a stream | a `dupe` and a `free` per frame | **once per call** | providers repeat both on every argument fragment, so each frame allocated and released two strings that had not moved; the skip is the rule `recordServed` already follows for `model` |
 | streamed frame parse | 7,204 instr | **4,101 instr** | declared shapes instead of a `std.json.Value` tree, with the generic parse kept behind them |
@@ -91,7 +96,7 @@ run-to-run noise, so there is no build flag to reach for either.
 | the same library, system time to the first request | 9.3 ms | **2.0 ms** | the same change: 21 MB of reads become about 1.6 MB, and kernel time is the half that carries it |
 | three MCP servers with 1 MB `tools/list` answers | 12.2 MB resident | **4.5 MB** | a `tools/list` answer was parsed into the run arena, tree and line both, and the buffer it arrived in kept its size; the answer is parsed in a scratch arena now, only the schema bytes are copied out, and that buffer has its own allocator and is handed back |
 | one such server | 8.5 MB | **4.5 MB** | the same change |
-| worker stacks, a 300-turn run | 36.7 MB address space | **6.7 MB** | std gives each `Io.Threaded` worker a 16 MB stack and allows one per core; this program's batches hold one or two operations, so it asks for sixteen workers of a megabyte -- the fan-out row below is why it is not four, and a 300-turn run at sixteen measures 19.8 MB of `VmPeak` against 16.9 MB at four |
+| worker stacks, a 300-turn run | 36.7 MB address space | **6.7 MB** | std gives each `Io.Threaded` worker a 16 MB stack and allows one per core; this program's batches hold one or two operations, so it asks for sixteen workers of a megabyte (the fan-out row below is why it is not four), and a 300-turn run at sixteen measures 19.8 MB of `VmPeak` against 16.9 MB at four |
 | the same, a 3000-turn run | 91.8 MB address space | **46.8 MB** | the rest is the conversation and the arenas; peak resident on that run fell from 10.9 MB to 9.5 MB |
 | a 3000-turn run's client CPU | 211.9 M instr | **177.8 M instr** | `sendBodyComplete` needs the whole body in one buffer, so the conversation was copied into a fresh one every turn; the prefix and the conversation now go to the wire from where they are |
 | the same run, peak resident | 13.3 MB | **11.0 MB** | with the body buffer gone, the turn arena crosses its retention ceiling less often |
@@ -111,11 +116,11 @@ run-to-run noise, so there is no build flag to reach for either.
 | resident memory while waiting on a model, HTTPS | 1,530 kB (handshake stack stays dirty) | **1,324 kB** | the handshake dirties about 200 kB of stack for milliseconds; `madvise(DONTNEED)` on the `[stack]` mapping below the caller's frame gives it back, and does nothing on any other thread or mapping |
 | a full run's copies, shipped build | 92,000 of 255,644 instr in `memcpy` | **8,000 of 171,991** | Zig's compiler runtime copies a byte at a time in `ReleaseSmall`, about four instructions a byte, and the request body goes through several writers; `src/copy.zig` is a word-at-a-time `memcpy`, built with `-fno-builtin` so LLVM cannot turn its loop back into a call to itself, and linked only where the runtime's is the slow one |
 | the stream's error check, shipped build | 54.3 M instr for 5,000 frames | **37.8 M** | `std.mem.indexOf` for `"error":` made a call per position, 128,042 calls in a 3,000-frame stream; the needle is one machine word, so each position is a load and a compare. `ReleaseFast` inlined the call and does not change (26.9 M) |
-| the stock system prompt | escaped per run (about 12 instr per byte) | **escaped at compile time** | a run with no reply style and no skills sends the same 3 KB every time |
+| the stock system prompt | escaped per run (about 12 instr per byte) | **escaped at compile time** | a run with no reply style and no skills sent the same 3 KB every time. Superseded: `systemText`, `src/main.zig:1056` now always appends the working-directory sentence, so no run sends the stock prompt alone and the compile-time copy (`system_message_json` in `src/conversation.zig`) is reached only by tests |
 | a JSON string's plain runs | one table lookup per byte | **a word at a time** | after a plain byte, eight bytes are tested at once; compaction of a 1 MB conversation fell 37.2 M to 31.0 M instr, and the byte loop is unchanged for text that is mostly escapes or non-ASCII |
 | the sandbox path check | a `realpath` of `.` per `write` and `edit` | **none** | the working directory is `writable_roots[0]`, taken at startup; a `realpath` is an `openat`, a `readlink` and a `close` |
-| a connection to a host with several addresses, all four presets on | 4,607 ms before the first request | **2,820 ms** | `std.net.HostName.connect` dials every address a name resolves to as its own async task and keeps the first, and `Io.Threaded` runs a task inline when every async slot is busy -- four slots for four handshakes and their fan-out, so a connection cost the sum of the host's addresses instead of the fastest and the handshakes queued behind each other. Sixteen slots is the measured knee; the wait is per connection and a run opens several |
-| the four presets at run start, all four on | 2,820 ms before the first request | **0.6 ms** | none of them is handshaken: their tools and schemas are in this binary, so the model sees them with no request, and the first call to one of their tools is what connects. The row above still governs that call, and every keyed preset, `url` server and provider connection |
+| a connection to a host with several addresses, all four presets on | 4,607 ms before the first request | **2,820 ms** | `std.net.HostName.connect` dials every address a name resolves to as its own async task and keeps the first, and `Io.Threaded` runs a task inline when every async slot is busy. With four slots for four handshakes and their fan-out, a connection cost the sum of the host's addresses instead of the fastest and the handshakes queued behind each other. Sixteen slots is the measured knee; the wait is per connection and a run opens several |
+| the four presets at run start, all four on | 2,820 ms before the first request | **0.6 ms** | none of them is handshaken: their tools and schemas are in this binary, so the model sees them with no request, and the first call to one of their tools is what connects ([which servers connect at start](usage.md#tool-set)). The row above still governs that call, every server connected at start, and every provider connection |
 | the session store walked per run | two full walks and two sorts | **one walk, one sort** | `session.open` pruned before creating the log and again after, so every run start listed, copied and sorted the whole store twice over a directory of up to 200 names. Pruning once with the run's own log already in place settles on the same size, and it runs on the path where no log could be opened as well, which is the case the pre-open prune was for |
 
 Four of the rows above are one body of work on one run, and they compound. Between `v0.4.0` and the
@@ -151,14 +156,12 @@ Kept out on the numbers, not on taste:
   `indexOfScalarPos`. On a 20,000-frame stream in ReleaseFast it cost 4.5% more instructions
   (114.7 M against 109.8 M): a 47-byte frame holds about ten quotes, and ten hops cost more than
   one short scan.
-- **ReleaseFast release assets.** ReleaseSmall retires 1.3 times the instructions of ReleaseFast
-  (43,156 against 33,030 for `--version`, 37.8 M against 27.0 M for a 5,000-frame stream), and it
-  holds 28% to 41% less resident memory: 540 kB against 788 kB at `--version`, 764 kB against 1,244 kB
-  up to the first request, 1,300 kB against 1,812 kB after 50,000 frames. Startup CPU time is 0.13 ms
-  against 0.23 ms, because it pages in half the binary. Memory is the headline, and the cycles it
-  gives up are under 1% of a turn, so the release assets, `make` and `make musl` build ReleaseSmall.
-  ReleaseSafe holds two to three times ReleaseSmall's. Before the fixes above the shipped build
-  retired twice ReleaseFast's instructions.
+- **ReleaseFast release assets.** ReleaseSmall retires about 1.3 times the instructions of
+  ReleaseFast and holds 28% to 41% less resident memory (the build-mode table in
+  [docs/benchmark.md](benchmark.md#memory-footprint)); its startup CPU time is lower because it
+  pages in half the binary. Memory is the headline, and the cycles it gives up are under 1% of a
+  turn, so the release assets, `make` and `make musl` build ReleaseSmall. Before the fixes above
+  the shipped build retired twice ReleaseFast's instructions.
 - **Skipping the system CA store rescan.** With no `--ca-bundle`, the HTTP client parses every
   certificate in the system store before the first https request: 121 certificates, 5.9 M
   instructions and 0.7 ms of CPU on this machine, once per run and with no peak-memory cost. There
@@ -191,7 +194,7 @@ None of the defects worth finding were CPU. The categories generalize past this 
 
 | class | why a profiler misses it | example |
 | --- | --- | --- |
-| wire bytes | no instruction is spent on them | 4.3 KB of tool schema re-read every turn |
+| wire bytes | no instruction is spent on them | the whole tool schema re-read every turn |
 | waiting | the cost is sleep | a 429 sat the run out for six minutes inside `--budget`, and three MCP servers were handshaken one at a time, so a run paid their boot times in series |
 | resident memory | instruction counts do not carry it | 48 MB retained after one large response |
 | fallback paths | the primary path works | `date +%s` standing in for a monotonic clock |
@@ -201,10 +204,10 @@ than profiling it.
 
 ## Open, and deliberately
 
-`conversation_soft_limit` is the one knob left that moves a run's wall time. Its uncached cost does
-not depend on the limit: compaction fires once per half-limit of growth and discards a prompt of
-about the limit, so the product is the conversation's growth and the limit cancels. Deciding it
-needs a live provider, and it is the only thing here that does.
+`conversation_soft_limit` is the one knob left whose effect needs a live provider to measure. Its
+uncached prefill does not depend on the limit; what moves is the size of the cached prompt every
+turn, whose cost in time and tokens is the provider's. The arithmetic is in
+[docs/benchmark.md](benchmark.md#prompt-cache).
 
 ### Compaction is the CPU when tool results are large
 
@@ -354,8 +357,8 @@ presets, so all four are handshaken before the first request: median 4,607 ms at
 not four equal parts. One at a time, `mcp.context7.com` answers in 2.8 s and `mcp.deepwiki.com`,
 which resolves to five addresses at 0.16 s a connect, takes 4,368 ms at four slots against
 1,899 ms at sixteen; `mcp.grep.app` (1.1 s) and `mcp.exa.ai` (0.8 s) do not move. The three
-presets that predate `deepwiki` are already at 2.8 s at four slots -- the row above about connecting
-them concurrently is what bought that -- so what the fourth preset exposed is contention: four
+presets that predate `deepwiki` are already at 2.8 s at four slots (the row above about connecting
+them concurrently bought that), so what the fourth preset exposed is contention: four
 handshakes, each wanting its own address fan-out, against four slots. `strace -f -e connect` on the
 two binaries is the mechanism in one picture: five `connect` calls one after another on one thread
 at four, and five on five threads that all finish within 0.0002 s of each other at sixteen. The
@@ -370,7 +373,3 @@ handshaken at start: median 0.6 ms over fifteen runs (0.7 ms with every preset d
 table itself costs nothing at start). That is the whole of the run's wait before its provider
 request on this machine. A `tools/call` to a preset is where its connection is opened, and that
 call pays the fan-out row above.
-
-The instruction gate needs `perf` and exits 1 when a row leaves its band, 2 when a row cannot be
-measured. It is not in `make check` because a shared runner may have performance counters switched
-off, where a blocking gate fails for a reason unrelated to the code.

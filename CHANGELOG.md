@@ -1,23 +1,26 @@
 # Changelog
 
-All notable changes to microagent, in the order a consumer meets them. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project follows [SemVer](https://semver.org)
-from `0.1.0`: under `0.y` the minor carries features and changes that alter a run's default behavior, the
-patch carries fixes, and a patch never changes what an existing invocation does. A `Security` entry is a
-minor entry too, because closing a hole narrows what an invocation may do as often as it changes an
-answer. The version lives in
-`build.zig.zon`, and two documents repeat it rather than one: the README, in the install snippet and
-the status line, which `make check-readme` holds to the declared version, and the man page's `.TH`
-line, which `make check-man` holds to it and to every flag `--help` lists. A bump that moves the
-former and leaves either of the others behind ships an install command that fetches the previous
-release or a man page describing an older interface, and both `make check` and the push workflow run
-both targets. `microagent --version` prints it, and the release workflow refuses to publish a tag
-that does not name it.
+Notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+The project follows [SemVer](https://semver.org) from `0.1.0`, with a stricter
+policy during `0.y`: features, default-behavior changes, removals and security
+fixes require a minor release. Patches contain fixes that preserve existing
+invocations.
 
-Only the latest release is supported. There is no backport window and no LTS line: a fix ships in the next
-release, and `microagent update` moves you to it.
+`build.zig.zon` declares the version. `make check-readme` and `make check-man`
+check its copies in the README and man page; the release workflow checks the tag.
+See [Contributing](CONTRIBUTING.md#version-and-changelog) for the release process.
+
+[SECURITY.md](SECURITY.md#supported-versions) says which releases are supported.
 
 ## [Unreleased]
+
+### Fixed
+
+- Documentation, the man page and the comments in the `setup` config template
+  now match the code: stale limits, defaults, gate steps and review
+  instructions are corrected, and repeated guidance is removed. The template
+  that `setup` and a first run write has new comments; no key, default or
+  invocation changed.
 
 ## [0.24.0] - 2026-11-13
 

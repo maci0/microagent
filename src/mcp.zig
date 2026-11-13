@@ -1558,9 +1558,9 @@ test "MCP tool names include the server prefix in the provider name limit" {
 }
 
 /// Fills a preset's tool table from the table above, so its tools can be
-/// offered without the run talking to it. True when the host is one the table
-/// knows, which is the four presets and nothing a config wrote: a `[[mcp]]` url
-/// is a server whose tools only its own `tools/list` can name.
+/// offered without the run talking to it. True when the host is one of the four
+/// preset hosts, whether a preset table or a `[[mcp]]` url named it; a server
+/// on any other host has tools only its own `tools/list` can name.
 ///
 /// A preset with a key is not filled here. A key unlocks tools this binary has
 /// never seen -- exa's company and people search, deepwiki's private mode -- and

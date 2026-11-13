@@ -32,14 +32,13 @@ a container that has nothing installed. microagent is the other shape:
 - **Script-shaped output.** stdout is the answer plus one JSON usage line per response. Everything
   else goes to stderr. Exit codes separate "finished", "failed", "bad invocation" and "stopped at a
   ceiling".
-- **Bounded by default.** Turn, token, spend and wall-clock ceilings, a request that is never
-  re-sent once the provider has produced anything, and a prompt prefix that stays byte-identical so
-  the provider's cache keeps hitting.
-- **Small on purpose.** No subagents, no plugins, no TUI. Skills and MCP servers are yours to add. Four public remote
-  tools (web search, library docs, GitHub code search, repository wikis) are off until a
-  `[tools.<name>]` table names one, described by
-  this binary rather than by a start-up handshake, so they cost nothing until one is called and a
-  fresh config sends a query to nobody.
+- **Bounded runs.** Default turn and response-token ceilings, optional spend and wall-clock
+  limits, and no retry after the provider produces content. A stable prompt prefix supports caching.
+- **Small on purpose.** No subagents, no plugins, no TUI. Skills and MCP servers are yours to add.
+  Four public remote tools (web search, library docs, GitHub code search, repository wikis) are off
+  until a `[tools.<name>]` table enables one. Enabled without a key, a preset connects on first use,
+  from schemas shipped in the binary ([tool set](docs/usage.md#tool-set) has the exact rule). A
+  fresh config enables none.
 
 ## What it looks like
 
@@ -53,9 +52,8 @@ $ hyperfine -N -w 5 -r 30 './zig-out/bin/microagent --version'
   Time (mean ± σ):     130.0 µs ±  64.5 µs    [User: 87.1 µs, System: 4.4 µs]
 ```
 
-`ReleaseSmall` is the build the release assets and `make` use, because it holds the least of the three
-release modes; the three, their memory and their instruction counts are in
-[docs/benchmark.md](docs/benchmark.md#memory-footprint).
+The release assets and `make` use `ReleaseSmall`, the release mode with the smallest footprint;
+all three modes are compared in [docs/benchmark.md](docs/benchmark.md#memory-footprint).
 
 A run prints the model's answer to stdout and a usage line after each response; tool calls show on
 stderr as a one-line gutter such as `⏺ read: src/main.zig`, with the tool name in bold when
@@ -74,11 +72,10 @@ It also spent about 1.9x the input tokens. Details, caveats and error bars are i
 
 Prebuilt binaries for `x86_64-linux-musl`, `aarch64-linux-musl`, `x86_64-macos` and `aarch64-macos`
 are on the [releases page](https://github.com/maci0/microagent/releases), each with a `.sha256`
-sidecar, the `LICENSE` they are distributed under, and an SPDX inventory
-(`microagent-$v.spdx.json`) naming the assets with their digests. The inventory records that the
-binaries carry no third-party code and link no libc, and names every Python package the repository
-pins for its linters and its benchmark adapter, none of which is in a release. Pick the target your
-machine runs:
+sidecar, the `LICENSE`, and an SPDX inventory (`microagent-$v.spdx.json`). The inventory lists the
+assets with their digests, records that the binaries carry no third-party code and link no libc,
+and names the Python packages pinned for the linters and the benchmark adapter, none of which ships
+in a release. Pick your machine's target:
 
 ```sh
 v=v0.24.0 t=x86_64-linux-musl
@@ -92,29 +89,28 @@ $sum -c microagent-$v-$t.sha256 && mkdir -p ~/.local/bin && install -m 755 micro
 
 `microagent update` replaces an installed binary with the latest release after checking its digest.
 
-Or build it. Zig 0.17.0 or newer is the only requirement:
+Or build it. Zig 0.17.0 or newer is the only requirement, but `make install` needs exactly 0.17.0,
+the compiler the release assets are built with, and refuses any other:
 
 ```sh
 zig build -Doptimize=ReleaseSmall     # zig-out/bin/microagent
 make install                         # the binary, docs/microagent.1 and LICENSE into ~/.local
 ```
 
-A distro or homebrew-style packager stages the same three files with
-`make install PREFIX=/usr DESTDIR=$pkgdir`, which writes `$pkgdir/usr/bin/microagent` mode 755,
-`$pkgdir/usr/share/man/man1/microagent.1` and `$pkgdir/usr/share/licenses/microagent/LICENSE` mode
-644, and nothing else. `BINDIR`, `MANDIR` and `LICENSEDIR` move those three directories. The binary
-is static and links no library, but it is not dependency-free: the `search`, `ast` and `git` tools
-exec `rg`, `ast-grep` and `git`, so a package should depend on the three executables under whatever
-names its distribution packages them, rather than declare none and leave the tools failing on a
-machine that has the package installed. An install from a release asset needs the same three on
-`PATH`.
+A packager stages the same three files with `make install PREFIX=/usr DESTDIR=$pkgdir`, which
+writes `$pkgdir/usr/bin/microagent` mode 755, `$pkgdir/usr/share/man/man1/microagent.1` and
+`$pkgdir/usr/share/licenses/microagent/LICENSE` mode 644, and nothing else. `BINDIR`, `MANDIR` and
+`LICENSEDIR` move those three directories.
+
+The binary links no library, but the `search`, `ast` and `git` tools exec `rg`, `ast-grep` and
+`git`, so every install needs those three on `PATH`, and a package should depend on them.
 
 ## First run
 
-Run `microagent setup` to create the config from the template and answer questions about the
-provider, built-in tools, remote endpoints, repository instructions, skills and sandbox.
-Enter keeps current values. Run it again to change settings, or use
-`microagent setup --config path/to/config.toml` for another file.
+`microagent setup` creates the config from the template and asks about the provider, built-in
+tools, remote endpoints, repository instructions, skills and sandbox. Enter keeps current values.
+Run it again to change settings, or pass `--config path/to/config.toml` for another file. Or skip
+the file and use the environment:
 
 ```sh
 export MICROAGENT_API_KEY=sk-...                        # any OpenAI-compatible provider's key
@@ -125,11 +121,9 @@ microagent "fix the failing test and run it"
 ```
 
 All three may also be written in the config file (`model`, `base_url`, `api_key`); a flag beats the
-variable, which beats the file. There is no default provider and no key file. A router that needs
-an extra request header gets it from the file's `headers` table, e.g.
-`headers = { "x-grok-client-version" = "1.0.77" }`. `models = ["a", "b"]` lists the models an ACP
-client may switch a session among, with `model` as the default, and `discover_models = true` adds
-the provider's own `GET /models` list to it.
+variable, which beats the file. There is no default provider and no key file. The file also takes
+extra request headers for routers that need one (`headers`), and the list of models an ACP client
+may switch among (`models`, `discover_models`); see [provider settings](docs/usage.md#provider-settings).
 
 For OpenCode Zen, set `MICROAGENT_BASE_URL=https://opencode.ai/zen/v1`; for OpenCode Go,
 use `https://opencode.ai/zen/go/v1`. Set `MICROAGENT_API_KEY` to your OpenCode API key and
@@ -141,10 +135,11 @@ For an interactive session, run `microagent --repl`. Enter one prompt per line;
 conversation history carries over. Exit with `/quit` or Ctrl-D. The usual flags apply,
 and turn, time and token spending ceilings reset for each prompt.
 
-`microagent --help` lists every flag. `microagent schema` prints a CLI Spec 0.3 document and reads no config. `-o json` asks `--version`, `setup`, and `update` for one JSON document; the model's stdout stays text. The API key is `MICROAGENT_API_KEY` or the config file, and `--api-key` still works. [docs/usage.md](docs/usage.md) is the full reference: flags and
-environment variables, the config file (provider settings, system prompt addendum, skills, MCP servers), the tools and their
-credential guards, the stdout and session-log formats, exit codes, retries, gauntlet setup, and
-self-update.
+`microagent --help` lists every flag. `microagent schema` prints a CLI Spec 0.3 document and reads
+no config. `-o json` asks `--version`, `setup` and `update` for one JSON document (`schema`
+prints one either way); the model's stdout stays text. [docs/usage.md](docs/usage.md) is the full reference: flags and
+environment variables, the config file, the tools and their credential guards, the stdout and
+session-log formats, exit codes, retries, gauntlet and ACP clients, and self-update.
 
 ## Status
 
@@ -154,10 +149,11 @@ from `AGENTS.md`; skills; MCP servers over stdio and over HTTP; the Agent Client
 (`microagent acp`) for editor and harness clients; the session log; verified self-update;
 reproducible release builds for Linux and macOS.
 
-Deliberately absent: session resume (gauntlet's `--retries` reruns a whole review), parallel tool
-calls, a TUI, Windows builds. Not built yet, with what would settle each on
-[docs/todo.md](docs/todo.md): subagents and language-server tools. What the harness costs and which optimizations were
-measured and rejected is in [docs/performance.md](docs/performance.md).
+Deliberately absent: session restoration across process restarts, parallel tool calls, a TUI and
+Windows builds. ACP can resume sessions retained by the current connection; gauntlet's `--retries`
+reruns a whole review. Not built yet: subagents and language-server tools;
+[docs/todo.md](docs/todo.md) says what would settle each. What the harness costs, and which
+optimizations were measured and rejected, is in [docs/performance.md](docs/performance.md).
 
 Known limits: credential protection is a filename rule, so a key file with an unrecognized name, or
 a path a command builds at run time, is still readable. [docs/threat-model.md](docs/threat-model.md)

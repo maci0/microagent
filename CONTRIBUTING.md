@@ -2,64 +2,48 @@
 
 ## Repository layout
 
-| path | what lives there |
+| Path | Contents |
 | --- | --- |
-| `src/` | the agent, one Zig file per concern, each with its tests and fuzz corpora beside the code: `main.zig` (command line, config resolution, the turn loop and the request), `stream.zig` (folding response frames into a turn), `conversation.zig` (the system prompt, message array and compaction), `chat.zig` (value types and the JSON writer), `net.zig`, `tool.zig`, `sandbox.zig`, `session.zig`, `skill.zig`, `copy.zig`, `config.zig`, `mcp.zig`, `update.zig` |
-| `bench/` | the benchmark and gauntlet scripts, a loopback stub provider for profiling the harness alone (`stub_provider.py`), the peak-memory probe (`maxrss.py`), the task fixtures under `bench/tasks/`, the fixed stride-sample task lists (`tb4-sample.txt`, `polyglot-sample.txt`, `deepswe-sample.txt`, `tb2-sample.txt`, `swe-sample.txt`), the instruction gate's baseline, the committed results (`results.jsonl`, `gauntlet-results.jsonl`), and the Python integration suite `make test-cli` runs (`test_cli.py` for the built CLI against a loopback provider, and a `test_*.py` beside each tool it checks) |
-| `integrations/harbor/` | the adapter that runs microagent on [Harbor](integrations/harbor/README.md) benchmarks, and its pinned Python requirements |
-| `docs/` | reference and design docs: [usage](docs/usage.md), [benchmark](docs/benchmark.md), [performance](docs/performance.md), [threat model](docs/threat-model.md), the [to-do list](docs/todo.md), and the logo |
-| `reviews/` | this project's own [gauntlet](https://github.com/maci0/gauntlet) review prompts; run them with `gauntlet --prompt-dir reviews`, which replaces gauntlet's embedded set |
-| `.github/` | the `ci` and `release` workflows, the shared `setup-zig` and `setup-linters` actions, and the Dependabot config |
-| `scripts/` | the gate's own checks, and nothing else: the linter version pins (`lint-versions.sh`), each dependency set's lock against the manifest it was compiled from (`lint-lock.sh`), the `run:` steps in the workflows (`lint-ci-shell.sh`), their action pins and runner semantics (`lint-actions.sh`), the Markdown checks (`lint-md.sh`), the `src/path:line` citations (`check-refs.sh`), and the release inventory (`sbom.sh`). The linters' hashed install is compiled from `lint-requirements.in` |
+| `src/` | Zig modules, each with its tests and fuzz corpora beside the code: `main.zig` (command line, config resolution, the turn loop, the provider request and ACP sessions), `acp.zig` (ACP v1 frames and content blocks), `stream.zig` (folding response frames into a turn), `conversation.zig` (system prompt, message array and compaction), `chat.zig` (value types, the JSON writer and diagnostic escaping), `net.zig` (CA bundle, environment, deadlines and output sinks), `tool.zig` (the built-in tools and their process runner), `mcp.zig` (stdio and HTTP MCP servers), `config.zig` (the config file), `setup.zig` (`microagent setup`), `session.zig` (the session log), `skill.zig` (skills), `sandbox.zig` (Landlock and Seatbelt), `update.zig` (`microagent update`), `clispec.zig` (the `schema` document, `-o` and the JSON error envelope), `clispec_check.zig` (drives the built binary through its entry point), `copy.zig` (the word-at-a-time `memcpy` for ReleaseSmall). |
+| `bench/` | Benchmark and gauntlet scripts, task fixtures and sample lists, the stub provider, memory probe, instruction baseline, committed results and Python integration tests. |
+| `integrations/harbor/` | The [Harbor adapter](integrations/harbor/README.md) and its pinned Python requirements. |
+| `docs/` | [Usage](docs/usage.md), [benchmarks](docs/benchmark.md), [performance](docs/performance.md), [threat model](docs/threat-model.md), [to-do list](docs/todo.md), man page and artwork. |
+| `reviews/` | Review prompts for `gauntlet --prompt-dir reviews`, replacing gauntlet's embedded set. |
+| `.github/` | CI and release workflows, shared setup actions and Dependabot config. |
+| `scripts/` | Gate checks and release inventory generation. |
 
-At the root: `build.zig` and `build.zig.zon` (the build and the version), the
-[Makefile](Makefile) (every command below), `README.md`, `CHANGELOG.md`, this
-file, `LICENSE`, `config.example.toml` (the config template), and the linter
-setup: `lint-requirements.in`, `lint-requirements.txt`, `ruff.toml`,
-`.yamllint`. `.gitignore` and `.gitattributes` complete the list.
+The root holds the build and version (`build.zig`, `build.zig.zon`),
+[Makefile](Makefile), changelog, config template, license and linter configuration.
 
 ## Setup
 
-Zig 0.17.0 or newer, the minimum declared as `.minimum_zig_version` in
-[build.zig.zon](build.zig.zon). There is no dependency to install, no service to
-start and no configuration to copy: a clone plus a Zig toolchain builds and
-tests. A newer Zig builds and tests this tree: `make zig-version`, which `make check` runs
-first, refuses only a compiler older than that minimum and names a newer one without stopping.
-The release assets are the exception, because a compiler decides their bytes. CI builds them
-with exactly 0.17.0, and `make release-assets`, `make musl`, `make install`,
-`make check-asset-run` and `make check-reproducible` each refuse any other compiler through
-`make zig-release-version`, so a rehearsal built here is the binary the tag publishes. 0.17.0 is also the newest stable release;
-[docs/performance.md](docs/performance.md#the-toolchain) says why there is no
-compiler upgrade or build flag to take for speed.
+Use Zig 0.17.0 or newer, the minimum declared in [build.zig.zon](build.zig.zon).
+The Zig build needs no third-party package installation, service or copied config.
+`make zig-version` rejects older compilers and reports newer ones without rejecting them;
+that is a version check, not a guarantee of compatibility with future Zig releases.
 
-The build copies the Zig library into its cache and patches the POSIX spawn
-error path to close its pipes and reap the failed child. The installed toolchain
-is untouched. If a toolchain upgrade changes that implementation, the build
-stops for review; remove the workaround once upstream provides the cleanup.
+Release-related targets require exactly the minimum version: `make release-assets`,
+`make musl`, `make install`, `make check-asset-run` and `make check-reproducible`
+run `make zig-release-version`. CI uses that same compiler.
+
+The build copies the Zig library into its cache and patches the POSIX spawn error path
+to close pipes and reap a failed child. It leaves the installed toolchain untouched.
+If an upgrade changes that implementation, the build stops for review; remove the
+workaround when upstream provides the cleanup.
 
 ```sh
-make                     # zig-out/bin/microagent, built ReleaseSmall: the smallest resident memory
-make OPT=ReleaseFast     # the build the CPU counters are read on
+make                     # ReleaseSmall binary at zig-out/bin/microagent
+make OPT=ReleaseFast     # build used for CPU-counter measurements
 ```
 
 ### Linters
 
-`make check` also needs `shellcheck`, `ruff`, `yamllint`, `git` and `python3` on
-`PATH` (git because every linter reads its file list with `git ls-files`;
-python3 because `check-sbom` parses the SBOM with it). The same Python must
-import PyYAML, which decodes workflow `run:` bodies for shellcheck.
-`make preflight` names each missing tool with the command that installs it, and
-`make check` runs it first, so a clean clone missing a linter says which one
-instead of stopping at `make: ruff: No such file or directory`. It also names
-`rg` and `ast-grep` when either is absent, as a note rather than a failure: the
-tests that drive the `search` and `ast` tools skip themselves, the runner counts
-a skip as a pass, and a stock macOS ships neither program, so a gate that
-refused to run without them would stop working on a published platform. A local
-run with both on `PATH` is the run that covers those tests.
+`make check` needs `shellcheck`, `ruff`, `yamllint`, `git` and `python3` on `PATH`.
+That Python must import PyYAML to decode workflow `run:` bodies. `make preflight`
+reports missing tools and installation commands. It also notes missing `rg` and
+`ast-grep`: tests using them skip rather than fail, so install both to cover those paths.
 
-`ruff` and `yamllint` are format- and rule-sensitive, so the [Makefile](Makefile)
-pins them, and `make lint-versions` names a local install that differs from the
-one CI runs:
+Install the pinned Python tools with:
 
 ```sh
 uv venv .scratch/lintenv --python 3.12
@@ -67,420 +51,215 @@ uv pip install --python .scratch/lintenv/bin/python --require-hashes -r lint-req
 export PATH="$PWD/.scratch/lintenv/bin:$PATH"
 ```
 
-CI installs ShellCheck 0.11.0 from its upstream release with a pinned SHA-256.
-`make check` needs ShellCheck 0.11.0 or newer for the optional checks it enables:
-
-```sh
-brew install shellcheck          # or download the upstream 0.11.0 binary
-```
-
-CI installs `ruff` and `yamllint` from [lint-requirements.txt](lint-requirements.txt),
-which pins them and the packages `yamllint` and the workflow checker import with one sha256 per
-published artifact. It installs with `--require-hashes` into a venv on `PATH`,
-so the job never writes into the runner image's externally managed Python.
-`make lint-versions` fails when that file and the Makefile disagree on a
-version. The file is compiled by `uv` from `lint-requirements.in` (the command is in that
-file's header), so its transitive pins are whatever the declared tools ask for and nothing is
-checked by hand.
-
-`zig fmt` covers the Zig and `build.zig.zon`, and needs nothing else.
-
-`ruff` targets the Python the adapter runs on, not ruff's default.
-[ruff.toml](ruff.toml) sets `target-version = "py312"`, the floor
-`integrations/harbor/requirements.txt` records in the `uv pip compile
---python-version 3.12` that generates the lock. Without it ruff assumes py39
-and never evaluates the rules that fire only from 3.10 on, so a green run would
-say nothing about the interpreter the adapter is installed into.
+CI installs ShellCheck 0.11.0 from an upstream release with a pinned SHA-256.
+The optional checks need ShellCheck 0.11.0 or newer (`brew install shellcheck`,
+or use the upstream binary). `make lint-versions` checks the Python tool pins
+against the Makefile. Ruff targets Python 3.12, the Harbor adapter's floor.
 
 ## Before you push
 
+Run `make check`. Use the narrower targets while editing:
+
 ```sh
-make check                  # the gate: zig fmt --check, the linters, the tests, an optimized build
-make test FILTER="..."      # one test, while you are mid-edit; a filter matching no test is refused
-make test-sanitize          # the same suite optimized with Zig runtime safety checks
-make watch [FILTER="..."]   # the suite again on every source change, until Ctrl-C
-make preflight              # name any tool check and lint need that is not on PATH
-make lint                   # the pin checks, shellcheck, ruff, yamllint and Markdown on their own
-make lint-ci                # shellcheck over the run: steps, and the workflow refs and runner semantics, on their own
-make check-asset-run        # the published asset for this host, cross-built and started
-make instructions CHECK=--check   # retired instructions per unit, and a band it must stay inside
-make check-unreleased       # the [Unreleased] entry's shape, and that a source change has one
-make check-changelog-history # the 0.y bump rule over every released section, oldest first
+make test FILTER="..."      # matching unit tests; an unknown filter fails
+make test                   # unit tests plus the Python CLI/integration suite
+make test-sanitize          # optimized unit tests with Zig runtime safety checks
+make watch FILTER="..."     # rerun unit tests on source changes; Ctrl-C stops
+make preflight              # check installed tools
+make lint                   # all lint, lock, inventory and citation checks
+make lint-ci                # workflow shell, action pins and runner semantics
+make check-asset-run        # cross-build and start this host's published asset
+make instructions CHECK=--check   # instruction counts against baseline bands
 ```
 
-`make help` lists every target.
+`make help` lists all targets. `make fmt` applies `zig fmt` and `ruff format`;
+`make fmt-check` checks formatting without changing files.
 
 ### The gate
 
-`make check` runs, in order: `preflight`, `zig-version`,
-`check-unreleased`, `check-changelog-history`, `check-readme`, `check-man`, `check-help`, `fmt-check`, `lint`
-(`lint-versions`, `lint-versions-selftest`, `lint-lock`, `check-sbom`, shellcheck over the tracked scripts
-and over the `run:` steps in the workflows, with a shellcheck directive that
-silences nothing refused in both, `ruff check`, `ruff format --check`,
-yamllint, the Markdown check and `check-refs`), `zig build test`,
-`zig build test-sanitize`, `check-binary` (a `ReleaseSmall` build whose
-binary it then starts) and `check-asset-run` (the published asset for this
-host, cross-built and started). These are the checks
-[.github/workflows/ci.yml](.github/workflows/ci.yml) runs in its test and lint
-jobs, on the same Zig version, less `preflight` and `zig-version`, which ask a
-laptop what is missing and what a runner's setup actions already installed, and
-more the one step the test job adds, `check-asset-run`, below. The shared
-setup-zig action installs the version `make required-zig-version` prints.
-`make zig-version` refuses a compiler older than that minimum, which is the one
-case where the build stops inside the compiler rather than on the code, and it
-names a newer compiler without refusing it: the tests do not depend on the
-bytes a compiler emits, and the targets that publish those bytes ask
-`make zig-release-version` for the exact one instead. The workflow calls the same targets
-rather than repeating their commands, so a step added to `check` is a step CI
-runs.
+`make check` runs these targets in order:
 
-The second test run compiles the same tests, including the copy module, in
-[ReleaseSafe](https://ziglang.org/documentation/0.17.0/#ReleaseSafe): optimizations
-and Zig's runtime safety checks are both enabled. The default Debug run also
-has safety checks, while the `ReleaseSmall` release binary disables them.
-`test-sanitize` keeps its original command name; it uses Zig's safety checks
-rather than a C sanitizer, since the program has no C sources. A passing run
-verifies the exercised paths, including bounds and overflow checks, and does
-not prove the absence of unchecked illegal behavior.
+1. `preflight` and `zig-version`.
+2. `check-unreleased`, `check-changelog-history`, `check-readme`, `check-help`, `check-man`.
+3. `fmt-check` and `lint`.
+4. `test`, `test-sanitize`, `check-binary OPT=ReleaseSmall`.
 
-`make test FILTER=...` checks the filter against the declared test names first, because a filter that
-matches nothing reports success while running no test. An unfiltered `make test` also runs
-`make test-cli`, a Python standard-library check of the built CLI against a loopback provider.
-`make watch` is that same filter check around
-`zig build test --watch`, the build system's own edit loop, and is not what `check` runs: a green
-watch is not a push.
+`lint` covers version pins and their self-tests, Python locks, the SPDX generator,
+ShellCheck over scripts and workflow `run:` bodies, Ruff checks and formatting,
+yamllint, Markdown and source citations. File lists include tracked files and
+untracked files not excluded by gitignore, so new files are checked before staging.
 
-`make fmt` applies `zig fmt` and `ruff format`; `make fmt-check` is what the
-gate runs. The other linters cover what `zig fmt` cannot: the bench shell, the
-Harbor adapter under `integrations/harbor` (rules in [ruff.toml](ruff.toml)),
-the workflows, the composite actions and the Dependabot config (rules in
-[.yamllint](.yamllint)), and the Markdown through
-[scripts/lint-md.sh](scripts/lint-md.sh), which is the one tracked file kind
-no other linter reads. It checks the things a rendered page hides and a diff
-does not: a hard tab or a trailing space outside a code fence, two blank lines
-in a row, a fence that is never closed, and a file with no final newline.
-There is no Markdown formatter, so this is the whole of that gate rather than
-a proxy for one. Each target takes its file list from git, as the tracked tree plus the
-untracked files `.gitignore` does not exclude, so a shell, Python, YAML or
-Markdown file added anywhere is linted too, and one written but not yet
-`git add`ed is linted before it is committed rather than after. Both workflows call `make lint`
-rather than repeating its targets, so a linter added to the Makefile gates a
-push and a tag as well as a laptop.
+The Markdown check rejects trailing spaces and hard tabs outside code fences,
+repeated blank lines, unclosed fences and missing final newlines. There is no
+Markdown formatter. `lint-ci` also requires full commit SHAs with release comments
+for external actions, explicit shells in composite actions, job timeouts,
+workflow permissions and concurrency groups, no `write-all`, and checkout with
+`persist-credentials: false`. ShellCheck directives that suppress nothing fail.
 
-`lint-ci` reaches past the shape yamllint reads, into what a workflow means to
-the runner. Its checker asks of every external `uses:` that it is a full commit
-sha with the release it stands for named beside it, of a composite action's
-`run:` step that it names the `shell:` Actions runs no default for, of every job
-that it carries a `timeout-minutes` so a hung step cannot sit there until the
-workflow's ceiling, of every workflow that it declares `permissions:` rather than
-inheriting the repository's default scope, of the workflow and of each job that
-neither asks for `write-all`, of every workflow that it declares a
-`concurrency` group, and of every checkout that it sets
-`persist-credentials: false`, so the job's token is not left in
-`.git/config` where a later build or test step can reach it. Each is one
-whose wrong setting turns a run green rather than red, which is why nothing a
-check on a `run:` body can reach will catch it.
+Cite source controls as pairs: `` `symbol`, `src/file.zig:line` ``. `check-refs`
+checks the symbol's definition, including qualified names such as `config.parse`.
+Bare citations must name existing code lines; ranges must be ordered and in bounds.
+Run `make check-refs FIX=1` after moving a definition to repair its paired citations.
+Missing symbols and invalid bare citations need manual repair.
 
-`check-refs`, in the same target, is the one gate about what a document claims
-rather than how it is written. Every `src/path:line` citation in a Markdown
-file names the function behind a claim, and a line number is written by hand
-beside a diff that moves the function. `scripts/check-refs.sh` asks the source
-where each named symbol is defined and fails a citation that points anywhere
-else, or a symbol the file no longer has, so a control citing a deleted
-function fails the gate rather than the reader. `make check-refs FIX=1` rewrites a
-stale citation to the line its symbol is on, which is the repair a diff that moved
-a function needs. Citations without symbols must name an existing line; ranges
-must be ordered and both endpoints must exist. Repair mode still fails when a
-reference cannot be repaired, and missing input files fail the check.
+The Debug unit run and the ReleaseSafe `test-sanitize` run both enable Zig's
+runtime safety checks; ReleaseSmall disables them. Despite its name,
+`test-sanitize` does not use a C sanitizer. Passing tests cover exercised paths
+and do not prove the absence of unchecked illegal behavior. An unfiltered
+`make test` also runs `test-cli`, including a built CLI against a loopback provider.
+A green filtered test or watch run does not replace the gate.
 
-`check` does not cover three things. One is the release cross-build: `make
-release-assets` runs it, and `make check-reproducible` rebuilds it byte for
-byte (see
-[Version and changelog](#version-and-changelog)). The second is the asset
-check, which `make check-asset-run` runs on its own: it cross-builds the
-published target for this host and starts it, so a change that only breaks the
-shipped binary (a Mach-O that links but does not start, a Linux asset that needs
-a libc the host build never saw) is caught on a laptop rather than on a runner
-or a user's machine. `make check-asset-run TARGET=...` is the form CI uses, and
-it refuses a target that is not the one this host publishes. The third is the
-macOS runners, where CI runs the same tests again.
+`make check` does not run release cross-builds, reproducibility checks, the host's
+published-asset smoke test or the macOS matrix. Run the relevant release targets
+below; CI runs the platform tests and `check-asset-run` separately.
+`make check-asset-run TARGET=...` accepts only the published target for its host.
 
 ### What CI requires
 
-The three jobs in `ci.yml` are the checks a merge has to pass: `test`, `lint`
-and `release-assets`. The first two are the gate. The third builds the four
-published targets under the tag, the inventory and the digests beside them, and
-refuses one whose rebuild is not byte-identical, so a merge that leaves the
-release unreproducible is caught before the tag.
+Require the `test`, `lint` and `release-assets` jobs in
+[ci.yml](.github/workflows/ci.yml) on the default branch, including the test matrix,
+and require them to be up to date. Branch protection is a repository setting.
+The test matrix includes two macOS runners. The release-assets job builds all
+four published targets, inventories and checksums them, checks their format and
+architecture, and verifies reproducibility before a tag is cut. The test matrix
+starts three published assets on their native platforms; `aarch64-linux-musl` is
+cross-built and inspected but is not executed in CI.
 
-Mark all three required on the default branch, and require them to be up to
-date, not merely passing: `test` also runs on two macOS runners, and a merge
-that has not seen them is unmeasured. Branch protection is a repository
-setting no file in the tree can declare, which is why it is written here.
-
-Neither workflow reads a repository secret. The release publishes with the
-automatic `GITHUB_TOKEN`; the token scope is `contents: read` for a push and
-`contents: write` for the release job alone. CI needs no configuration.
+Neither workflow reads a repository secret. The release uses the automatic
+`GITHUB_TOKEN`: `contents: read` by default, `contents: write` for the release job.
 
 ### The instruction gate
 
-`make instructions` is the one gate outside `make check`. It measures retired
-instructions, not time: wall clock moves with frequency scaling and the CPU
-quota, so a wall-clock gate fails on a busy runner for reasons unrelated to the
-code, while retired instructions for a fixed binary and input repeat to within
-0.001%. It needs `perf`, and a shared CI runner may have performance counters
-switched off, so as a blocking gate it would fail for the wrong reason on
-someone else's machine.
+Run `make instructions CHECK=--check` before pushing a hot-path change. This gate
+is outside `make check` because it needs `perf` counters that shared runners may
+disable. It measures retired instructions rather than load-sensitive wall time.
+Exit 1 means a row left its band; exit 2 means a row could not be measured.
+Fix an increase, or deliberately re-record `bench/instructions.baseline` when
+changing the measured work. A decrease also requires reviewing the stale baseline.
 
-It exits 1 when a row leaves its band and 2 when a row cannot be measured. Run
-it before a push that touches a hot path, and re-record
-`bench/instructions.baseline` only when the change is meant to move it. A row
-above its band is a regression to fix. A row below it retired less work than
-the baseline records, so the baseline is stale; the run says which of the two
-it found.
-
-The four bench scripts write their scratch under the tree's gitignored
-`.scratch/`, never under `${TMPDIR:-/tmp}`: the host's temp directory is a
-tmpfs on most Linux hosts, so a run's tree and its harness build products would
-be read out of and written back to RAM. `BENCH_WORK` names another root for a
-contributor whose scratch belongs on a named disk, and `GAUNTLET_WORK` does the
-same for `make gauntlet`.
+Bench scripts put scratch data in gitignored `.scratch/` to avoid benchmarking a
+host's temporary filesystem, which may be RAM-backed. Set `BENCH_WORK` to choose
+another root, or `GAUNTLET_WORK` for `make gauntlet`.
 
 ## Tests
 
-A `test` block lives in the file it covers, next to the code, named for the
-behavior it pins rather than the function it calls: `test "usage counters land
-on the result"`. Tests are hermetic: pass the environment in (the code reads an
-`environ_map`, it does not call `getenv`) and use `std.testing.tmpDir` for
-files. Nothing in the suite reaches the network, the clock's timezone or
-`$HOME`, so a test that needs any of those says how it neutralizes them.
+Put a Zig `test` block beside the code it covers and name the behavior it pins,
+for example `test "usage counters land on the result"`. Pass the environment
+through an `environ_map` and use `std.testing.tmpDir` for files. Neutralize any
+external dependency explicitly. CLI integration tests use a loopback provider,
+not a live provider account.
 
-`build.zig` sets `LC_ALL=C` and `TZ=UTC` for the test run and the children it
-spawns, and the Makefile exports the same two. Several tests assert on the
-exact bytes a `/bin/sh` printed, and a shell started under an `LC_ALL` naming a
-locale the host lacks opens with a `setlocale` warning on stderr, which fails
-them on a correct tree.
+The build and Makefile set `LC_ALL=C` and `TZ=UTC` for tests and their children.
+This also prevents unavailable host locales from adding shell warnings to stderr.
+Tests requiring `rg` or `ast-grep` return `error.SkipZigTest` when unavailable;
+a green run then does not cover those tools. A macOS-only session test is covered
+by the macOS runners.
 
-A handful of tests need a program the host may not have: the `search` and `ast`
-tests delegate to `rg` and `ast-grep`, which a stock macOS ships neither of, and
-one session test is macOS-only. Each of those prints `skipped: ...` on stderr and
-returns `error.SkipZigTest`, which the test runner counts as a pass, so a green
-run on a machine without `rg` says nothing about the search tool. `make
-preflight` names both programs when they are absent, before the suite spends
-its time. A local run
-with both programs on `PATH` is the run that covers them, and the macOS runners
-are what cover the session one.
+### Locks and generated artifacts
 
-There is no generated code, and the Zig build regenerates no lockfile. The two
-lockfiles are inputs to the Python around the Zig, refreshed by hand:
-`lint-requirements.txt` is uv's output for `lint-requirements.in`, and
-`integrations/harbor/requirements.lock` is uv's output for the Harbor adapter,
-with the command that produces it in the comment at the top of
-`integrations/harbor/requirements.txt`. `make lint-lock` asks each of the two
-the same four questions: that every requirement is pinned to one exact version
-rather than a range or a wildcard, that the lock carries the
-manifest's exact pin, that it has no missing or malformed 64-digit `sha256` digest, and that it
-carries no package no pin in
-the manifest needs. A lock left behind by an earlier pin therefore fails the
-gate instead of benchmarking a Harbor release the manifest no longer names, and
-a package nothing asks for never reaches the venv a score is measured in. A
-range fails it too: uv resolves a range against the index at install time, so
-the version behind the lock's digest is one the gate never chose, and the hash
-that verifies the artifact stops describing the pair a run installs.
+There is no generated Zig code or Zig dependency lockfile. Refresh the two Python
+locks with the `uv pip compile` commands in their manifest/header, rather than
+hand-editing them:
 
-The linter lock was the one of the two nothing asked the questions of, and it
-is the one a contributor can hand-edit: it sits at the root rather than in a
-directory, and its header reads like a generated file even when a line has been
-typed into it. CI installs it with `--require-hashes`, which refuses an
-unhashed entry there and nowhere else, so a laptop running `make check` is the
-run that catches a hand edit. Recompile it instead of editing it, with the
-`uv pip compile` in its own header.
+- `lint-requirements.in` → `lint-requirements.txt`.
+- `integrations/harbor/requirements.txt` → `integrations/harbor/requirements.lock`.
 
-A release publishes an SPDX inventory beside its binaries: `make sbom` writes
-`dist/microagent-<tag>.spdx.json` from the assets in `dist/`, and the release
-runs it before `make checksums` so the inventory gets a sidecar like every other
-asset. It names each asset with its digest, and every pin the two Python
-manifests declare with the manifest that declares it, and says in one annotation
-that no published asset carries a third-party component. Nothing in the tree
-reads the file a release writes, and nothing builds a tagged one before the tag,
-so `make check-sbom` runs the generator over two stand-in assets in a scratch
-directory and checks what a scanner reads: that the document parses, names those
-assets with their digests, and carries a package for every pin the manifests
-declare. A manifest a change adds a pin to is then a `check-sbom` failure until
-the inventory is regenerated, rather than a package a published document
-silently omits.
+`make lint-lock` checks exact pins, manifest/lock agreement, valid SHA-256 hashes
+and unneeded packages. CI installs with `--require-hashes` into a venv.
 
-The build outputs are `zig-out/` and `dist/`. `make clean` removes them, along
-with `.zig-cache/` and the Harbor musl binary. `make musl` copies the static
-binary to `integrations/harbor/microagent-<arch>-linux-musl`, named for the
-host's architecture; that file and the `.tmp` it is renamed from are ignored,
-so a commit never picks up a build output under `integrations/`. A bench run
-appends a line to the committed `bench/results.jsonl`. That file is results,
-not code: leave the appended line out of a change that did not run a benchmark.
+`make sbom` writes `dist/microagent-<tag>.spdx.json`, naming asset digests and
+Python manifest pins and recording that published binaries carry no third-party
+component. Run it before `make checksums` so it gets a sidecar too.
+`make check-sbom` exercises the generator with stand-in assets and checks its JSON,
+asset digests and declared packages.
+
+Build outputs are `zig-out/` and `dist/`. `make clean` also removes `.zig-cache/`,
+cross-build outputs and the Harbor musl binary. `make musl` copies a static binary
+to the ignored `integrations/harbor/microagent-<arch>-linux-musl` path.
+Benchmark and gauntlet runs append to committed result files (see
+[Reproducing](docs/benchmark.md#reproducing)); include only rows from a run the
+change actually made.
 
 ### Fuzz targets
 
-A parser that reads bytes it did not write gets a `std.testing.fuzz` harness and
-a corpus beside it, in the same file. An ordinary `zig build test` asserts the
-harness on the corpus, so a new seed goes there. Mutating beyond the seeds
-needs `zig build test --fuzz`, which does not build on the pinned 0.17.0: the
-toolchain's own test runner fails to compile under `-ffuzz`
-(`compiler/test_runner.zig:566`, an `@errorReturnTrace()` the fuzzer's
-instrumentation gives a different type), so the command fails before reaching a
-harness. Nothing in this tree can fix that; a seed added to a corpus is still
-asserted on every `make check`. A harness asserts invariants, not only the
-absence of a crash: a turn assembled from a fuzzed provider stream has to
-serialize as a valid request body, and a release body has to earn the verdict
-that installs it.
+A parser reading untrusted bytes gets a `std.testing.fuzz` harness and a corpus
+beside it. Assert invariants, not just absence of crashes: for example, a turn
+assembled from a provider stream must serialize as valid request JSON.
+Ordinary unit tests exercise the corpus, so new seeds run in `make check`.
+
+Mutation with `zig build test --fuzz` is currently blocked on the pinned 0.17.0:
+its `compiler/test_runner.zig:566` fails to compile under `-ffuzz` because
+`@errorReturnTrace()` has a different type under instrumentation. Corpus tests
+remain available; mutation coverage must not be claimed from them.
 
 ## Version and changelog
 
-The version is `.version` in `build.zig.zon` and nowhere else.
+The version source is `.version` in `build.zig.zon`.
 
-Every change that lands gets a [CHANGELOG.md](CHANGELOG.md) entry under
-`## [Unreleased]`, in the Keep a Changelog sections already in use, in order
-and at most once each: `Added`, `Changed`, `Removed`, `Fixed`, `Security`. A fix
-that closes a way for text the model or the tree controls to reach the prompt
-or the terminal is a `Security` entry, not `Fixed`, so a reader scanning for
-those finds it. A control the operator set that was silently dropped, a refusal
-that was not applied, and a credential path a model could spell are the same
-class: a `Fixed` entry about any of them is a `Security` entry. A change to the
-flags, the environment variables, or the stdout and session-log JSON names the
-before and the after in its entry.
+Every change that lands gets a [CHANGELOG.md](CHANGELOG.md) bullet under
+`## [Unreleased]`. Use these sections, each at most once and in this order:
+`Added`, `Changed`, `Removed`, `Fixed`, `Security`. For flags, environment variables,
+stdout or session-log JSON, describe the before and after.
 
-Under `0.y` the minor carries features, anything that changes what a run does
-by default, and anything taken away. The patch carries fixes and must not
-change what an existing invocation does. A security fix is not exempt: closing
-a hole narrows what an invocation may do as often as it changes an answer, so a
-patch may not carry a `Security` entry either, and `make check-changelog`
-refuses one.
+Use `Security` for prompt or terminal injection fixes, dropped operator controls,
+missing refusals and credential-path bypasses. The [changelog](CHANGELOG.md)
+preamble states which changes need a minor bump under `0.y`; a `Security` entry
+is one of them.
 
-`make check-unreleased` runs in `make check` and in the push workflow, and
-checks the entry's shape while it is under `[Unreleased]`: the five sections,
-each at most once, in that order. It also checks that there is an entry.
-`check-changelog-entry.sh` diffs this tree against the upstream of the branch
-(HEAD, when the checkout has none) and refuses it when a file under `src/`,
-`build.zig`, `Makefile`, `scripts/`, `bench/`, `integrations/`, `.github/` or a
-linter manifest changed and `[Unreleased]` holds no bullet. A change to the
-changelog, the prose or the review notes is not that, and a change that
-describes nothing a consumer meets is the exception: say so in the pull request
-rather than in the changelog. `make check-changelog` checks the same shape on the entry a tag
-names, after the heading has become a version and the author no longer sees
-it. `make check-unreleased` runs `make check-changelog-links`, and so does
-`make check-release` over the whole file before a tag. That check holds the
-`[Unreleased]:` and
-`[X.Y.Z]:` references at the bottom of the file to the versions the headings
-above them say: a release renames the `[Unreleased]` heading and adds the
-version's own, and the two links under them are written by hand, so a release
-that forgets them publishes notes whose diff still points at the release
-before.
+`make check-unreleased` checks section shape, compare links and whether changed
+source, build, scripts, benchmarks, integrations, CI or linter manifests have an
+Unreleased bullet. The rule is path-based: `docs/`, `reviews/` and top-level
+Markdown are exempt, but Markdown under a checked directory, such as
+`integrations/harbor/README.md`, still needs a bullet. For another change with
+no consumer-visible effect, explain the exception in the pull request.
+`make check-changelog-history` applies the bump policy to every released section.
 
 ### Releases
 
-Releases are tags. The release workflow publishes only when the tag names the
-`build.zig.zon` version, that version has a `CHANGELOG.md` entry, and the bump
-matches the entry: a patch tag whose section carries an `Added`, `Changed`,
-`Removed` or `Security` entry is refused, because under `0.y` those belong to
-the minor.
-Those three rules are `make check-release TAG=vX.Y.Z` and `make
-check-changelog`, and `release.yml` runs those targets rather than its own copy
-of the rules, so a release note is written against something runnable:
+Contributors do not tag or publish. For a release rehearsal:
+
+1. Update `build.zig.zon`, the README's version/install examples and the `.TH`
+   version in `docs/microagent.1`.
+2. Move Unreleased notes to a dated `## [X.Y.Z]` heading and leave an empty
+   `## [Unreleased]` heading. Add the release's compare reference and point
+   `[Unreleased]` at the new tag.
+3. Run the tag gate and build/read-back checks:
 
 ```sh
-make check-changelog              # the section for the version build.zig.zon declares, its shape, and the 0.y policy on it
-make check-changelog VERSION=0.2.1
-make check-changelog-history      # the same 0.y policy over every released section, oldest first
-make check-readme                 # the README installs and names the version this tree declares
-make check-release TAG=v0.2.1     # what a tag has to satisfy: the version, nothing left under [Unreleased], the README
+make check-changelog              # current version's section and bump policy
+make check-changelog-history      # all released sections
+make check-release TAG=vX.Y.Z     # matching version, notes, links, README; no pending notes
+make release-assets TAG=vX.Y.Z    # four cross-built assets in dist/
+make sbom
+make checksums
+make check-checksums
+make check-assets TAG=vX.Y.Z
+make check-reproducible
 ```
 
-`check-changelog` is asked of one version, the one `build.zig.zon` declares, so
-the 0.y bump rule is checked at the moment a tag is cut and never again after it:
-a later edit that moves an `Added` or a `Security` entry into a patch that has
-already been published is history a consumer has read, and no tag will ever name
-it a second time. `check-changelog-history` asks the same rule of every released
-section, oldest first, and runs in `make check` and in the push workflow, so a
-bad bump in the file is a red build rather than a note somebody has to notice.
+`check-changelog VERSION=X.Y.Z` checks a specific version. The release workflow
+uses the same Makefile rules and publishes the checked section as its notes.
 
-`make check-changelog` prints the section it checked, which a release publishes
-as its notes, and refuses it on the same five headings `check-unreleased` asks
-of a draft. `check-release` is the whole tag gate. It refuses an entry still
-under `[Unreleased]`, since the tag would drop it from the published notes and
-land it in the next release under a version nobody ran, and it refuses a README
-still naming the previous release, since the install snippet a reader copies
-would fetch the older binary under the new tag. Run it after the
-version bump, the entry and the README line are written, before the tag is cut.
+`release-assets` empties `dist/` first: the workflow publishes `dist/microagent-*`,
+so old rehearsal assets must not remain there. `check-assets` runs the host binary
+and checks its version against `TAG` (the build version when unset), then checks
+each asset's object format and machine. `check-checksums` requires each asset's
+sidecar to name its actual digest.
 
-Cutting a release moves two of those three by hand, and the third moves with
-them: rename `## [Unreleased]` to `## [X.Y.Z]` with the release date, write the
-version's own compare reference, and point `[Unreleased]` at the new tag. The
-step the `X.Y.Z` naming gives away is the one that gets skipped, because
-nothing downstream of a green `make check` reads those links.
+`check-reproducible` builds every target twice with cold caches and different
+clocks, timezones, locales and output directories. It builds the first target
+again from another source path to catch embedded checkout paths. Both push and
+release workflows run it.
 
-The four published binaries and their asset names are spelled once, in the
-[Makefile](Makefile), so a release can be built and checksummed on a laptop
-before the tag exists:
-
-```sh
-make release-assets TAG=v0.2.0   # the four cross-built assets, in dist/
-make sbom                        # the SPDX inventory, which a scanner reads
-make checksums                   # the sha256 sidecars `update` verifies
-make check-checksums             # every asset has a sidecar naming its own digest
-make check-assets                # the host binary's version, and every asset's object format and machine
-```
-
-`make release-assets` empties `dist/` first, so it holds only this run's
-assets: the release workflow publishes the glob `dist/microagent-*`, and a
-rehearsal's or an earlier tag's binaries left there would go out under this
-tag.
-
-`make check-assets` reads `dist/` back rather than trusting the build that
-wrote it. It runs the host binary and compares its `--version` with the tag
-being built (`TAG=`, or the `build.zig.zon` version when unset). It reads each
-of the four assets for the object format its target name promises and the
-machine that format carries, because a cross build that ignored `-Dtarget` and
-produced the host's architecture, or an empty file, publishes green and fails
-on a user's machine. The magic alone would not catch that: every Mach-O 64
-file starts with `cffaedfe` whatever the CPU, and every ELF with `7f454c46`, so
-`e_machine` at offset 18 and `cputype` at offset 4 say which. Both are declared
-per target, so a target added to `RELEASE_TARGETS` states what it is before it
-can be published. `ci.yml` runs the same target over the rehearsal build and
-`release.yml` over the tagged one, so the check a laptop runs before a tag is
-the check the tag runs.
-
-`make check-checksums` is the same read-back for the digests. It refuses an
-asset in `dist/` with no `.sha256` beside it, and a sidecar whose recorded
-digest is not the one the asset hashes to, which is what `microagent update`
-compares a download against. `ci.yml` builds its rehearsal under the tag, runs
-`make sbom` and `make checksums` over it, and then this, so a defect in either
-lands on a push; `release.yml` runs it before the publish step rather than
-leaving it to the read-back below, which runs once a consumer can fetch the
-release.
-
-`make check-reproducible` rebuilds every published target twice, from cold
-compiler caches and with a different clock, timezone, locale and output
-directory each time, and refuses a
-target whose two builds differ: a released checksum has to describe a binary a
-rebuild reproduces. The first target is built a third time from a copy of the
-source at another path, because the first two share this checkout's path and a
-build directory can leak into a binary the way a timestamp does. The push
-workflow runs it on every push and the release workflow on the tag, so a
-release is never published from a commit that has not passed it.
-
-A published release is never replaced: the publish step refuses a tag whose
-release exists and is not a draft, because a consumer may already have fetched
-it. There is no automated rollback; the fix ships as the next release, and
-[CHANGELOG.md](CHANGELOG.md) states that only the latest release is supported.
-A release that has to be withdrawn before then is removed in the GitHub UI,
-with its tag. `microagent update` reads `releases/latest`, so it stops
-resolving to a withdrawn release, and a build ahead of what remains is reported
-as ahead rather than downgraded. Deleting the tag keeps the release from coming
-back, since recreating the tag and re-running the workflow publishes it again.
-
-Contributors do not tag or publish.
+A published release is never replaced: publication refuses an existing non-draft
+release. There is no automated rollback, and
+[SECURITY.md](SECURITY.md#supported-versions) states which releases get fixes.
+To withdraw a release, remove it and its tag in GitHub. `microagent update`
+reads `releases/latest` and reports an ahead build rather than downgrading it.
+Recreating the tag can publish it again.
 
 ## Commit messages
 
-Short, imperative subject in lowercase, matching the existing history
-(`fix: saturating token totals, codepoint-safe truncation, capped backoff`).
-What changed and why goes in the body when the subject cannot carry it.
+Use a short, lowercase imperative subject matching the existing history, for example
+`fix: saturating token totals, codepoint-safe truncation, capped backoff`.
+Explain what changed and why in the body when the subject cannot carry it.

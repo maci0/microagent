@@ -3869,8 +3869,8 @@ fn incompleteAnswer(arena: std.mem.Allocator, result: *const chat_mod.ChatResult
 }
 
 /// Everything in a request body that is not the conversation: the tool schema
-/// is 3.8 KB, and the rest is the model, the stream flags and the token
-/// ceiling. The credential is a header, not a field, so it is not in this. A
+/// (`tools_json`, a compile-time constant), the model, the stream flags and
+/// the token ceiling. The credential is a header, not a field, so it is not in this. A
 /// reservation rather than a bound, and the buffer still grows if it does not
 /// cover the body, which a long model name would do. The optional `skill`
 /// entry is reserved too, because which tools a run advertises is fixed before
@@ -3899,7 +3899,7 @@ fn builtinToolsJson(arena: std.mem.Allocator, disabled: std.EnumSet(chat_mod.Too
     return out.items;
 }
 
-/// The entries a run adds to the built-in seven: the `skill` entry when skills
+/// The entries a run adds to the built-in tools: the `skill` entry when skills
 /// were found, and one entry per MCP tool. Comma-separated and without the
 /// surrounding brackets, and empty when the run adds nothing.
 fn extraToolsJson(arena: std.mem.Allocator, opts: Options) ![]const u8 {

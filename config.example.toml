@@ -4,18 +4,16 @@
 # Copy to ~/.microagent/config.toml, or point MICROAGENT_CONFIG or --config at
 # it. Every key is optional. A missing key, a bad value or a missing file keeps
 # the built-in default, and the first line this file gets wrong is named on
-# stderr. The exception is a [tools.<name>] table the run cannot honor, which
-# stops it.
+# stderr. The run stops instead on a [tools.<name>] table it cannot honor, a
+# model outside models, a reasoning_effort that names no level, and a base_url
+# or api_key it refuses. A flag beats its environment variable, which beats
+# this file.
 #
-# MICROAGENT_SKILLS sets the skills for one run and overrides this file, since a
-# value named in the environment is the more explicit statement.
+# A list may span lines, one element per line, each with an optional trailing
+# `#` comment. A list left without its closing bracket is refused by name, and
+# the tables under it still apply.
 
-# A list may be written over as many lines as it takes, one element per line, and
-# a `#` comment may trail any of them. The closing bracket has to be there: a
-# list left open is refused by name, and the tables under it still apply.
-
-# Where the run talks and with what key. Each is the weakest of the three
-# sources: --flag beats the environment variable, which beats this file.
+# Where the run talks and with what key.
 #
 # model has a default; base_url and api_key have none, and a run that names
 # neither is refused before the first request. There is no default provider.
@@ -42,8 +40,7 @@
 # discover_models = true
 
 # Optional reasoning level for models that support it: minimal, low, medium,
-# high, or none to disable. A CLI flag beats MICROAGENT_REASONING_EFFORT,
-# which beats this setting. Leave unset to use the provider's default.
+# high, or none to disable. Leave unset to use the provider's default.
 # reasoning_effort = "high"
 
 # Extra headers on every provider request, file only. A header the client sets
@@ -82,26 +79,24 @@ loss, security measures, accessibility, or anything the task explicitly asks for
 runnable check behind for non-trivial logic.
 '''
 
+# The repository's own instructions, read from the working directory when the
+# run starts and appended to the system prompt. With the key absent the run
+# reads `AGENTS.md`, the name other coding agents read; `agents_files = []`
+# turns the read off, and a list names other paths, in order. This is
+# repository content the run follows as instructions, so `[]` is how the
+# operator declines it. A file past 128 KB is followed up to the cap. A listed
+# path that is missing is named on stderr; a missing default is silent.
+# agents_files = ["AGENTS.md"]
+
 # Where skills are read from: one directory per root, each holding one
 # directory per skill, each with a SKILL.md in it. A relative path is resolved
 # against the working directory. Leaving the key out uses
-# $HOME/.microagent/skills; `skills = []` turns skills off. The working
-# directory is never a default root: a SKILL.md in a repository under review
-# was written by whoever wrote that repository, and a skill body is
-# instructions the model follows. Name a directory here, or in
-# MICROAGENT_SKILLS, to say its bytes are instructions.
+# $HOME/.microagent/skills; `skills = []` turns skills off. MICROAGENT_SKILLS
+# overrides this key for one run. The working directory is never a default
+# root: a SKILL.md in a repository under review was written by whoever wrote
+# that repository, and a skill body is instructions the model follows. Name a
+# directory here, or in MICROAGENT_SKILLS, to say its bytes are instructions.
 #
-# The repository's own instructions: read from the working directory when the run
-# starts and appended to the system prompt. `AGENTS.md` is the name every other
-# coding agent reads, so it is what a run reads when this key is absent.
-# `agents_files = []` turns the read off; a list names other paths, in order.
-# Unlike a skill, this is repository content the run follows as instructions,
-# which is why the key exists: naming it is the operator saying yes, and `[]` is
-# the operator saying no. A file past 16 KB is followed up to the cap. A path
-# named here that is not there is said on stderr, because a setting that did
-# nothing is your own spelling; the default name that is not there is silent.
-# agents_files = ["AGENTS.md"]
-
 # skills = ["./skills", "~/.microagent/skills"]
 
 # One table per MCP server. `name` and one of `command` or `url` are required. A
@@ -109,24 +104,18 @@ runnable check behind for non-trivial logic.
 # list of strings and `env` is an inline table. Its tools are offered to the
 # model as mcp__<server>__<tool>. A server that cannot start, be reached or
 # answer is reported on stderr and skipped. An `env` key is a variable name:
-# letters, digits and underscores, quoted or not, and a key or a value carrying
-# a `=`, a NUL or a control character is one the child's environment cannot
-# hold, so that server is skipped rather than spawned.
+# letters, digits and underscores, quoted or not. A key outside that form, or a
+# value holding a NUL, is one the child's environment cannot hold, so that
+# server is skipped rather than spawned.
 #
 # An `env` value is the second place in this file a secret can be written in the
-# clear, after `api_key`, and it is the easier one to commit by accident: a
-# `command` server usually wants a token of its own, and `env = { GITHUB_TOKEN =
-# "ghp_..." }` is the obvious way to hand it over. Where a server can read a
-# variable from the run's own environment, name it there and keep only the name
-# here; where it cannot, the entry below is the same secret written in the
-# clear, held to the same rule as `api_key` above.
-#
-#   [[mcp]]
-#   name    = "git"
-#   command = "mcp-server-git"
-#   env     = { GITHUB_TOKEN = "ghp_..." }   # a secret in the clear: keep this
-#                                           # file mode 600, and out of any
-#                                           # workspace the model is given
+# clear, after `api_key`, and the easier one to commit by accident. Where a
+# server can inherit a variable, set it in the run's environment instead. A
+# terminal run scrubs the provider key, GITHUB_TOKEN and configured remote-key
+# variables from that environment (`microagent acp` does not; see
+# docs/usage.md#tool-environment), so a stdio server needing one must receive it
+# through `env`. Keep this file mode 600 and out of the model's workspace when
+# it holds secrets.
 #
 # [[mcp]]
 # name = "fs"
@@ -138,16 +127,16 @@ runnable check behind for non-trivial logic.
 # name = "git"
 # command = "mcp-server-git"
 # args = ["--repository", "."]
+# env = { GITHUB_TOKEN = "ghp_..." }   # a secret in the clear, see above
 #
 # A `url` server is a remote streamable-HTTP endpoint instead of a process. The
 # url is https, or http to this machine. Every key after it is optional:
-# api_key_env is the NAME of an environment variable that holds the key (never
-# the key itself; unset or empty sends no header), api_key_header is where the
-# key goes (default Authorization, sent as "Bearer <key>"; any other header gets
-# the key as it is), and timeout is seconds per request, 1 to 600, default 30.
-# A variable that is unset or empty sends no header, and the server is named on
-# stderr, since a keyless server is a run that finds out a turn later.
-# The variable is removed from the environment tool subprocesses inherit.
+# api_key_env is the NAME of an environment variable that holds the key, never
+# the key itself; api_key_header is where the key goes (default Authorization,
+# sent as "Bearer <key>"; any other header gets the key as it is); timeout is
+# seconds per request, 1 to 600, default 30. A variable that is unset or empty
+# sends no header, and the server is named on stderr. A terminal run removes
+# the variable from the environment tool subprocesses inherit.
 #
 # [[mcp]]
 # name = "docs"
@@ -167,10 +156,12 @@ runnable check behind for non-trivial logic.
 # [tools.git]
 # enabled = false
 
-# Four public remote MCP servers, off until a table below says `enabled = true`: a call to one
-# carries the query the model built out of your task, so naming one is what says it may go. Their
-# tools and schemas are in the binary, so a run that names one does not contact it until one of its
-# tools is called; a server that cannot be reached is named on stderr then. Their tools are offered as mcp__<name>__<tool>
+# Four public remote MCP servers, off until a table below says `enabled = true`:
+# a call to one carries the query the model built out of your task. A keyless
+# preset on its own host is offered from tools and schemas in the binary and
+# connects on first use; one with a resolved api_key_env, or a url on another
+# host, connects at startup (docs/usage.md#tool-set). An unreachable server is
+# named on stderr. Tools are offered as mcp__<name>__<tool>
 # (mcp__context7__query-docs, mcp__grep_app__searchGitHub, ...). None needs a
 # key today. Each takes the same optional keys as a `url` server above: url
 # (another endpoint), api_key_env, api_key_header and timeout.
@@ -200,19 +191,15 @@ runnable check behind for non-trivial logic.
 #
 # deny_commands = ["sudo", "su", "shutdown", "reboot"]
 
-# Workspace sandbox confinement. When enabled, restricts filesystem modifications
-# to designated roots (by default: current working directory, /tmp, the session
-# dir, and $TMPDIR wherever it names an absolute directory none of those covers;
-# on macOS that is where per-user scratch space is kept, and a Linux host
-# exporting it elsewhere gets the same root).
-# On Linux (kernel 5.13+) Landlock, and on macOS a Seatbelt profile, confine both microagent
-# and all spawned child processes (bash, MCP, subcommands). In-process path checks
-# additionally refuse write and edit tool calls targeting paths outside writable roots.
-# `writable` on its own confines nothing: a file that declares it without
-# `enabled = true` says so on stderr and runs unconfined. Each entry is read the
-# way this program reads its own paths: a leading `~` or `~/` is the home
-# directory, and a relative path is resolved against the working directory, so
-# "build" names the working directory's build.
+# Workspace sandbox. When enabled, file writes are confined to the working
+# directory, /tmp, the session directory, $TMPDIR where it names an absolute
+# directory none of those covers, and each `writable` entry. Landlock on Linux
+# (kernel 5.13+) and a Seatbelt profile on macOS confine microagent and every
+# child it spawns (bash, MCP servers); write, edit, multi_edit and an ast
+# rewrite also check their path in process. `writable` without `enabled = true`
+# confines nothing, and the run says so on stderr. In an entry a leading `~` or
+# `~/` is the home directory and a relative path resolves against the working
+# directory, so "build" names the working directory's build.
 #
 # [sandbox]
 # enabled = true
