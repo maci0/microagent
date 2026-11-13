@@ -14,6 +14,8 @@ See [Contributing](CONTRIBUTING.md#version-and-changelog) for the release proces
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-11-13
+
 ### Changed
 
 - `microagent acp` sessions connect the config's `[[mcp]]` servers and enabled
@@ -3457,7 +3459,8 @@ First release.
   `aarch64-macos` with a checksum sidecar each, and refuses a tag that does not name the version in
   `build.zig.zon`.
 
-[Unreleased]: https://github.com/maci0/microagent/compare/v0.24.0...HEAD
+[Unreleased]: https://github.com/maci0/microagent/compare/v0.25.0...HEAD
+[0.25.0]: https://github.com/maci0/microagent/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/maci0/microagent/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/maci0/microagent/compare/v0.22.2...v0.23.0
 [0.22.2]: https://github.com/maci0/microagent/compare/v0.22.1...v0.22.2

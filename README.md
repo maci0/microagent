@@ -78,7 +78,7 @@ and names the Python packages pinned for the linters and the benchmark adapter, 
 in a release. Pick your machine's target:
 
 ```sh
-v=v0.24.0 t=x86_64-linux-musl
+v=v0.25.0 t=x86_64-linux-musl
 curl -fLO https://github.com/maci0/microagent/releases/download/$v/microagent-$v-$t
 curl -fLO https://github.com/maci0/microagent/releases/download/$v/microagent-$v-$t.sha256
 # GNU coreutils spells it sha256sum, macOS ships shasum; both read the same
@@ -143,7 +143,7 @@ session-log formats, exit codes, retries, gauntlet and ACP clients, and self-upd
 
 ## Status
 
-Version 0.24.0. What works: the tool loop against OpenRouter, DeepSeek, OpenAI and any other
+Version 0.25.0. What works: the tool loop against OpenRouter, DeepSeek, OpenAI and any other
 OpenAI-compatible endpoint; an interactive session with `--repl`; repository instructions read
 from `AGENTS.md`; skills; MCP servers over stdio and over HTTP; the Agent Client Protocol
 (`microagent acp`) for editor and harness clients; the session log; verified self-update;
