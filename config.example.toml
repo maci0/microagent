@@ -111,11 +111,10 @@ runnable check behind for non-trivial logic.
 # An `env` value is the second place in this file a secret can be written in the
 # clear, after `api_key`, and the easier one to commit by accident. Where a
 # server can inherit a variable, set it in the run's environment instead. A
-# terminal run scrubs the provider key, GITHUB_TOKEN and configured remote-key
-# variables from that environment (`microagent acp` does not; see
-# docs/usage.md#tool-environment), so a stdio server needing one must receive it
-# through `env`. Keep this file mode 600 and out of the model's workspace when
-# it holds secrets.
+# run scrubs the provider key, GITHUB_TOKEN and configured remote-key variables
+# from that environment (docs/usage.md#tool-environment), so a stdio server
+# needing one must receive it through `env`. Keep this file mode 600 and out of
+# the model's workspace when it holds secrets.
 #
 # [[mcp]]
 # name = "fs"
@@ -135,8 +134,8 @@ runnable check behind for non-trivial logic.
 # the key itself; api_key_header is where the key goes (default Authorization,
 # sent as "Bearer <key>"; any other header gets the key as it is); timeout is
 # seconds per request, 1 to 600, default 30. A variable that is unset or empty
-# sends no header, and the server is named on stderr. A terminal run removes
-# the variable from the environment tool subprocesses inherit.
+# sends no header, and the server is named on stderr. The run removes the
+# variable from the environment tool subprocesses inherit.
 #
 # [[mcp]]
 # name = "docs"

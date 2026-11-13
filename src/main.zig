@@ -683,7 +683,7 @@ fn runMain(init: std.process.Init) !u8 {
             // Not enforced: Landlock needs Linux 5.13 or newer and Seatbelt refused the profile. Saying so is
             // what keeps `enabled = true` from reading as protection `bash` and the MCP servers
             // do not have.
-            net.note(io, arena, "microagent: sandbox: the kernel sandbox could not be applied (Linux needs 5.13 or newer for Landlock, macOS uses Seatbelt); only the tools that write (`write`, `edit`, `multi_edit`, and `ast` with a `rewrite`) are confined, not `bash` or MCP servers\n", .{});
+            net.note(io, arena, sandbox_unenforced_note, .{});
         }
     }
     // Built before the skills and the servers, because a tool subprocess and
@@ -1189,10 +1189,10 @@ const help_text =
     \\                         0 is the one setting that repeats
     \\                         (env MICROAGENT_TEMPERATURE)
     \\  -o, --output <format> auto, text, or json (default auto). Before the
-    \\                         subcommand. auto stays text when stdout is not a
-    \\                         terminal, because the pipe contract is the model's
-    \\                         text. json asks schema, --version, setup and update
-    \\                         for one JSON document, and a failure's last stderr
+    \\                         subcommand. auto is text, because the pipe
+    \\                         contract is the model's text. json asks --version,
+    \\                         setup and update for one JSON document (schema
+    \\                         prints one either way), and a failure's last stderr
     \\                         line is an error envelope with the same exit
     \\                         status. The API key is never printed
     \\  -h, --help             this text ("help" as the only argument too)
@@ -2354,6 +2354,10 @@ const empty_is_unset_vars = [_][]const u8{
 /// the other.
 const secret_env_vars = [_][]const u8{ key_var, "GITHUB_TOKEN" };
 
+/// Printed by a terminal run and by `acp` alike when `[sandbox] enabled = true`
+/// and the kernel refused the confinement.
+const sandbox_unenforced_note = "microagent: sandbox: the kernel sandbox could not be applied (Linux needs 5.13 or newer for Landlock, macOS uses Seatbelt); only the tools that write (`write`, `edit`, `multi_edit`, and `ast` with a `rewrite`) are confined, not `bash` or MCP servers\n";
+
 /// The environment every tool subprocess runs under: this process's, less the
 /// credentials.
 ///
@@ -2759,9 +2763,15 @@ fn secretInReadableFile(io: Io, arena: std.mem.Allocator, source: ConfigSource, 
     // remedy the operator can act on without reading the rest of the message.
     // An `[[mcp]] env` value has no single variable to point at: the child is
     // handed this value because it could not read it from the run's own
-    // environment, so the line names the server instead.
+    // environment, so the line names the server instead. A provider header is
+    // read from this file alone, so chmod is the only remedy for one.
     const remedy = if (parsed.api_key.len != 0)
         key_var
+    else if (credentialHeader(parsed) != null)
+        return std.fmt.allocPrint(arena, "microagent: config {s}: holds {s} and is readable beyond its owner; run chmod 600 on it\n", .{
+            configPathText(arena, source),
+            configSecretName(arena, parsed),
+        }) catch null
     else
         "that server's own environment";
     return std.fmt.allocPrint(arena, "microagent: config {s}: holds {s} and is readable beyond its owner; run chmod 600 on it, or leave the secret to {s}\n", .{
@@ -2778,6 +2788,7 @@ fn secretInReadableFile(io: Io, arena: std.mem.Allocator, source: ConfigSource, 
 /// these.
 fn holdsConfigSecret(parsed: *const config_mod.Config) bool {
     if (parsed.api_key.len != 0) return true;
+    if (credentialHeader(parsed) != null) return true;
     for (parsed.mcp) |entry| {
         for (entry.env) |pair| {
             if (pair[1].len != 0) return true;
@@ -2786,12 +2797,27 @@ fn holdsConfigSecret(parsed: *const config_mod.Config) bool {
     return false;
 }
 
+/// The first provider header whose name says it carries a credential, or null.
+/// `Authorization` itself is refused in `headers`, but a router may take its
+/// key under a name of its own, such as `X-Api-Key`.
+fn credentialHeader(parsed: *const config_mod.Config) ?[]const u8 {
+    const words = [_][]const u8{ "key", "token", "secret", "auth", "cookie", "password" };
+    for (parsed.headers) |pair| {
+        if (pair[1].len == 0) continue;
+        for (words) |word| if (std.ascii.findIgnoreCase(pair[0], word) != null) return pair[0];
+    }
+    return null;
+}
+
 /// How the line names the secret, so an operator reading it knows which key to
 /// move into the environment. The variable name is quoted through `safeText`
 /// because it came out of a config file, which is a file a repository can
 /// commit with whatever bytes in it.
 fn configSecretName(arena: std.mem.Allocator, parsed: *const config_mod.Config) []const u8 {
     if (parsed.api_key.len != 0) return "an api key";
+    if (credentialHeader(parsed)) |name| return std.fmt.allocPrint(arena, "a credential in the provider header '{s}'", .{
+        chat_mod.safeTextAll(arena, name),
+    }) catch "a credential in a provider header";
     for (parsed.mcp) |entry| {
         for (entry.env) |pair| {
             if (pair[1].len != 0) return std.fmt.allocPrint(arena, "a secret in the environment of the MCP server '{s}'", .{
@@ -8315,10 +8341,20 @@ test "a config holding a key that other accounts can read is said out loud" {
     const empty_env: config_mod.Config = .{ .mcp = &.{.{ .name = "fs", .command = "npx", .env = &.{.{ "LOG", "" }} }} };
     try std.testing.expect(secretInReadableFile(io, arena, source, &empty_env) == null);
 
+    // The third place: a provider header whose name says it carries a
+    // credential. A router's version header is not one.
+    const with_header: config_mod.Config = .{ .headers = &.{.{ "X-Api-Key", "sk-secret" }} };
+    const header_line = secretInReadableFile(io, arena, source, &with_header).?;
+    try std.testing.expect(std.mem.indexOf(u8, header_line, "X-Api-Key") != null);
+    try std.testing.expect(std.mem.indexOf(u8, header_line, "sk-secret") == null);
+    const plain_header: config_mod.Config = .{ .headers = &.{.{ "x-grok-client-version", "1.0.77" }} };
+    try std.testing.expect(secretInReadableFile(io, arena, source, &plain_header) == null);
+
     // Mode 600 is the same answer for the second place: nothing is said when
     // the file is not readable beyond its owner.
     try handle.setPermissions(io, .fromMode(0o600));
     try std.testing.expect(secretInReadableFile(io, arena, source, &with_env) == null);
+    try std.testing.expect(secretInReadableFile(io, arena, source, &with_header) == null);
 }
 
 test "the trace switch is on only for a value that says so" {
@@ -10309,8 +10345,13 @@ fn runAcp(init: std.process.Init) !u8 {
     opts.sandbox = loaded.sandbox;
     if (opts.sandbox.enabled) {
         opts.writable_roots = try sandbox_mod.resolveWritableRoots(io, arena, init.environ_map, opts.sandbox.writable, opts.session_dir);
-        _ = sandbox_mod.applySandbox(io, arena, opts.writable_roots);
+        if (!sandbox_mod.applySandbox(io, arena, opts.writable_roots)) net.note(io, arena, sandbox_unenforced_note, .{});
     }
+    // As in a terminal run: the remote servers' keys are read from the
+    // environment as it came, then every credential is removed before any
+    // session spawns a tool or an MCP server.
+    const config_servers = try mcp_mod.withKeys(arena, init.environ_map, loaded.mcp);
+    scrubSecrets(init.environ_map, config_servers);
     const skill_roots = skill_mod.roots(io, init.environ_map, arena, loaded.skills);
     opts.skills = skill_mod.discover(io, arena, skill_roots);
     const skill_block = try opts.skills.prompt(arena);
@@ -10416,7 +10457,7 @@ fn runAcp(init: std.process.Init) !u8 {
                 discover_pending = false;
                 opts.models = try discoverModels(io, &client, arena, opts);
             }
-            if (acpStartSession(io, &conn, &client, init.environ_map, &opts, arena, new_session, skill_block, loaded.system_prompt_extra, loaded.agents_files)) |session| {
+            if (acpStartSession(io, &conn, &client, init.environ_map, &opts, arena, new_session, config_servers, skill_block, loaded.system_prompt_extra, loaded.agents_files)) |session| {
                 conn.sessions.put(gpa, session.id, session) catch {
                     acpError(&conn, request.id, acp_mod.ErrorCode.internal_error, "Internal error");
                     continue;
@@ -10869,6 +10910,33 @@ test "an ACP frame split one byte per read keeps the bytes past its newline" {
 /// tools, repository instructions and MCP children all resolve from it),
 /// connects the servers the client offered and builds the same system prompt
 /// a terminal run builds.
+/// The servers an ACP session connects: the config's, then the client's. A
+/// client server takes the name from a config server, which is dropped, so a
+/// tool name never belongs to two servers.
+fn sessionServers(arena: std.mem.Allocator, config: []const mcp_mod.Entry, client: []const mcp_mod.Entry) ![]const mcp_mod.Entry {
+    var out: std.ArrayList(mcp_mod.Entry) = .empty;
+    outer: for (config) |entry| {
+        for (client) |named| if (std.mem.eql(u8, entry.name, named.name)) continue :outer;
+        try out.append(arena, entry);
+    }
+    try out.appendSlice(arena, client);
+    return out.items;
+}
+
+test "an ACP session connects the config's servers and lets a client server replace one by name" {
+    var state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state.deinit();
+    const arena = state.allocator();
+    const config = [_]mcp_mod.Entry{ .{ .name = "docs", .command = "a" }, .{ .name = "fs", .command = "b" } };
+    const client = [_]mcp_mod.Entry{.{ .name = "fs", .command = "c" }};
+    const merged = try sessionServers(arena, &config, &client);
+    try std.testing.expectEqual(@as(usize, 2), merged.len);
+    try std.testing.expectEqualStrings("docs", merged[0].name);
+    try std.testing.expectEqualStrings("c", merged[1].command);
+    try std.testing.expectEqual(@as(usize, 2), (try sessionServers(arena, &config, &.{})).len);
+    try std.testing.expectEqual(@as(usize, 1), (try sessionServers(arena, &.{}, &client)).len);
+}
+
 fn acpStartSession(
     io: Io,
     conn: *AcpConn,
@@ -10877,6 +10945,7 @@ fn acpStartSession(
     base_opts: *const Options,
     arena: std.mem.Allocator,
     request: acp_mod.NewSession,
+    config_servers: []const mcp_mod.Entry,
     skill_block: []const u8,
     system_extra: []const u8,
     agents_files: ?[]const []const u8,
@@ -10894,6 +10963,11 @@ fn acpStartSession(
     const dir = std.Io.Dir.openDirAbsolute(io, cwd, .{}) catch return error.InvalidParams;
     defer dir.close(io);
     try std.process.setCurrentDir(io, dir);
+    // The kernel grant was fixed for the launch directory before the first
+    // session and cannot be widened, so a session elsewhere is told up front
+    // rather than finding out from a refused write.
+    if (base_opts.sandbox.enabled and !sandbox_mod.isPathWritable(io, arena, cwd, base_opts.writable_roots))
+        net.note(io, arena, "microagent: sandbox: session directory {s} is outside the writable roots fixed at launch; writes there are refused\n", .{cwd});
 
     const agents_block = try agentsBlock(io, arena, std.Io.Dir.cwd(), agents_files);
     const system_text = try systemText(arena, cwd, system_extra, agents_block, skill_block, base_opts.disabled_tools);
@@ -10902,7 +10976,7 @@ fn acpStartSession(
     opts.acp_sink = null;
     opts.prompt = "";
     opts.repl = false;
-    opts.mcp = mcp_mod.connect(io, arena, environ, client, request.servers, version);
+    opts.mcp = mcp_mod.connect(io, arena, environ, client, try sessionServers(arena, config_servers, request.servers), version);
 
     const session = try arena.create(AcpSession);
     session.* = .{

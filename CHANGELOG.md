@@ -14,13 +14,38 @@ See [Contributing](CONTRIBUTING.md#version-and-changelog) for the release proces
 
 ## [Unreleased]
 
+### Changed
+
+- `microagent acp` sessions connect the config's `[[mcp]]` servers and enabled
+  `[tools.<preset>]` servers as well as the ones `session/new` names; a client
+  server replaces a config server of the same name. Before, a session
+  connected only the client's servers.
+- The `-o` text in `--help` and in `microagent schema` now says `auto` is
+  text and that `schema` prints JSON whatever `-o` says. Before, it said
+  `auto` was text only when stdout was not a terminal and that `-o json`
+  selected JSON for `schema`.
+
 ### Fixed
 
+- `microagent acp` prints the kernel-sandbox warning when Landlock or Seatbelt
+  cannot be applied, as a terminal run does, and names a session whose `cwd`
+  is outside the writable roots fixed at launch.
 - Documentation, the man page and the comments in the `setup` config template
   now match the code: stale limits, defaults, gate steps and review
   instructions are corrected, and repeated guidance is removed. The template
   that `setup` and a first run write has new comments; no key, default or
   invocation changed.
+
+### Security
+
+- `microagent acp` removes `MICROAGENT_API_KEY`, `GITHUB_TOKEN` and each
+  `api_key_env` variable from the environment tools and MCP servers inherit,
+  as a terminal run does. Before, `bash: env` in an ACP session put the
+  provider key in the conversation and on to the provider.
+- A config file readable beyond its owner is named on stderr when a `headers`
+  entry whose name contains `key`, `token`, `secret`, `auth`, `cookie` or
+  `password` holds a value, as it already was for `api_key` and an
+  `[[mcp]] env` value.
 
 ## [0.24.0] - 2026-11-13
 

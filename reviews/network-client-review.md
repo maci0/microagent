@@ -108,14 +108,13 @@ failures, update integrity, then terminal and log output.
 
 8. **An environment a spawned process inherits.** An MCP server over stdio is a
    program this binary starts, and it must not inherit the provider key.
-   `scrubSecrets` in `src/main.zig` is the code's own scrubber, called once in
-   `runMain`. Find every path that hands an environment to a child (every
-   `std.process.spawn` in the tree: `ToolChild` in `src/tool.zig` and
+   `scrubSecrets` in `src/main.zig` is the code's own scrubber, called in
+   `runMain` and `runAcp`. Find every path that hands an environment to a child
+   (every `std.process.spawn` in the tree: `ToolChild` in `src/tool.zig` and
    `spawnOne` in `src/mcp.zig`) and every caller that supplies that
    environment, including `runAcp`, which passes its own to `acpStartSession`
-   and `acpRunPrompt`, and confirm it has been through the same function. The
-   `runAcp` path is not today, a gap the threat model records. A new spawn path
-   that builds its own environment map is a finding.
+   and `acpRunPrompt`, and confirm it has been through the same function. A new
+   spawn path that builds its own environment map is a finding.
 
 9. **The update path's integrity chain, read end to end.** `parseRelease` in
    `src/update.zig` reads the API document, `assetUrl` turns a `browser_download_url`

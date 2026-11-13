@@ -362,7 +362,7 @@ fn writeOutputArg(doc: *Doc) !void {
     try doc.elemStr("json");
     try doc.endArr();
     try doc.fieldStr("default", "auto");
-    try doc.fieldStr("description", "auto and text keep the text a command already prints, including when stdout is not a terminal. json asks schema, --version, setup, and update for one JSON document. The model's own stdout is unchanged. Accepted before the subcommand.");
+    try doc.fieldStr("description", "auto and text keep the text a command already prints. json asks --version, setup, and update for one JSON document; schema prints one either way. The model's own stdout is unchanged. Accepted before the subcommand.");
     try doc.endObj();
 }
 

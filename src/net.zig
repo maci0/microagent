@@ -2513,7 +2513,10 @@ fn dirtyStack() void {
 test "releaseDeadStack gives back stack pages the caller no longer uses" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     // A stack the test runner already grew is not this test's to release, so the helper's pages are
-    // measured as the difference, and only a drop of most of them counts.
+    // measured as the difference, and only a drop of most of them counts. An earlier test can leave
+    // the pages below this frame resident, which would make the helper's writes cost nothing, so
+    // they are given back before the baseline is read.
+    releaseDeadStack();
     const before = try rssAnonKb();
     @call(.never_inline, dirtyStack, .{});
     const dirty = try rssAnonKb();

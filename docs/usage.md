@@ -112,10 +112,10 @@ usage: microagent [options] "<prompt>"
                          0 is the one setting that repeats
                          (env MICROAGENT_TEMPERATURE)
   -o, --output <format> auto, text, or json (default auto). Before the
-                         subcommand. auto stays text when stdout is not a
-                         terminal, because the pipe contract is the model's
-                         text. json asks schema, --version, setup and update
-                         for one JSON document, and a failure's last stderr
+                         subcommand. auto is text, because the pipe
+                         contract is the model's text. json asks --version,
+                         setup and update for one JSON document (schema
+                         prints one either way), and a failure's last stderr
                          line is an error envelope with the same exit
                          status. The API key is never printed
   -h, --help             this text ("help" as the only argument too)
@@ -651,7 +651,7 @@ that server with the line named rather than spawning it.
 An `env` value holding a token is a secret in the clear, the second place the file can hold one
 after `api_key`, and the easier one to commit by accident (`env = { GITHUB_TOKEN = "ghp_..." }`).
 Keep the file mode 600 and out of any workspace the model is given. Prefer handing a server a
-variable from the run's environment; the credential variables a terminal run removes from it
+variable from the run's environment; the credential variables a run removes from it
 ([tool environment](#tool-environment)) are the exception, and a server that needs one must be
 given it in `env`.
 
@@ -692,7 +692,7 @@ tool names keep their first listing.
 | key | meaning |
 | --- | --- |
 | `url` | `https`, or `http` to this machine (`localhost`, `127.0.0.0/8`, `::1`). No `user:password@`. No redirect is followed. |
-| `api_key_env` | name of the environment variable holding the key. Unset or empty means no header, not an error. The key is never in the file, and a terminal run removes the variable from the environment tool subprocesses and local MCP servers get ([tool environment](#tool-environment)). |
+| `api_key_env` | name of the environment variable holding the key. Unset or empty means no header, not an error. The key is never in the file, and the run removes the variable from the environment tool subprocesses and local MCP servers get ([tool environment](#tool-environment)). |
 | `api_key_header` | header the key travels in, default `Authorization`. In `Authorization` the value is `Bearer <key>`; in any other header it is the key as it is. |
 | `timeout` | seconds one request may take, from connecting to the last byte, 1 to 600, default 30. Also bounded by the run's own budget. |
 
@@ -824,7 +824,8 @@ The writable roots are always `.` (the working directory), `/tmp`, and the sessi
 When enabled, writes outside those roots are blocked:
 - **Landlock (Linux 5.13+):** rules applied to microagent before the first task mark `/` read-only and the writable roots read-write. Every child process inherits them across `execve`: `bash`, MCP servers and the build tools they start.
 - **Seatbelt (macOS):** On macOS, a Seatbelt profile (`sandbox_init`, the call behind `sandbox-exec`) denies file writes everywhere except the same roots (on this system `$TMPDIR` is under `/var/folders`, behind a symlink into `/private`, and is not covered by `/tmp`) and the devices `/dev/null`, `/dev/tty` and `/dev/dtracehelper`. Reads, the network and process creation stay allowed. Children inherit the profile as they inherit Landlock's rules. Apple deprecates the call but still uses it, and it is not in the tests that run on Linux: the profile text is, the enforcement on a Mac is not.
-- **When the kernel does not enforce it:** in ordinary CLI runs, an older Linux kernel or a Seatbelt refusal prints `microagent: sandbox: the kernel sandbox could not be applied ...` at startup, and only the in-process check below applies. That check covers the tools that write, not `bash` or MCP servers. ACP currently discards the kernel-sandbox result and emits no equivalent fallback warning.
+- **When the kernel does not enforce it:** an older Linux kernel or a Seatbelt refusal prints `microagent: sandbox: the kernel sandbox could not be applied ...` at startup, and only the in-process check below applies. That check covers the tools that write, not `bash` or MCP servers.
+- **Under `microagent acp`:** the roots, and the kernel grant, are fixed once for the directory the process was launched in, before any session. A session whose `cwd` is outside them is named on stderr when it opens, and writes there are refused.
 - **When one root is refused:** a root the kernel will not open or will not grant prints `microagent: sandbox: <root> was not made writable (<errno>); writes under it are refused`, and the rest of the roots are applied as usual. A root the kernel refuses the read-only rule for `/` is not one of these: nothing is enforced at all and the run prints the "could not be applied" line above.
 - **In-process path checking:** The `write`, `edit` and `multi_edit` tools, and `ast` when it carries a `rewrite`, canonicalize their path and verify it resolves strictly within allowed roots before writing, returning `refused: path '...' is outside the sandbox writable roots`.
 
@@ -835,7 +836,7 @@ them off ([tool set](#tool-set)).
 
 | tool | what it does |
 | --- | --- |
-| `bash` | `/bin/sh -c`, so write POSIX sh: bash-only syntax (`[[ ]]`, arrays, `$'...'`, process substitution) works only where the host's `/bin/sh` happens to accept it. 120 s default timeout (the model may ask for up to 600 s), output capped at 24 KB. A command naming a credentials file or matching the command filter is refused, and in a terminal run the child inherits no provider credential ([tool environment](#tool-environment)). |
+| `bash` | `/bin/sh -c`, so write POSIX sh: bash-only syntax (`[[ ]]`, arrays, `$'...'`, process substitution) works only where the host's `/bin/sh` happens to accept it. 120 s default timeout (the model may ask for up to 600 s), output capped at 24 KB. A command naming a credentials file or matching the command filter is refused, and the child inherits no provider credential ([tool environment](#tool-environment)). |
 | `read` | read a file, with optional line offset and limit. Refuses credentials (`.env`, key and keystore files, anything under `.secrets` or `.ssh`), including a symlink to one, and refuses any path under `/proc/` whose last component is `environ` or `cmdline`. |
 | `write` | create or overwrite a file, creating parents. Refuses a credentials path, a path outside sandbox roots when enabled, a call with no `content`, and `content` past the 64 MB ceiling `edit` holds the file it leaves behind to. |
 | `edit` | exact string replacement. Refuses a credentials path, a path outside sandbox roots when enabled, an ambiguous match unless `replace_all`, and an edit that would leave `old_string` matchable in the result, so a repeated call cannot apply the change twice. |
@@ -867,8 +868,8 @@ and `write` and `edit` refuse to replace one. The name is checked twice, on the 
 and on the path a symlink resolves to, so a link committed under an ordinary name does not leak the
 file it points at. The two `/proc` files that report a process's own environment and argument
 vector are refused by name as well, since `read /proc/self/environ` returned the run's own key
-under a path no name table could have caught. A terminal run also removes its own keys from every
-tool subprocess's environment, so `bash: env` has none to print; under ACP it does not
+under a path no name table could have caught. A run also removes its own keys from every
+tool subprocess's environment, so `bash: env` has none to print
 ([tool environment](#tool-environment)). What remains open is the name rule itself: a credential
 the tables do not recognize, and a path a command assembles at run time, are still read. See
 [threat-model.md](threat-model.md).
@@ -880,15 +881,11 @@ stderr, and two identical calls with different ids are two calls.
 
 ### Tool environment
 
-Every tool subprocess and every local MCP server inherits the run's environment. A terminal run,
-one-shot or `--repl`, first removes the variables this binary sends as credentials:
+Every tool subprocess and every local MCP server inherits the run's environment. Every run
+(one-shot, `--repl` and `acp`) first removes the variables this binary sends as credentials:
 `MICROAGENT_API_KEY`, `GITHUB_TOKEN`, and each variable a remote server's `api_key_env` names. A
 local MCP server gets that environment plus its own `env` entries, so a server that needs one of
 those values must be given it there.
-
-`microagent acp` removes nothing: tools and MCP servers see the environment the client launched it
-with, so a `MICROAGENT_API_KEY` or `GITHUB_TOKEN` set there reaches them, and `bash: env` prints it
-into the conversation. The [threat model](threat-model.md) lists this as a known gap.
 
 ## Output
 
@@ -1091,10 +1088,11 @@ required.
 `microagent acp` serves the Agent Client Protocol (ACP) v1 on stdin and stdout. A client
 launches it as a subprocess, sends JSON-RPC 2.0 frames, and receives streamed
 `session/update` notifications and one result per prompt. Configuration, provider
-credentials, skills, tools and the session log resolve as they do for a terminal
-run, with two differences: tools and MCP servers inherit the environment
-unscrubbed ([tool environment](#tool-environment)), and a kernel sandbox that
-could not be applied is not reported ([sandbox](#sandbox)). The example below
+credentials, skills, tools, MCP servers, the [tool environment](#tool-environment)
+and the session log resolve as they do for a terminal run; the sandbox roots are
+fixed at launch ([sandbox](#sandbox)). Each session connects the config's MCP
+servers and the ones its `session/new` names; a client server replaces a config
+server of the same name. The example below
 needs the same `MICROAGENT_API_KEY`, `MICROAGENT_BASE_URL` and `MICROAGENT_MODEL`.
 
 ```json

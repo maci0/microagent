@@ -278,14 +278,10 @@ path keeps that command and the paths that start with it.
 .SH ACP SUBCOMMAND
 .B microagent acp
 serves the Agent Client Protocol v1 on stdin and stdout for an editor or
-harness client. Configuration, credentials, skills, tools and the session log
-resolve as they do for a terminal run, with two differences: tool subprocesses
-and MCP servers inherit the environment unscrubbed, so a
-.B MICROAGENT_API_KEY
-or
-.B GITHUB_TOKEN
-set there reaches them, and a kernel sandbox that could not be applied is not
-reported.
+harness client. Configuration, credentials, skills, tools, MCP servers and the
+session log resolve as they do for a terminal run, and each session also
+connects the MCP servers its client names. The sandbox roots are fixed for the
+launch directory; a session outside them is named on stderr.
 .SH ENVIRONMENT
 .TP
 .B MICROAGENT_MODEL
@@ -313,9 +309,7 @@ As above.
 A bearer for api.github.com, for
 .B microagent update
 only, past the anonymous rate limit. The public asset hosts never see it. A
-terminal run withholds it from every tool subprocess it starts;
-.B microagent acp
-does not.
+run withholds it from every tool subprocess it starts.
 .TP
 .BR MICROAGENT_CONFIG ", " MICROAGENT_SESSION_DIR ", " MICROAGENT_SKILLS
 These three take an empty value as off: no config file, no session log, no

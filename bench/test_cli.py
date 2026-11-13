@@ -772,6 +772,30 @@ def check_acp_discover_models(binary: Path, root: Path, url: str) -> None:
         client.close()
 
 
+def check_acp_environment(binary: Path, root: Path, url: str) -> None:
+    """Under `acp`, tools and the config's MCP servers run with the credentials
+    removed, as in a terminal run, and the config's servers are started at all.
+    """
+    Provider.reset()
+    path = root / "acp-env.toml"
+    path.write_text('[[mcp]]\nname = "probe"\ncommand = "sh"\nargs = ["-c", "env > acp-mcp-env.txt"]\n')
+    Provider.tool_call_args = json.dumps({"command": "env > acp-tool-env.txt"})
+    # because: a fixture value the check asserts is withheld, not a credential
+    client = AcpClient(binary, root, url, "--max-turns", "1", MICROAGENT_CONFIG=str(path), GITHUB_TOKEN="ghp_test")  # noqa: S106
+    try:
+        client.call("initialize", {"protocolVersion": 1})
+        session = client.call("session/new", {"cwd": str(root), "mcpServers": []})["result"]["sessionId"]
+        client.call("session/prompt", {"sessionId": session, "prompt": [{"type": "text", "text": "print env"}]})
+    finally:
+        client.close()
+        Provider.tool_call_args = ""
+    for name in ("acp-tool-env.txt", "acp-mcp-env.txt"):
+        expect((root / name).exists(), f"{name} was not written")
+        seen = (root / name).read_text()
+        expect("PATH=" in seen, (name, seen))
+        expect("MICROAGENT_API_KEY" not in seen and "GITHUB_TOKEN" not in seen, (name, seen))
+
+
 def check_tool_table_keys(binary: Path, root: Path, url: str) -> None:
     """A key that only a preset table takes is named with the table it went in.
 
@@ -945,6 +969,7 @@ if __name__ == "__main__":
             check_provider_headers(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_acp_models(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_acp_discover_models(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
+            check_acp_environment(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_tool_table_keys(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
             check_compressed_error(binary, Path(temp))
             check_harbor_numbers(binary, Path(temp), f"http://127.0.0.1:{server.server_port}/v1")
